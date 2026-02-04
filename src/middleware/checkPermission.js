@@ -2,114 +2,102 @@ const Permission = require('../models/auth/Permission');
 const RolePermission = require('../models/auth/RolePermission');
 
 /**
- * Middleware para verificar si el usuario tiene un permiso específico
- * @param {string} permissionName - Nombre del permiso (ej: 'invoices.create')
+ * Requiere UN permiso
  */
 const checkPermission = (permissionName) => {
   return async (req, res, next) => {
     try {
-      // Verificar que el usuario esté autenticado
       if (!req.user) {
         return res.status(401).json({
           success: false,
-          message: 'No autenticado',
+          message: 'No autenticado'
         });
       }
 
-      const userRole = req.user.role;
+      const { role } = req.user;
 
-      // Super admin siempre tiene todos los permisos
-      if (userRole === 'super_admin') {
+      if (role === 'super_admin') {
         return next();
       }
 
-      // Buscar si el rol tiene el permiso
       const permission = await Permission.findOne({
-        where: { name: permissionName, is_active: true },
+        where: { name: permissionName, is_active: true }
       });
 
       if (!permission) {
-        console.warn(`⚠️ Permiso no encontrado: ${permissionName}`);
         return res.status(403).json({
           success: false,
-          message: 'Permiso no encontrado',
+          message: 'Permiso no encontrado'
         });
       }
 
-      const rolePermission = await RolePermission.findOne({
+      const hasPermission = await RolePermission.findOne({
         where: {
-          role: userRole,
-          permission_id: permission.id,
-        },
+          role,
+          permission_id: permission.id
+        }
       });
 
-      if (!rolePermission) {
+      if (!hasPermission) {
         return res.status(403).json({
           success: false,
-          message: 'No tienes permisos para realizar esta acción',
-          required_permission: permissionName,
+          message: 'No tienes permisos para esta acción'
         });
       }
 
-      // Usuario tiene el permiso, continuar
       next();
     } catch (error) {
       console.error('Error verificando permiso:', error);
       return res.status(500).json({
         success: false,
-        message: 'Error al verificar permisos',
-        error: error.message,
+        message: 'Error al verificar permisos'
       });
     }
   };
 };
 
 /**
- * Helper para verificar múltiples permisos (requiere TODOS)
- * @param {string[]} permissions - Array de permisos requeridos
+ * Requiere TODOS los permisos
  */
-const checkPermissions = (permissions) => {
+const checkPermissions = (permissions = []) => {
   return async (req, res, next) => {
     try {
       if (!req.user) {
         return res.status(401).json({
           success: false,
-          message: 'No autenticado',
+          message: 'No autenticado'
         });
       }
 
-      const userRole = req.user.role;
+      const { role } = req.user;
 
-      // Super admin siempre pasa
-      if (userRole === 'super_admin') {
+      if (role === 'super_admin') {
         return next();
       }
 
-      // Verificar todos los permisos
       for (const permName of permissions) {
         const permission = await Permission.findOne({
-          where: { name: permName, is_active: true },
+          where: { name: permName, is_active: true }
         });
 
         if (!permission) {
           return res.status(403).json({
             success: false,
-            message: `Permiso no encontrado: ${permName}`,
+            message: `Permiso no encontrado: ${permName}`
           });
         }
 
-        const rolePermission = await RolePermission.findOne({
+        const hasPermission = await RolePermission.findOne({
           where: {
-            role: userRole,
-            permission_id: permission.id,
-          },
+            role,
+            permission_id: permission.id
+          }
         });
 
-        if (!rolePermission) {
+        if (!hasPermission) {
           return res.status(403).json({
             success: false,
-            message: 'No tienes todos los permisos requeridos',
-            required_permissions: permissions,
+            message: 'No tienes todos los permisos requeridos'
           });
         }
       }
@@ -119,65 +107,59 @@ const checkPermissions = (permissions) => {
       console.error('Error verificando permisos:', error);
       return res.status(500).json({
         success: false,
-        message: 'Error al verificar permisos',
-        error: error.message,
+        message: 'Error al verificar permisos'
       });
     }
   };
 };
 
 /**
- * Helper para verificar si tiene AL MENOS UNO de los permisos
- * @param {string[]} permissions - Array de permisos (requiere al menos uno)
+ * Requiere AL MENOS UNO
  */
-const checkAnyPermission = (permissions) => {
+const checkAnyPermission = (permissions = []) => {
   return async (req, res, next) => {
     try {
       if (!req.user) {
         return res.status(401).json({
           success: false,
-          message: 'No autenticado',
+          message: 'No autenticado'
         });
       }
 
-      const userRole = req.user.role;
+      const { role } = req.user;
 
-      if (userRole === 'super_admin') {
+      if (role === 'super_admin') {
         return next();
       }
 
-      // Verificar si tiene al menos uno
       for (const permName of permissions) {
         const permission = await Permission.findOne({
-          where: { name: permName, is_active: true },
+          where: { name: permName, is_active: true }
         });
 
-        if (permission) {
-          const rolePermission = await RolePermission.findOne({
-            where: {
-              role: userRole,
-              permission_id: permission.id,
-            },
-          });
+        if (!permission) continue;
 
-          if (rolePermission) {
-            return next(); // Tiene al menos uno, continuar
+        const hasPermission = await RolePermission.findOne({
+          where: {
+            role,
+            permission_id: permission.id
           }
+        });
+
+        if (hasPermission) {
+          return next();
         }
       }
 
-      // No tiene ninguno
       return res.status(403).json({
         success: false,
-        message: 'No tienes los permisos necesarios',
-        required_any: permissions,
+        message: 'No tienes permisos suficientes'
       });
     } catch (error) {
       console.error('Error verificando permisos:', error);
       return res.status(500).json({
         success: false,
-        message: 'Error al verificar permisos',
-        error: error.message,
+        message: 'Error al verificar permisos'
       });
     }
   };
@@ -186,5 +168,5 @@ const checkAnyPermission = (permissions) => {
 module.exports = {
   checkPermission,
   checkPermissions,
-  checkAnyPermission,
+  checkAnyPermission
 };

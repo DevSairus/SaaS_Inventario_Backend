@@ -223,13 +223,11 @@ const getProfile = async (req, res) => {
       success: true,
       data: user
     });
-
   } catch (error) {
     console.error('Error en getProfile:', error);
     res.status(500).json({
       success: false,
-      message: 'Error en el servidor',
-      error: error.message
+      message: 'Error en el servidor'
     });
   }
 };

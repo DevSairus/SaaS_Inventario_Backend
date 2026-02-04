@@ -1,72 +1,45 @@
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = 'inventario_jwt_secret_super_seguro';
+const JWT_SECRET = process.env.JWT_SECRET;
 
 /**
  * Middleware para verificar JWT
+ * ❗ SOLO autentica (401)
  */
 const authMiddleware = (req, res, next) => {
-  try {
-    // Obtener token del header
-    const authHeader = req.headers.authorization;
+  const authHeader = req.headers.authorization;
 
-    if (!authHeader) {
-      return res.status(401).json({
-        success: false,
-        message: 'No se proporcionó token de autenticación'
-      });
-    }
-
-    // El token viene en formato: "Bearer TOKEN"
-    const token = authHeader.split(' ')[1];
-
-    if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: 'Token inválido'
-      });
-    }
-
-    // Verificar token
-    const decoded = jwt.verify(token, JWT_SECRET);
-
-    // Agregar datos del usuario al request
-    req.user = decoded;
-
-    next();
-
-  } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Token expirado'
-      });
-    }
-
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({
-        success: false,
-        message: 'Token inválido'
-      });
-    }
-
-    return res.status(500).json({
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({
       success: false,
-      message: 'Error al verificar token',
-      error: error.message
+      message: 'Token no proporcionado'
+    });
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    return res.status(401).json({
+      success: false,
+      message: 'Token inválido o expirado'
     });
   }
 };
 
 /**
- * Middleware para verificar roles
+ * Middleware de roles
+ * ❗ 403 = autenticado pero sin permisos
  */
 const checkRole = (...allowedRoles) => {
   return (req, res, next) => {
     if (!req.user) {
       return res.status(401).json({
         success: false,
-        message: 'Usuario no autenticado'
+        message: 'No autenticado'
       });
     }
 
@@ -83,5 +56,5 @@ const checkRole = (...allowedRoles) => {
 
 module.exports = {
   authMiddleware,
-  checkRole
-};
+  checkRole,
+}
