@@ -1,7 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { DataTypes } = require('sequelize');
-const { sequelize } = require('./config/database');
+const { sequelize } = require('../../config/database');
 
 const User = sequelize.define('User', {
   id: {
