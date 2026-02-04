@@ -43,6 +43,11 @@ const Sale = sequelize.define('Sale', {
   customer_address: {
     type: DataTypes.TEXT,
   },
+  vehicle_plate: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    comment: 'Número de placa del vehículo (opcional)'
+  },
   warehouse_id: {
     type: DataTypes.UUID,
     references: { model: 'warehouses', key: 'id' },

@@ -8,15 +8,12 @@ const InventoryMovement = require('../../models/inventory/InventoryMovement');
 const Purchase = require('../../models/inventory/Purchase');
 const PurchaseItem = require('../../models/inventory/PurchaseItem');
 
-/**
- * Obtiene reporte de movimientos por mes (entradas vs salidas)
- */
 exports.getMovementsByMonth = async (req, res) => {
   try {
     const { months = 6 } = req.query;
     const tenantId = req.user.tenant_id;
 
-    // Consulta para cantidades
+    // Consulta para cantidades y conteo de movimientos
     const quantityQuery = `
       SELECT 
         TO_CHAR(movement_date, 'YYYY-MM') as month,
@@ -62,7 +59,7 @@ exports.getMovementsByMonth = async (req, res) => {
       valueMap[key] = parseFloat(v.total_value) || 0;
     });
 
-    // Formatear los datos combinando cantidades y valores
+    // ✨ CORREGIDO: Formatear los datos combinando cantidades, valores y conteo
     const monthsMap = {};
     quantities.forEach(mov => {
       if (!monthsMap[mov.month]) {
@@ -73,16 +70,21 @@ exports.getMovementsByMonth = async (req, res) => {
           ajuste_positivo: 0,
           ajuste_negativo: 0,
           entradas_valor: 0,
-          salidas_valor: 0
+          salidas_valor: 0,
+          total_movements: 0  // ✨ NUEVO: Campo para el conteo total de movimientos
         };
       }
       
       const quantity = parseFloat(mov.total_quantity) || 0;
+      const movementCount = parseInt(mov.total_movements) || 0;  // ✨ NUEVO: Obtener conteo
       const valueKey = `${mov.month}-${mov.movement_type}`;
       const value = valueMap[valueKey] || 0;
       
       // Asignar cantidades
       monthsMap[mov.month][mov.movement_type] = quantity;
+      
+      // ✨ NUEVO: Acumular el conteo total de movimientos del mes
+      monthsMap[mov.month].total_movements += movementCount;
       
       // Asignar valores monetarios
       if (mov.movement_type === 'entrada') {

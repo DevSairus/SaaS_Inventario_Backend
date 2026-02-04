@@ -15,12 +15,16 @@ const generateSalePDF = (res, sale, tenant) => {
     const doc = new PDFDocument({ 
       margin: 40,
       size: 'LETTER',
-      bufferPages: true
+      bufferPages: true,
+      compress: false  // ✨ NUEVO: Desactivar compresión para mejor compatibilidad de impresión
     });
 
-    // Configurar headers para la descarga del PDF
+    // ✨ NUEVO: Configurar headers para visualización e impresión directa
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename="${sale.sale_number}.pdf"`);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
     
     // Hacer pipe del PDF directamente a la respuesta
     doc.pipe(res);
@@ -101,8 +105,14 @@ const generateSalePDF = (res, sale, tenant) => {
     // ==================== INFORMACIÓN DEL CLIENTE ====================
     let yPos = headerHeight + 30;
     
+    // ✨ NUEVO: Calcular altura dinámica del recuadro según los campos presentes
+    let clientBoxHeight = 70; // Altura base
+    if (sale.Customer?.address || sale.customer_address) clientBoxHeight += 18;
+    if (sale.Customer?.phone || sale.customer_phone) clientBoxHeight += 18;
+    if (sale.vehicle_plate) clientBoxHeight += 18; // ✨ Espacio para placa
+    
     // Recuadro del cliente
-    doc.rect(40, yPos, doc.page.width - 80, 90)
+    doc.rect(40, yPos, doc.page.width - 80, clientBoxHeight)
        .fillAndStroke(lightGray, secondaryColor)
        .lineWidth(1);
     
@@ -127,6 +137,18 @@ const generateSalePDF = (res, sale, tenant) => {
        .text(` ${sale.Customer?.tax_id || sale.customer_tax_id || 'N/A'}`);
     
     yPos += 18;
+    
+    // ✨ NUEVO: Mostrar placa de vehículo si existe
+    if (sale.vehicle_plate) {
+      doc.font('Helvetica')
+         .text(`Placa:`, 55, yPos, { continued: true })
+         .font('Helvetica-Bold')
+         .fillColor(primaryColor)  // Color distintivo para la placa
+         .text(` ${sale.vehicle_plate}`, { width: 250 });
+      
+      doc.fillColor(darkGray);  // Restaurar color
+      yPos += 18;
+    }
     
     if (sale.Customer?.address || sale.customer_address) {
       doc.font('Helvetica')
@@ -412,8 +434,13 @@ class PDFService {
         doc.fontSize(10).text(sale.Customer?.name || sale.customer_name || 'N/A', 50, 170);
         doc.text(sale.Customer?.tax_id || sale.customer_tax_id || 'N/A', 50, 185);
         
+        // ✨ NUEVO: Placa si existe
+        if (sale.vehicle_plate) {
+          doc.text(`Placa: ${sale.vehicle_plate}`, 50, 200);
+        }
+        
         if (sale.Customer?.address || sale.customer_address) {
-          doc.text(sale.Customer?.address || sale.customer_address, 50, 200);
+          doc.text(sale.Customer?.address || sale.customer_address, 50, sale.vehicle_plate ? 215 : 200);
         }
         
         // Tabla de productos

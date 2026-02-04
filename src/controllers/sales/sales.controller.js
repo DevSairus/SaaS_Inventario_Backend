@@ -6,7 +6,6 @@ const { generateSalePDF } = require('../../services/pdfService');
 const { createMovement } = require('../inventory/movements.controller');
 
 // Obtener todas las ventas
-// Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
@@ -26,7 +25,8 @@ const getAll = async (req, res) => {
         { customer_name: { [Op.iLike]: `%${search}%` } },
         { customer_tax_id: { [Op.iLike]: `%${search}%` } },
         { customer_email: { [Op.iLike]: `%${search}%` } },
-        { customer_phone: { [Op.iLike]: `%${search}%` } }
+        { customer_phone: { [Op.iLike]: `%${search}%` } },
+        { vehicle_plate: { [Op.iLike]: `%${search}%` } }  // ✨ NUEVO: Búsqueda por placa
       ];
     }
     
@@ -148,6 +148,7 @@ const create = async (req, res) => {
       items,
       payment_method,
       notes,
+      vehicle_plate,  // ✨ NUEVO: Recibir placa del vehículo
       document_type = 'remision',
       sale_date,
     } = req.body;
@@ -260,8 +261,8 @@ const create = async (req, res) => {
     
     const total_amount = subtotal - discount_amount + tax_amount;
     
-    // Crear venta
-    const sale = await Sale.create({
+    // ✨ NUEVO: Preparar datos de venta incluyendo vehicle_plate
+    const saleData = {
       tenant_id: tenantId,
       sale_number: saleNumber,
       document_type,
@@ -278,32 +279,38 @@ const create = async (req, res) => {
       notes,
       status: 'draft',
       created_by: userId,
-    }, { transaction }
-    );
+    };
+
+    // ✨ NUEVO: Solo agregar vehicle_plate si tiene valor
+    if (vehicle_plate && vehicle_plate.trim()) {
+      saleData.vehicle_plate = vehicle_plate.trim().toUpperCase();
+    }
+
+    // Crear venta
+    const sale = await Sale.create(saleData, { transaction });
 
     // Crear items
     for (const item of saleItems) {
-          await SaleItem.create({
-            sale_id: sale.id,
-            tenant_id: item.tenant_id,
-            product_id: item.product_id,
-            product_name: item.product_name,
-            product_sku: item.product_sku,
-            quantity: item.quantity,
-            unit_price: item.unit_price,
-            discount_percentage: item.discount_percentage,
-            discount_amount: item.discount_amount,
-            tax_percentage: item.tax_percentage,
-            tax_amount: item.tax_amount,
-            subtotal: item.subtotal,
-            total: item.total,
-            unit_cost: item.unit_cost,
-            notes: null
-          }, { transaction }
-        );
+      await SaleItem.create({
+        sale_id: sale.id,
+        tenant_id: item.tenant_id,
+        product_id: item.product_id,
+        product_name: item.product_name,
+        product_sku: item.product_sku,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        discount_percentage: item.discount_percentage,
+        discount_amount: item.discount_amount,
+        tax_percentage: item.tax_percentage,
+        tax_amount: item.tax_amount,
+        subtotal: item.subtotal,
+        total: item.total,
+        unit_cost: item.unit_cost,
+        notes: null
+      }, { transaction });
     }
 
-    await transaction.commit();  // ← MOVER AQUÍ ANTES DEL findByPk
+    await transaction.commit();
 
     // Recargar con relaciones (DESPUÉS del commit)
     const completeSale = await Sale.findByPk(sale.id, {
@@ -361,17 +368,24 @@ const update = async (req, res) => {
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const updateData = { ...req.body };
 
-    // Sanitizar warehouse_id: si es vacío o no es UUID válido, enviar null
+    // Sanitizar warehouse_id
     if ("warehouse_id" in updateData) {
       updateData.warehouse_id = (updateData.warehouse_id && uuidRegex.test(updateData.warehouse_id))
         ? updateData.warehouse_id
         : null;
     }
 
-    // Sanitizar customer_id de la misma manera
+    // Sanitizar customer_id
     if ("customer_id" in updateData) {
       updateData.customer_id = (updateData.customer_id && uuidRegex.test(updateData.customer_id))
         ? updateData.customer_id
+        : null;
+    }
+
+    // ✨ NUEVO: Sanitizar vehicle_plate - convertir a mayúsculas si tiene valor
+    if ("vehicle_plate" in updateData) {
+      updateData.vehicle_plate = updateData.vehicle_plate && updateData.vehicle_plate.trim()
+        ? updateData.vehicle_plate.trim().toUpperCase()
         : null;
     }
 
