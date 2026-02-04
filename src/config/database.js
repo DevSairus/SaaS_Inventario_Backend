@@ -1,14 +1,30 @@
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
 
+// ============================================================================
+// IMPORTANTE: Pre-cargar el módulo pg antes de usarlo con Sequelize
+// Esto resuelve el problema "Please install pg package manually" en Vercel
+// ============================================================================
+let pg;
+try {
+  pg = require('pg');
+  console.log('✅ Módulo pg cargado correctamente');
+} catch (err) {
+  console.error('❌ Error cargando módulo pg:', err.message);
+  // Intentar con pg-pool como fallback
+  try {
+    pg = require('pg-pool');
+    console.log('✅ Módulo pg-pool cargado como fallback');
+  } catch (err2) {
+    console.error('❌ Error crítico: no se pudo cargar pg ni pg-pool');
+  }
+}
+
 let sequelize;
 
 // ============================================================================
 // CONFIGURACIÓN PARA VERCEL + NEON INTEGRATION
 // ============================================================================
-// Vercel con Neon crea automáticamente POSTGRES_URL
-// Si usas Neon fuera de Vercel, usa DATABASE_URL
-
 const DATABASE_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === 'production';
 
@@ -20,27 +36,34 @@ if (DATABASE_URL) {
   console.log('🔧 Conectando a Neon PostgreSQL');
   console.log('📍 Variable usada:', process.env.POSTGRES_URL ? 'POSTGRES_URL' : 'DATABASE_URL');
   
+  // Configuración específica para Vercel
+  const dialectOptions = {
+    ssl: {
+      require: true,
+      rejectUnauthorized: false
+    }
+  };
+
+  // Si estamos en Vercel, configuración adicional
+  if (process.env.VERCEL) {
+    console.log('🔧 Modo Vercel detectado - Configuración optimizada');
+  }
+
   sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
+    dialectModule: pg, // ← IMPORTANTE: Pasar explícitamente el módulo pg
     protocol: 'postgres',
-    
-    // SSL es obligatorio para Neon
-    dialectOptions: {
-      ssl: {
-        require: true,
-        rejectUnauthorized: false  // Necesario para Neon
-      }
-    },
+    dialectOptions,
     
     // Logging
     logging: isProduction ? false : console.log,
     
     // Pool optimizado para Vercel Serverless
     pool: {
-      max: 2,           // Máximo 2 conexiones (límite serverless)
-      min: 0,           // Cerrar cuando no se use
-      acquire: 30000,   // 30s timeout para adquirir conexión
-      idle: 10000       // Cerrar conexiones inactivas después de 10s
+      max: 2,
+      min: 0,
+      acquire: 30000,
+      idle: 10000
     },
     
     // Opciones de modelos
@@ -48,18 +71,6 @@ if (DATABASE_URL) {
       timestamps: true,
       underscored: false,
       freezeTableName: true
-    },
-    
-    // Importante para Neon
-    dialectOptions: {
-      ...this?.dialectOptions,
-      ssl: {
-        require: true,
-        rejectUnauthorized: false
-      },
-      // Configuración adicional para Neon
-      statement_timeout: 30000,  // 30s timeout por query
-      idle_in_transaction_session_timeout: 30000
     }
   });
   
@@ -86,6 +97,7 @@ if (DATABASE_URL) {
       host: dbConfig.host,
       port: dbConfig.port,
       dialect: 'postgres',
+      dialectModule: pg, // También en desarrollo
       logging: console.log,
       
       pool: {
@@ -117,7 +129,8 @@ async function testConnection() {
     if (!isProduction) {
       try {
         const [results] = await sequelize.query('SELECT version()');
-        console.log('📊 PostgreSQL Version:', results[0].version.split(' ')[0] + ' ' + results[0].version.split(' ')[1]);
+        const version = results[0].version.split(' ').slice(0, 2).join(' ');
+        console.log('📊 PostgreSQL Version:', version);
         
         // Mostrar tablas disponibles
         const [tables] = await sequelize.query(`
@@ -129,8 +142,8 @@ async function testConnection() {
         
         if (tables.length > 0) {
           console.log(`📋 Tablas disponibles: ${tables.length}`);
-          console.log('   ' + tables.slice(0, 5).map(t => t.table_name).join(', ') + 
-                     (tables.length > 5 ? '...' : ''));
+          const tableNames = tables.slice(0, 5).map(t => t.table_name).join(', ');
+          console.log('   ' + tableNames + (tables.length > 5 ? '...' : ''));
         } else {
           console.log('⚠️  No hay tablas. Ejecuta database-schema.sql');
         }
@@ -153,10 +166,6 @@ async function testConnection() {
         console.error('   → Agrega la variable de entorno en Vercel');
       } else {
         console.error('   ✅ Variable de conexión encontrada');
-        
-        if (!DATABASE_URL.includes('sslmode=require')) {
-          console.error('   ⚠️  Falta ?sslmode=require al final de la URL');
-        }
       }
       
       console.error('   - ¿PostgreSQL está corriendo?');
@@ -211,68 +220,9 @@ async function closeConnection() {
   }
 }
 
-/**
- * Ejecutar query SQL directamente
- * Útil para migraciones o consultas específicas
- */
-async function executeQuery(sql, options = {}) {
-  try {
-    const [results, metadata] = await sequelize.query(sql, options);
-    return { success: true, results, metadata };
-  } catch (error) {
-    console.error('❌ Error ejecutando query:', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
-/**
- * Verificar que las tablas principales existen
- */
-async function checkTables() {
-  try {
-    const requiredTables = [
-      'tenants',
-      'users',
-      'permissions',
-      'categories',
-      'products',
-      'warehouses',
-      'suppliers'
-    ];
-    
-    const [tables] = await sequelize.query(`
-      SELECT table_name 
-      FROM information_schema.tables 
-      WHERE table_schema = 'public' 
-      AND table_name = ANY($1)
-    `, {
-      bind: [requiredTables]
-    });
-    
-    const existingTables = tables.map(t => t.table_name);
-    const missingTables = requiredTables.filter(t => !existingTables.includes(t));
-    
-    if (missingTables.length > 0) {
-      console.warn('⚠️  Faltan tablas importantes:');
-      missingTables.forEach(t => console.warn(`   - ${t}`));
-      console.warn('   → Ejecuta database-schema.sql');
-      return { success: false, missingTables };
-    }
-    
-    console.log('✅ Todas las tablas principales existen');
-    return { success: true, tables: existingTables };
-    
-  } catch (error) {
-    console.error('❌ Error verificando tablas:', error.message);
-    return { success: false, error: error.message };
-  }
-}
-
 module.exports = {
   sequelize,
   testConnection,
   syncDatabase,
-  closeConnection,
-  executeQuery,
-  checkTables
+  closeConnection
 };
