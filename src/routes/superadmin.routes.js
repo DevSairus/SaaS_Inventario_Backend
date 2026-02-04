@@ -1418,6 +1418,99 @@ router.delete(
 );
 
 // ============================================
+// GESTIÓN DE USUARIOS DE TENANTS
+// ============================================
+
+/**
+ * POST /api/v1/superadmin/tenants/:tenantId/users
+ * Crear un nuevo usuario para un tenant específico
+ */
+router.post(
+  '/tenants/:tenantId/users',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { tenantId } = req.params;
+      const {
+        email,
+        password,
+        first_name,
+        last_name,
+        role,
+        identification_type,
+        identification_number,
+        phone,
+        address,
+      } = req.body;
+
+      // Validar datos requeridos
+      if (!email || !password || !first_name || !last_name || !role) {
+        return res.status(400).json({
+          error: 'Faltan campos requeridos',
+          required: ['email', 'password', 'first_name', 'last_name', 'role'],
+        });
+      }
+
+      // Verificar que el tenant existe
+      const tenant = await Tenant.findByPk(tenantId);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant no encontrado' });
+      }
+
+      // Verificar si el email ya existe en el tenant
+      const existingUser = await User.findOne({
+        where: {
+          email,
+          tenant_id: tenantId,
+        },
+      });
+
+      if (existingUser) {
+        return res.status(400).json({
+          error: 'El email ya está registrado en este tenant',
+        });
+      }
+
+      // Hash de la contraseña
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // Crear el usuario
+      const user = await User.create({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        role,
+        identification_type,
+        identification_number,
+        phone,
+        address,
+        tenant_id: tenantId,
+        is_active: true,
+        created_by: req.user.id,
+      });
+
+      // No devolver el hash de la contraseña
+      const userResponse = user.toJSON();
+      delete userResponse.password_hash;
+
+      res.status(201).json({
+        success: true,
+        message: 'Usuario creado exitosamente',
+        user: userResponse,
+      });
+    } catch (error) {
+      console.error('Error creating tenant user:', error);
+      res.status(500).json({
+        error: 'Error al crear usuario',
+        details: error.message,
+      });
+    }
+  }
+);
+
+// ============================================
 // GESTIÓN DE PERMISOS DE ROLES
 // ============================================
 
