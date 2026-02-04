@@ -1,6 +1,10 @@
-// ============================================================================
-// IMPORTANTE: En Vercel NO usar dotenv, las variables vienen del sistema
-// ============================================================================
+console.log('🔍 DEBUG - Variables de entorno:');
+console.log('   NODE_ENV:', process.env.NODE_ENV);
+console.log('   VERCEL:', process.env.VERCEL);
+console.log('   POSTGRES_URL exists:', !!process.env.POSTGRES_URL);
+console.log('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
+console.log('   POSTGRES_HOST:', process.env.POSTGRES_HOST);
+
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
 }
