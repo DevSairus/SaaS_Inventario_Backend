@@ -41,7 +41,15 @@ const User = sequelize.define('User', {
     allowNull: false,
     defaultValue: 'user',
     validate: {
-      isIn: [['super_admin', 'admin', 'user', 'viewer']]
+      isIn: [[
+        'super_admin',
+        'admin',
+        'manager',
+        'seller',
+        'warehouse_keeper',
+        'user',
+        'viewer'
+      ]]
     }
   },
   phone: {
