@@ -1,13 +1,7 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { Sequelize, DataTypes } = require('sequelize');
-
-const sequelize = new Sequelize('inventario_db', 'inventario_user', 'Inventario2026', {
-  host: 'localhost',
-  port: 5433,
-  dialect: 'postgres',
-  logging: false
-});
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('./config/database');
 
 const User = sequelize.define('User', {
   id: {
