@@ -1,4 +1,10 @@
-require('dotenv').config();
+// ============================================================================
+// IMPORTANTE: En Vercel NO usar dotenv, las variables vienen del sistema
+// ============================================================================
+if (process.env.NODE_ENV !== 'production') {
+  require('dotenv').config();
+}
+
 const { Sequelize } = require('sequelize');
 
 // ============================================================================
@@ -23,10 +29,25 @@ try {
 let sequelize;
 
 // ============================================================================
+// DEBUG: Verificar variables de entorno (remover después de verificar)
+// ============================================================================
+console.log('🔍 DEBUG - Verificando conexión a DB:');
+console.log('   NODE_ENV:', process.env.NODE_ENV);
+console.log('   VERCEL:', process.env.VERCEL ? 'YES' : 'NO');
+console.log('   POSTGRES_URL exists:', !!process.env.POSTGRES_URL);
+console.log('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
+
+// ============================================================================
 // CONFIGURACIÓN PARA VERCEL + NEON INTEGRATION
 // ============================================================================
 const DATABASE_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === 'production';
+
+console.log('   Using DATABASE_URL:', !!DATABASE_URL);
+if (DATABASE_URL) {
+  console.log('   Connection string starts with:', DATABASE_URL.substring(0, 15) + '...');
+}
+console.log('============================================================================\n');
 
 if (DATABASE_URL) {
   // ============================================================================
@@ -80,6 +101,8 @@ if (DATABASE_URL) {
   // ============================================================================
   
   console.log('🔧 Conectando a PostgreSQL local (desarrollo)');
+  console.log('⚠️  ADVERTENCIA: No se encontró POSTGRES_URL ni DATABASE_URL');
+  console.log('   Usando configuración de desarrollo local');
   
   const dbConfig = {
     database: process.env.DB_NAME || 'inventario_db',
@@ -88,6 +111,8 @@ if (DATABASE_URL) {
     host: process.env.DB_HOST || 'localhost',
     port: process.env.DB_PORT || 5432
   };
+  
+  console.log(`   DB: ${dbConfig.database}@${dbConfig.host}:${dbConfig.port}`);
   
   sequelize = new Sequelize(
     dbConfig.database,
