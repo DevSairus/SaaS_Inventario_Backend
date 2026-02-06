@@ -590,7 +590,7 @@ const receivePurchase = async (req, res) => {
       // Campos adicionales que createMovement no cubre
       const extraUpdates = {
         available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock || 0),
-        last_purchase_cost: parseFloat(purchaseItem.unit_cost),
+        last_purchase_cost: parseFloat(purchaseItem.unit_cost) || 0,
         last_purchase_date: purchase.purchase_date
       };
 
