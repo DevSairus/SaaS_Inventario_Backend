@@ -1,7 +1,5 @@
 // backend/src/controllers/tenant.controller.js
 const { Tenant } = require('../models');
-const path = require('path');
-const fs = require('fs');
 
 /**
  * Obtener configuración del tenant actual
@@ -9,6 +7,13 @@ const fs = require('fs');
 const getTenantConfig = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
+    
+    if (!tenantId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID de tenant no encontrado en la solicitud'
+      });
+    }
     
     const tenant = await Tenant.findByPk(tenantId, {
       attributes: [
@@ -55,6 +60,14 @@ const getTenantConfig = async (req, res) => {
 const updateTenantConfig = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
+    
+    if (!tenantId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID de tenant no encontrado en la solicitud'
+      });
+    }
+    
     const {
       company_name,
       business_name,
@@ -111,10 +124,18 @@ const updateTenantConfig = async (req, res) => {
 
 /**
  * Subir logo del tenant
+ * SOLUCIÓN PARA VERCEL: Usar Cloudinary en lugar de filesystem
  */
 const uploadLogo = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
+
+    if (!tenantId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID de tenant no encontrado en la solicitud'
+      });
+    }
 
     if (!req.file) {
       return res.status(400).json({
@@ -132,42 +153,136 @@ const uploadLogo = async (req, res) => {
       });
     }
 
-    // Eliminar logo anterior si existe
-    if (tenant.logo_url) {
-      const oldLogoPath = path.join(__dirname, '../../uploads/logos', tenant.logo_url);
-      if (fs.existsSync(oldLogoPath)) {
-        fs.unlinkSync(oldLogoPath);
+    // ========================================================================
+    // OPCIÓN A: CLOUDINARY (RECOMENDADA PARA PRODUCCIÓN)
+    // ========================================================================
+    // Descomentar este bloque si usas Cloudinary
+    /*
+    const cloudinary = require('cloudinary').v2;
+    
+    cloudinary.config({
+      cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+      api_key: process.env.CLOUDINARY_API_KEY,
+      api_secret: process.env.CLOUDINARY_API_SECRET
+    });
+
+    // Subir a Cloudinary
+    const uploadResult = await new Promise((resolve, reject) => {
+      const uploadStream = cloudinary.uploader.upload_stream(
+        {
+          folder: 'tenant-logos',
+          public_id: `logo-${tenantId}-${Date.now()}`,
+          resource_type: 'image',
+          transformation: [
+            { width: 500, height: 500, crop: 'limit' },
+            { quality: 'auto' }
+          ]
+        },
+        (error, result) => {
+          if (error) reject(error);
+          else resolve(result);
+        }
+      );
+      uploadStream.end(req.file.buffer);
+    });
+
+    // Eliminar logo anterior de Cloudinary si existe
+    if (tenant.logo_url && !tenant.logo_url.startsWith('data:') && tenant.logo_url.includes('cloudinary')) {
+      try {
+        const urlParts = tenant.logo_url.split('/');
+        const publicIdWithExt = urlParts[urlParts.length - 1];
+        const publicId = publicIdWithExt.split('.')[0];
+        await cloudinary.uploader.destroy(`tenant-logos/${publicId}`);
+      } catch (err) {
+        console.error('Error eliminando logo anterior:', err);
       }
     }
 
-    // Guardar nuevo logo
-    const fileName = `logo-${tenantId}-${Date.now()}${path.extname(req.file.originalname)}`;
-    const logoPath = path.join(__dirname, '../../uploads/logos', fileName);
-
-    // Asegurar que el directorio existe
-    const logoDir = path.join(__dirname, '../../uploads/logos');
-    if (!fs.existsSync(logoDir)) {
-      fs.mkdirSync(logoDir, { recursive: true });
-    }
-
-    fs.writeFileSync(logoPath, req.file.buffer);
-
-    // Actualizar tenant con nueva URL del logo
-    await tenant.update({ logo_url: fileName });
+    // Actualizar tenant con URL de Cloudinary
+    await tenant.update({ logo_url: uploadResult.secure_url });
 
     res.json({
       success: true,
       message: 'Logo subido exitosamente',
       data: {
-        logo_url: fileName
+        logo_url: uploadResult.secure_url
       }
     });
+    */
+
+    // ========================================================================
+    // OPCIÓN B: VERCEL BLOB STORAGE
+    // ========================================================================
+    // Descomentar este bloque si usas Vercel Blob
+    /*
+    const { put, del } = require('@vercel/blob');
+
+    // Subir a Vercel Blob
+    const filename = `tenant-logos/logo-${tenantId}-${Date.now()}.${req.file.originalname.split('.').pop()}`;
+    const blob = await put(filename, req.file.buffer, {
+      access: 'public',
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
+
+    // Eliminar logo anterior si existe
+    if (tenant.logo_url && tenant.logo_url.startsWith('https://') && tenant.logo_url.includes('vercel-storage')) {
+      try {
+        await del(tenant.logo_url, {
+          token: process.env.BLOB_READ_WRITE_TOKEN,
+        });
+      } catch (err) {
+        console.error('Error eliminando logo anterior:', err);
+      }
+    }
+
+    await tenant.update({ logo_url: blob.url });
+
+    res.json({
+      success: true,
+      message: 'Logo subido exitosamente',
+      data: {
+        logo_url: blob.url
+      }
+    });
+    */
+
+    // ========================================================================
+    // OPCIÓN C: BASE64 EN BASE DE DATOS (TEMPORAL - Solo para desarrollo)
+    // ========================================================================
+    // Comentar este bloque cuando migres a Cloudinary o Vercel Blob
+    
+    // Validar tamaño del archivo (máximo 2MB para base64)
+    if (req.file.size > 2 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        message: 'El archivo es demasiado grande. Máximo 2MB permitido.'
+      });
+    }
+
+    const base64Logo = req.file.buffer.toString('base64');
+    const mimeType = req.file.mimetype;
+    const logoDataUrl = `data:${mimeType};base64,${base64Logo}`;
+
+    await tenant.update({ logo_url: logoDataUrl });
+
+    res.json({
+      success: true,
+      message: 'Logo subido exitosamente',
+      data: {
+        logo_url: logoDataUrl
+      }
+    });
+    
+    // FIN OPCIÓN C
+    // ========================================================================
+
   } catch (error) {
     console.error('Error subiendo logo:', error);
     res.status(500).json({
       success: false,
       message: 'Error subiendo logo',
-      error: error.message
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
@@ -178,6 +293,13 @@ const uploadLogo = async (req, res) => {
 const deleteLogo = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
+
+    if (!tenantId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID de tenant no encontrado en la solicitud'
+      });
+    }
 
     const tenant = await Tenant.findByPk(tenantId);
 
@@ -195,11 +317,44 @@ const deleteLogo = async (req, res) => {
       });
     }
 
-    // Eliminar archivo físico
-    const logoPath = path.join(__dirname, '../../uploads/logos', tenant.logo_url);
-    if (fs.existsSync(logoPath)) {
-      fs.unlinkSync(logoPath);
+    // ========================================================================
+    // ELIMINAR DE CLOUDINARY
+    // ========================================================================
+    /*
+    if (!tenant.logo_url.startsWith('data:') && tenant.logo_url.includes('cloudinary')) {
+      const cloudinary = require('cloudinary').v2;
+      cloudinary.config({
+        cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+        api_key: process.env.CLOUDINARY_API_KEY,
+        api_secret: process.env.CLOUDINARY_API_SECRET
+      });
+
+      try {
+        const urlParts = tenant.logo_url.split('/');
+        const publicIdWithExt = urlParts[urlParts.length - 1];
+        const publicId = publicIdWithExt.split('.')[0];
+        await cloudinary.uploader.destroy(`tenant-logos/${publicId}`);
+      } catch (err) {
+        console.error('Error eliminando de Cloudinary:', err);
+      }
     }
+    */
+
+    // ========================================================================
+    // ELIMINAR DE VERCEL BLOB
+    // ========================================================================
+    /*
+    if (tenant.logo_url.startsWith('https://') && tenant.logo_url.includes('vercel-storage')) {
+      const { del } = require('@vercel/blob');
+      try {
+        await del(tenant.logo_url, {
+          token: process.env.BLOB_READ_WRITE_TOKEN,
+        });
+      } catch (err) {
+        console.error('Error eliminando de Vercel Blob:', err);
+      }
+    }
+    */
 
     // Actualizar tenant
     await tenant.update({ logo_url: null });

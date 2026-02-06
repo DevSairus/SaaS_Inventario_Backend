@@ -7,10 +7,25 @@ const { Product, Category } = require('../../models/inventory');
  */
 const getProductStats = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
     let whereClause = {};
 
     if (req.user.role !== 'super_admin') {
-      whereClause.tenant_id = req.user.tenant_id || null;
+      // ✅ Validar tenant_id
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
     }
 
     const totalProducts = await Product.count({ where: whereClause });
@@ -66,7 +81,11 @@ const getProductStats = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getProductStats:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener estadísticas', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener estadísticas', 
+      error: error.message 
+    });
   }
 };
 
@@ -77,10 +96,26 @@ const getAllProducts = async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '', category_id = '', is_active = '', sort_by = 'name', sort_order = 'ASC' } = req.query;
     const offset = (page - 1) * limit;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
     let whereClause = {};
 
     if (req.user.role !== 'super_admin') {
-      whereClause.tenant_id = req.user.tenant_id || null;
+      // ✅ Validar tenant_id
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
     }
 
     if (search) {
@@ -124,7 +159,11 @@ const getAllProducts = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getAllProducts:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener productos', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener productos', 
+      error: error.message 
+    });
   }
 };
 
@@ -135,8 +174,29 @@ const getProductById = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    let whereClause = { id };
+
+    // ✅ Filtrar por tenant si no es super_admin
+    if (req.user.role !== 'super_admin') {
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
+    }
+
     const product = await Product.findOne({
-      where: { id },
+      where: whereClause,
       include: [{
         model: Category,
         as: 'category',
@@ -145,13 +205,20 @@ const getProductById = async (req, res) => {
     });
 
     if (!product) {
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Producto no encontrado' 
+      });
     }
 
     res.json({ success: true, data: product });
   } catch (error) {
     console.error('Error en getProductById:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener producto', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener producto', 
+      error: error.message 
+    });
   }
 };
 
@@ -160,11 +227,22 @@ const getProductById = async (req, res) => {
  */
 const createProduct = async (req, res) => {
   try {
-    // Debug: Ver qué llega en req.user
-    console.log('🔍 DEBUG createProduct:');
-    console.log('   req.user:', req.user);
-    console.log('   req.user.tenant_id:', req.user?.tenant_id);
-    console.log('   req.body:', JSON.stringify(req.body, null, 2));
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (req.user.role !== 'super_admin' && !req.user.tenant_id) {
+      console.log('❌ ERROR: Usuario sin tenant_id');
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Error: Usuario sin tenant asignado. Por favor contacte a soporte.' 
+      });
+    }
 
     const {
       sku,
@@ -188,47 +266,54 @@ const createProduct = async (req, res) => {
       is_for_purchase = true
     } = req.body;
 
-    // Validación de tenant_id
-    if (!req.user || !req.user.tenant_id) {
-      console.log('❌ ERROR: Usuario sin tenant_id');
+    if (!sku || !name) {
       return res.status(400).json({ 
         success: false, 
-        message: 'Error: Usuario sin tenant_id. Por favor, cierra sesión y vuelve a iniciar sesión.' 
+        message: 'SKU y nombre son requeridos' 
       });
     }
 
-    if (!sku || !name) {
-      return res.status(400).json({ success: false, message: 'SKU y nombre son requeridos' });
-    }
+    // Determinar tenant_id a usar
+    const tenantId = req.user.role === 'super_admin' 
+      ? (req.body.tenant_id || null) 
+      : req.user.tenant_id;
 
+    // Verificar SKU duplicado
     const existingSku = await Product.findOne({
       where: {
         sku: sku.trim(),
-        tenant_id: req.user.tenant_id || null
+        tenant_id: tenantId
       }
     });
 
     if (existingSku) {
-      return res.status(400).json({ success: false, message: 'Ya existe un producto con ese SKU' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Ya existe un producto con ese SKU' 
+      });
     }
 
+    // Verificar código de barras duplicado
     if (barcode) {
       const existingBarcode = await Product.findOne({
         where: {
           barcode: barcode.trim(),
-          tenant_id: req.user.tenant_id || null
+          tenant_id: tenantId
         }
       });
 
       if (existingBarcode) {
-        return res.status(400).json({ success: false, message: 'Ya existe un producto con ese código de barras' });
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Ya existe un producto con ese código de barras' 
+        });
       }
     }
 
     const available_stock = parseFloat(current_stock) - parseFloat(reserved_stock);
 
     const product = await Product.create({
-      tenant_id: req.user.tenant_id || null,
+      tenant_id: tenantId,
       sku: sku.trim(),
       barcode: barcode ? barcode.trim() : null,
       name: name.trim(),
@@ -267,7 +352,11 @@ const createProduct = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en createProduct:', error);
-    res.status(500).json({ success: false, message: 'Error al crear producto', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al crear producto', 
+      error: error.message 
+    });
   }
 };
 
@@ -279,63 +368,98 @@ const updateProduct = async (req, res) => {
     const { id } = req.params;
     const updateData = req.body;
 
-    // Validación de tenant_id
-    if (!req.user || !req.user.tenant_id) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Error: Usuario sin tenant_id. Por favor, contacte al administrador del sistema.' 
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
       });
     }
 
-    const product = await Product.findOne({ where: { id } });
-
-    if (!product) {
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+    // ✅ Validar tenant_id
+    if (req.user.role !== 'super_admin' && !req.user.tenant_id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Error: Usuario sin tenant asignado. Por favor contacte a soporte.' 
+      });
     }
 
+    let whereClause = { id };
+
+    // ✅ Filtrar por tenant si no es super_admin
+    if (req.user.role !== 'super_admin') {
+      whereClause.tenant_id = req.user.tenant_id;
+    }
+
+    const product = await Product.findOne({ where: whereClause });
+
+    if (!product) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Producto no encontrado' 
+      });
+    }
+
+    // Determinar tenant_id para validaciones
+    const tenantId = req.user.role === 'super_admin' 
+      ? product.tenant_id 
+      : req.user.tenant_id;
+
+    // Verificar SKU duplicado
     if (updateData.sku && updateData.sku !== product.sku) {
       const existingSku = await Product.findOne({
         where: {
           sku: updateData.sku.trim(),
-          tenant_id: req.user.tenant_id || null,
+          tenant_id: tenantId,
           id: { [Op.ne]: id }
         }
       });
 
       if (existingSku) {
-        return res.status(400).json({ success: false, message: 'Ya existe un producto con ese SKU' });
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Ya existe un producto con ese SKU' 
+        });
       }
     }
 
+    // Verificar código de barras duplicado
     if (updateData.barcode && updateData.barcode !== product.barcode) {
       const existingBarcode = await Product.findOne({
         where: {
           barcode: updateData.barcode.trim(),
-          tenant_id: req.user.tenant_id || null,
+          tenant_id: tenantId,
           id: { [Op.ne]: id }
         }
       });
 
       if (existingBarcode) {
-        return res.status(400).json({ success: false, message: 'Ya existe un producto con ese código de barras' });
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Ya existe un producto con ese código de barras' 
+        });
       }
     }
 
+    // Calcular stock disponible si se actualizan stocks
     if (updateData.current_stock !== undefined || updateData.reserved_stock !== undefined) {
-      const current = updateData.current_stock !== undefined ? parseFloat(updateData.current_stock) : parseFloat(product.current_stock);
-      const reserved = updateData.reserved_stock !== undefined ? parseFloat(updateData.reserved_stock) : parseFloat(product.reserved_stock);
+      const current = updateData.current_stock !== undefined 
+        ? parseFloat(updateData.current_stock) 
+        : parseFloat(product.current_stock);
+      const reserved = updateData.reserved_stock !== undefined 
+        ? parseFloat(updateData.reserved_stock) 
+        : parseFloat(product.reserved_stock);
       updateData.available_stock = current - reserved;
     }
 
-    // CRÍTICO: Convertir strings vacíos a null para campos UUID y opcionales
-    // PostgreSQL no acepta '' como UUID, debe ser null
+    // Convertir strings vacíos a null para campos UUID y opcionales
     const fieldsToSanitize = [
-      'category_id',    // UUID
-      'barcode',        // string opcional
-      'description',    // text opcional
-      'brand',          // string opcional
-      'unit_of_measure',// string opcional
-      'max_stock'       // número opcional
+      'category_id',
+      'barcode',
+      'description',
+      'brand',
+      'unit_of_measure',
+      'max_stock'
     ];
 
     fieldsToSanitize.forEach(field => {
@@ -362,7 +486,11 @@ const updateProduct = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en updateProduct:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar producto', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al actualizar producto', 
+      error: error.message 
+    });
   }
 };
 
@@ -373,10 +501,34 @@ const deactivateProduct = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const product = await Product.findOne({ where: { id } });
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    let whereClause = { id };
+
+    // ✅ Filtrar por tenant si no es super_admin
+    if (req.user.role !== 'super_admin') {
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
+    }
+
+    const product = await Product.findOne({ where: whereClause });
 
     if (!product) {
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Producto no encontrado' 
+      });
     }
 
     await product.update({ is_active: false });
@@ -387,7 +539,11 @@ const deactivateProduct = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en deactivateProduct:', error);
-    res.status(500).json({ success: false, message: 'Error al desactivar producto', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al desactivar producto', 
+      error: error.message 
+    });
   }
 };
 
@@ -398,10 +554,34 @@ const deleteProductPermanently = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const product = await Product.findOne({ where: { id } });
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    let whereClause = { id };
+
+    // ✅ Filtrar por tenant si no es super_admin
+    if (req.user.role !== 'super_admin') {
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
+    }
+
+    const product = await Product.findOne({ where: whereClause });
 
     if (!product) {
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Producto no encontrado' 
+      });
     }
 
     await product.destroy();
@@ -412,7 +592,11 @@ const deleteProductPermanently = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en deleteProductPermanently:', error);
-    res.status(500).json({ success: false, message: 'Error al eliminar producto', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al eliminar producto', 
+      error: error.message 
+    });
   }
 };
 
@@ -423,14 +607,31 @@ const getProductByBarcode = async (req, res) => {
   try {
     const { barcode } = req.params;
 
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
     if (!barcode) {
-      return res.status(400).json({ success: false, message: 'Código de barras requerido' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Código de barras requerido' 
+      });
     }
 
     let whereClause = { barcode: barcode.trim() };
 
     if (req.user.role !== 'super_admin') {
-      whereClause.tenant_id = req.user.tenant_id || null;
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
     }
 
     const product = await Product.findOne({
@@ -443,13 +644,20 @@ const getProductByBarcode = async (req, res) => {
     });
 
     if (!product) {
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Producto no encontrado' 
+      });
     }
 
     res.json({ success: true, data: product });
   } catch (error) {
     console.error('Error en getProductByBarcode:', error);
-    res.status(500).json({ success: false, message: 'Error al buscar producto por código de barras', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al buscar producto por código de barras', 
+      error: error.message 
+    });
   }
 };
 
@@ -460,14 +668,31 @@ const checkBarcodeExists = async (req, res) => {
   try {
     const { barcode } = req.params;
 
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
     if (!barcode) {
-      return res.status(400).json({ success: false, message: 'Código de barras requerido' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Código de barras requerido' 
+      });
     }
 
     let whereClause = { barcode: barcode.trim() };
 
     if (req.user.role !== 'super_admin') {
-      whereClause.tenant_id = req.user.tenant_id || null;
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
     }
 
     const product = await Product.findOne({
@@ -482,7 +707,11 @@ const checkBarcodeExists = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en checkBarcodeExists:', error);
-    res.status(500).json({ success: false, message: 'Error al verificar código de barras', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al verificar código de barras', 
+      error: error.message 
+    });
   }
 };
 
@@ -492,11 +721,33 @@ const checkBarcodeExists = async (req, res) => {
 const getProductSuppliers = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
     const Supplier = require('../../models/inventory/Supplier');
     const ProductSupplier = require('../../models/inventory/ProductSupplier');
 
+    let whereClause = { id };
+
+    // ✅ Filtrar por tenant si no es super_admin
+    if (req.user.role !== 'super_admin') {
+      if (!req.user.tenant_id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Usuario sin tenant asignado'
+        });
+      }
+      whereClause.tenant_id = req.user.tenant_id;
+    }
+
     const product = await Product.findOne({
-      where: { id },
+      where: whereClause,
       include: [{
         model: Supplier,
         as: 'suppliers',
@@ -509,7 +760,10 @@ const getProductSuppliers = async (req, res) => {
     });
 
     if (!product) {
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Producto no encontrado' 
+      });
     }
 
     // Transformar los datos para incluir la información de la tabla pivote
@@ -532,7 +786,11 @@ const getProductSuppliers = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getProductSuppliers:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener proveedores del producto', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener proveedores del producto', 
+      error: error.message 
+    });
   }
 };
 

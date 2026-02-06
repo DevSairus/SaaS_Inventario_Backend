@@ -32,6 +32,22 @@ const generateReturnNumber = async (tenant_id) => {
 
 const getSupplierReturns = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const {
       search = '',
       supplier_id,
@@ -97,6 +113,22 @@ const getSupplierReturns = async (req, res) => {
 
 const getSupplierReturnById = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -147,6 +179,24 @@ const createSupplierReturn = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
     const { purchase_id, reason, notes, items } = req.body;
 
@@ -258,6 +308,24 @@ const approveSupplierReturn = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -326,6 +394,22 @@ const approveSupplierReturn = async (req, res) => {
 
 const rejectSupplierReturn = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const { rejection_reason } = req.body;
     const tenant_id = req.user.tenant_id;
@@ -356,6 +440,22 @@ const rejectSupplierReturn = async (req, res) => {
 
 const deleteSupplierReturn = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 

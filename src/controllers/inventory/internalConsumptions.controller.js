@@ -30,6 +30,22 @@ const generateConsumptionNumber = async (tenant_id) => {
 
 const getInternalConsumptions = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const {
       search = '',
       warehouse_id,
@@ -92,6 +108,22 @@ const getInternalConsumptions = async (req, res) => {
 
 const getInternalConsumptionById = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -132,6 +164,24 @@ const createInternalConsumption = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
     const { warehouse_id, department, purpose, notes, items } = req.body;
 
@@ -231,6 +281,24 @@ const approveInternalConsumption = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -297,6 +365,22 @@ const approveInternalConsumption = async (req, res) => {
 
 const rejectInternalConsumption = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const { rejection_reason } = req.body;
     const tenant_id = req.user.tenant_id;
@@ -327,6 +411,22 @@ const rejectInternalConsumption = async (req, res) => {
 
 const deleteInternalConsumption = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 

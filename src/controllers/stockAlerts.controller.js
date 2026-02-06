@@ -7,6 +7,22 @@ const { sequelize } = require('../config/database');
  */
 const getStockAlerts = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const {
       search = '',
       alert_type,
@@ -104,6 +120,22 @@ const getStockAlerts = async (req, res) => {
  */
 const getStockAlertById = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -156,6 +188,22 @@ const getStockAlertById = async (req, res) => {
  */
 const resolveStockAlert = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const { resolution_notes } = req.body;
     const tenant_id = req.user.tenant_id;
@@ -223,6 +271,22 @@ const resolveStockAlert = async (req, res) => {
  */
 const ignoreStockAlert = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const { resolution_notes } = req.body;
     const tenant_id = req.user.tenant_id;
@@ -273,6 +337,22 @@ const ignoreStockAlert = async (req, res) => {
  */
 const reactivateStockAlert = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -321,6 +401,22 @@ const reactivateStockAlert = async (req, res) => {
  */
 const deleteStockAlert = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -356,6 +452,22 @@ const deleteStockAlert = async (req, res) => {
  */
 const getStockAlertsStats = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     // Total de alertas activas
@@ -452,6 +564,22 @@ const getStockAlertsStats = async (req, res) => {
  */
 const checkAndCreateAlerts = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     // Obtener productos con stock configurado

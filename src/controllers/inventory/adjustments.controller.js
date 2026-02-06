@@ -8,6 +8,22 @@ const { sequelize } = require('../../config/database');
  */
 const getAdjustments = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const {
       search = '',
       adjustment_type,
@@ -120,6 +136,22 @@ const getAdjustments = async (req, res) => {
  */
 const getAdjustmentById = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -177,6 +209,24 @@ const createAdjustment = async (req, res) => {
   const t = await sequelize.transaction();
 
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await t.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { adjustment_type, reason, warehouse_id, adjustment_date, notes, items } = req.body;
     const tenant_id = req.user.tenant_id;
     const user_id = req.user.id;
@@ -305,6 +355,24 @@ const updateAdjustment = async (req, res) => {
   const t = await sequelize.transaction();
 
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await t.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const { adjustment_type, reason, warehouse_id, adjustment_date, notes, items } = req.body;
     const tenant_id = req.user.tenant_id;
@@ -334,21 +402,22 @@ const updateAdjustment = async (req, res) => {
 
     // Actualizar ajuste
     await adjustment.update({
-      adjustment_type,
-      reason,
-      warehouse_id,
-      adjustment_date,
+      adjustment_type: adjustment_type || adjustment.adjustment_type,
+      reason: reason || adjustment.reason,
+      warehouse_id: warehouse_id || adjustment.warehouse_id,
+      adjustment_date: adjustment_date || adjustment.adjustment_date,
       notes
     }, { transaction: t });
 
-    // Eliminar items antiguos
-    await InventoryAdjustmentItem.destroy({
-      where: { adjustment_id: id },
-      transaction: t
-    });
-
-    // Crear nuevos items
+    // Si se enviaron items, actualizar
     if (items && items.length > 0) {
+      // Eliminar items antiguos
+      await InventoryAdjustmentItem.destroy({
+        where: { adjustment_id: adjustment.id },
+        transaction: t
+      });
+
+      // Crear nuevos items
       for (const item of items) {
         const product = await Product.findByPk(item.product_id, { transaction: t });
         
@@ -419,6 +488,24 @@ const confirmAdjustment = async (req, res) => {
   const t = await sequelize.transaction();
 
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await t.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await t.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const user_id = req.user.id;
@@ -550,6 +637,22 @@ const confirmAdjustment = async (req, res) => {
  */
 const cancelAdjustment = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -596,6 +699,22 @@ const cancelAdjustment = async (req, res) => {
  */
 const deleteAdjustment = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -639,6 +758,22 @@ const deleteAdjustment = async (req, res) => {
  */
 const getAdjustmentsStats = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     // Total de ajustes

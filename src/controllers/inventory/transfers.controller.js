@@ -30,6 +30,22 @@ const generateTransferNumber = async (tenant_id) => {
 
 const getTransfers = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const {
       search = '',
       from_warehouse_id,
@@ -97,6 +113,22 @@ const getTransfers = async (req, res) => {
 
 const getTransferById = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
@@ -142,6 +174,24 @@ const createTransfer = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
     const { from_warehouse_id, to_warehouse_id, shipping_method, tracking_number, notes, items } = req.body;
 
@@ -242,6 +292,24 @@ const sendTransfer = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const { shipping_notes } = req.body;
@@ -315,6 +383,24 @@ const receiveTransfer = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const { receiving_notes, items } = req.body; // items: [{ product_id, quantity_received, condition }]
@@ -399,6 +485,24 @@ const cancelTransfer = async (req, res) => {
   const transaction = await sequelize.transaction();
   
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      await transaction.rollback();
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const { notes } = req.body;
@@ -451,6 +555,22 @@ const cancelTransfer = async (req, res) => {
 
 const deleteTransfer = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 

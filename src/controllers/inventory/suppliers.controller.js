@@ -15,6 +15,22 @@ const getSuppliers = async (req, res) => {
       limit = 10
     } = req.query;
 
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
     const offset = (page - 1) * limit;
 
@@ -55,7 +71,11 @@ const getSuppliers = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getSuppliers:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener proveedores', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener proveedores', 
+      error: error.message 
+    });
   }
 };
 
@@ -65,6 +85,23 @@ const getSuppliers = async (req, res) => {
 const getSupplierById = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     const supplier = await Supplier.findOne({
@@ -72,7 +109,10 @@ const getSupplierById = async (req, res) => {
     });
 
     if (!supplier) {
-      return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Proveedor no encontrado' 
+      });
     }
 
     res.json({
@@ -81,7 +121,11 @@ const getSupplierById = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getSupplierById:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener proveedor', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener proveedor', 
+      error: error.message 
+    });
   }
 };
 
@@ -90,6 +134,22 @@ const getSupplierById = async (req, res) => {
  */
 const createSupplier = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
     const {
       name,
@@ -116,7 +176,10 @@ const createSupplier = async (req, res) => {
 
     // Validar campos requeridos
     if (!name) {
-      return res.status(400).json({ success: false, message: 'El nombre del proveedor es requerido' });
+      return res.status(400).json({ 
+        success: false, 
+        message: 'El nombre del proveedor es requerido' 
+      });
     }
 
     // Verificar si ya existe un proveedor con el mismo tax_id
@@ -165,7 +228,11 @@ const createSupplier = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en createSupplier:', error);
-    res.status(500).json({ success: false, message: 'Error al crear proveedor', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al crear proveedor', 
+      error: error.message 
+    });
   }
 };
 
@@ -175,6 +242,23 @@ const createSupplier = async (req, res) => {
 const updateSupplier = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
     const updateData = req.body;
 
@@ -183,7 +267,10 @@ const updateSupplier = async (req, res) => {
     });
 
     if (!supplier) {
-      return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Proveedor no encontrado' 
+      });
     }
 
     // Verificar si se está actualizando el tax_id y si ya existe
@@ -213,7 +300,11 @@ const updateSupplier = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en updateSupplier:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar proveedor', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al actualizar proveedor', 
+      error: error.message 
+    });
   }
 };
 
@@ -223,6 +314,23 @@ const updateSupplier = async (req, res) => {
 const deactivateSupplier = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     const supplier = await Supplier.findOne({
@@ -230,7 +338,10 @@ const deactivateSupplier = async (req, res) => {
     });
 
     if (!supplier) {
-      return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Proveedor no encontrado' 
+      });
     }
 
     await supplier.update({ is_active: false });
@@ -241,7 +352,11 @@ const deactivateSupplier = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en deactivateSupplier:', error);
-    res.status(500).json({ success: false, message: 'Error al desactivar proveedor', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al desactivar proveedor', 
+      error: error.message 
+    });
   }
 };
 
@@ -251,6 +366,23 @@ const deactivateSupplier = async (req, res) => {
 const activateSupplier = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     const supplier = await Supplier.findOne({
@@ -258,7 +390,10 @@ const activateSupplier = async (req, res) => {
     });
 
     if (!supplier) {
-      return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Proveedor no encontrado' 
+      });
     }
 
     await supplier.update({ is_active: true });
@@ -269,7 +404,11 @@ const activateSupplier = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en activateSupplier:', error);
-    res.status(500).json({ success: false, message: 'Error al activar proveedor', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al activar proveedor', 
+      error: error.message 
+    });
   }
 };
 
@@ -279,6 +418,23 @@ const activateSupplier = async (req, res) => {
 const deleteSupplier = async (req, res) => {
   try {
     const { id } = req.params;
+
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     const supplier = await Supplier.findOne({
@@ -286,7 +442,10 @@ const deleteSupplier = async (req, res) => {
     });
 
     if (!supplier) {
-      return res.status(404).json({ success: false, message: 'Proveedor no encontrado' });
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Proveedor no encontrado' 
+      });
     }
 
     // Verificar si tiene compras asociadas
@@ -310,7 +469,11 @@ const deleteSupplier = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en deleteSupplier:', error);
-    res.status(500).json({ success: false, message: 'Error al eliminar proveedor', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al eliminar proveedor', 
+      error: error.message 
+    });
   }
 };
 
@@ -319,6 +482,22 @@ const deleteSupplier = async (req, res) => {
  */
 const getSupplierStats = async (req, res) => {
   try {
+    // ✅ Validar autenticación
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    // ✅ Validar tenant_id
+    if (!req.user.tenant_id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Usuario sin tenant asignado'
+      });
+    }
+
     const tenant_id = req.user.tenant_id;
 
     const totalSuppliers = await Supplier.count({
@@ -343,7 +522,11 @@ const getSupplierStats = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getSupplierStats:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener estadísticas', error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener estadísticas', 
+      error: error.message 
+    });
   }
 };
 
