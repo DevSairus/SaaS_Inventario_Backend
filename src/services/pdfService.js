@@ -125,8 +125,15 @@ const generateSalePDF = (res, sale, tenant) => {
       .text(sale.Customer?.phone || sale.customer_phone || '', 40, y + 28)
       .text(sale.Customer?.email || sale.customer_email || '', 40, y + 42);
 
+    // Mostrar placa del vehículo si existe
+    if (sale.vehicle_plate) {
+      doc
+        .font('Helvetica-Bold')
+        .text(`Placa: ${sale.vehicle_plate}`, 40, y + 56);
+    }
+
     /* ================= TABLA ================= */
-    y += 80;
+    y += sale.vehicle_plate ? 94 : 80;
 
     const cols = {
       desc: 40,
