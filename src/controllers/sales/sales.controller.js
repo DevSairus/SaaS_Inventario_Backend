@@ -240,7 +240,7 @@ const create = async (req, res) => {
         const fd  = fs * (item.discount_percentage || 0) / 100;
         const ftb = fs - fd;
         let ftax = 0, ftotal = 0, ftaxpct = 0;
-        if (document_type !== 'remision' && item.tax_percentage > 0) {
+        if (item.tax_percentage > 0) {
           ftaxpct = item.tax_percentage;
           ftax    = ftb * ftaxpct / 100;
           ftotal  = ftb + ftax;
@@ -281,15 +281,8 @@ const create = async (req, res) => {
       let itemBaseWithoutTax = 0;
       let taxPercentage = 0; // Declarar aquí para que esté disponible en todo el scope
       
-      // Si es remisión, NO calcular IVA
-      if (document_type === 'remision') {
-        itemTax = 0;
-        itemBaseWithoutTax = itemTaxBase;
-        itemTotal = itemTaxBase;
-        taxPercentage = 0;
-      }
-      // Si el producto es exento, forzar taxPercentage a 0
-      else if (product.has_tax === false) {
+      if (product.has_tax === false) {
+        // Producto exento de IVA
         itemTax = 0;
         itemBaseWithoutTax = itemTaxBase;
         itemTotal = itemTaxBase;
@@ -297,17 +290,14 @@ const create = async (req, res) => {
       } else {
         taxPercentage = item.tax_percentage || product.tax_percentage || 19;
         const priceIncludesTax = product.price_includes_tax || false;
-        
+
         if (priceIncludesTax) {
-          // El precio YA INCLUYE el IVA - necesitamos EXTRAERLO
-          // Fórmula: IVA = (precio × tax%) / (100 + tax%)
-          // Base sin IVA = precio - IVA
+          // El precio YA INCLUYE el IVA - extraerlo
           itemTax = (itemTaxBase * taxPercentage) / (100 + taxPercentage);
           itemBaseWithoutTax = itemTaxBase - itemTax;
-          itemTotal = itemTaxBase; // El total es el precio que ya incluye IVA
+          itemTotal = itemTaxBase;
         } else {
-          // El precio NO incluye IVA - necesitamos SUMARLO
-          // Fórmula tradicional: IVA = base × tax% / 100
+          // El precio NO incluye IVA - sumarlo
           itemTax = itemTaxBase * taxPercentage / 100;
           itemBaseWithoutTax = itemTaxBase;
           itemTotal = itemTaxBase + itemTax;
@@ -424,88 +414,164 @@ const create = async (req, res) => {
 // Actualizar venta (solo si está en draft)
 const update = async (req, res) => {
   const transaction = await sequelize.transaction();
-  
   try {
     const { id } = req.params;
     const tenantId = req.tenant_id;
-    
-    const sale = await Sale.findOne({
-      where: { id, tenant_id: tenantId }
-    });
-    
+
+    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
+
     if (!sale) {
       await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     }
-    
+
     if (sale.status !== 'draft') {
       await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Solo se pueden editar ventas en borrador'
-      });
+      return res.status(400).json({ success: false, message: 'Solo se pueden editar ventas en borrador' });
     }
-    
+
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    const updateData = { ...req.body };
+    const { items, customer_data, ...rest } = req.body;
+    const updateData = { ...rest };
 
-    // Sanitizar warehouse_id
-    if ("warehouse_id" in updateData) {
+    if ('warehouse_id' in updateData) {
       updateData.warehouse_id = (updateData.warehouse_id && uuidRegex.test(updateData.warehouse_id))
-        ? updateData.warehouse_id
-        : null;
+        ? updateData.warehouse_id : null;
     }
-
-    // Sanitizar customer_id
-    if ("customer_id" in updateData) {
+    if ('customer_id' in updateData) {
       updateData.customer_id = (updateData.customer_id && uuidRegex.test(updateData.customer_id))
-        ? updateData.customer_id
-        : null;
+        ? updateData.customer_id : null;
+    }
+    if ('vehicle_plate' in updateData) {
+      updateData.vehicle_plate = updateData.vehicle_plate?.trim()
+        ? updateData.vehicle_plate.trim().toUpperCase() : null;
+    }
+    if ('mileage' in updateData) {
+      const parsed = parseInt(updateData.mileage);
+      updateData.mileage = isNaN(parsed) ? null : parsed;
     }
 
-    // ✨ NUEVO: Sanitizar vehicle_plate - convertir a mayúsculas si tiene valor
-    if ("vehicle_plate" in updateData) {
-      updateData.vehicle_plate = updateData.vehicle_plate && updateData.vehicle_plate.trim()
-        ? updateData.vehicle_plate.trim().toUpperCase()
-        : null;
-    }
-
-    // ✨ SANITIZAR mileage - convertir a INT o NULL
-    if ("mileage" in updateData) {
-      if (updateData.mileage === '' || updateData.mileage === null || updateData.mileage === undefined) {
-        updateData.mileage = null;
-      } else {
-        const parsedMileage = parseInt(updateData.mileage);
-        updateData.mileage = isNaN(parsedMileage) ? null : parsedMileage;
+    // Si viene customer_id válido, actualizar info del cliente en la venta
+    if (updateData.customer_id) {
+      const customer = await Customer.findOne({
+        where: { id: updateData.customer_id, tenant_id: tenantId }
+      });
+      if (customer) {
+        updateData.customer_name = [customer.first_name, customer.last_name].filter(Boolean).join(' ');
+        updateData.customer_tax_id = customer.tax_id;
+        updateData.customer_email = customer.email;
+        updateData.customer_phone = customer.phone || customer.mobile;
+        updateData.customer_address = customer.address;
       }
+    }
+
+    const document_type = updateData.document_type || sale.document_type;
+
+    // Recalcular y guardar items si vienen en el body
+    if (items && Array.isArray(items) && items.length > 0) {
+      await SaleItem.destroy({ where: { sale_id: id }, transaction });
+
+      let subtotal = 0, tax_amount = 0, discount_amount = 0;
+      const newItems = [];
+
+      for (const item of items) {
+        const itemType = item.item_type || 'product';
+
+        if (itemType === 'free_line') {
+          const fs  = item.quantity * item.unit_price;
+          const fd  = fs * (item.discount_percentage || 0) / 100;
+          const ftb = fs - fd;
+          let ftax = 0, ftaxpct = 0, ftotal = ftb;
+
+          if (item.tax_percentage > 0) {
+            ftaxpct = item.tax_percentage;
+            ftax    = ftb * ftaxpct / 100;
+            ftotal  = ftb + ftax;
+          }
+
+          subtotal += fs; discount_amount += fd; tax_amount += ftax;
+          newItems.push({
+            sale_id: id, tenant_id: tenantId, item_type: 'free_line',
+            product_id: null, product_name: item.product_name, product_sku: null,
+            quantity: item.quantity, unit_price: item.unit_price,
+            discount_percentage: item.discount_percentage || 0, discount_amount: fd,
+            tax_percentage: ftaxpct, tax_amount: ftax,
+            subtotal: fs, total: ftotal, unit_cost: 0,
+          });
+          continue;
+        }
+
+        const product = await Product.findOne({
+          where: { id: item.product_id, tenant_id: tenantId }
+        });
+
+        if (!product) {
+          await transaction.rollback();
+          return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
+        }
+
+        const itemSubtotal = item.quantity * item.unit_price;
+        const itemDiscount = itemSubtotal * (item.discount_percentage || 0) / 100;
+        const itemTaxBase  = itemSubtotal - itemDiscount;
+
+        let itemTax = 0, itemTotal = 0, taxPercentage = 0;
+
+        if (product.has_tax === false) {
+          itemTotal = itemTaxBase;
+        } else {
+          taxPercentage = item.tax_percentage || product.tax_percentage || 19;
+          if (product.price_includes_tax) {
+            itemTax   = (itemTaxBase * taxPercentage) / (100 + taxPercentage);
+            itemTotal = itemTaxBase;
+          } else {
+            itemTax   = itemTaxBase * taxPercentage / 100;
+            itemTotal = itemTaxBase + itemTax;
+          }
+        }
+
+        subtotal        += itemSubtotal;
+        discount_amount += itemDiscount;
+        tax_amount      += itemTax;
+
+        newItems.push({
+          sale_id: id, tenant_id: tenantId,
+          item_type: product.product_type === 'service' ? 'service' : 'product',
+          product_id: product.id, product_name: product.name, product_sku: product.sku,
+          quantity: item.quantity, unit_price: item.unit_price,
+          discount_percentage: item.discount_percentage || 0, discount_amount: itemDiscount,
+          tax_percentage: taxPercentage, tax_amount: itemTax,
+          subtotal: itemSubtotal, total: itemTotal,
+          unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
+        });
+      }
+
+      for (const item of newItems) {
+        await SaleItem.create(item, { transaction });
+      }
+
+      const total_amount = newItems.reduce((sum, i) => sum + i.total, 0);
+      updateData.subtotal        = subtotal;
+      updateData.tax_amount      = tax_amount;
+      updateData.discount_amount = discount_amount;
+      updateData.total_amount    = total_amount;
     }
 
     await sale.update(updateData, { transaction });
     await transaction.commit();
-    
+
     const updatedSale = await Sale.findByPk(id, {
       include: [
         { model: SaleItem, as: 'items' },
         { model: Customer, as: 'customer' }
       ]
     });
-    
-    res.json({
-      success: true,
-      message: 'Venta actualizada exitosamente',
-      data: updatedSale
-    });
+
+    res.json({ success: true, message: 'Venta actualizada exitosamente', data: updatedSale });
+
   } catch (error) {
     await transaction.rollback();
     console.error('Error actualizando venta:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error actualizando venta',
-      error: error.message
-    });
+    res.status(500).json({ success: false, message: 'Error actualizando venta', error: error.message });
   }
 };
 
@@ -546,6 +612,31 @@ const confirm = async (req, res) => {
 
     const transaction = await sequelize.transaction();
     try {
+      // Pre-validar stock de TODOS los items antes de mover
+      const stockErrors = [];
+      for (const item of sale.items) {
+        if (item.item_type === 'service' || item.item_type === 'free_line') continue;
+        if (!item.product_id) continue;
+        const prodCheck = await Product.findOne({
+          where: { id: item.product_id, tenant_id: tenantId },
+          transaction
+        });
+        if (prodCheck && prodCheck.track_inventory && !prodCheck.allow_negative_stock) {
+          const disponible = parseFloat(prodCheck.current_stock);
+          const solicitado = parseFloat(item.quantity);
+          if (disponible < solicitado) {
+            stockErrors.push(`• ${prodCheck.name}: disponible ${disponible}, solicitado ${solicitado}`);
+          }
+        }
+      }
+      if (stockErrors.length > 0) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Stock insuficiente: ${stockErrors.join(', ')}`
+        });
+      }
+
       // Crear movimiento de salida por cada item
       for (const item of sale.items) {
         // Servicios y líneas libres no mueven inventario

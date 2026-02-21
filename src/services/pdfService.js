@@ -25,6 +25,7 @@ const downloadImage = (url) => {
 const generateSalePDF = async (res, sale, tenant) => {
   try {
     const docType = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
+    const isRemision = sale.document_type === 'remision';
 
     const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
 
@@ -198,11 +199,18 @@ const generateSalePDF = async (res, sale, tenant) => {
     items.forEach((item, index) => {
       if (y > 620) { doc.addPage(); y = 40; }
       if (index % 2 === 0) doc.rect(MARGIN, y, INNER_W, 20).fill(lightBg);
+
+      // Precio unitario: en remisión mostrar precio con IVA incluido (unit_price + tax por unidad)
+      const qty = parseFloat(item.quantity) || 1;
+      const unitPriceDisplay = isRemision
+        ? parseFloat(item.total) / qty          // total ya tiene IVA incluido
+        : parseFloat(item.unit_price);
+
       doc.font('Helvetica').fontSize(9).fillColor(black)
         .text(item.Product?.name || item.product_name, cols.desc + 6, y + 5, { width: 264 })
-        .text(String(item.quantity),           cols.qty,   y + 5)
-        .text(formatCurrency(item.unit_price), cols.price, y + 5)
-        .text(formatCurrency(item.total),      cols.total, y + 5);
+        .text(String(item.quantity),              cols.qty,   y + 5)
+        .text(formatCurrency(unitPriceDisplay),   cols.price, y + 5)
+        .text(formatCurrency(item.total),         cols.total, y + 5);
       doc.rect(MARGIN, y, INNER_W, 20).strokeColor(border).lineWidth(0.4).stroke();
       y += 20;
     });
@@ -223,8 +231,8 @@ const generateSalePDF = async (res, sale, tenant) => {
     const legalNote    = pdfConfig.legal_note?.trim();
 
     // Calcular alto del bloque (basado en filas de totales)
-    let totRows = 2; // subtotal + total
-    if (sale.document_type !== 'remision') totRows++;
+    let totRows = isRemision ? 1 : 2; // remision: solo total | factura: subtotal + total
+    if (!isRemision)                        totRows++; // IVA
     if ((sale.discount_amount || 0) > 0)   totRows++;
     if (paidAmt > 0)                        totRows++;
     if (balance > 0 && paidAmt > 0)         totRows++;
@@ -260,9 +268,15 @@ const generateSalePDF = async (res, sale, tenant) => {
       y += 18;
     };
 
-    drawRow('Subtotal', formatCurrency(sale.subtotal));
-    if (sale.document_type !== 'remision') drawRow('IVA', formatCurrency(sale.tax_amount));
-    if ((sale.discount_amount || 0) > 0)   drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
+    if (isRemision) {
+      // Remisión: IVA incluido en el total, no se discrimina
+      if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
+    } else {
+      // Factura / Cotización: desglosar subtotal + IVA + descuento
+      drawRow('Subtotal', formatCurrency(sale.subtotal));
+      drawRow('IVA',      formatCurrency(sale.tax_amount));
+      if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
+    }
 
     doc.moveTo(LBL_X, y - 3).lineTo(TOT_X + TOT_W - 8, y - 3).strokeColor(borderMd).lineWidth(0.4).stroke();
 
