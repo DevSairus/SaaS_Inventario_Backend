@@ -20,10 +20,10 @@ const Product = sequelize.define('Product', {
   },
   // ── Tipo de ítem ─────────────────────────────────────────
   product_type: {
-    type: DataTypes.ENUM('product', 'service'),
+    type: DataTypes.ENUM('simple', 'variant', 'service', 'bundle', 'raw_material'),
     allowNull: false,
-    defaultValue: 'product',
-    comment: 'product = producto físico con inventario, service = servicio sin inventario'
+    defaultValue: 'simple',
+    comment: 'simple = producto estándar, variant = con variantes, service = servicio, bundle = kit, raw_material = materia prima'
   },
   // ─────────────────────────────────────────────────────────
   sku: {

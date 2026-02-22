@@ -50,7 +50,8 @@ const getTenantConfig = async (req, res) => {
         'primary_color',
         'secondary_color',
         'pdf_config',
-        'business_config'
+        'business_config',
+        'features'
       ]
     });
 
@@ -100,7 +101,8 @@ const updateTenantConfig = async (req, res) => {
       primary_color,
       secondary_color,
       pdf_config,
-      business_config
+      business_config,
+      features
     } = req.body;
 
     const tenant = await Tenant.findByPk(tenantId);
@@ -125,6 +127,7 @@ const updateTenantConfig = async (req, res) => {
     if (secondary_color !== undefined) updates.secondary_color = secondary_color;
     if (pdf_config !== undefined) updates.pdf_config = pdf_config;
     if (business_config !== undefined) updates.business_config = business_config;
+    if (features !== undefined) updates.features = { ...(tenant.features || {}), ...features };
 
     await tenant.update(updates);
 

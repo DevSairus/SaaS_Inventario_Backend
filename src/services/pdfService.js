@@ -25,7 +25,11 @@ const downloadImage = (url) => {
 const generateSalePDF = async (res, sale, tenant) => {
   try {
     const docType = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
-    const isRemision = sale.document_type === 'remision';
+    // hide_remision_tax: si el tenant activa esta opción, la remisión oculta el IVA
+    const hideRemisionTax = tenant?.features?.hide_remision_tax !== false
+      ? (sale.document_type === 'remision')   // por defecto activo para remisiones
+      : false;                                  // tenant desactivó la función
+    const isRemision = hideRemisionTax;
 
     const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
 
@@ -166,17 +170,30 @@ const generateSalePDF = async (res, sale, tenant) => {
     doc.font('Helvetica-Bold').fontSize(6.5).fillColor(gray).text('ESTADO', SX, SY);
 
     const paymentStatus = sale.payment_status || 'pending';
-    let badgeColor, badgeLabel;
-    if      (paymentStatus === 'paid')    { badgeColor = green;     badgeLabel = '✓  PAGADO';    }
-    else if (paymentStatus === 'partial') { badgeColor = '#d97706'; badgeLabel = 'PAGO PARCIAL'; }
-    else                                  { badgeColor = orange;    badgeLabel = 'A CRÉDITO';    }
+    const saleStatus    = sale.status || 'draft';
+    const isConfirmed   = saleStatus !== 'draft';
 
-    doc.roundedRect(SX, SY + 12, SW, 18, 4).fill(badgeColor);
-    doc.font('Helvetica-Bold').fontSize(8).fillColor(white).text(badgeLabel, SX, SY + 17, { width: SW, align: 'center' });
+    // Solo mostrar badge si la venta está confirmada (no borrador)
+    if (isConfirmed) {
+      let badgeColor, badgeLabel;
 
-    if (sale.due_date && paymentStatus !== 'paid') {
-      doc.font('Helvetica').fontSize(7).fillColor(gray)
-        .text(`Vence: ${formatDate(sale.due_date)}`, SX, SY + 36, { width: SW, align: 'center' });
+      if (sale.document_type === 'cotizacion') {
+        badgeColor = '#7c3aed'; badgeLabel = 'COTIZACIÓN';
+      } else if (paymentStatus === 'paid') {
+        badgeColor = green;     badgeLabel = '✓  PAGADO';
+      } else if (paymentStatus === 'partial') {
+        badgeColor = '#d97706'; badgeLabel = 'PAGO PARCIAL';
+      } else {
+        badgeColor = orange;    badgeLabel = 'A CRÉDITO';
+      }
+
+      doc.roundedRect(SX, SY + 12, SW, 18, 4).fill(badgeColor);
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(white).text(badgeLabel, SX, SY + 17, { width: SW, align: 'center' });
+
+      if (sale.due_date && paymentStatus !== 'paid') {
+        doc.font('Helvetica').fontSize(7).fillColor(gray)
+          .text(`Vence: ${formatDate(sale.due_date)}`, SX, SY + 36, { width: SW, align: 'center' });
+      }
     }
 
     /* ══════════════════════════════════════════════════════════

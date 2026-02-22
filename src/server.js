@@ -10,6 +10,7 @@ const swaggerSpec = require('./config/swagger');
 const { testConnection } = require('./config/database');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
+const { generalLimiter, authLimiter } = require('./middleware/rateLimiter');
 
 // Cargar asociaciones de modelos (debe ejecutarse antes de cualquier ruta)
 require('./models');
@@ -81,6 +82,7 @@ const tenantRoutes = require('./routes/tenant.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const invoiceImportRoutes = require('./routes/invoiceImport.routes');
+const permissionsRoutes = require('./routes/permissions.routes');
 const userRoutes = require('./routes/user.routes');
 
 // Movimientos Avanzados
@@ -95,6 +97,9 @@ const announcementsRoutes = require('./routes/announcements.routes');
 // ✅ NUEVO: Gestión de Cartera (Cuentas por Cobrar)
 const accountsReceivableRoutes = require('./routes/accounts-receivable.routes');
 
+// Rate limiting global
+app.use('/api/', generalLimiter);
+
 // Public
 app.use('/api/auth', authRoutes);
 
@@ -104,6 +109,9 @@ app.use('/api/superadmin', authMiddleware, superadminRoutes);
 // ✅ NUEVO: Anuncios (requiere autenticación, NO requiere tenant)
 // Los anuncios funcionan para todos los usuarios (tenants y superadmin)
 app.use('/api/announcements', authMiddleware, announcementsRoutes);
+
+// Permisos (superadmin sin tenant)
+app.use('/api/permissions', authMiddleware, permissionsRoutes);
 
 // Protected (con tenant middleware)
 app.use('/api/products', authMiddleware, tenantMiddleware, productsRoutes);

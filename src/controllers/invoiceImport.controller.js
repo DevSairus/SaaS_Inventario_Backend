@@ -14,6 +14,12 @@ const importInvoice = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
     const user_id = req.user.id;
+    const profit_margin = parseFloat(req.body.profit_margin) || 30;
+    const margin_multiplier = 1 + (profit_margin / 100);
+    const supplier_name_override = req.body.supplier_name?.trim() || null;
+    const removed_items  = JSON.parse(req.body.removed_items || '[]');
+    const shipping_cost   = parseFloat(req.body.shipping_cost) || 0;
+    const discount_amount = parseFloat(req.body.discount_amount) || 0;
 
     if (!req.file) {
       return res.status(400).json({
@@ -82,15 +88,23 @@ const importInvoice = async (req, res) => {
 
     console.log('✅ Factura no duplicada, continuando...');
 
-    const supplier = await findOrCreateSupplier(invoiceData.supplier, tenant_id, transaction);
-    const processedItems = await processInvoiceItems(invoiceData.items, tenant_id, transaction);
+    // Si el usuario editó el nombre del proveedor en el modal, usarlo
+    const supplierData = supplier_name_override
+      ? { ...invoiceData.supplier, name: supplier_name_override }
+      : invoiceData.supplier;
+    const supplier = await findOrCreateSupplier(supplierData, tenant_id, transaction);
+    // Filtrar ítems que el usuario decidió excluir en el modal
+    const filteredItems = invoiceData.items.filter((_, idx) => !removed_items.includes(idx));
+    const processedItems = await processInvoiceItems(filteredItems, tenant_id, transaction, profit_margin, margin_multiplier);
     const purchase = await createPurchaseFromInvoice(
       invoiceData,
       supplier.id,
       processedItems,
       tenant_id,
       user_id,
-      transaction
+      transaction,
+      shipping_cost,
+      discount_amount
     );
 
     await transaction.commit();
@@ -284,7 +298,7 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
   return supplier;
 }
 
-async function processInvoiceItems(items, tenant_id, transaction) {
+async function processInvoiceItems(items, tenant_id, transaction, profit_margin = 30, margin_multiplier = 1.3) {
   const processedItems = [];
 
   for (const item of items) {
@@ -315,12 +329,14 @@ async function processInvoiceItems(items, tenant_id, transaction) {
 
       product = await Product.create({
         tenant_id,
+        product_type: 'simple', // valor válido según CHECK constraint de la DB
         sku: newSku,
+        barcode: newSku,  // código de barras = mismo SKU para productos nuevos
         name: item.name,
         unit_of_measure: 'unit',
         average_cost: item.unit_price,
-        base_price: item.unit_price * 1.3,
-        profit_margin_percentage: 30,
+        base_price: Math.round(item.unit_price * margin_multiplier),
+        profit_margin_percentage: profit_margin,
         current_stock: 0,
         min_stock: 1,
         track_inventory: true,
@@ -364,12 +380,12 @@ async function generateUniqueSku(productName, tenant_id, transaction) {
   return sku;
 }
 
-async function createPurchaseFromInvoice(invoiceData, supplier_id, items, tenant_id, user_id, transaction) {
+async function createPurchaseFromInvoice(invoiceData, supplier_id, items, tenant_id, user_id, transaction, shipping_cost = 0, discount_amount = 0) {
   const purchaseNumber = await generatePurchaseNumber(tenant_id, transaction);
 
-  const subtotal = items.reduce((sum, item) => sum + parseFloat(item.subtotal), 0);
-  const tax_amount = items.reduce((sum, item) => sum + parseFloat(item.tax_amount), 0);
-  const total_amount = subtotal + tax_amount;
+  const subtotal     = items.reduce((sum, item) => sum + parseFloat(item.subtotal), 0);
+  const tax_amount   = items.reduce((sum, item) => sum + parseFloat(item.tax_amount), 0);
+  const total_amount = subtotal + tax_amount + shipping_cost - discount_amount;
 
   const purchase = await Purchase.create({
     tenant_id,
@@ -379,6 +395,8 @@ async function createPurchaseFromInvoice(invoiceData, supplier_id, items, tenant
     expected_date: invoiceData.invoice.due_date || new Date(),
     subtotal,
     tax_amount,
+    discount_amount,
+    shipping_cost,
     total_amount,
     status: 'draft',
     notes: `Importada desde factura electrónica: ${invoiceData.invoice.number}`,

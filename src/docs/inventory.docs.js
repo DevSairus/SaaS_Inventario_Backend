@@ -883,7 +883,7 @@
  *   post:
  *     tags: [InternalConsumptions]
  *     summary: Crear consumo interno
- *     description: Registra productos usados internamente (no ventas). Ej: material de oficina, mantenimiento.
+ *     description: "Registra productos usados internamente (no ventas). Ej: material de oficina, mantenimiento."
  *     requestBody:
  *       required: true
  *       content:
