@@ -110,7 +110,7 @@ const getPurchases = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getPurchases:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener compras', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al obtener compras'});
   }
 };
 
@@ -154,7 +154,7 @@ const getPurchaseById = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getPurchaseById:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener compra', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al obtener compra'});
   }
 };
 
@@ -479,7 +479,7 @@ const updatePurchase = async (req, res) => {
   } catch (error) {
     await t.rollback();
     console.error('Error en updatePurchase:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar compra', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al actualizar compra'});
   }
 };
 
@@ -515,7 +515,7 @@ const confirmPurchase = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en confirmPurchase:', error);
-    res.status(500).json({ success: false, message: 'Error al confirmar compra', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al confirmar compra'});
   }
 };
 
@@ -725,7 +725,7 @@ const cancelPurchase = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en cancelPurchase:', error);
-    res.status(500).json({ success: false, message: 'Error al cancelar compra', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al cancelar compra'});
   }
 };
 
@@ -768,7 +768,7 @@ const deletePurchase = async (req, res) => {
   } catch (error) {
     await t.rollback();
     console.error('Error en deletePurchase:', error);
-    res.status(500).json({ success: false, message: 'Error al eliminar compra', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al eliminar compra'});
   }
 };
 
@@ -822,7 +822,7 @@ const getPurchaseStats = async (req, res) => {
     });
   } catch (error) {
     console.error('Error en getPurchaseStats:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener estadísticas', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al obtener estadísticas'});
   }
 };
 

@@ -71,9 +71,7 @@ const getAll = async (req, res) => {
     console.error('Error al obtener clientes:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener clientes',
-      error: error.message
-    });
+      message: 'Error al obtener clientes'});
   }
 };
 
@@ -116,9 +114,7 @@ const getById = async (req, res) => {
     console.error('Error al obtener cliente:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener cliente',
-      error: error.message
-    });
+      message: 'Error al obtener cliente'});
   }
 };
 
@@ -158,9 +154,7 @@ const create = async (req, res) => {
     console.error('Error al crear cliente:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al crear cliente',
-      error: error.message
-    });
+      message: 'Error al crear cliente'});
   }
 };
 
@@ -209,9 +203,7 @@ const update = async (req, res) => {
     console.error('Error al actualizar cliente:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al actualizar cliente',
-      error: error.message
-    });
+      message: 'Error al actualizar cliente'});
   }
 };
 
@@ -253,9 +245,7 @@ const deleteById = async (req, res) => {
     console.error('Error al eliminar cliente:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al eliminar cliente',
-      error: error.message
-    });
+      message: 'Error al eliminar cliente'});
   }
 };
 
@@ -289,9 +279,7 @@ const search = async (req, res) => {
     console.error('Error buscando clientes:', error);
     res.status(500).json({
       success: false,
-      message: 'Error buscando clientes',
-      error: error.message
-    });
+      message: 'Error buscando clientes'});
   }
 };
 

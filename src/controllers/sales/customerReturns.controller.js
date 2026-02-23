@@ -431,9 +431,7 @@ const createCustomerReturn = async (req, res) => {
     console.error('Error en createCustomerReturn:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al crear devolución',
-      error: error.message
-    });
+      message: 'Error al crear devolución'});
   }
 };
 
@@ -558,9 +556,7 @@ const approveCustomerReturn = async (req, res) => {
     console.error('Error en approveCustomerReturn:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al aprobar devolución',
-      error: error.message
-    });
+      message: 'Error al aprobar devolución'});
   }
 };
 

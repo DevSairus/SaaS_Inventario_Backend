@@ -33,7 +33,7 @@ router.post(
     body('first_name').notEmpty().withMessage('Nombre es requerido'),
     body('last_name').notEmpty().withMessage('Apellido es requerido'),
     body('role')
-      .isIn(['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer'])
+      .isIn(['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'])
       .withMessage('Rol inválido'),
   ],
   userController.createUser

@@ -22,8 +22,21 @@ app.use(helmet({
   contentSecurityPolicy: false, // Necesario para Swagger UI
 }));
 app.set('etag', false);
+// CORS: soporta múltiples orígenes (local + producción)
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()) : []),
+  ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.trim()] : []),
+];
+
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin: (origin, callback) => {
+    // Permitir requests sin origin (Postman, móvil, etc.)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    callback(new Error(`CORS bloqueado para: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -83,6 +96,9 @@ const reportsRoutes = require('./routes/reports.routes');
 const dashboardRoutes = require('./routes/dashboard.routes');
 const invoiceImportRoutes = require('./routes/invoiceImport.routes');
 const permissionsRoutes = require('./routes/permissions.routes');
+const vehiclesRoutes = require('./routes/workshop/vehicles.routes');
+const workOrdersRoutes = require('./routes/workshop/workOrders.routes');
+const commissionSettlementsRoutes = require('./routes/workshop/commissionSettlements.routes');
 const userRoutes = require('./routes/user.routes');
 
 // Movimientos Avanzados
@@ -112,6 +128,11 @@ app.use('/api/announcements', authMiddleware, announcementsRoutes);
 
 // Permisos (superadmin sin tenant)
 app.use('/api/permissions', authMiddleware, permissionsRoutes);
+
+// ── TALLER ──
+app.use('/api/workshop/vehicles', authMiddleware, tenantMiddleware, vehiclesRoutes);
+app.use('/api/workshop/work-orders', authMiddleware, tenantMiddleware, workOrdersRoutes);
+app.use('/api/workshop/commission-settlements', authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
 
 // Protected (con tenant middleware)
 app.use('/api/products', authMiddleware, tenantMiddleware, productsRoutes);

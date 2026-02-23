@@ -283,7 +283,7 @@ const createMovement = async (movementData, transaction) => {
     new_stock = previous_stock - parseFloat(quantity);
     
     // Validar que no quede stock negativo
-    if (new_stock < 0) {
+    if (new_stock < 0 && !product.allow_negative_stock) {
       throw new Error(`Stock insuficiente para el producto ${product.name}. Stock actual: ${previous_stock}, solicitado: ${quantity}`);
     }
   } else {

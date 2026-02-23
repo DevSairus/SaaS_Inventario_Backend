@@ -83,9 +83,7 @@ const getProductStats = async (req, res) => {
     console.error('Error en getProductStats:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al obtener estadísticas', 
-      error: error.message 
-    });
+      message: 'Error al obtener estadísticas'});
   }
 };
 
@@ -161,9 +159,7 @@ const getAllProducts = async (req, res) => {
     console.error('Error en getAllProducts:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al obtener productos', 
-      error: error.message 
-    });
+      message: 'Error al obtener productos'});
   }
 };
 
@@ -216,9 +212,7 @@ const getProductById = async (req, res) => {
     console.error('Error en getProductById:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al obtener producto', 
-      error: error.message 
-    });
+      message: 'Error al obtener producto'});
   }
 };
 
@@ -364,9 +358,7 @@ const createProduct = async (req, res) => {
     console.error('Error en createProduct:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al crear producto', 
-      error: error.message 
-    });
+      message: 'Error al crear producto'});
   }
 };
 
@@ -498,9 +490,7 @@ const updateProduct = async (req, res) => {
     console.error('Error en updateProduct:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al actualizar producto', 
-      error: error.message 
-    });
+      message: 'Error al actualizar producto'});
   }
 };
 
@@ -551,9 +541,7 @@ const deactivateProduct = async (req, res) => {
     console.error('Error en deactivateProduct:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al desactivar producto', 
-      error: error.message 
-    });
+      message: 'Error al desactivar producto'});
   }
 };
 
@@ -604,9 +592,7 @@ const deleteProductPermanently = async (req, res) => {
     console.error('Error en deleteProductPermanently:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al eliminar producto', 
-      error: error.message 
-    });
+      message: 'Error al eliminar producto'});
   }
 };
 
@@ -665,9 +651,7 @@ const getProductByBarcode = async (req, res) => {
     console.error('Error en getProductByBarcode:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al buscar producto por código de barras', 
-      error: error.message 
-    });
+      message: 'Error al buscar producto por código de barras'});
   }
 };
 
@@ -719,9 +703,7 @@ const checkBarcodeExists = async (req, res) => {
     console.error('Error en checkBarcodeExists:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al verificar código de barras', 
-      error: error.message 
-    });
+      message: 'Error al verificar código de barras'});
   }
 };
 
@@ -871,9 +853,7 @@ const getProductSuppliers = async (req, res) => {
     console.error('Error en getProductSuppliers:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al obtener proveedores del producto', 
-      error: error.message 
-    });
+      message: 'Error al obtener proveedores del producto'});
   }
 };
 

@@ -44,7 +44,12 @@ const TenantMercadoPagoConfig = require('./payments/TenantMercadoPagoConfig');
 // ✅ NUEVO - Sistema de Anuncios
 const Announcement = require('./Announcement');
 const UserAnnouncementView = require('./UserAnnouncementView');
-
+// ✅ NUEVO - Taller
+const Vehicle = require('./workshop/Vehicle');
+const WorkOrder = require('./workshop/WorkOrder');
+const WorkOrderItem = require('./workshop/WorkOrderItem');
+const CommissionSettlement = require('./workshop/CommissionSettlement');
+const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
 // ============= RELACIONES EXISTENTES =============
 Tenant.hasMany(User, { foreignKey: 'tenant_id', as: 'users' });
 User.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -189,6 +194,59 @@ User.hasMany(UserAnnouncementView, { foreignKey: 'user_id', as: 'announcement_vi
 // UserAnnouncementView - Announcement
 UserAnnouncementView.belongsTo(Announcement, { foreignKey: 'announcement_id', as: 'announcement' });
 Announcement.hasMany(UserAnnouncementView, { foreignKey: 'announcement_id', as: 'views' });
+// ============= RELACIONES - TALLER =============
+
+// Vehicle ↔ Customer
+Vehicle.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Customer.hasMany(Vehicle, { foreignKey: 'customer_id', as: 'vehicles' });
+
+// WorkOrder ↔ Vehicle
+WorkOrder.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+Vehicle.hasMany(WorkOrder, { foreignKey: 'vehicle_id', as: 'work_orders' });
+
+// WorkOrder ↔ Customer
+WorkOrder.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Customer.hasMany(WorkOrder, { foreignKey: 'customer_id', as: 'work_orders' });
+
+// WorkOrder ↔ User (técnico)
+WorkOrder.belongsTo(User, { foreignKey: 'technician_id', as: 'technician' });
+User.hasMany(WorkOrder, { foreignKey: 'technician_id', as: 'work_orders_assigned' });
+
+// WorkOrder ↔ User (creador)
+WorkOrder.belongsTo(User, { foreignKey: 'created_by', as: 'creator_wo' });
+
+// WorkOrder ↔ Warehouse
+WorkOrder.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'warehouse' });
+
+// WorkOrder ↔ Sale (remisión generada)
+WorkOrder.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+Sale.hasOne(WorkOrder, { foreignKey: 'sale_id', as: 'work_order' });
+
+// WorkOrderItem ↔ WorkOrder
+WorkOrderItem.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+WorkOrder.hasMany(WorkOrderItem, { foreignKey: 'work_order_id', as: 'items' });
+
+// WorkOrderItem ↔ Product
+WorkOrderItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Product.hasMany(WorkOrderItem, { foreignKey: 'product_id', as: 'work_order_items' });
+
+// CommissionSettlement ↔ User (técnico)
+CommissionSettlement.belongsTo(User, { foreignKey: 'technician_id', as: 'technician' });
+User.hasMany(CommissionSettlement, { foreignKey: 'technician_id', as: 'commission_settlements' });
+
+// CommissionSettlement ↔ User (creador)
+CommissionSettlement.belongsTo(User, { foreignKey: 'created_by', as: 'creator_cs' });
+
+// CommissionSettlement ↔ CommissionSettlementItem
+CommissionSettlement.hasMany(CommissionSettlementItem, { foreignKey: 'settlement_id', as: 'items' });
+CommissionSettlementItem.belongsTo(CommissionSettlement, { foreignKey: 'settlement_id', as: 'settlement' });
+
+// CommissionSettlementItem ↔ WorkOrder
+CommissionSettlementItem.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+WorkOrder.hasMany(CommissionSettlementItem, { foreignKey: 'work_order_id', as: 'settlement_items' });
+
+// WorkOrder ↔ CommissionSettlement (liquidación en la que fue incluida)
+WorkOrder.belongsTo(CommissionSettlement, { foreignKey: 'settlement_id', as: 'commission_settlement' });
 
 module.exports = {
   sequelize,
@@ -225,4 +283,9 @@ module.exports = {
   InternalConsumptionItem,
   Announcement,
   UserAnnouncementView,
+  Vehicle,
+  WorkOrder,
+  WorkOrderItem,
+  CommissionSettlement,
+  CommissionSettlementItem,
 };

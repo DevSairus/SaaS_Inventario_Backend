@@ -92,9 +92,7 @@ const getAll = async (req, res) => {
     console.error('Error al obtener ventas:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener ventas',
-      error: error.message
-    });
+      message: 'Error al obtener ventas'});
   }
 };
 
@@ -139,9 +137,7 @@ const getById = async (req, res) => {
     console.error('Error al obtener venta:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al obtener venta',
-      error: error.message
-    });
+      message: 'Error al obtener venta'});
   }
 };
 
@@ -405,9 +401,7 @@ const create = async (req, res) => {
     console.error('Error creando venta:', error);
     res.status(500).json({ 
       success: false,
-      message: 'Error creando venta', 
-      error: error.message 
-    });
+      message: 'Error creando venta'});
   }
 };
 
@@ -571,7 +565,7 @@ const update = async (req, res) => {
   } catch (error) {
     await transaction.rollback();
     console.error('Error actualizando venta:', error);
-    res.status(500).json({ success: false, message: 'Error actualizando venta', error: error.message });
+    res.status(500).json({ success: false, message: 'Error actualizando venta'});
   }
 };
 
@@ -711,9 +705,7 @@ const confirm = async (req, res) => {
     console.error('Error confirmando venta:', error);
     res.status(500).json({
       success: false,
-      message: 'Error confirmando venta',
-      error: error.message
-    });
+      message: 'Error confirmando venta'});
   }
 };
 
@@ -801,9 +793,7 @@ const cancel = async (req, res) => {
     console.error('Error cancelando venta:', error);
     res.status(500).json({
       success: false,
-      message: 'Error cancelando venta',
-      error: error.message
-    });
+      message: 'Error cancelando venta'});
   }
 };
 
@@ -853,9 +843,7 @@ const markAsDelivered = async (req, res) => {
     console.error('Error actualizando venta:', error);
     res.status(500).json({
       success: false,
-      message: 'Error actualizando venta',
-      error: error.message
-    });
+      message: 'Error actualizando venta'});
   }
 };
 
@@ -936,9 +924,7 @@ const registerPayment = async (req, res) => {
     console.error('Error registrando pago:', error);
     res.status(500).json({
       success: false,
-      message: 'Error registrando pago',
-      error: error.message
-    });
+      message: 'Error registrando pago'});
   }
 };
 
@@ -976,9 +962,7 @@ const deleteById = async (req, res) => {
     console.error('Error eliminando venta:', error);
     res.status(500).json({
       success: false,
-      message: 'Error eliminando venta',
-      error: error.message
-    });
+      message: 'Error eliminando venta'});
   }
 };
 
@@ -1023,9 +1007,7 @@ const getStats = async (req, res) => {
     console.error('Error obteniendo estadísticas:', error);
     res.status(500).json({
       success: false,
-      message: 'Error obteniendo estadísticas',
-      error: error.message
-    });
+      message: 'Error obteniendo estadísticas'});
   }
 };
 
@@ -1070,9 +1052,7 @@ const generatePDF = async (req, res) => {
     console.error('Error generando PDF:', error);
     res.status(500).json({
       success: false,
-      message: 'Error generando PDF',
-      error: error.message
-    });
+      message: 'Error generando PDF'});
   }
 };
 

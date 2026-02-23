@@ -10,6 +10,7 @@
  */
 
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 const logger = require('../config/logger');
 
 // ============================================
@@ -46,10 +47,8 @@ const generalLimiter = rateLimit({
     });
   },
 
-  // Función para generar la key (por IP por defecto)
-  keyGenerator: (req) => {
-    return req.ip;
-  },
+  // Función para generar la key compatible con IPv6
+  keyGenerator: (req) => ipKeyGenerator(req),
 });
 
 /**
@@ -241,8 +240,8 @@ const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
       return maxForUser;
     },
     keyGenerator: (req) => {
-      // Si está autenticado, usar user ID, sino IP
-      return req.user?.id || req.ip;
+      // Si está autenticado, usar user ID, sino IP compatible IPv6
+      return req.user?.id || ipKeyGenerator(req);
     },
   });
 };

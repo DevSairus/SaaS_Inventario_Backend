@@ -251,24 +251,21 @@ const getPaymentHistory = async (req, res) => {
     const balance = parseFloat(sale.total_amount) - parseFloat(sale.paid_amount || 0);
     const paymentHistory = sale.payment_history || [];
 
-    // Enriquecer historial con información de usuarios
-    const enrichedHistory = await Promise.all(
-      paymentHistory.map(async (payment) => {
-        let userName = 'Usuario desconocido';
-        if (payment.user_id) {
-          const user = await User.findByPk(payment.user_id, {
-            attributes: ['id', 'first_name', 'last_name', 'email']
-          });
-          if (user) {
-            userName = `${user.first_name} ${user.last_name}`.trim();
-          }
-        }
-        return {
-          ...payment,
-          user_name: userName
-        };
-      })
-    );
+    // Enriquecer historial con información de usuarios (una sola query)
+    const userIds = [...new Set(paymentHistory.map(p => p.user_id).filter(Boolean))];
+    const users = userIds.length > 0
+      ? await User.findAll({
+          where: { id: userIds },
+          attributes: ['id', 'first_name', 'last_name', 'email']
+        })
+      : [];
+    const usersMap = Object.fromEntries(users.map(u => [u.id, u]));
+
+    const enrichedHistory = paymentHistory.map((payment) => {
+      const user = payment.user_id ? usersMap[payment.user_id] : null;
+      const userName = user ? `${user.first_name} ${user.last_name}`.trim() : 'Usuario desconocido';
+      return { ...payment, user_name: userName };
+    });
 
     res.json({
       success: true,

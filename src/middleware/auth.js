@@ -1,6 +1,10 @@
 const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET env variable is not set. Server cannot start securely.');
+  process.exit(1);
+}
 
 /**
  * Middleware para verificar JWT

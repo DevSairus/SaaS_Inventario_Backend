@@ -32,7 +32,7 @@ const registerValidator = [
 ];
 
 const loginValidator = [
-  body('email').isEmail().withMessage('Email inválido').normalizeEmail(),
+  body('email').isEmail().withMessage('Email inválido').trim().toLowerCase(),
   body('password').notEmpty().withMessage('La contraseña es requerida'),
 ];
 

@@ -48,7 +48,8 @@ const User = sequelize.define('User', {
         'seller',
         'warehouse_keeper',
         'user',
-        'viewer'
+        'viewer',
+        'technician'
       ]]
     }
   },
@@ -80,4 +81,4 @@ const User = sequelize.define('User', {
   updatedAt: 'updated_at'
 });
 
-module.exports = User;
+module.exports = User; 
