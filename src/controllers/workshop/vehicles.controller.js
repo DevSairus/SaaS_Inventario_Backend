@@ -60,13 +60,18 @@ const getById = async (req, res) => {
 const create = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { plate, brand, model, year, color, vin, engine, fuel_type, current_mileage, customer_id, notes } = req.body;
+    const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
+            soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
+            fuel_type, current_mileage, customer_id, notes } = req.body;
 
     if (!plate) return res.status(400).json({ success: false, message: 'La placa es requerida' });
 
     const vehicle = await Vehicle.create({
       tenant_id, plate: plate.toUpperCase().trim(),
-      brand, model, year, color, vin, engine, fuel_type, current_mileage, customer_id, notes
+      brand, model, year, color, vin, engine, engine_number, ownership_card,
+      soat_number, soat_expiry: soat_expiry || null,
+      tecnomecanica_number, tecnomecanica_expiry: tecnomecanica_expiry || null,
+      fuel_type, current_mileage, customer_id, notes
     });
 
     const full = await Vehicle.findByPk(vehicle.id, {
@@ -85,8 +90,17 @@ const update = async (req, res) => {
     const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
     if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
 
-    const { plate, brand, model, year, color, vin, engine, fuel_type, current_mileage, customer_id, notes, is_active } = req.body;
-    await vehicle.update({ plate: plate?.toUpperCase().trim() || vehicle.plate, brand, model, year, color, vin, engine, fuel_type, current_mileage, customer_id, notes, is_active });
+    const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
+            soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
+            fuel_type, current_mileage, customer_id, notes, is_active } = req.body;
+    await vehicle.update({ plate: plate?.toUpperCase().trim() || vehicle.plate, brand, model, year, color, vin,
+      engine, engine_number, ownership_card, soat_number, soat_expiry,
+      tecnomecanica_number, tecnomecanica_expiry, fuel_type, current_mileage, customer_id, notes, is_active });
+
+    // Reload con customer incluido para que el frontend tenga el objeto completo
+    await vehicle.reload({
+      include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone'] }]
+    });
 
     res.json({ success: true, message: 'Vehículo actualizado', data: vehicle });
   } catch (error) {
@@ -97,7 +111,10 @@ const update = async (req, res) => {
 
 const getHistory = async (req, res) => {
   try {
-    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    const vehicle = await Vehicle.findOne({
+      where: { id: req.params.id, tenant_id: req.user.tenant_id },
+      include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone'] }],
+    });
     if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
 
     const orders = await WorkOrder.findAll({
@@ -115,6 +132,10 @@ const getHistory = async (req, res) => {
         {
           model: Sale, as: 'sale',
           attributes: ['id', 'sale_number', 'status', 'payment_status', 'total_amount', 'paid_amount'],
+        },
+        {
+          model: Customer, as: 'customer',
+          attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone'],
         },
       ],
     });

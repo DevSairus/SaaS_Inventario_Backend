@@ -383,4 +383,137 @@ function formatCurrency(value) {
   }).format(value || 0);
 }
 
-module.exports = { generateSalePDF };
+
+/* ══════════════════════════════════════════════════════════════
+   RECIBO DE PAGO / ANTICIPO  (A5 portrait)
+   ══════════════════════════════════════════════════════════════ */
+const generatePaymentReceiptPDF = async (res, sale, tenant, payment) => {
+  try {
+    const doc = new PDFDocument({ size: 'A5', margin: 30, bufferPages: true });
+    const recNum = payment.receipt_number || `REC-${String((payment.index ?? 0) + 1).padStart(4, '0')}`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="recibo-${recNum}.pdf"`);
+    doc.pipe(res);
+
+    const PAGE_W  = doc.page.width;
+    const MARGIN  = 30;
+    const INNER_W = PAGE_W - MARGIN * 2;
+
+    const blue   = '#1e40af';
+    const green  = '#059669';
+    const orange = '#d97706';
+    const gray   = '#6b7280';
+    const dark   = '#111827';
+    const light  = '#eff6ff';
+    const white  = '#ffffff';
+    const border = '#e5e7eb';
+
+    doc.rect(0, 0, PAGE_W, 5).fill(blue);
+
+    let y = 14;
+
+    doc.font('Helvetica-Bold').fontSize(16).fillColor(blue)
+      .text('RECIBO DE PAGO', MARGIN, y, { width: INNER_W, align: 'center' });
+    y += 22;
+
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(dark)
+      .text(tenant.company_name || '', MARGIN, y, { width: INNER_W, align: 'center' });
+    y += 12;
+    const empLine = [tenant.tax_id ? 'NIT ' + tenant.tax_id : null, tenant.phone].filter(Boolean).join('  .  ');
+    if (empLine) {
+      doc.font('Helvetica').fontSize(7).fillColor(gray)
+        .text(empLine, MARGIN, y, { width: INNER_W, align: 'center' });
+      y += 12;
+    }
+    y += 4;
+
+    doc.roundedRect(MARGIN, y, INNER_W, 30, 5).fill(blue);
+    doc.font('Helvetica-Bold').fontSize(11).fillColor(white)
+      .text(recNum, MARGIN, y + 4, { width: INNER_W, align: 'center' });
+
+    const dtStr = payment.date
+      ? new Date(payment.date).toLocaleString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : formatDate(new Date());
+    doc.font('Helvetica').fontSize(7.5).fillColor('#bfdbfe')
+      .text(dtStr, MARGIN, y + 18, { width: INNER_W, align: 'center' });
+    y += 40;
+
+    const clientName = sale.Customer
+      ? (sale.Customer.business_name || ((sale.Customer.first_name || '') + ' ' + (sale.Customer.last_name || '')).trim())
+      : (sale.customer_name || '—');
+
+    const rows = [
+      ['Documento', sale.sale_number],
+      ['Cliente',   clientName],
+    ];
+    if (sale.vehicle_plate) rows.push(['Vehiculo', sale.vehicle_plate]);
+    if (sale.Customer && sale.Customer.tax_id) rows.push(['CC / NIT', sale.Customer.tax_id]);
+
+    const rowH = 18;
+    doc.roundedRect(MARGIN, y, INNER_W, rows.length * rowH + 14, 4).strokeColor(border).lineWidth(0.5).stroke();
+    let ry = y + 8;
+    rows.forEach(function(r) {
+      doc.font('Helvetica').fontSize(7.5).fillColor(gray).text(r[0], MARGIN + 10, ry, { width: 85 });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(dark).text(r[1], MARGIN + 98, ry, { width: INNER_W - 108, ellipsis: true });
+      ry += rowH;
+    });
+    y += rows.length * rowH + 22;
+
+    doc.roundedRect(MARGIN, y, INNER_W, 52, 6).fill(light);
+    doc.font('Helvetica').fontSize(8).fillColor(gray).text('VALOR RECIBIDO', MARGIN, y + 10, { width: INNER_W, align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(22).fillColor(blue).text(formatCurrency(payment.amount), MARGIN, y + 22, { width: INNER_W, align: 'center' });
+    y += 62;
+
+    const METHODS = { efectivo: 'Efectivo', tarjeta: 'Tarjeta', transferencia: 'Transferencia', credito: 'Credito' };
+    doc.font('Helvetica').fontSize(8).fillColor(gray).text('Metodo: ' + (METHODS[payment.method] || payment.method || 'Efectivo'), MARGIN, y);
+    if (payment.notes) {
+      y += 13;
+      doc.font('Helvetica').fontSize(7.5).fillColor(gray).text('Nota: ' + payment.notes, MARGIN, y, { width: INNER_W });
+    }
+    y += 16;
+
+    const total    = parseFloat(sale.total_amount || 0);
+    const allPaid  = parseFloat(sale.paid_amount  || 0);
+    const thisPay  = parseFloat(payment.amount);
+    const paidPrev = Math.max(0, allPaid - thisPay);
+    const balance  = total - allPaid;
+
+    doc.moveTo(MARGIN, y).lineTo(MARGIN + INNER_W, y).strokeColor(border).lineWidth(0.5).stroke();
+    y += 10;
+
+    [
+      ['Total del documento', formatCurrency(total),    dark,   false],
+      ['Pagos anteriores',    formatCurrency(paidPrev), gray,   false],
+      ['Este pago',           formatCurrency(thisPay),  green,  true ],
+      ['Saldo pendiente',     formatCurrency(balance),  balance > 0 ? orange : green, true],
+    ].forEach(function(row) {
+      var lbl = row[0], val = row[1], color = row[2], bold = row[3];
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 9 : 8).fillColor(gray).text(lbl, MARGIN, y, { width: 140 });
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 9.5 : 8).fillColor(color).text(val, MARGIN, y, { width: INNER_W, align: 'right' });
+      y += 16;
+    });
+
+    if (balance <= 0) {
+      y += 4;
+      doc.roundedRect(MARGIN, y, INNER_W, 20, 4).fill(green);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(white).text('DOCUMENTO CANCELADO EN SU TOTALIDAD', MARGIN, y + 5, { width: INNER_W, align: 'center' });
+      y += 26;
+    }
+
+    const sigY = Math.max(y + 16, doc.page.height - 70);
+    const sigW = (INNER_W - 20) / 2;
+    [[MARGIN, 'Firma quien recibe'], [MARGIN + sigW + 20, 'Firma y sello empresa']].forEach(function(pair) {
+      doc.moveTo(pair[0], sigY).lineTo(pair[0] + sigW, sigY).strokeColor('#d1d5db').lineWidth(0.5).stroke();
+      doc.font('Helvetica').fontSize(7).fillColor('#9ca3af').text(pair[1], pair[0], sigY + 5, { width: sigW, align: 'center' });
+    });
+
+    doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(blue);
+    doc.end();
+  } catch (e) {
+    console.error('Error generando recibo de pago:', e);
+    if (!res.headersSent) res.status(500).json({ message: 'Error generando recibo' });
+  }
+};
+
+module.exports = { generateSalePDF, generatePaymentReceiptPDF };

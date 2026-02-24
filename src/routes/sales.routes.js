@@ -23,5 +23,6 @@ router.post('/:id/payments', salesController.registerPayment);
 
 // Generar PDF
 router.get('/:id/pdf', salesController.generatePDF);
+router.get('/:id/payment-receipt', salesController.generatePaymentReceipt);
 
 module.exports = router;

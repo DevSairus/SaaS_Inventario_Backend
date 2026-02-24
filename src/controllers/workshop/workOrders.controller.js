@@ -43,12 +43,13 @@ function calcTotals(items) {
 const list = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { status, technician_id, search, page = 1, limit = 20 } = req.query;
+    const { status, technician_id, customer_id, search, page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
 
     const where = { tenant_id };
     if (status)        where.status        = status;
     if (technician_id) where.technician_id = technician_id;
+    if (customer_id)   where.customer_id   = customer_id;
     if (search) {
       where[Op.or] = [
         { order_number:         { [Op.iLike]: `%${search}%` } },
@@ -100,7 +101,17 @@ const getById = async (req, res) => {
       ],
     });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
-    res.json({ success: true, data: order });
+
+    // Sequelize puede no incluir columnas JSONB añadidas post-creación — forzar con raw query
+    const rows = await sequelize.query(
+      'SELECT checklist_in FROM work_orders WHERE id = :id',
+      { replacements: { id: req.params.id }, type: sequelize.QueryTypes.SELECT }
+    );
+
+    const data = order.toJSON();
+    data.checklist_in = rows[0]?.checklist_in || {};
+
+    res.json({ success: true, data });
   } catch (error) {
     logger.error('Error obteniendo OT:', error);
     res.status(500).json({ success: false, message: 'Error al obtener la orden' });
@@ -132,6 +143,14 @@ const create = async (req, res) => {
 
     if (mileage_in) {
       await Vehicle.update({ current_mileage: mileage_in }, { where: { id: vehicle_id, tenant_id }, transaction });
+    }
+
+    // Si el vehículo no tiene propietario y la OT lleva cliente, vincularlo permanentemente
+    if (sanitizedCustomerId) {
+      await Vehicle.update(
+        { customer_id: sanitizedCustomerId },
+        { where: { id: vehicle_id, tenant_id, customer_id: null }, transaction }
+      );
     }
 
     const order = await WorkOrder.create({
@@ -646,4 +665,102 @@ const productivity = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity };
+
+// ── PDF GENERATION ───────────────────────────────────────────────────────────
+const { generatePaymentReceipt, generateIntakeForm, generateWorkOrderPDF } = require('../../services/workshopPdfService');
+const Tenant = require('../../models/auth/Tenant');
+
+async function getOrderWithTenant(id, tenant_id) {
+  const order = await WorkOrder.findOne({
+    where: { id, tenant_id },
+    include: [
+      { model: Vehicle,       as: 'vehicle' },
+      { model: Customer,      as: 'customer' },
+      { model: User,          as: 'technician', attributes: ['id', 'first_name', 'last_name', 'phone'] },
+      { model: WorkOrderItem, as: 'items',
+        include: [{ model: require('../../models/inventory/Product'), as: 'product', attributes: ['id', 'name', 'sku'] }] },
+    ],
+  });
+
+  if (order) {
+    // Inyectar checklist_in con raw query (Sequelize omite JSONB agregado post-migración)
+    const rows = await sequelize.query(
+      'SELECT checklist_in FROM work_orders WHERE id = :id',
+      { replacements: { id }, type: sequelize.QueryTypes.SELECT }
+    );
+    const data = order.toJSON();
+    data.checklist_in = rows[0]?.checklist_in || {};
+    const tenant = await Tenant.findByPk(tenant_id, {
+      attributes: ['id', 'company_name', 'tax_id', 'phone', 'address', 'email', 'logo_url', 'pdf_config', 'features'],
+    });
+    return { order: data, tenant };
+  }
+
+  const tenant = await Tenant.findByPk(tenant_id, {
+    attributes: ['id', 'company_name', 'tax_id', 'phone', 'address', 'email', 'logo_url', 'pdf_config', 'features'],
+  });
+  return { order: null, tenant };
+}
+
+const generatePDF = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { type } = req.query; // 'intake' | 'receipt' | 'workorder'
+    const tenant_id = req.user.tenant_id;
+
+    const { order, tenant } = await getOrderWithTenant(id, tenant_id);
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    if (type === 'intake') {
+      return generateIntakeForm(res, order, tenant);
+    }
+    if (type === 'receipt') {
+      // Datos del pago vienen en query params para recibo rápido del último pago
+      const paymentData = {
+        amount:          parseFloat(req.query.amount || 0),
+        method:          req.query.method || 'cash',
+        notes:           req.query.notes  || '',
+        date:            req.query.date   || new Date(),
+        receipt_number:  req.query.receipt_number || `REC-${Date.now().toString().slice(-6)}`,
+      };
+      return generatePaymentReceipt(res, order, tenant, paymentData);
+    }
+    // default: OT completa
+    return generateWorkOrderPDF(res, order, tenant);
+  } catch (error) {
+    logger.error('Error generando PDF taller:', error);
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando PDF' });
+  }
+};
+
+// ── CHECKLIST INGRESO ────────────────────────────────────────────────────────
+const updateChecklist = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenant_id = req.user.tenant_id;
+
+    // Verificar que la OT existe y pertenece al tenant
+    const order = await WorkOrder.findOne({ where: { id, tenant_id } });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    // Raw SQL para evitar problemas de Sequelize con JSONB
+    await sequelize.query(
+      `UPDATE work_orders SET checklist_in = :data::jsonb WHERE id = :id AND tenant_id = :tenant_id`,
+      {
+        replacements: {
+          data: JSON.stringify(req.body),
+          id,
+          tenant_id,
+        },
+        type: sequelize.QueryTypes.UPDATE,
+      }
+    );
+
+    res.json({ success: true, data: req.body });
+  } catch (error) {
+    logger.error('Error actualizando checklist:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar checklist' });
+  }
+};
+
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist };

@@ -2,7 +2,7 @@
 const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement } = require('../../models');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
-const { generateSalePDF } = require('../../services/pdfService');
+const { generateSalePDF, generatePaymentReceiptPDF } = require('../../services/pdfService');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
@@ -1082,6 +1082,50 @@ async function generateSaleNumber(tenant_id, document_type) {
   return `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
 }
 
+const generatePaymentReceipt = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenant_id;
+    // payment_index: indice en payment_history (0-based), o -1 para el ultimo
+    const paymentIndex = req.query.payment_index !== undefined
+      ? parseInt(req.query.payment_index)
+      : -1;
+
+    const sale = await Sale.findOne({
+      where: { id, tenant_id: tenantId },
+      include: [{ model: Customer, as: 'customer' }, { model: SaleItem, as: 'items' }]
+    });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+
+    const history = sale.payment_history || [];
+
+    let payment;
+    let idx;
+    if (history.length > 0) {
+      idx = paymentIndex === -1 ? history.length - 1 : Math.min(paymentIndex, history.length - 1);
+      payment = { ...history[idx] };
+    } else {
+      // Sin historial detallado — usar datos globales de la venta
+      idx = 0;
+      payment = {
+        amount:  sale.paid_amount || 0,
+        method:  sale.payment_method || 'efectivo',
+        date:    sale.updated_at || sale.created_at,
+        notes:   null,
+      };
+    }
+
+    payment.index = idx;
+    payment.receipt_number = `REC-${sale.sale_number}-${String(idx + 1).padStart(2, '0')}`;
+
+    const tenant = await Tenant.findByPk(tenantId);
+    generatePaymentReceiptPDF(res, sale, tenant, payment);
+  } catch (e) {
+    console.error('Error generando recibo:', e);
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando recibo' });
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -1093,5 +1137,6 @@ module.exports = {
   registerPayment,
   delete: deleteById,
   getStats,
-  generatePDF
+  generatePDF,
+  generatePaymentReceipt
 };

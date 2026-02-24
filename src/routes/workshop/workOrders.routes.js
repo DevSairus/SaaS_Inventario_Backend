@@ -14,10 +14,12 @@ const upload = multer({
 
 router.get('/productivity', ctrl.productivity);
 router.get('/', ctrl.list);
+router.get('/:id/pdf', ctrl.generatePDF);
 router.get('/:id', ctrl.getById);
 router.post('/', ctrl.create);
 router.put('/:id', ctrl.update);
 router.patch('/:id/status', ctrl.changeStatus);
+router.patch('/:id/checklist', ctrl.updateChecklist);
 
 // Ítems
 router.post('/:id/items', ctrl.addItem);

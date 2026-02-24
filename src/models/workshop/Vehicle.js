@@ -53,6 +53,36 @@ const Vehicle = sequelize.define('Vehicle', {
     allowNull: true,
     comment: 'Cilindraje / tipo de motor'
   },
+  engine_number: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    comment: 'Número serial del motor'
+  },
+  ownership_card: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
+    comment: 'Número tarjeta de propiedad'
+  },
+  soat_number: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
+    comment: 'Número de póliza SOAT'
+  },
+  soat_expiry: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+    comment: 'Fecha de vencimiento SOAT'
+  },
+  tecnomecanica_number: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
+    comment: 'Número certificado técnico-mecánica'
+  },
+  tecnomecanica_expiry: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+    comment: 'Fecha de vencimiento técnico-mecánica'
+  },
   fuel_type: {
     type: DataTypes.ENUM('gasolina', 'diesel', 'gas', 'hibrido', 'electrico', 'otro'),
     defaultValue: 'gasolina'
