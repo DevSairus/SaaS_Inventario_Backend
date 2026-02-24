@@ -195,15 +195,17 @@ exports.getKPIs = async (req, res) => {
       },
       charts: {
         salesByDay: salesByDayWithProfit,
-        topProducts: topProducts.map(item => ({
-          product: {
-            id: item.product.id,
-            name: item.product.name,
-            sku: item.product.sku
-          },
-          quantity: parseInt(item.dataValues.total_quantity),
-          revenue: parseFloat(item.dataValues.revenue)
-        }))
+        topProducts: topProducts
+          .filter(item => item.product != null)
+          .map(item => ({
+            product: {
+              id: item.product.id,
+              name: item.product.name,
+              sku: item.product.sku
+            },
+            quantity: parseInt(item.dataValues.total_quantity),
+            revenue: parseFloat(item.dataValues.revenue)
+          }))
       }
     });
 
