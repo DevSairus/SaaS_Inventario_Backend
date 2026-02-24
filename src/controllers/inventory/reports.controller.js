@@ -214,13 +214,13 @@ exports.getProfitReport = async (req, res) => {
         COUNT(DISTINCT s.id)::integer as total_sales,
         COALESCE(SUM(si.quantity), 0)::numeric as total_quantity,
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
-        COALESCE(SUM(si.quantity * si.unit_cost), 0)::numeric as total_cost,
-        COALESCE(SUM(si.quantity * (si.unit_price - si.unit_cost)), 0)::numeric as profit,
+        COALESCE(SUM(si.quantity * NULLIF(COALESCE(NULLIF(si.unit_cost,0), p.average_cost), 0)), 0)::numeric as total_cost,
+        COALESCE(SUM(si.quantity * (si.unit_price - COALESCE(NULLIF(si.unit_cost,0), p.average_cost, 0))), 0)::numeric as profit,
         ROUND(
-          CASE 
-            WHEN SUM(si.quantity * si.unit_cost) > 0 THEN
-              (SUM(si.quantity * (si.unit_price - si.unit_cost)) / 
-               SUM(si.quantity * si.unit_cost)) * 100
+          CASE
+            WHEN SUM(si.quantity * COALESCE(NULLIF(si.unit_cost,0), p.average_cost)) > 0 THEN
+              (SUM(si.quantity * (si.unit_price - COALESCE(NULLIF(si.unit_cost,0), p.average_cost, 0))) /
+               SUM(si.quantity * COALESCE(NULLIF(si.unit_cost,0), p.average_cost))) * 100
             ELSE 0
           END,
           2
