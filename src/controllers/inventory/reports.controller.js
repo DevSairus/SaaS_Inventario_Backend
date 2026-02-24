@@ -197,12 +197,10 @@ exports.getProfitReport = async (req, res) => {
     // Determinar el filtro de fecha
     let dateFilter;
     if (from_date && to_date) {
-      // Usar fechas personalizadas
-      dateFilter = `s.sale_date BETWEEN '${from_date}' AND '${to_date}'`;
+      dateFilter = `COALESCE(s.sale_date, s.created_at) BETWEEN '${from_date}' AND '${to_date}'`;
     } else {
-      // Usar meses
       const monthsToUse = months || 3;
-      dateFilter = `s.sale_date >= NOW() - INTERVAL '${parseInt(monthsToUse)} months'`;
+      dateFilter = `COALESCE(s.sale_date, s.created_at) >= NOW() - INTERVAL '${parseInt(monthsToUse)} months'`;
     }
 
     const query = `
@@ -210,17 +208,18 @@ exports.getProfitReport = async (req, res) => {
         p.id,
         p.name as product_name,
         p.sku as product_sku,
+        p.product_type,
         c.name as category,
         COUNT(DISTINCT s.id)::integer as total_sales,
         COALESCE(SUM(si.quantity), 0)::numeric as total_quantity,
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
-        COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
-        COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as profit,
+        COALESCE(SUM(si.quantity * COALESCE(p.average_cost, 0)), 0)::numeric as total_cost,
+        COALESCE(SUM(si.quantity * (si.unit_price - COALESCE(p.average_cost, 0))), 0)::numeric as profit,
         ROUND(
           CASE
-            WHEN SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) > 0 THEN
-              SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END))
-              / SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) * 100
+            WHEN SUM(si.quantity * COALESCE(p.average_cost, 0)) > 0 THEN
+              SUM(si.quantity * (si.unit_price - COALESCE(p.average_cost, 0)))
+              / SUM(si.quantity * COALESCE(p.average_cost, 0)) * 100
             ELSE 0
           END,
           2
@@ -233,8 +232,7 @@ exports.getProfitReport = async (req, res) => {
         AND s.tenant_id = :tenantId
         AND ${dateFilter}
         AND s.status IN ('completed', 'pending')
-        AND s.payment_status IN ('paid', 'partial')
-      GROUP BY p.id, p.name, p.sku, c.name
+      GROUP BY p.id, p.name, p.sku, p.product_type, c.name
       ORDER BY profit DESC
       LIMIT ${parseInt(limit)}
     `;
@@ -244,13 +242,33 @@ exports.getProfitReport = async (req, res) => {
       type: QueryTypes.SELECT
     });
 
-    // Calcular totales con valores seguros
+    // Calcular totales con query separada (sin LIMIT) para no perder datos
+    const totalsQuery = `
+      SELECT
+        COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
+        COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
+        COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as total_profit
+      FROM products p
+      INNER JOIN sale_items si ON p.id = si.product_id
+      INNER JOIN sales s ON si.sale_id = s.id
+      WHERE p.tenant_id = :tenantId
+        AND s.tenant_id = :tenantId
+        AND ${dateFilter}
+        AND s.status IN ('completed', 'pending')
+    `;
+    const [totalsRow] = await sequelize.query(totalsQuery, {
+      replacements: { tenantId },
+      type: QueryTypes.SELECT
+    });
     const totals = {
-      total_revenue: 0,
-      total_cost: 0,
-      total_profit: 0,
+      total_revenue: parseFloat(totalsRow?.total_revenue) || 0,
+      total_cost: parseFloat(totalsRow?.total_cost) || 0,
+      total_profit: parseFloat(totalsRow?.total_profit) || 0,
       margin_percentage: 0
     };
+    if (totals.total_cost > 0) {
+      totals.margin_percentage = (totals.total_profit / totals.total_cost) * 100;
+    }
 
     products.forEach(item => {
       const revenue = parseFloat(item.total_revenue) || 0;
@@ -315,7 +333,7 @@ exports.getRotationReport = async (req, res) => {
         COALESCE(p.min_stock, 0)::numeric as min_stock,
         COALESCE(SUM(si.quantity), 0)::numeric as qty_sold,
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as revenue,
-        COALESCE(COUNT(DISTINCT s.id), 0)::integer as sales_count,
+        COALESCE(COUNT(DISTINCT si.sale_id), 0)::integer as sales_count,
         ROUND(
           COALESCE(SUM(si.quantity), 0) / NULLIF(p.current_stock, 0),
           2
@@ -328,16 +346,13 @@ exports.getRotationReport = async (req, res) => {
           ELSE 'Baja rotación'
         END as rotation_status
       FROM products p
-      LEFT JOIN (
-        SELECT si.product_id, si.quantity, si.unit_price, si.sale_id
-        FROM sale_items si
-        INNER JOIN sales s ON si.sale_id = s.id
-          AND s.status IN ('completed', 'pending')
-          AND s.payment_status IN ('paid', 'partial')
-          AND s.tenant_id = :tenantId
-          AND ${dateFilter}
-      ) si ON p.id = si.product_id
-      LEFT JOIN sales s ON si.sale_id = s.id
+      LEFT JOIN sale_items si ON p.id = si.product_id
+        AND si.sale_id IN (
+          SELECT id FROM sales
+          WHERE tenant_id = :tenantId
+            AND status IN ('completed')
+            AND ${dateFilter.replace('s.sale_date', 'sale_date')}
+        )
       LEFT JOIN categories c ON p.category_id = c.id
       WHERE p.tenant_id = :tenantId
         AND p.product_type != 'service'

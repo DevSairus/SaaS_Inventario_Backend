@@ -6,6 +6,7 @@ const {
   Warehouse, Product, InventoryMovement, Sale, SaleItem,
 } = require('../../models');
 const { Op } = require('sequelize');
+const { createMovement } = require('../inventory/movements.controller');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -472,8 +473,16 @@ const generateSale = async (req, res) => {
       created_by: req.user.id,
     }, { transaction });
 
-    // Ítems de la venta
+    // Ítems de la venta + movimientos de inventario
     for (const item of order.items) {
+      // Obtener costo actual del producto si es un producto con inventario
+      let unit_cost = 0;
+      let product = null;
+      if (item.product_id) {
+        product = await Product.findOne({ where: { id: item.product_id, tenant_id }, transaction });
+        unit_cost = product?.average_cost || 0;
+      }
+
       await SaleItem.create({
         tenant_id,
         sale_id:          sale.id,
@@ -482,6 +491,7 @@ const generateSale = async (req, res) => {
         product_sku:      item.product_sku,
         quantity:         item.quantity,
         unit_price:       item.unit_price,
+        unit_cost,
         discount_percentage: 0,
         discount_amount:  0,
         tax_percentage:   item.tax_percentage,
@@ -489,6 +499,37 @@ const generateSale = async (req, res) => {
         subtotal:         item.subtotal,
         total:            item.total,
       }, { transaction });
+
+      // Crear movimiento de salida de inventario
+      if (product && product.track_inventory && item.product_id) {
+        // Validar stock si no permite negativos
+        if (!product.allow_negative_stock) {
+          const disponible = parseFloat(product.current_stock || 0);
+          const solicitado = parseFloat(item.quantity);
+          if (disponible < solicitado) {
+            await transaction.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Stock insuficiente para ${product.name}: disponible ${disponible}, solicitado ${solicitado}`
+            });
+          }
+        }
+
+        await createMovement({
+          tenant_id,
+          movement_type:   'salida',
+          movement_reason: 'sale',
+          reference_type:  'sale',
+          reference_id:    sale.id,
+          product_id:      item.product_id,
+          warehouse_id:    order.warehouse_id || null,
+          quantity:        item.quantity,
+          unit_cost,
+          user_id:         req.user.id,
+          movement_date:   new Date().toISOString().split('T')[0],
+          notes:           `Remisión ${sale_number} - OT ${order.order_number}`,
+        }, transaction);
+      }
     }
 
     // Vincular y cerrar OT
