@@ -214,13 +214,13 @@ exports.getProfitReport = async (req, res) => {
         COUNT(DISTINCT s.id)::integer as total_sales,
         COALESCE(SUM(si.quantity), 0)::numeric as total_quantity,
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
-        COALESCE(SUM(si.quantity * NULLIF(COALESCE(NULLIF(si.unit_cost,0), p.average_cost), 0)), 0)::numeric as total_cost,
-        COALESCE(SUM(si.quantity * (si.unit_price - COALESCE(NULLIF(si.unit_cost,0), p.average_cost, 0))), 0)::numeric as profit,
+        COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
+        COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as profit,
         ROUND(
           CASE
-            WHEN SUM(si.quantity * COALESCE(NULLIF(si.unit_cost,0), p.average_cost)) > 0 THEN
-              (SUM(si.quantity * (si.unit_price - COALESCE(NULLIF(si.unit_cost,0), p.average_cost, 0))) /
-               SUM(si.quantity * COALESCE(NULLIF(si.unit_cost,0), p.average_cost))) * 100
+            WHEN SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) > 0 THEN
+              SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END))
+              / SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) * 100
             ELSE 0
           END,
           2
@@ -232,7 +232,7 @@ exports.getProfitReport = async (req, res) => {
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
         AND ${dateFilter}
-        AND s.status IN ('completed', 'pending', 'delivered')
+        AND s.status IN ('completed', 'pending')
         AND s.payment_status IN ('paid', 'partial')
       GROUP BY p.id, p.name, p.sku, c.name
       ORDER BY profit DESC
@@ -332,7 +332,7 @@ exports.getRotationReport = async (req, res) => {
         SELECT si.product_id, si.quantity, si.unit_price, si.sale_id
         FROM sale_items si
         INNER JOIN sales s ON si.sale_id = s.id
-          AND s.status IN ('completed', 'pending', 'delivered')
+          AND s.status IN ('completed', 'pending')
           AND s.payment_status IN ('paid', 'partial')
           AND s.tenant_id = :tenantId
           AND ${dateFilter}
