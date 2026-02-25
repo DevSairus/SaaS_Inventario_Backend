@@ -1,5 +1,7 @@
+const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
 const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement } = require('../../models');
+const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { generateSalePDF, generatePaymentReceiptPDF } = require('../../services/pdfService');
@@ -89,7 +91,7 @@ const getAll = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error al obtener ventas:', error);
+    logger.error('Error al obtener ventas:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener ventas'});
@@ -134,7 +136,7 @@ const getById = async (req, res) => {
       data: sale
     });
   } catch (error) {
-    console.error('Error al obtener venta:', error);
+    logger.error('Error al obtener venta:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener venta'});
@@ -398,7 +400,7 @@ const create = async (req, res) => {
     
   } catch (error) {
     await transaction.rollback();
-    console.error('Error creando venta:', error);
+    logger.error('Error creando venta:', error);
     res.status(500).json({ 
       success: false,
       message: 'Error creando venta'});
@@ -564,7 +566,7 @@ const update = async (req, res) => {
 
   } catch (error) {
     await transaction.rollback();
-    console.error('Error actualizando venta:', error);
+    logger.error('Error actualizando venta:', error);
     res.status(500).json({ success: false, message: 'Error actualizando venta'});
   }
 };
@@ -602,6 +604,42 @@ const confirm = async (req, res) => {
         success: false,
         message: 'Solo se pueden confirmar ventas en borrador'
       });
+    }
+
+    // Validar límite de crédito si el método es crédito
+    if (payment_method === 'credito' && sale.customer_id) {
+      const creditCustomer = await Customer.findOne({
+        where: { id: sale.customer_id, tenant_id: tenantId }
+      });
+      if (creditCustomer && parseFloat(creditCustomer.credit_limit || 0) > 0) {
+        const pendingResult = await Sale.findOne({
+          where: {
+            customer_id: sale.customer_id,
+            tenant_id: tenantId,
+            payment_status: { [Op.in]: ['pending', 'partial'] },
+            status: { [Op.in]: ['completed', 'pending'] },
+            id: { [Op.ne]: sale.id }
+          },
+          attributes: [
+            [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('total_amount')), 0), 'total_pending'],
+            [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('paid_amount')), 0), 'total_paid']
+          ],
+          raw: true
+        });
+        const currentDebt = parseFloat(pendingResult?.total_pending || 0) - parseFloat(pendingResult?.total_paid || 0);
+        const newDebt = currentDebt + parseFloat(sale.total_amount);
+        const limit = parseFloat(creditCustomer.credit_limit);
+        if (newDebt > limit) {
+          const name = creditCustomer.business_name || `${creditCustomer.first_name} ${creditCustomer.last_name}`;
+          return res.status(400).json({
+            success: false,
+            message: `Límite de crédito excedido para ${name}. Límite: $${limit.toLocaleString('es-CO')}, Deuda actual: $${currentDebt.toLocaleString('es-CO')}, Esta venta: $${parseFloat(sale.total_amount).toLocaleString('es-CO')}`,
+            credit_limit: limit,
+            current_debt: currentDebt,
+            sale_total: parseFloat(sale.total_amount)
+          });
+        }
+      }
     }
 
     const transaction = await sequelize.transaction();
@@ -680,6 +718,12 @@ const confirm = async (req, res) => {
 
       await sale.update(updateData, { transaction });
       await transaction.commit();
+
+      // Audit
+      await audit({ tenant_id: tenantId, user_id: userId, action: 'CONFIRM_SALE',
+        entity: 'sale', entity_id: sale.id,
+        changes: { sale_number: sale.sale_number, total_amount: sale.total_amount, payment_method },
+        req });
     } catch (err) {
       await transaction.rollback();
       throw err;
@@ -702,7 +746,7 @@ const confirm = async (req, res) => {
       data: updatedSale
     });
   } catch (error) {
-    console.error('Error confirmando venta:', error);
+    logger.error('Error confirmando venta:', error);
     res.status(500).json({
       success: false,
       message: 'Error confirmando venta'});
@@ -790,7 +834,7 @@ const cancel = async (req, res) => {
       data: updatedSale
     });
   } catch (error) {
-    console.error('Error cancelando venta:', error);
+    logger.error('Error cancelando venta:', error);
     res.status(500).json({
       success: false,
       message: 'Error cancelando venta'});
@@ -840,7 +884,7 @@ const markAsDelivered = async (req, res) => {
       data: updatedSale
     });
   } catch (error) {
-    console.error('Error actualizando venta:', error);
+    logger.error('Error actualizando venta:', error);
     res.status(500).json({
       success: false,
       message: 'Error actualizando venta'});
@@ -921,7 +965,7 @@ const registerPayment = async (req, res) => {
       data: updatedSale
     });
   } catch (error) {
-    console.error('Error registrando pago:', error);
+    logger.error('Error registrando pago:', error);
     res.status(500).json({
       success: false,
       message: 'Error registrando pago'});
@@ -959,7 +1003,7 @@ const deleteById = async (req, res) => {
       message: 'Venta eliminada exitosamente'
     });
   } catch (error) {
-    console.error('Error eliminando venta:', error);
+    logger.error('Error eliminando venta:', error);
     res.status(500).json({
       success: false,
       message: 'Error eliminando venta'});
@@ -1004,7 +1048,7 @@ const getStats = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error obteniendo estadísticas:', error);
+    logger.error('Error obteniendo estadísticas:', error);
     res.status(500).json({
       success: false,
       message: 'Error obteniendo estadísticas'});
@@ -1049,7 +1093,7 @@ const generatePDF = async (req, res) => {
     generateSalePDF(res, sale, tenant);
 
   } catch (error) {
-    console.error('Error generando PDF:', error);
+    logger.error('Error generando PDF:', error);
     res.status(500).json({
       success: false,
       message: 'Error generando PDF'});
@@ -1121,7 +1165,7 @@ const generatePaymentReceipt = async (req, res) => {
     const tenant = await Tenant.findByPk(tenantId);
     generatePaymentReceiptPDF(res, sale, tenant, payment);
   } catch (e) {
-    console.error('Error generando recibo:', e);
+    logger.error('Error generando recibo:', e);
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando recibo' });
   }
 };

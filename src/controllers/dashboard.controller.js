@@ -1,5 +1,6 @@
+const logger = require('../config/logger');
 // backend/src/controllers/dashboard.controller.js
-const { Product, Sale, SaleItem, Purchase, Customer, InventoryMovement, Warehouse } = require('../models');
+const { Product, Sale, SaleItem, Purchase, Customer, InventoryMovement, Warehouse, WorkOrder, WorkOrderItem } = require('../models');
 const { Op, fn, col, literal } = require('sequelize');
 
 /**
@@ -210,7 +211,7 @@ exports.getKPIs = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error al obtener KPIs:', error);
+    logger.error('Error al obtener KPIs:', error);
     res.status(500).json({
       message: 'Error al obtener KPIs del dashboard',
       error: error.message
@@ -286,11 +287,108 @@ exports.getAlerts = async (req, res) => {
     res.json(alerts);
 
   } catch (error) {
-    console.error('Error al obtener alertas:', error);
+    logger.error('Error al obtener alertas:', error);
     res.status(500).json({
       message: 'Error al obtener alertas',
       error: error.message
     });
+  }
+};
+
+/**
+ * KPIs del módulo de taller
+ */
+exports.getWorkshopKPIs = async (req, res) => {
+  try {
+    const tenantId = req.user.tenant_id;
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    // OTs por estado
+    const otsByStatus = await WorkOrder.findAll({
+      where: { tenant_id: tenantId },
+      attributes: ['status', [fn('COUNT', col('id')), 'count']],
+      group: ['status'],
+      raw: true
+    });
+
+    const statusMap = {};
+    otsByStatus.forEach(r => { statusMap[r.status] = parseInt(r.count); });
+
+    // OTs abiertas (no entregadas ni canceladas)
+    const openStatuses = ['recibido', 'diagnostico', 'en_proceso', 'listo'];
+    const openOTs = openStatuses.reduce((sum, s) => sum + (statusMap[s] || 0), 0);
+
+    // Ingresos de mano de obra este mes
+    const laborRevenue = await WorkOrderItem.findOne({
+      include: [{
+        model: WorkOrder,
+        as: 'work_order',
+        where: {
+          tenant_id: tenantId,
+          status: { [Op.in]: ['listo', 'entregado'] },
+          completed_at: { [Op.gte]: startOfMonth }
+        },
+        attributes: []
+      }],
+      where: { item_type: { [Op.in]: ['servicio', 'mano_obra'] } },
+      attributes: [[fn('SUM', literal('quantity * unit_price')), 'total']],
+      raw: true
+    });
+
+    // Ingresos de repuestos este mes
+    const partsRevenue = await WorkOrderItem.findOne({
+      include: [{
+        model: WorkOrder,
+        as: 'work_order',
+        where: {
+          tenant_id: tenantId,
+          status: { [Op.in]: ['listo', 'entregado'] },
+          completed_at: { [Op.gte]: startOfMonth }
+        },
+        attributes: []
+      }],
+      where: { item_type: 'repuesto' },
+      attributes: [[fn('SUM', literal('quantity * unit_price')), 'total']],
+      raw: true
+    });
+
+    // OTs completadas este mes
+    const completedThisMonth = await WorkOrder.count({
+      where: {
+        tenant_id: tenantId,
+        status: 'entregado',
+        delivered_at: { [Op.gte]: startOfMonth }
+      }
+    });
+
+    // Tiempo promedio de resolución (días) - últimas 30 OTs entregadas
+    const { sequelize } = require('../config/database');
+    const { QueryTypes } = require('sequelize');
+    const avgTime = await sequelize.query(`
+      SELECT ROUND(AVG(EXTRACT(EPOCH FROM (delivered_at - created_at)) / 86400), 1) as avg_days
+      FROM work_orders
+      WHERE tenant_id = :tenantId
+        AND status = 'entregado'
+        AND delivered_at IS NOT NULL
+        AND created_at >= NOW() - INTERVAL '90 days'
+    `, { replacements: { tenantId }, type: QueryTypes.SELECT });
+
+    res.json({
+      success: true,
+      data: {
+        open_ots: openOTs,
+        completed_this_month: completedThisMonth,
+        labor_revenue_month: parseFloat(laborRevenue?.total || 0),
+        parts_revenue_month: parseFloat(partsRevenue?.total || 0),
+        total_revenue_month: parseFloat(laborRevenue?.total || 0) + parseFloat(partsRevenue?.total || 0),
+        avg_resolution_days: parseFloat(avgTime[0]?.avg_days || 0),
+        by_status: statusMap
+      }
+    });
+  } catch (error) {
+    logger.error('Error en workshop KPIs:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener KPIs del taller' });
   }
 };
 

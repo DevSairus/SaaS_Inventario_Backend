@@ -44,6 +44,7 @@ const TenantMercadoPagoConfig = require('./payments/TenantMercadoPagoConfig');
 // ✅ NUEVO - Sistema de Anuncios
 const Announcement = require('./Announcement');
 const UserAnnouncementView = require('./UserAnnouncementView');
+const AuditLog = require('../models/AuditLog');
 // ✅ NUEVO - Taller
 const Vehicle = require('./workshop/Vehicle');
 const WorkOrder = require('./workshop/WorkOrder');
@@ -283,6 +284,7 @@ module.exports = {
   InternalConsumptionItem,
   Announcement,
   UserAnnouncementView,
+  AuditLog,
   Vehicle,
   WorkOrder,
   WorkOrderItem,

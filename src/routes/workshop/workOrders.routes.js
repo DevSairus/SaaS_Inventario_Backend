@@ -12,6 +12,7 @@ const upload = multer({
   }
 });
 
+router.get('/report', ctrl.getReport);
 router.get('/productivity', ctrl.productivity);
 router.get('/', ctrl.list);
 router.get('/:id/pdf', ctrl.generatePDF);

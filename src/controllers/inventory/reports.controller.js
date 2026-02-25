@@ -213,13 +213,13 @@ exports.getProfitReport = async (req, res) => {
         COUNT(DISTINCT s.id)::integer as total_sales,
         COALESCE(SUM(si.quantity), 0)::numeric as total_quantity,
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
-        COALESCE(SUM(si.quantity * COALESCE(p.average_cost, 0)), 0)::numeric as total_cost,
-        COALESCE(SUM(si.quantity * (si.unit_price - COALESCE(p.average_cost, 0))), 0)::numeric as profit,
+        COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
+        COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as profit,
         ROUND(
           CASE
-            WHEN SUM(si.quantity * COALESCE(p.average_cost, 0)) > 0 THEN
-              SUM(si.quantity * (si.unit_price - COALESCE(p.average_cost, 0)))
-              / SUM(si.quantity * COALESCE(p.average_cost, 0)) * 100
+            WHEN SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) > 0 THEN
+              SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END))
+              / SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) * 100
             ELSE 0
           END,
           2

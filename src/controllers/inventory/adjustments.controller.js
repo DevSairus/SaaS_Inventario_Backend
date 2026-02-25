@@ -1,3 +1,5 @@
+const logger = require('../../config/logger');
+const audit = require('../../utils/audit');
 const { InventoryAdjustment, InventoryAdjustmentItem, Product } = require('../../models/inventory');
 const { createMovement } = require('./movements.controller');
 const { Op } = require('sequelize');
@@ -124,7 +126,7 @@ const getAdjustments = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en getAdjustments:', error);
+    logger.error('Error en getAdjustments:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener ajustes de inventario'
@@ -195,7 +197,7 @@ const getAdjustmentById = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en getAdjustmentById:', error);
+    logger.error('Error en getAdjustmentById:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener el ajuste'
@@ -343,7 +345,7 @@ const createAdjustment = async (req, res) => {
     if (t && !t.finished) {
       await t.rollback();
     }
-    console.error('Error en createAdjustment:', error);
+    logger.error('Error en createAdjustment:', error);
     res.status(500).json({
       success: false,
       message: 'Error al crear el ajuste'
@@ -478,7 +480,7 @@ const updateAdjustment = async (req, res) => {
     if (t && !t.finished) {
       await t.rollback();
     }
-    console.error('Error en updateAdjustment:', error);
+    logger.error('Error en updateAdjustment:', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar el ajuste'
@@ -625,6 +627,12 @@ const confirmAdjustment = async (req, res) => {
     const product_ids = adjustment.items.map(item => item.product_id);
     markProductsForAlertCheck(res, product_ids, tenant_id);
 
+    // Audit
+    setImmediate(() => audit({ tenant_id, user_id: req.user?.id, action: 'INVENTORY_ADJUSTMENT',
+      entity: 'adjustment', entity_id: product_ids.join(','),
+      changes: { products_affected: product_ids.length },
+      req }));
+
     res.json({
       success: true,
       message: 'Ajuste confirmado exitosamente',
@@ -636,7 +644,7 @@ const confirmAdjustment = async (req, res) => {
     if (t && !t.finished) {
       await t.rollback();
     }
-    console.error('Error en confirmAdjustment:', error);
+    logger.error('Error en confirmAdjustment:', error);
     res.status(500).json({
       success: false,
       message: error.message || 'Error al confirmar el ajuste'
@@ -698,7 +706,7 @@ const cancelAdjustment = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en cancelAdjustment:', error);
+    logger.error('Error en cancelAdjustment:', error);
     res.status(500).json({
       success: false,
       message: 'Error al cancelar el ajuste'
@@ -757,7 +765,7 @@ const deleteAdjustment = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en deleteAdjustment:', error);
+    logger.error('Error en deleteAdjustment:', error);
     res.status(500).json({
       success: false,
       message: 'Error al eliminar el ajuste'
@@ -822,7 +830,7 @@ const getAdjustmentsStats = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en getAdjustmentsStats:', error);
+    logger.error('Error en getAdjustmentsStats:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener estadísticas'

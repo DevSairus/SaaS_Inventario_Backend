@@ -1,3 +1,4 @@
+const audit = require('../../utils/audit');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const {
@@ -188,6 +189,12 @@ const create = async (req, res) => {
     }
 
     await transaction.commit();
+
+    // Audit
+    setImmediate(() => audit({ tenant_id, user_id: req.user?.id, action: 'COMMISSION_SETTLEMENT',
+      entity: 'settlement', entity_id: String(Date.now()),
+      changes: { technician_id: req.body?.technician_id },
+      req }));
 
     // Devolver liquidación completa
     const full = await CommissionSettlement.findByPk(settlement.id, {

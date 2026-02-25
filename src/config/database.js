@@ -1,9 +1,10 @@
-console.log('🔍 DEBUG - Variables de entorno:');
-console.log('   NODE_ENV:', process.env.NODE_ENV);
-console.log('   VERCEL:', process.env.VERCEL);
-console.log('   POSTGRES_URL exists:', !!process.env.POSTGRES_URL);
-console.log('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
-console.log('   POSTGRES_HOST:', process.env.POSTGRES_HOST);
+const logger = require('./logger');
+logger.debug('🔍 DEBUG - Variables de entorno:');
+logger.debug('   NODE_ENV:', process.env.NODE_ENV);
+logger.debug('   VERCEL:', process.env.VERCEL);
+logger.debug('   POSTGRES_URL exists:', !!process.env.POSTGRES_URL);
+logger.debug('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
+logger.debug('   POSTGRES_HOST:', process.env.POSTGRES_HOST);
 
 if (process.env.NODE_ENV !== 'production') {
   require('dotenv').config();
@@ -18,15 +19,15 @@ const { Sequelize } = require('sequelize');
 let pg;
 try {
   pg = require('pg');
-  console.log('✅ Módulo pg cargado correctamente');
+  logger.debug('✅ Módulo pg cargado correctamente');
 } catch (err) {
-  console.error('❌ Error cargando módulo pg:', err.message);
+  logger.error('❌ Error cargando módulo pg:', err.message);
   // Intentar con pg-pool como fallback
   try {
     pg = require('pg-pool');
-    console.log('✅ Módulo pg-pool cargado como fallback');
+    logger.debug('✅ Módulo pg-pool cargado como fallback');
   } catch (err2) {
-    console.error('❌ Error crítico: no se pudo cargar pg ni pg-pool');
+    logger.error('❌ Error crítico: no se pudo cargar pg ni pg-pool');
   }
 }
 
@@ -35,11 +36,11 @@ let sequelize;
 // ============================================================================
 // DEBUG: Verificar variables de entorno (remover después de verificar)
 // ============================================================================
-console.log('🔍 DEBUG - Verificando conexión a DB:');
-console.log('   NODE_ENV:', process.env.NODE_ENV);
-console.log('   VERCEL:', process.env.VERCEL ? 'YES' : 'NO');
-console.log('   POSTGRES_URL exists:', !!process.env.POSTGRES_URL);
-console.log('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
+logger.debug('🔍 DEBUG - Verificando conexión a DB:');
+logger.debug('   NODE_ENV:', process.env.NODE_ENV);
+logger.debug('   VERCEL:', process.env.VERCEL ? 'YES' : 'NO');
+logger.debug('   POSTGRES_URL exists:', !!process.env.POSTGRES_URL);
+logger.debug('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
 
 // ============================================================================
 // CONFIGURACIÓN PARA VERCEL + NEON INTEGRATION
@@ -47,19 +48,19 @@ console.log('   DATABASE_URL exists:', !!process.env.DATABASE_URL);
 const DATABASE_URL = process.env.POSTGRES_URL || process.env.DATABASE_URL;
 const isProduction = process.env.NODE_ENV === 'production';
 
-console.log('   Using DATABASE_URL:', !!DATABASE_URL);
+logger.debug('   Using DATABASE_URL:', !!DATABASE_URL);
 if (DATABASE_URL) {
-  console.log('   Connection string starts with:', DATABASE_URL.substring(0, 15) + '...');
+  logger.debug('   Connection string starts with:', DATABASE_URL.substring(0, 15) + '...');
 }
-console.log('============================================================================\n');
+logger.debug('============================================================================\n');
 
 if (DATABASE_URL) {
   // ============================================================================
   // PRODUCCIÓN: Usando Neon (via Vercel o externo)
   // ============================================================================
   
-  console.log('🔧 Conectando a Neon PostgreSQL');
-  console.log('📍 Variable usada:', process.env.POSTGRES_URL ? 'POSTGRES_URL' : 'DATABASE_URL');
+  logger.debug('🔧 Conectando a Neon PostgreSQL');
+  logger.debug('📍 Variable usada:', process.env.POSTGRES_URL ? 'POSTGRES_URL' : 'DATABASE_URL');
   
   // Configuración específica para Vercel
   const dialectOptions = {
@@ -71,7 +72,7 @@ if (DATABASE_URL) {
 
   // Si estamos en Vercel, configuración adicional
   if (process.env.VERCEL) {
-    console.log('🔧 Modo Vercel detectado - Configuración optimizada');
+    logger.debug('🔧 Modo Vercel detectado - Configuración optimizada');
   }
 
   sequelize = new Sequelize(DATABASE_URL, {
@@ -104,9 +105,9 @@ if (DATABASE_URL) {
   // DESARROLLO LOCAL: Usando PostgreSQL local
   // ============================================================================
   
-  console.log('🔧 Conectando a PostgreSQL local (desarrollo)');
-  console.log('⚠️  ADVERTENCIA: No se encontró POSTGRES_URL ni DATABASE_URL');
-  console.log('   Usando configuración de desarrollo local');
+  logger.debug('🔧 Conectando a PostgreSQL local (desarrollo)');
+  logger.debug('⚠️  ADVERTENCIA: No se encontró POSTGRES_URL ni DATABASE_URL');
+  logger.debug('   Usando configuración de desarrollo local');
   
   const dbConfig = {
     database: process.env.DB_NAME || 'inventario_db',
@@ -116,7 +117,7 @@ if (DATABASE_URL) {
     port: process.env.DB_PORT || 5432
   };
   
-  console.log(`   DB: ${dbConfig.database}@${dbConfig.host}:${dbConfig.port}`);
+  logger.debug(`   DB: ${dbConfig.database}@${dbConfig.host}:${dbConfig.port}`);
   
   sequelize = new Sequelize(
     dbConfig.database,
@@ -151,15 +152,15 @@ if (DATABASE_URL) {
 async function testConnection() {
   try {
     await sequelize.authenticate();
-    console.log('✅ Conexión a PostgreSQL exitosa');
-    console.log(`📍 Entorno: ${process.env.NODE_ENV || 'development'}`);
+    logger.debug('✅ Conexión a PostgreSQL exitosa');
+    logger.debug(`📍 Entorno: ${process.env.NODE_ENV || 'development'}`);
     
     // Información adicional solo en desarrollo
     if (!isProduction) {
       try {
         const [results] = await sequelize.query('SELECT version()');
         const version = results[0].version.split(' ').slice(0, 2).join(' ');
-        console.log('📊 PostgreSQL Version:', version);
+        logger.debug('📊 PostgreSQL Version:', version);
         
         // Mostrar tablas disponibles
         const [tables] = await sequelize.query(`
@@ -170,37 +171,37 @@ async function testConnection() {
         `);
         
         if (tables.length > 0) {
-          console.log(`📋 Tablas disponibles: ${tables.length}`);
+          logger.debug(`📋 Tablas disponibles: ${tables.length}`);
           const tableNames = tables.slice(0, 5).map(t => t.table_name).join(', ');
-          console.log('   ' + tableNames + (tables.length > 5 ? '...' : ''));
+          logger.debug('   ' + tableNames + (tables.length > 5 ? '...' : ''));
         } else {
-          console.log('⚠️  No hay tablas. Ejecuta database-schema.sql');
+          logger.debug('⚠️  No hay tablas. Ejecuta database-schema.sql');
         }
       } catch (err) {
-        console.log('⚠️  No se pudo obtener información adicional');
+        logger.debug('⚠️  No se pudo obtener información adicional');
       }
     }
     
     return true;
   } catch (error) {
-    console.error('❌ Error conectando a PostgreSQL:');
-    console.error('   Mensaje:', error.message);
+    logger.error('❌ Error conectando a PostgreSQL:');
+    logger.error('   Mensaje:', error.message);
     
     // Ayuda de debugging
     if (!isProduction) {
-      console.error('\n💡 Verificaciones:');
+      logger.error('\n💡 Verificaciones:');
       
       if (!DATABASE_URL) {
-        console.error('   ❌ No se encontró POSTGRES_URL ni DATABASE_URL');
-        console.error('   → Agrega la variable de entorno en Vercel');
+        logger.error('   ❌ No se encontró POSTGRES_URL ni DATABASE_URL');
+        logger.error('   → Agrega la variable de entorno en Vercel');
       } else {
-        console.error('   ✅ Variable de conexión encontrada');
+        logger.error('   ✅ Variable de conexión encontrada');
       }
       
-      console.error('   - ¿PostgreSQL está corriendo?');
-      console.error('   - ¿Las credenciales son correctas?');
-      console.error('   - ¿La base de datos existe?');
-      console.error('   - ¿SSL está configurado correctamente?');
+      logger.error('   - ¿PostgreSQL está corriendo?');
+      logger.error('   - ¿Las credenciales son correctas?');
+      logger.error('   - ¿La base de datos existe?');
+      logger.error('   - ¿SSL está configurado correctamente?');
     }
     
     return false;
@@ -226,11 +227,11 @@ async function syncDatabase(options = {}) {
     }
     
     await sequelize.sync({ force, alter });
-    console.log('✅ Modelos sincronizados con la base de datos');
+    logger.debug('✅ Modelos sincronizados con la base de datos');
     
     return true;
   } catch (error) {
-    console.error('❌ Error sincronizando modelos:', error.message);
+    logger.error('❌ Error sincronizando modelos:', error.message);
     return false;
   }
 }
@@ -241,10 +242,10 @@ async function syncDatabase(options = {}) {
 async function closeConnection() {
   try {
     await sequelize.close();
-    console.log('✅ Conexión a PostgreSQL cerrada');
+    logger.debug('✅ Conexión a PostgreSQL cerrada');
     return true;
   } catch (error) {
-    console.error('❌ Error cerrando conexión:', error.message);
+    logger.error('❌ Error cerrando conexión:', error.message);
     return false;
   }
 }

@@ -1,3 +1,4 @@
+const logger = require('../../config/logger');
 /* eslint-disable indent */
 const Tenant = require('../models/Tenant');
 const User = require('../models/User');
@@ -173,7 +174,7 @@ const getDashboard = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo dashboard:', error);
+    logger.error('Error obteniendo dashboard:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener dashboard',
@@ -247,7 +248,7 @@ const getAllTenants = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo tenants:', error);
+    logger.error('Error obteniendo tenants:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener tenants',
@@ -303,7 +304,7 @@ const getTenantById = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('❌ Error obteniendo tenant:', error);
+    logger.error('❌ Error obteniendo tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener tenant',
@@ -395,7 +396,7 @@ const createTenant = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error creando tenant:', error);
+    logger.error('Error creando tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al crear tenant',
@@ -453,7 +454,7 @@ const updateTenant = async (req, res) => {
       data: { tenant },
     });
   } catch (error) {
-    console.error('Error actualizando tenant:', error);
+    logger.error('Error actualizando tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar tenant',
@@ -485,7 +486,7 @@ const toggleTenantStatus = async (req, res) => {
       data: { tenant },
     });
   } catch (error) {
-    console.error('Error cambiando estado del tenant:', error);
+    logger.error('Error cambiando estado del tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al cambiar estado del tenant',
@@ -519,7 +520,7 @@ const deleteTenant = async (req, res) => {
       message: 'Tenant eliminado exitosamente',
     });
   } catch (error) {
-    console.error('Error eliminando tenant:', error);
+    logger.error('Error eliminando tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al eliminar tenant',
@@ -554,7 +555,7 @@ const getTenantUsers = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo usuarios del tenant:', error);
+    logger.error('Error obteniendo usuarios del tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener usuarios',
@@ -621,7 +622,7 @@ const updateSubscription = async (req, res) => {
       data: { tenant },
     });
   } catch (error) {
-    console.error('Error actualizando suscripción:', error);
+    logger.error('Error actualizando suscripción:', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar suscripción',
@@ -727,7 +728,7 @@ const getAnalyticsOverview = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo analytics:', error);
+    logger.error('Error obteniendo analytics:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener analytics',
@@ -791,7 +792,7 @@ const getTenantsAnalytics = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo analytics de tenants:', error);
+    logger.error('Error obteniendo analytics de tenants:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener analytics',
@@ -860,7 +861,7 @@ const getUsersFromTenant = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo usuarios del tenant:', error);
+    logger.error('Error obteniendo usuarios del tenant:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener usuarios',
@@ -911,7 +912,7 @@ const updateTrialDate = async (req, res) => {
       data: { tenant },
     });
   } catch (error) {
-    console.error('Error actualizando fecha de trial:', error);
+    logger.error('Error actualizando fecha de trial:', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar fecha de trial',
@@ -955,7 +956,7 @@ const extendTrial = async (req, res) => {
       data: { tenant },
     });
   } catch (error) {
-    console.error('Error extendiendo trial:', error);
+    logger.error('Error extendiendo trial:', error);
     res.status(500).json({
       success: false,
       message: 'Error al extender trial',
@@ -1006,7 +1007,7 @@ const updateSubscriptionStatus = async (req, res) => {
       data: { tenant },
     });
   } catch (error) {
-    console.error('Error actualizando estado:', error);
+    logger.error('Error actualizando estado:', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar estado',
@@ -1044,7 +1045,7 @@ const getExpiringTrials = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('Error obteniendo trials por vencer:', error);
+    logger.error('Error obteniendo trials por vencer:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener trials',
@@ -1108,7 +1109,7 @@ const updateTenantUser = async (req, res) => {
       data: { user },
     });
   } catch (error) {
-    console.error('❌ [SUPERADMIN] Error actualizando usuario:', error);
+    logger.error('❌ [SUPERADMIN] Error actualizando usuario:', error);
     res.status(500).json({
       success: false,
       message: 'Error al actualizar usuario',
@@ -1147,7 +1148,7 @@ const deleteTenantUser = async (req, res) => {
       message: 'Usuario eliminado exitosamente',
     });
   } catch (error) {
-    console.error('❌ [SUPERADMIN] Error eliminando usuario:', error);
+    logger.error('❌ [SUPERADMIN] Error eliminando usuario:', error);
     res.status(500).json({
       success: false,
       message: 'Error al eliminar usuario',
@@ -1194,7 +1195,7 @@ const changeTenantUserRole = async (req, res) => {
       data: { user },
     });
   } catch (error) {
-    console.error('❌ [SUPERADMIN] Error cambiando rol:', error);
+    logger.error('❌ [SUPERADMIN] Error cambiando rol:', error);
     res.status(500).json({
       success: false,
       message: 'Error al cambiar rol',
@@ -1209,10 +1210,10 @@ const resetTenantUserPassword = async (req, res) => {
     const { userId } = req.params;
     const { password } = req.body;
 
-    if (!password || password.length < 6) {
+    if (!password || password.length < 8) {
       return res.status(400).json({
         success: false,
-        message: 'La contraseña debe tener al menos 6 caracteres',
+        message: 'La contraseña debe tener al menos 8 caracteres',
       });
     }
 
@@ -1243,7 +1244,7 @@ const resetTenantUserPassword = async (req, res) => {
       message: 'Contraseña reseteada exitosamente',
     });
   } catch (error) {
-    console.error('❌ [SUPERADMIN] Error reseteando contraseña:', error);
+    logger.error('❌ [SUPERADMIN] Error reseteando contraseña:', error);
     res.status(500).json({
       success: false,
       message: 'Error al resetear contraseña',

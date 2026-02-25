@@ -1,5 +1,6 @@
 const { InventoryMovement, Product } = require('../../models/inventory');
 const { Op } = require('sequelize');
+const { checkAlertsForProduct } = require('../../middleware/autoCheckAlerts.middleware');
 
 /**
  * Obtener todos los movimientos con filtros y paginación
@@ -131,35 +132,50 @@ const getProductKardex = async (req, res) => {
       };
     }
 
-    const movements = await InventoryMovement.findAll({
+    const { page = 1, limit = 25 } = req.query;
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const offset = (pageNum - 1) * limitNum;
+
+    // Totales sobre TODO el rango (sin paginar)
+    const allMovements = await InventoryMovement.findAll({
       where,
-      include: [
-        {
-          model: Product,
-          as: 'product',
-          attributes: ['id', 'name', 'sku']
-        }
-      ],
-      order: [['movement_date', 'ASC'], ['created_at', 'ASC']]
+      attributes: ['movement_type', 'quantity', 'total_cost', 'new_stock'],
+      order: [['movement_date', 'ASC'], ['created_at', 'ASC']],
+      raw: true
     });
 
-    // Calcular resumen
-    const entradas = movements.filter(m => m.movement_type === 'entrada');
-    const salidas = movements.filter(m => m.movement_type === 'salida');
-    
-    const totalEntradas = entradas.reduce((sum, m) => sum + parseFloat(m.quantity), 0);
-    const totalSalidas = salidas.reduce((sum, m) => sum + parseFloat(m.quantity), 0);
-    const totalCostoEntradas = entradas.reduce((sum, m) => sum + parseFloat(m.total_cost), 0);
+    const entradas = allMovements.filter(m => m.movement_type === 'entrada');
+    const salidas  = allMovements.filter(m => m.movement_type === 'salida');
+    const totalEntradas      = entradas.reduce((s, m) => s + parseFloat(m.quantity), 0);
+    const totalSalidas       = salidas.reduce((s, m) => s + parseFloat(m.quantity), 0);
+    const totalCostoEntradas = entradas.reduce((s, m) => s + parseFloat(m.total_cost), 0);
+    const stockActual        = allMovements.length > 0 ? allMovements[allMovements.length - 1].new_stock : 0;
+
+    // Solo la página solicitada
+    const { count, rows: movements } = await InventoryMovement.findAndCountAll({
+      where,
+      include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }],
+      order: [['movement_date', 'ASC'], ['created_at', 'ASC']],
+      limit: limitNum,
+      offset
+    });
 
     res.json({
       success: true,
       data: {
         movements,
+        pagination: {
+          total: allMovements.length,
+          page: pageNum,
+          limit: limitNum,
+          pages: Math.ceil(allMovements.length / limitNum)
+        },
         summary: {
-          total_movements: movements.length,
+          total_movements: allMovements.length,
           total_entradas: totalEntradas,
           total_salidas: totalSalidas,
-          stock_actual: movements.length > 0 ? movements[movements.length - 1].new_stock : 0,
+          stock_actual: stockActual,
           total_costo_entradas: totalCostoEntradas,
           costo_promedio: totalEntradas > 0 ? totalCostoEntradas / totalEntradas : 0
         }
@@ -348,6 +364,13 @@ const createMovement = async (movementData, transaction) => {
     await product.update({
       average_cost: newAverageCost
     }, { transaction });
+  }
+
+  // Auto-verificar alertas de stock en salidas (fuera de transaction para no bloquearla)
+  if (movement_type === 'salida') {
+    setImmediate(() => {
+      checkAlertsForProduct(product_id, tenant_id).catch(() => {});
+    });
   }
 
   return movement;

@@ -48,7 +48,11 @@ const list = async (req, res) => {
     const offset = (page - 1) * limit;
 
     const where = { tenant_id };
-    if (status)        where.status        = status;
+    if (status) {
+      // Soportar múltiples estados separados por coma: "recibido,en_proceso,listo"
+      const statusList = status.split(',').map(s => s.trim()).filter(Boolean);
+      where.status = statusList.length === 1 ? statusList[0] : { [Op.in]: statusList };
+    }
     if (technician_id) where.technician_id = technician_id;
     if (customer_id)   where.customer_id   = customer_id;
     if (search) {
@@ -804,4 +808,77 @@ const updateChecklist = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist };
+/**
+ * Reporte general del taller — exportable
+ */
+const getReport = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { date_from, date_to, format = 'json' } = req.query;
+
+    const where = { tenant_id };
+    if (date_from || date_to) {
+      where.created_at = {};
+      if (date_from) where.created_at[Op.gte] = new Date(date_from);
+      if (date_to)   where.created_at[Op.lte] = new Date(date_to + 'T23:59:59');
+    }
+
+    const orders = await WorkOrder.findAll({
+      where,
+      include: [
+        { model: User,          as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
+        { model: Customer,      as: 'customer',   attributes: ['id', 'first_name', 'last_name', 'business_name'] },
+        { model: Vehicle,       as: 'vehicle',    attributes: ['id', 'plate', 'brand', 'model'] },
+        { model: WorkOrderItem, as: 'items' },
+      ],
+      order: [['created_at', 'DESC']]
+    });
+
+    const rows = orders.map(o => {
+      const laborTotal  = (o.items || []).filter(i => ['servicio','mano_obra'].includes(i.item_type)).reduce((s, i) => s + parseFloat(i.total || 0), 0);
+      const partsTotal  = (o.items || []).filter(i => i.item_type === 'repuesto').reduce((s, i) => s + parseFloat(i.total || 0), 0);
+      const customerName = o.customer ? (o.customer.business_name || `${o.customer.first_name} ${o.customer.last_name}`) : 'Sin cliente';
+      const techName     = o.technician ? `${o.technician.first_name} ${o.technician.last_name}` : 'Sin asignar';
+      const resolutionDays = o.delivered_at && o.created_at
+        ? Math.round((new Date(o.delivered_at) - new Date(o.created_at)) / 86400000)
+        : null;
+
+      return {
+        order_number:      o.order_number,
+        status:            o.status,
+        customer:          customerName,
+        vehicle:           o.vehicle ? `${o.vehicle.brand || ''} ${o.vehicle.model || ''} - ${o.vehicle.plate}`.trim() : '',
+        technician:        techName,
+        created_at:        o.created_at ? new Date(o.created_at).toLocaleDateString('es-CO') : '',
+        delivered_at:      o.delivered_at ? new Date(o.delivered_at).toLocaleDateString('es-CO') : '',
+        resolution_days:   resolutionDays,
+        labor_total:       laborTotal,
+        parts_total:       partsTotal,
+        total_amount:      parseFloat(o.total_amount || 0),
+        work_performed:    o.work_performed || '',
+      };
+    });
+
+    // Totales
+    const summary = {
+      total_orders:       rows.length,
+      completed:          rows.filter(r => r.status === 'entregado').length,
+      cancelled:          rows.filter(r => r.status === 'cancelado').length,
+      in_progress:        rows.filter(r => !['entregado','cancelado'].includes(r.status)).length,
+      total_labor:        rows.reduce((s, r) => s + r.labor_total, 0),
+      total_parts:        rows.reduce((s, r) => s + r.parts_total, 0),
+      total_revenue:      rows.reduce((s, r) => s + r.total_amount, 0),
+      avg_resolution_days: (() => {
+        const resolved = rows.filter(r => r.resolution_days !== null);
+        return resolved.length ? Math.round(resolved.reduce((s, r) => s + r.resolution_days, 0) / resolved.length) : 0;
+      })(),
+    };
+
+    res.json({ success: true, data: rows, summary, period: { date_from, date_to } });
+  } catch (error) {
+    logger.error('Error en reporte taller:', error);
+    res.status(500).json({ success: false, message: 'Error al generar reporte del taller' });
+  }
+};
+
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport };

@@ -1,3 +1,4 @@
+const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { DataTypes } = require('sequelize');
@@ -92,6 +93,13 @@ const login = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Email y password son requeridos'
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'La contraseña debe tener al menos 8 caracteres'
       });
     }
 
@@ -197,7 +205,7 @@ const login = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error en login:', error);
+    logger.error('Error en login:', error);
     res.status(500).json({
       success: false,
       message: 'Error en el servidor'});
@@ -222,7 +230,7 @@ const getProfile = async (req, res) => {
       data: user
     });
   } catch (error) {
-    console.error('Error en getProfile:', error);
+    logger.error('Error en getProfile:', error);
     res.status(500).json({
       success: false,
       message: 'Error en el servidor'

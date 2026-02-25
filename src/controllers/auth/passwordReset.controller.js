@@ -1,3 +1,4 @@
+const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { sequelize } = require('../../config/database');
@@ -77,7 +78,7 @@ const forgotPassword = async (req, res) => {
     return res.json({ success: true, message: 'Si el correo está registrado, recibirás un enlace de recuperación.' });
 
   } catch (error) {
-    console.error('Error en forgotPassword:', error);
+    logger.error('Error en forgotPassword:', error);
     return res.status(500).json({ success: false, message: 'Error en el servidor' });
   }
 };
@@ -94,8 +95,8 @@ const resetPassword = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Token y contraseña son requeridos' });
     }
 
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 6 caracteres' });
+    if (password.length < 8) {
+      return res.status(400).json({ success: false, message: 'La contraseña debe tener al menos 8 caracteres' });
     }
 
     const user = await User.findOne({
@@ -123,7 +124,7 @@ const resetPassword = async (req, res) => {
     return res.json({ success: true, message: 'Contraseña actualizada correctamente. Ya puedes iniciar sesión.' });
 
   } catch (error) {
-    console.error('Error en resetPassword:', error);
+    logger.error('Error en resetPassword:', error);
     return res.status(500).json({ success: false, message: 'Error en el servidor' });
   }
 };
