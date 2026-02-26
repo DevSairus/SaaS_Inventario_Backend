@@ -360,58 +360,37 @@ const createCustomerReturn = async (req, res) => {
 
     const total_amount = subtotal + tax;
 
-    // 4. Crear devolución con retry + SAVEPOINT para manejar race condition en entorno serverless.
-    // Problema: en Vercel múltiples Lambdas pueden generar el mismo return_number simultáneamente.
-    // Cuando Postgres recibe un error dentro de una transacción, la marca como abortada (código 25P02)
-    // y rechaza todos los comandos siguientes hasta un ROLLBACK.
-    // Solución: usar SAVEPOINTs — si el INSERT falla, hacemos ROLLBACK TO SAVEPOINT (no a toda la
-    // transacción) y reintentamos con el siguiente número disponible.
-    const MAX_RETRIES = 5;
-    let customerReturn = null;
+    // 4. Generar número de devolución de forma atómica usando advisory lock de Postgres.
+    //
+    // PROBLEMA RAÍZ: En Vercel, múltiples Lambdas ejecutan simultáneamente. Dos Lambdas pueden
+    // consultar el último número al mismo tiempo, obtener el mismo resultado, y ambas intentar
+    // insertar 'DEV-2026-00001'. Los reintentos con SAVEPOINT no funcionan porque después del
+    // rollback la otra Lambda aún no hizo COMMIT, así que el SELECT vuelve a ver el mismo número.
+    //
+    // SOLUCIÓN: pg_advisory_xact_lock serializa el acceso por tenant_id. La segunda Lambda queda
+    // bloqueada en esta línea hasta que la primera haga COMMIT o ROLLBACK. Entonces ya ve el
+    // número correcto y genera el siguiente. Sin colisiones, sin reintentos.
+    await sequelize.query(
+      `SELECT pg_advisory_xact_lock(('x' || md5('customer_return_${tenant_id}'))::bit(64)::bigint)`,
+      { transaction }
+    );
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const sp = `sp_return_num_${attempt}`;
-      await sequelize.query(`SAVEPOINT ${sp}`, { transaction });
+    const return_number = await generateReturnNumber(tenant_id);
 
-      try {
-        const return_number = await generateReturnNumber(tenant_id);
-
-        customerReturn = await CustomerReturn.create({
-          tenant_id,
-          return_number,
-          sale_id,
-          customer_id: sale.customer_id,
-          return_date: new Date(),
-          reason,
-          notes,
-          subtotal,
-          tax,
-          total_amount,
-          status: 'pending',
-          created_by: req.user.id
-        }, { transaction });
-
-        // ✅ Éxito — liberar savepoint y salir del loop
-        await sequelize.query(`RELEASE SAVEPOINT ${sp}`, { transaction });
-        break;
-
-      } catch (createErr) {
-        // Revertir al savepoint para que la transacción siga viva
-        await sequelize.query(`ROLLBACK TO SAVEPOINT ${sp}`, { transaction });
-
-        const isUniqueViolation =
-          createErr.name === 'SequelizeUniqueConstraintError' &&
-          createErr.fields &&
-          createErr.fields.return_number;
-
-        if (isUniqueViolation && attempt < MAX_RETRIES) {
-          console.warn(`⚠️ Colisión en return_number (intento ${attempt}/${MAX_RETRIES}), reintentando...`);
-          await new Promise(r => setTimeout(r, Math.random() * 150));
-        } else {
-          throw createErr;
-        }
-      }
-    }
+    const customerReturn = await CustomerReturn.create({
+      tenant_id,
+      return_number,
+      sale_id,
+      customer_id: sale.customer_id,
+      return_date: new Date(),
+      reason,
+      notes,
+      subtotal,
+      tax,
+      total_amount,
+      status: 'pending',
+      created_by: req.user.id
+    }, { transaction });
 
     // 5. Crear items
     for (const item of returnItems) {
@@ -725,4 +704,3 @@ module.exports = {
   rejectCustomerReturn,
   deleteCustomerReturn
 };
-
