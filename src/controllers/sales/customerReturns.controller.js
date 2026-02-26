@@ -360,13 +360,19 @@ const createCustomerReturn = async (req, res) => {
 
     const total_amount = subtotal + tax;
 
-    // 4. Crear devolución con retry para manejar race condition en entorno serverless
-    // En Vercel, múltiples Lambdas pueden generar el mismo return_number simultáneamente.
-    // Si ocurre colisión de unique constraint, reintentamos hasta MAX_RETRIES veces.
+    // 4. Crear devolución con retry + SAVEPOINT para manejar race condition en entorno serverless.
+    // Problema: en Vercel múltiples Lambdas pueden generar el mismo return_number simultáneamente.
+    // Cuando Postgres recibe un error dentro de una transacción, la marca como abortada (código 25P02)
+    // y rechaza todos los comandos siguientes hasta un ROLLBACK.
+    // Solución: usar SAVEPOINTs — si el INSERT falla, hacemos ROLLBACK TO SAVEPOINT (no a toda la
+    // transacción) y reintentamos con el siguiente número disponible.
     const MAX_RETRIES = 5;
     let customerReturn = null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const sp = `sp_return_num_${attempt}`;
+      await sequelize.query(`SAVEPOINT ${sp}`, { transaction });
+
       try {
         const return_number = await generateReturnNumber(tenant_id);
 
@@ -385,9 +391,14 @@ const createCustomerReturn = async (req, res) => {
           created_by: req.user.id
         }, { transaction });
 
-        break; // ✅ Éxito — salir del loop
+        // ✅ Éxito — liberar savepoint y salir del loop
+        await sequelize.query(`RELEASE SAVEPOINT ${sp}`, { transaction });
+        break;
 
       } catch (createErr) {
+        // Revertir al savepoint para que la transacción siga viva
+        await sequelize.query(`ROLLBACK TO SAVEPOINT ${sp}`, { transaction });
+
         const isUniqueViolation =
           createErr.name === 'SequelizeUniqueConstraintError' &&
           createErr.fields &&
@@ -395,10 +406,8 @@ const createCustomerReturn = async (req, res) => {
 
         if (isUniqueViolation && attempt < MAX_RETRIES) {
           console.warn(`⚠️ Colisión en return_number (intento ${attempt}/${MAX_RETRIES}), reintentando...`);
-          // Espera aleatoria corta para reducir probabilidad de nueva colisión
           await new Promise(r => setTimeout(r, Math.random() * 150));
         } else {
-          // Otro tipo de error, o se agotaron los reintentos
           throw createErr;
         }
       }
