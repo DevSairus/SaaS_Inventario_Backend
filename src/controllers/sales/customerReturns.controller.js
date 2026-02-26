@@ -12,11 +12,12 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 
 /**
  * Generar número de devolución único
+ * FIX: Ordena por el número extraído numéricamente para evitar errores con order by fecha
  */
 const generateReturnNumber = async (tenant_id) => {
   const year = new Date().getFullYear();
   const prefix = `DEV-${year}-`;
-  
+
   const lastReturn = await CustomerReturn.findOne({
     where: {
       tenant_id,
@@ -24,13 +25,17 @@ const generateReturnNumber = async (tenant_id) => {
         [Op.like]: `${prefix}%`
       }
     },
-    order: [['created_at', 'DESC']]
+    order: [
+      [sequelize.literal(`CAST(SPLIT_PART(return_number, '-', 3) AS INTEGER)`), 'DESC']
+    ]
   });
 
   let nextNumber = 1;
   if (lastReturn) {
-    const lastNum = parseInt(lastReturn.return_number.split('-').pop());
-    nextNumber = lastNum + 1;
+    const lastNum = parseInt(lastReturn.return_number.split('-').pop(), 10);
+    if (!isNaN(lastNum)) {
+      nextNumber = lastNum + 1;
+    }
   }
 
   return `${prefix}${String(nextNumber).padStart(5, '0')}`;
@@ -224,50 +229,44 @@ const getCustomerReturnById = async (req, res) => {
  * Crear nueva devolución de cliente
  */
 const createCustomerReturn = async (req, res) => {
+  // ✅ Validar autenticación antes de abrir transacción
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Usuario no autenticado'
+    });
+  }
+
+  if (!req.user.tenant_id) {
+    return res.status(400).json({
+      success: false,
+      message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+    });
+  }
+
+  const tenant_id = req.user.tenant_id;
+  const { sale_id, reason, notes, items } = req.body;
+
+  console.log('📦 Datos recibidos para crear devolución:', { sale_id, reason, notes, items });
+
+  // Validaciones iniciales
+  if (!sale_id) {
+    return res.status(400).json({
+      success: false,
+      message: 'El ID de la venta es requerido'
+    });
+  }
+
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({
+      success: false,
+      message: 'Debe especificar al menos un producto para devolver'
+    });
+  }
+
   const transaction = await sequelize.transaction();
-  
+
   try {
-    // ✅ Validar autenticación
-    if (!req.user) {
-      await transaction.rollback();
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
-    }
-
-    // ✅ Validar tenant_id
-    if (!req.user.tenant_id) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
-    }
-
-    const tenant_id = req.user.tenant_id;
-    const { sale_id, reason, notes, items } = req.body;
-
-    console.log('📦 Datos recibidos para crear devolución:', { sale_id, reason, notes, items });
-
-    // Validaciones iniciales
-    if (!sale_id) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'El ID de la venta es requerido'
-      });
-    }
-
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Debe especificar al menos un producto para devolver'
-      });
-    }
-
-
     // 1. Validar que existe la venta
     const sale = await Sale.findOne({
       where: { id: sale_id, tenant_id },
@@ -361,26 +360,51 @@ const createCustomerReturn = async (req, res) => {
 
     const total_amount = subtotal + tax;
 
-    // 4. Generar número de devolución
-    const return_number = await generateReturnNumber(tenant_id);
+    // 4. Crear devolución con retry para manejar race condition en entorno serverless
+    // En Vercel, múltiples Lambdas pueden generar el mismo return_number simultáneamente.
+    // Si ocurre colisión de unique constraint, reintentamos hasta MAX_RETRIES veces.
+    const MAX_RETRIES = 5;
+    let customerReturn = null;
 
-    // 5. Crear devolución
-    const customerReturn = await CustomerReturn.create({
-      tenant_id,
-      return_number,
-      sale_id,
-      customer_id: sale.customer_id,
-      return_date: new Date(),
-      reason,
-      notes,
-      subtotal,
-      tax,
-      total_amount,
-      status: 'pending', // Requiere aprobación
-      created_by: req.user.id
-    }, { transaction });
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const return_number = await generateReturnNumber(tenant_id);
 
-    // 6. Crear items
+        customerReturn = await CustomerReturn.create({
+          tenant_id,
+          return_number,
+          sale_id,
+          customer_id: sale.customer_id,
+          return_date: new Date(),
+          reason,
+          notes,
+          subtotal,
+          tax,
+          total_amount,
+          status: 'pending',
+          created_by: req.user.id
+        }, { transaction });
+
+        break; // ✅ Éxito — salir del loop
+
+      } catch (createErr) {
+        const isUniqueViolation =
+          createErr.name === 'SequelizeUniqueConstraintError' &&
+          createErr.fields &&
+          createErr.fields.return_number;
+
+        if (isUniqueViolation && attempt < MAX_RETRIES) {
+          console.warn(`⚠️ Colisión en return_number (intento ${attempt}/${MAX_RETRIES}), reintentando...`);
+          // Espera aleatoria corta para reducir probabilidad de nueva colisión
+          await new Promise(r => setTimeout(r, Math.random() * 150));
+        } else {
+          // Otro tipo de error, o se agotaron los reintentos
+          throw createErr;
+        }
+      }
+    }
+
+    // 5. Crear items
     for (const item of returnItems) {
       await CustomerReturnItem.create({
         return_id: customerReturn.id,
@@ -388,7 +412,7 @@ const createCustomerReturn = async (req, res) => {
       }, { transaction });
     }
 
-    // 7. Obtener devolución completa dentro de la transacción
+    // 6. Obtener devolución completa dentro de la transacción
     const returnComplete = await CustomerReturn.findByPk(customerReturn.id, {
       include: [
         {
@@ -431,7 +455,8 @@ const createCustomerReturn = async (req, res) => {
     console.error('Error en createCustomerReturn:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al crear devolución'});
+      message: 'Error al crear devolución'
+    });
   }
 };
 
@@ -506,8 +531,6 @@ const approveCustomerReturn = async (req, res) => {
 
       // Solo generar movimiento si el destino es inventario
       if (item.destination === 'inventory') {
-        // Generar movimiento de entrada por devolución de cliente
-        // La función createMovement actualiza automáticamente el current_stock
         await createMovement({
           tenant_id,
           movement_type: 'entrada',
@@ -540,8 +563,9 @@ const approveCustomerReturn = async (req, res) => {
 
     await transaction.commit();
 
-    const product_ids = supplierReturn.items.map(item => item.product_id);
-    markProductsForAlertCheck(res, product_ids, tenantId);
+    // FIX: era supplierReturn.items y tenantId (variables inexistentes)
+    const product_ids = customerReturn.items.map(item => item.product_id);
+    markProductsForAlertCheck(res, product_ids, tenant_id);
 
     res.json({
       success: true,
@@ -556,7 +580,8 @@ const approveCustomerReturn = async (req, res) => {
     console.error('Error en approveCustomerReturn:', error);
     res.status(500).json({
       success: false,
-      message: 'Error al aprobar devolución'});
+      message: 'Error al aprobar devolución'
+    });
   }
 };
 
