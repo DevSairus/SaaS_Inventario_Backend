@@ -385,6 +385,11 @@ const approveCustomerReturn = async (req, res) => {
           model: CustomerReturnItem,
           as: 'items',
           include: [{ model: Product, as: 'product' }]
+        },
+        {
+          model: Sale,
+          as: 'sale',
+          attributes: ['id', 'sale_number', 'warehouse_id']
         }
       ]
     });
@@ -404,30 +409,36 @@ const approveCustomerReturn = async (req, res) => {
 
     const { createMovement } = require('../inventory/movements.controller');
 
+    // warehouse_id viene de la venta original
+    const warehouse_id = customerReturn.sale ? customerReturn.sale.warehouse_id : null;
+
     for (const item of customerReturn.items) {
       const product = item.product;
       if (!product) continue;
 
-      if (item.destination === 'inventory') {
-        await createMovement({
-          tenant_id,
-          movement_type: 'entrada',
-          movement_reason: 'customer_return',
-          product_id: item.product_id,
-          quantity: item.quantity,
-          unit_cost: item.unit_cost,
-          reference_type: 'customer_return',
-          reference_id: customerReturn.id,
-          user_id: req.user.id,
-          notes: `Devolución de cliente ${customerReturn.return_number} - ${customerReturn.reason}`
-        }, transaction);
+      // Solo mover inventario si el producto lo trackea y el destino es inventario
+      if (!product.track_inventory) continue;
+      if (item.destination !== 'inventory') continue;
 
-        const updatedProduct = await Product.findByPk(item.product_id, { transaction });
-        if (updatedProduct) {
-          await updatedProduct.update({
-            available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock)
-          }, { transaction });
-        }
+      await createMovement({
+        tenant_id,
+        movement_type: 'entrada',
+        movement_reason: 'customer_return',
+        product_id: item.product_id,
+        warehouse_id: warehouse_id || null,
+        quantity: item.quantity,
+        unit_cost: item.unit_cost,
+        reference_type: 'customer_return',
+        reference_id: customerReturn.id,
+        user_id: req.user.id,
+        notes: `Devolución de cliente ${customerReturn.return_number} - ${customerReturn.reason}`
+      }, transaction);
+
+      const updatedProduct = await Product.findByPk(item.product_id, { transaction });
+      if (updatedProduct) {
+        await updatedProduct.update({
+          available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock)
+        }, { transaction });
       }
     }
 
