@@ -11,33 +11,34 @@ const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
 /**
- * Generar número de devolución único
- * FIX: Ordena por el número extraído numéricamente para evitar errores con order by fecha
+ * Generar número de devolución único.
+ *
+ * USA SQL DIRECTO con MAX() — el sequelize.literal en order[] falla silenciosamente
+ * y siempre retornaba el mismo número. Con MAX() obtenemos el entero más alto real.
+ *
+ * Recibe la transacción activa para que el advisory lock sea efectivo:
+ * si se llama sin transacción, el SELECT ve datos committed pero no ve lo que
+ * la propia transacción bloqueada aún no ha committed.
  */
-const generateReturnNumber = async (tenant_id) => {
+const generateReturnNumber = async (tenant_id, transaction) => {
   const year = new Date().getFullYear();
   const prefix = `DEV-${year}-`;
 
-  const lastReturn = await CustomerReturn.findOne({
-    where: {
-      tenant_id,
-      return_number: {
-        [Op.like]: `${prefix}%`
-      }
-    },
-    order: [
-      [sequelize.literal(`CAST(SPLIT_PART(return_number, '-', 3) AS INTEGER)`), 'DESC']
-    ]
-  });
-
-  let nextNumber = 1;
-  if (lastReturn) {
-    const lastNum = parseInt(lastReturn.return_number.split('-').pop(), 10);
-    if (!isNaN(lastNum)) {
-      nextNumber = lastNum + 1;
+  // IMPORTANTE: El unique constraint de la DB es GLOBAL (solo columna return_number, sin tenant_id).
+  // Si filtramos por tenant_id, no vemos los numeros de otros tenants y colisionamos con ellos.
+  // La query busca el MAX global del año para garantizar unicidad en toda la DB.
+  const [result] = await sequelize.query(
+    `SELECT MAX(CAST(SPLIT_PART(return_number, '-', 3) AS INTEGER)) AS max_num
+     FROM customer_returns
+     WHERE return_number LIKE :prefix`,
+    {
+      replacements: { prefix: `${prefix}%` },
+      type: sequelize.QueryTypes.SELECT,
+      transaction
     }
-  }
+  );
 
+  const nextNumber = (result && result.max_num != null ? parseInt(result.max_num, 10) : 0) + 1;
   return `${prefix}${String(nextNumber).padStart(5, '0')}`;
 };
 
@@ -46,20 +47,11 @@ const generateReturnNumber = async (tenant_id) => {
  */
 const getCustomerReturns = async (req, res) => {
   try {
-    // ✅ Validar autenticación
     if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
+      return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     }
-
-    // ✅ Validar tenant_id
     if (!req.user.tenant_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
+      return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
     }
 
     const {
@@ -77,7 +69,6 @@ const getCustomerReturns = async (req, res) => {
     const tenant_id = req.user.tenant_id;
     const offset = (page - 1) * limit;
 
-    // Construir condiciones
     const where = { tenant_id };
 
     if (search) {
@@ -86,29 +77,11 @@ const getCustomerReturns = async (req, res) => {
         { notes: { [Op.iLike]: `%${search}%` } }
       ];
     }
+    if (customer_id) where.customer_id = customer_id;
+    if (status) where.status = status;
+    if (start_date) where.return_date = { [Op.gte]: start_date };
+    if (end_date) where.return_date = { ...where.return_date, [Op.lte]: end_date };
 
-    if (customer_id) {
-      where.customer_id = customer_id;
-    }
-
-    if (status) {
-      where.status = status;
-    }
-
-    if (start_date) {
-      where.return_date = {
-        [Op.gte]: start_date
-      };
-    }
-
-    if (end_date) {
-      where.return_date = {
-        ...where.return_date,
-        [Op.lte]: end_date
-      };
-    }
-
-    // Obtener devoluciones
     const { count, rows } = await CustomerReturn.findAndCountAll({
       where,
       include: [
@@ -141,10 +114,7 @@ const getCustomerReturns = async (req, res) => {
 
   } catch (error) {
     console.error('Error en getCustomerReturns:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener devoluciones'
-    });
+    res.status(500).json({ success: false, message: 'Error al obtener devoluciones' });
   }
 };
 
@@ -153,20 +123,11 @@ const getCustomerReturns = async (req, res) => {
  */
 const getCustomerReturnById = async (req, res) => {
   try {
-    // ✅ Validar autenticación
     if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
+      return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     }
-
-    // ✅ Validar tenant_id
     if (!req.user.tenant_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
+      return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
     }
 
     const { id } = req.params;
@@ -179,16 +140,8 @@ const getCustomerReturnById = async (req, res) => {
           model: CustomerReturnItem,
           as: 'items',
           include: [
-            {
-              model: Product,
-              as: 'product',
-              attributes: ['id', 'name', 'sku', 'barcode']
-            },
-            {
-              model: SaleItem,
-              as: 'saleItem',
-              attributes: ['id', 'quantity', 'unit_price']
-            }
+            { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'barcode'] },
+            { model: SaleItem, as: 'saleItem', attributes: ['id', 'quantity', 'unit_price'] }
           ]
         },
         {
@@ -205,23 +158,14 @@ const getCustomerReturnById = async (req, res) => {
     });
 
     if (!customerReturn) {
-      return res.status(404).json({
-        success: false,
-        message: 'Devolución no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
 
-    res.json({
-      success: true,
-      data: customerReturn
-    });
+    res.json({ success: true, data: customerReturn });
 
   } catch (error) {
     console.error('Error en getCustomerReturnById:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener devolución'
-    });
+    res.status(500).json({ success: false, message: 'Error al obtener devolución' });
   }
 };
 
@@ -229,19 +173,11 @@ const getCustomerReturnById = async (req, res) => {
  * Crear nueva devolución de cliente
  */
 const createCustomerReturn = async (req, res) => {
-  // ✅ Validar autenticación antes de abrir transacción
   if (!req.user) {
-    return res.status(401).json({
-      success: false,
-      message: 'Usuario no autenticado'
-    });
+    return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
   }
-
   if (!req.user.tenant_id) {
-    return res.status(400).json({
-      success: false,
-      message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-    });
+    return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
   }
 
   const tenant_id = req.user.tenant_id;
@@ -249,19 +185,11 @@ const createCustomerReturn = async (req, res) => {
 
   console.log('📦 Datos recibidos para crear devolución:', { sale_id, reason, notes, items });
 
-  // Validaciones iniciales
   if (!sale_id) {
-    return res.status(400).json({
-      success: false,
-      message: 'El ID de la venta es requerido'
-    });
+    return res.status(400).json({ success: false, message: 'El ID de la venta es requerido' });
   }
-
   if (!items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({
-      success: false,
-      message: 'Debe especificar al menos un producto para devolver'
-    });
+    return res.status(400).json({ success: false, message: 'Debe especificar al menos un producto para devolver' });
   }
 
   const transaction = await sequelize.transaction();
@@ -271,40 +199,28 @@ const createCustomerReturn = async (req, res) => {
     const sale = await Sale.findOne({
       where: { id: sale_id, tenant_id },
       include: [
-        { 
-          model: SaleItem, 
+        {
+          model: SaleItem,
           as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product'
-            }
-          ]
+          include: [{ model: Product, as: 'product' }]
         }
       ]
     });
 
     if (!sale) {
       await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     }
 
     // 2. Validar items a devolver
     for (const item of items) {
       const saleItem = sale.items.find(si => si.id === item.sale_item_id);
-      
+
       if (!saleItem) {
         await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Producto no encontrado en la venta`
-        });
+        return res.status(400).json({ success: false, message: 'Producto no encontrado en la venta' });
       }
 
-      // Verificar cantidad
       if (parseFloat(item.quantity) > parseFloat(saleItem.quantity)) {
         await transaction.rollback();
         return res.status(400).json({
@@ -313,16 +229,13 @@ const createCustomerReturn = async (req, res) => {
         });
       }
 
-      // Verificar que no se haya devuelto ya
       const alreadyReturned = await CustomerReturnItem.sum('quantity', {
-        where: {
-          sale_item_id: item.sale_item_id
-        },
+        where: { sale_item_id: item.sale_item_id },
         transaction
       });
 
       const remainingToReturn = parseFloat(saleItem.quantity) - (parseFloat(alreadyReturned) || 0);
-      
+
       if (parseFloat(item.quantity) > remainingToReturn) {
         await transaction.rollback();
         return res.status(400).json({
@@ -340,7 +253,7 @@ const createCustomerReturn = async (req, res) => {
       const saleItem = sale.items.find(si => si.id === item.sale_item_id);
       const itemSubtotal = parseFloat(item.quantity) * parseFloat(saleItem.unit_price);
       const itemTax = itemSubtotal * (parseFloat(saleItem.tax_rate || 0) / 100);
-      
+
       subtotal += itemSubtotal;
       tax += itemTax;
 
@@ -360,22 +273,29 @@ const createCustomerReturn = async (req, res) => {
 
     const total_amount = subtotal + tax;
 
-    // 4. Generar número de devolución de forma atómica usando advisory lock de Postgres.
+    // 4. Advisory lock + generar número de forma atómica
     //
-    // PROBLEMA RAÍZ: En Vercel, múltiples Lambdas ejecutan simultáneamente. Dos Lambdas pueden
-    // consultar el último número al mismo tiempo, obtener el mismo resultado, y ambas intentar
-    // insertar 'DEV-2026-00001'. Los reintentos con SAVEPOINT no funcionan porque después del
-    // rollback la otra Lambda aún no hizo COMMIT, así que el SELECT vuelve a ver el mismo número.
+    // PROBLEMA: En Vercel, múltiples Lambdas ejecutan simultáneamente. Sin bloqueo,
+    // dos Lambdas pueden leer el mismo MAX y ambas intentar insertar DEV-2026-00001.
     //
-    // SOLUCIÓN: pg_advisory_xact_lock serializa el acceso por tenant_id. La segunda Lambda queda
-    // bloqueada en esta línea hasta que la primera haga COMMIT o ROLLBACK. Entonces ya ve el
-    // número correcto y genera el siguiente. Sin colisiones, sin reintentos.
+    // SOLUCIÓN: pg_advisory_xact_lock serializa el acceso por tenant.
+    // La segunda Lambda queda bloqueada aquí hasta que la primera haga COMMIT/ROLLBACK.
+    // El lock se libera automáticamente al finalizar la transacción.
+    //
+    // El hash convierte el tenant_id (string) en un bigint para el lock.
     await sequelize.query(
-      `SELECT pg_advisory_xact_lock(('x' || md5('customer_return_${tenant_id}'))::bit(64)::bigint)`,
-      { transaction }
+      `SELECT pg_advisory_xact_lock(
+         ('x' || substr(md5(:lock_key), 1, 16))::bit(64)::bigint
+       )`,
+      {
+        replacements: { lock_key: `customer_return_${tenant_id}` },
+        transaction
+      }
     );
 
-    const return_number = await generateReturnNumber(tenant_id);
+    // generateReturnNumber recibe la transacción para que el SELECT
+    // se ejecute dentro del mismo contexto bloqueado y vea los datos correctos.
+    const return_number = await generateReturnNumber(tenant_id, transaction);
 
     const customerReturn = await CustomerReturn.create({
       tenant_id,
@@ -400,19 +320,13 @@ const createCustomerReturn = async (req, res) => {
       }, { transaction });
     }
 
-    // 6. Obtener devolución completa dentro de la transacción
+    // 6. Obtener devolución completa
     const returnComplete = await CustomerReturn.findByPk(customerReturn.id, {
       include: [
         {
           model: CustomerReturnItem,
           as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product',
-              attributes: ['id', 'name', 'sku']
-            }
-          ]
+          include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }]
         },
         {
           model: Customer,
@@ -441,10 +355,7 @@ const createCustomerReturn = async (req, res) => {
       await transaction.rollback();
     }
     console.error('Error en createCustomerReturn:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al crear devolución'
-    });
+    res.status(500).json({ success: false, message: 'Error al crear devolución' });
   }
 };
 
@@ -453,29 +364,19 @@ const createCustomerReturn = async (req, res) => {
  */
 const approveCustomerReturn = async (req, res) => {
   const transaction = await sequelize.transaction();
-  
+
   try {
-    // ✅ Validar autenticación
     if (!req.user) {
       await transaction.rollback();
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
+      return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     }
-
-    // ✅ Validar tenant_id
     if (!req.user.tenant_id) {
       await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
+      return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
     }
 
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
-    const { notes } = req.body;
 
     const customerReturn = await CustomerReturn.findOne({
       where: { id, tenant_id },
@@ -483,22 +384,14 @@ const approveCustomerReturn = async (req, res) => {
         {
           model: CustomerReturnItem,
           as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product'
-            }
-          ]
+          include: [{ model: Product, as: 'product' }]
         }
       ]
     });
 
     if (!customerReturn) {
       await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: 'Devolución no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
 
     if (customerReturn.status !== 'pending') {
@@ -509,15 +402,12 @@ const approveCustomerReturn = async (req, res) => {
       });
     }
 
-    // 1. Actualizar stock y generar movimientos
     const { createMovement } = require('../inventory/movements.controller');
 
     for (const item of customerReturn.items) {
       const product = item.product;
-      
       if (!product) continue;
 
-      // Solo generar movimiento si el destino es inventario
       if (item.destination === 'inventory') {
         await createMovement({
           tenant_id,
@@ -532,7 +422,6 @@ const approveCustomerReturn = async (req, res) => {
           notes: `Devolución de cliente ${customerReturn.return_number} - ${customerReturn.reason}`
         }, transaction);
 
-        // Obtener el producto actualizado y recalcular available_stock
         const updatedProduct = await Product.findByPk(item.product_id, { transaction });
         if (updatedProduct) {
           await updatedProduct.update({
@@ -542,7 +431,6 @@ const approveCustomerReturn = async (req, res) => {
       }
     }
 
-    // 2. Actualizar estado
     await customerReturn.update({
       status: 'approved',
       approved_by: req.user.id,
@@ -555,21 +443,14 @@ const approveCustomerReturn = async (req, res) => {
     const product_ids = customerReturn.items.map(item => item.product_id);
     markProductsForAlertCheck(res, product_ids, tenant_id);
 
-    res.json({
-      success: true,
-      message: 'Devolución aprobada exitosamente',
-      data: customerReturn
-    });
+    res.json({ success: true, message: 'Devolución aprobada exitosamente', data: customerReturn });
 
   } catch (error) {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
     }
     console.error('Error en approveCustomerReturn:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al aprobar devolución'
-    });
+    res.status(500).json({ success: false, message: 'Error al aprobar devolución' });
   }
 };
 
@@ -578,42 +459,24 @@ const approveCustomerReturn = async (req, res) => {
  */
 const rejectCustomerReturn = async (req, res) => {
   try {
-    // ✅ Validar autenticación
     if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
+      return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     }
-
-    // ✅ Validar tenant_id
     if (!req.user.tenant_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
+      return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
     }
 
     const { id } = req.params;
     const { rejection_reason } = req.body;
     const tenant_id = req.user.tenant_id;
 
-    const customerReturn = await CustomerReturn.findOne({
-      where: { id, tenant_id }
-    });
+    const customerReturn = await CustomerReturn.findOne({ where: { id, tenant_id } });
 
     if (!customerReturn) {
-      return res.status(404).json({
-        success: false,
-        message: 'Devolución no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
-
     if (customerReturn.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: 'La devolución ya fue procesada'
-      });
+      return res.status(400).json({ success: false, message: 'La devolución ya fue procesada' });
     }
 
     await customerReturn.update({
@@ -623,18 +486,11 @@ const rejectCustomerReturn = async (req, res) => {
       rejection_reason
     });
 
-    res.json({
-      success: true,
-      message: 'Devolución rechazada',
-      data: customerReturn
-    });
+    res.json({ success: true, message: 'Devolución rechazada', data: customerReturn });
 
   } catch (error) {
     console.error('Error en rejectCustomerReturn:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al rechazar devolución'
-    });
+    res.status(500).json({ success: false, message: 'Error al rechazar devolución' });
   }
 };
 
@@ -643,56 +499,32 @@ const rejectCustomerReturn = async (req, res) => {
  */
 const deleteCustomerReturn = async (req, res) => {
   try {
-    // ✅ Validar autenticación
     if (!req.user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
+      return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     }
-
-    // ✅ Validar tenant_id
     if (!req.user.tenant_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
+      return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
     }
 
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
-    const customerReturn = await CustomerReturn.findOne({
-      where: { id, tenant_id }
-    });
+    const customerReturn = await CustomerReturn.findOne({ where: { id, tenant_id } });
 
     if (!customerReturn) {
-      return res.status(404).json({
-        success: false,
-        message: 'Devolución no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
-
     if (customerReturn.status !== 'pending') {
-      return res.status(400).json({
-        success: false,
-        message: 'Solo se pueden eliminar devoluciones pendientes'
-      });
+      return res.status(400).json({ success: false, message: 'Solo se pueden eliminar devoluciones pendientes' });
     }
 
     await customerReturn.destroy();
 
-    res.json({
-      success: true,
-      message: 'Devolución eliminada exitosamente'
-    });
+    res.json({ success: true, message: 'Devolución eliminada exitosamente' });
 
   } catch (error) {
     console.error('Error en deleteCustomerReturn:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al eliminar devolución'
-    });
+    res.status(500).json({ success: false, message: 'Error al eliminar devolución' });
   }
 };
 
