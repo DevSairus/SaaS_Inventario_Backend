@@ -1,5 +1,6 @@
 const logger = require('../../config/logger');
 /* eslint-disable indent */
+const bcrypt = require('bcryptjs'); // ✅ FIX: import movido al top del archivo
 const Tenant = require('../models/Tenant');
 const User = require('../models/User');
 const Invoice = require('../models/Invoice');
@@ -312,6 +313,7 @@ const getTenantById = async (req, res) => {
     });
   }
 };
+
 // Crear nuevo tenant
 const createTenant = async (req, res) => {
   try {
@@ -369,11 +371,14 @@ const createTenant = async (req, res) => {
       is_active: true,
     });
 
+    // ✅ FIX: Hashear la contraseña antes de guardarla en la BD
+    const hashedPassword = await bcrypt.hash(admin_password || 'temporal123', 10);
+
     // Crear usuario admin del tenant
     const admin = await User.create({
       tenant_id: tenant.id,
       email: admin_email,
-      password_hash: admin_password || 'temporal123',
+      password_hash: hashedPassword, // ✅ FIX: ahora se guarda el hash, no el texto plano
       role: 'admin',
       first_name: admin_first_name,
       last_name: admin_last_name,
@@ -418,10 +423,10 @@ const updateTenant = async (req, res) => {
       address,
       logo_url,
       notes,
-      plan, // ← AGREGAR
-      max_users, // ← AGREGAR
-      max_clients, // ← AGREGAR
-      max_invoices_per_month, // ← AGREGAR
+      plan,
+      max_users,
+      max_clients,
+      max_invoices_per_month,
     } = req.body;
 
     const tenant = await Tenant.findByPk(id);
@@ -442,10 +447,10 @@ const updateTenant = async (req, res) => {
       address,
       logo_url,
       notes,
-      plan, // ← AGREGAR
-      max_users, // ← AGREGAR
-      max_clients, // ← AGREGAR
-      max_invoices_per_month, // ← AGREGAR
+      plan,
+      max_users,
+      max_clients,
+      max_invoices_per_month,
     });
 
     res.status(200).json({
@@ -462,6 +467,7 @@ const updateTenant = async (req, res) => {
     });
   }
 };
+
 // Activar/Desactivar tenant
 const toggleTenantStatus = async (req, res) => {
   try {
@@ -1234,7 +1240,6 @@ const resetTenantUserPassword = async (req, res) => {
       });
     }
 
-    const bcrypt = require('bcryptjs');
     const hashedPassword = await bcrypt.hash(password, 10);
 
     await user.update({ password_hash: hashedPassword });
