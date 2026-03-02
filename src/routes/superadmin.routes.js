@@ -1511,6 +1511,170 @@ router.post(
 );
 
 // ============================================
+// GESTIÓN DE USUARIOS DE TENANTS (acciones individuales)
+// ============================================
+
+/**
+ * PUT /api/v1/superadmin/tenants/:tenantId/users/:userId
+ * Actualizar datos de un usuario específico
+ */
+router.put(
+  '/tenants/:tenantId/users/:userId',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { first_name, last_name, email, phone, role, is_active } = req.body;
+
+      const user = await User.findByPk(userId);
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (user.role === 'super_admin') {
+        return res.status(403).json({ success: false, message: 'No se puede editar un super admin' });
+      }
+
+      const updates = {};
+      if (first_name)          updates.first_name = first_name;
+      if (last_name)           updates.last_name  = last_name;
+      if (email)               updates.email      = email;
+      if (phone !== undefined) updates.phone      = phone;
+      if (role)                updates.role       = role;
+      if (is_active !== undefined) updates.is_active = is_active;
+
+      await user.update(updates);
+
+      const userResponse = user.toJSON();
+      delete userResponse.password_hash;
+
+      res.json({ success: true, message: 'Usuario actualizado exitosamente', data: { user: userResponse } });
+    } catch (error) {
+      console.error('Error actualizando usuario:', error);
+      res.status(500).json({ success: false, message: 'Error al actualizar usuario', error: error.message });
+    }
+  }
+);
+
+/**
+ * DELETE /api/v1/superadmin/tenants/:tenantId/users/:userId
+ * Eliminar (desactivar) un usuario de un tenant
+ */
+router.delete(
+  '/tenants/:tenantId/users/:userId',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const user = await User.findByPk(userId);
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (user.role === 'super_admin') {
+        return res.status(403).json({ success: false, message: 'No se puede eliminar un super admin' });
+      }
+
+      // Soft delete: desactivar en lugar de borrar físicamente
+      await user.update({ is_active: false });
+
+      res.json({ success: true, message: 'Usuario eliminado exitosamente' });
+    } catch (error) {
+      console.error('Error eliminando usuario:', error);
+      res.status(500).json({ success: false, message: 'Error al eliminar usuario', error: error.message });
+    }
+  }
+);
+
+/**
+ * PUT /api/v1/superadmin/tenants/:tenantId/users/:userId/role
+ * Cambiar el rol de un usuario
+ */
+router.put(
+  '/tenants/:tenantId/users/:userId/role',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { role } = req.body;
+
+      const validRoles = ['admin', 'operario', 'cliente'];
+      if (!role || !validRoles.includes(role)) {
+        return res.status(400).json({
+          success: false,
+          message: `Rol inválido. Valores permitidos: ${validRoles.join(', ')}`
+        });
+      }
+
+      const user = await User.findByPk(userId);
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (user.role === 'super_admin') {
+        return res.status(403).json({ success: false, message: 'No se puede cambiar el rol de un super admin' });
+      }
+
+      await user.update({ role });
+
+      res.json({ success: true, message: 'Rol actualizado exitosamente', data: { user } });
+    } catch (error) {
+      console.error('Error cambiando rol:', error);
+      res.status(500).json({ success: false, message: 'Error al cambiar rol', error: error.message });
+    }
+  }
+);
+
+/**
+ * PUT /api/v1/superadmin/tenants/:tenantId/users/:userId/password
+ * Resetear la contraseña de un usuario
+ */
+router.put(
+  '/tenants/:tenantId/users/:userId/password',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { password } = req.body;
+
+      if (!password || password.length < 8) {
+        return res.status(400).json({
+          success: false,
+          message: 'La contraseña debe tener al menos 8 caracteres'
+        });
+      }
+
+      const user = await User.findByPk(userId);
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (user.role === 'super_admin') {
+        return res.status(403).json({ success: false, message: 'No se puede resetear la contraseña de un super admin' });
+      }
+
+      // ✅ Siempre hashear la contraseña antes de guardar
+      const hashedPassword = await bcrypt.hash(password, 10);
+      await user.update({ password_hash: hashedPassword });
+
+      res.json({ success: true, message: 'Contraseña reseteada exitosamente' });
+    } catch (error) {
+      console.error('Error reseteando contraseña:', error);
+      res.status(500).json({ success: false, message: 'Error al resetear contraseña', error: error.message });
+    }
+  }
+);
+
+// ============================================
 // GESTIÓN DE PERMISOS DE ROLES
 // ============================================
 

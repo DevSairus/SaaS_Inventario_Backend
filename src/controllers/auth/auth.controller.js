@@ -1,86 +1,13 @@
 const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { DataTypes } = require('sequelize');
-const { sequelize } = require('../../config/database');
 
-const User = sequelize.define('User', {
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: DataTypes.UUIDV4,
-    primaryKey: true
-  },
-  tenant_id: {
-    type: DataTypes.UUID,
-    allowNull: true
-  },
-  email: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    unique: true
-  },
-  password_hash: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  first_name: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  last_name: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  role: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    defaultValue: 'user'
-  },
-  is_active: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: true
-  },
-  last_login: {
-    type: DataTypes.DATE,
-    allowNull: true
-  }
-}, {
-  tableName: 'users',
-  timestamps: true,
-  underscored: true,
-  createdAt: 'created_at',
-  updatedAt: 'updated_at'
-});
-
-const Tenant = sequelize.define('Tenant', {
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: DataTypes.UUIDV4,
-    primaryKey: true
-  },
-  company_name: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  is_active: {
-    type: DataTypes.BOOLEAN,
-    defaultValue: true
-  },
-  subscription_status: {
-    type: DataTypes.STRING,
-    defaultValue: 'trial'
-  },
-  trial_ends_at: {
-    type: DataTypes.DATE,
-    allowNull: true
-  }
-}, {
-  tableName: 'tenants',
-  timestamps: true,
-  underscored: true,
-  createdAt: 'created_at',
-  updatedAt: 'updated_at'
-});
+// ✅ FIX: Usar los modelos compartidos en lugar de redefinirlos inline.
+// Redefinir modelos con sequelize.define() en múltiples archivos causa que
+// Sequelize sobrescriba las asociaciones y configuraciones del modelo original,
+// lo que puede provocar fallos en la comparación de contraseñas y otros bugs.
+const User = require('../../models/auth/User');
+const Tenant = require('../../models/auth/Tenant');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = '365d'; // Sesión de larga duración - sin expiración práctica
@@ -166,6 +93,7 @@ const login = async (req, res) => {
       }
     }
 
+    // ✅ bcrypt.compare funciona correctamente usando el modelo compartido
     const isPasswordValid = await bcrypt.compare(password, user.password_hash);
 
     if (!isPasswordValid) {
@@ -208,7 +136,8 @@ const login = async (req, res) => {
     logger.error('Error en login:', error);
     res.status(500).json({
       success: false,
-      message: 'Error en el servidor'});
+      message: 'Error en el servidor'
+    });
   }
 };
 
