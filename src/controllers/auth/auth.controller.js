@@ -1,37 +1,41 @@
-const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-
-// ✅ FIX: Usar los modelos compartidos en lugar de redefinirlos inline.
-// Redefinir modelos con sequelize.define() en múltiples archivos causa que
-// Sequelize sobrescriba las asociaciones y configuraciones del modelo original,
-// lo que puede provocar fallos en la comparación de contraseñas y otros bugs.
-const User = require('../../models/auth/User');
-const Tenant = require('../../models/auth/Tenant');
-
-const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = '365d'; // Sesión de larga duración - sin expiración práctica
+const { User, Tenant } = require('../models');
 
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, tenant_id } = req.body;
 
-    if (!email || !password) {
+    if (!email || !password || !tenant_id) {
       return res.status(400).json({
         success: false,
-        message: 'Email y password son requeridos'
+        message: 'Email, contraseña y tenant_id son requeridos'
       });
     }
 
-    if (password.length < 8) {
-      return res.status(400).json({
+    // Validar tenant
+    const tenant = await Tenant.findByPk(tenant_id);
+
+    if (!tenant) {
+      return res.status(404).json({
         success: false,
-        message: 'La contraseña debe tener al menos 8 caracteres'
+        message: 'Empresa no encontrada'
       });
     }
 
+    if (!tenant.is_active) {
+      return res.status(403).json({
+        success: false,
+        message: 'Empresa desactivada'
+      });
+    }
+
+    // Buscar usuario dentro del tenant
     const user = await User.findOne({
-      where: { email: email.toLowerCase().trim() }
+      where: {
+        email: email.toLowerCase().trim(),
+        tenant_id: tenant_id
+      }
     });
 
     if (!user) {
@@ -48,62 +52,15 @@ const login = async (req, res) => {
       });
     }
 
-    // Verificar estado del tenant (solo para usuarios no-super_admin)
-    if (user.tenant_id) {
-      const tenant = await Tenant.findByPk(user.tenant_id);
+    // ⚠️ IMPORTANTE: usar password_hash
+    const isMatch = await bcrypt.compare(password, user.password_hash);
 
-      if (!tenant) {
-        return res.status(403).json({
-          success: false,
-          message: 'Empresa no encontrada'
-        });
-      }
-
-      if (!tenant.is_active) {
-        return res.status(403).json({
-          success: false,
-          message: 'Esta empresa ha sido desactivada. Contacte a soporte.'
-        });
-      }
-
-      if (tenant.subscription_status === 'suspended') {
-        return res.status(402).json({
-          success: false,
-          message: 'Suscripción suspendida. Por favor actualice su método de pago.',
-          code: 'SUBSCRIPTION_SUSPENDED'
-        });
-      }
-
-      if (tenant.subscription_status === 'cancelled') {
-        return res.status(403).json({
-          success: false,
-          message: 'Suscripción cancelada. Contacte a ventas para reactivar.',
-          code: 'SUBSCRIPTION_CANCELLED'
-        });
-      }
-
-      if (tenant.subscription_status === 'trial' && tenant.trial_ends_at) {
-        if (new Date() > new Date(tenant.trial_ends_at)) {
-          return res.status(402).json({
-            success: false,
-            message: 'Período de prueba finalizado. Por favor seleccione un plan.',
-            code: 'TRIAL_EXPIRED'
-          });
-        }
-      }
-    }
-
-    // ✅ bcrypt.compare funciona correctamente usando el modelo compartido
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
-
-    if (!isPasswordValid) {
+    if (!isMatch) {
       return res.status(401).json({
         success: false,
         message: 'Credenciales inválidas'
       });
     }
-
-    await user.update({ last_login: new Date() });
 
     const token = jwt.sign(
       {
@@ -112,73 +69,32 @@ const login = async (req, res) => {
         role: user.role,
         tenant_id: user.tenant_id
       },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
+      process.env.JWT_SECRET,
+      { expiresIn: '8h' }
     );
 
-    res.json({
+    return res.status(200).json({
       success: true,
       message: 'Login exitoso',
-      data: {
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          first_name: user.first_name,
-          last_name: user.last_name,
-          role: user.role,
-          tenant_id: user.tenant_id
-        }
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        tenant_id: user.tenant_id
       }
     });
 
   } catch (error) {
-    logger.error('Error en login:', error);
-    res.status(500).json({
+    console.error('LOGIN ERROR:', error);
+    return res.status(500).json({
       success: false,
-      message: 'Error en el servidor'
+      message: 'Error interno del servidor'
     });
   }
-};
-
-const getProfile = async (req, res) => {
-  try {
-    const user = await User.findByPk(req.user.id, {
-      attributes: { exclude: ['password_hash'] }
-    });
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: user
-    });
-  } catch (error) {
-    logger.error('Error en getProfile:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error en el servidor'
-    });
-  }
-};
-
-const verifyToken = (req, res) => {
-  res.json({
-    success: true,
-    message: 'Token válido',
-    data: {
-      user: req.user
-    }
-  });
 };
 
 module.exports = {
-  login,
-  getProfile,
-  verifyToken
+  login
 };
