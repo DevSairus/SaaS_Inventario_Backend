@@ -340,11 +340,13 @@ const createClient = async (req, res) => {
 
     // Generar contraseña temporal
     const tempPassword = Math.random().toString(36).slice(-8);
+    // ✅ FIX: Hashear la contraseña temporal antes de guardarla en la BD
+    const hashedTempPassword = await bcrypt.hash(tempPassword, 10);
 
     // Crear cliente con tenant_id
     let userData = {
       email,
-      password_hash: tempPassword,
+      password_hash: hashedTempPassword, // ✅ FIX: guardar hash, no texto plano
       role: 'cliente',
       first_name,
       last_name,
