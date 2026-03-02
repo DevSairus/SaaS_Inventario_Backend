@@ -316,6 +316,11 @@ const getTenantById = async (req, res) => {
 
 // Crear nuevo tenant
 const createTenant = async (req, res) => {
+  // ✅ FIX: Usar transacción para garantizar atomicidad.
+  // Sin transacción, si User.create falla, el tenant queda huérfano en la BD
+  // y el admin nunca se crea, causando 401 permanente al intentar login.
+  const t = await Tenant.sequelize.transaction();
+
   try {
     const {
       company_name,
@@ -336,20 +341,23 @@ const createTenant = async (req, res) => {
     } = req.body;
 
     // Verificar que el slug sea único
-    const existingTenant = await Tenant.findOne({ where: { slug } });
+    const existingTenant = await Tenant.findOne({ where: { slug }, transaction: t });
     if (existingTenant) {
+      await t.rollback();
       return res.status(400).json({
         success: false,
         message: 'El slug ya está en uso',
       });
     }
 
-    // Verificar que el email del admin sea único
-    const existingAdmin = await User.findOne({ where: { email: admin_email } });
+    // ✅ FIX: Verificar email del admin con mensaje claro
+    const normalizedAdminEmail = admin_email.toLowerCase().trim();
+    const existingAdmin = await User.findOne({ where: { email: normalizedAdminEmail }, transaction: t });
     if (existingAdmin) {
+      await t.rollback();
       return res.status(400).json({
         success: false,
-        message: 'El email del administrador ya está registrado',
+        message: 'El email del administrador ya está registrado en el sistema',
       });
     }
 
@@ -369,23 +377,25 @@ const createTenant = async (req, res) => {
       max_clients: max_clients || 50,
       max_invoices_per_month: max_invoices_per_month || 100,
       is_active: true,
-    });
+    }, { transaction: t });
 
     // ✅ FIX: Hashear la contraseña antes de guardarla en la BD
     const hashedPassword = await bcrypt.hash(admin_password || 'temporal123', 10);
 
-    // Crear usuario admin del tenant
+    // ✅ FIX: Crear usuario admin sin campos que no existen en el modelo (email_verified, created_by)
+    // El modelo User.js no define esos campos → Sequelize puede lanzar error inesperado
     const admin = await User.create({
       tenant_id: tenant.id,
-      email: admin_email,
-      password_hash: hashedPassword, // ✅ FIX: ahora se guarda el hash, no el texto plano
+      email: normalizedAdminEmail, // ✅ FIX: guardar email normalizado igual que lo busca el login
+      password_hash: hashedPassword,
       role: 'admin',
       first_name: admin_first_name,
       last_name: admin_last_name,
       is_active: true,
-      email_verified: true,
-      created_by: req.user.id,
-    });
+    }, { transaction: t });
+
+    // Si todo salió bien, confirmar la transacción
+    await t.commit();
 
     res.status(201).json({
       success: true,
@@ -401,6 +411,8 @@ const createTenant = async (req, res) => {
       },
     });
   } catch (error) {
+    // ✅ FIX: Hacer rollback en caso de cualquier error para no dejar datos inconsistentes
+    await t.rollback();
     logger.error('Error creando tenant:', error);
     res.status(500).json({
       success: false,
