@@ -11,6 +11,17 @@ const Tenant = require('../../models/auth/Tenant');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Atributos seguros de WorkOrder — excluye columnas que pueden no existir en BD
+// (share_token, checklist_in, settled_at, settlement_id) hasta que se ejecute la migración.
+const WO_SAFE_ATTRS = [
+  'id','tenant_id','order_number','vehicle_id','customer_id','technician_id',
+  'warehouse_id','status','mileage_in','mileage_out','problem_description',
+  'diagnosis','work_performed','photos_in','photos_out','received_at',
+  'promised_at','completed_at','delivered_at','subtotal','tax_amount',
+  'discount_amount','total_amount','sale_id','notes','internal_notes',
+  'created_by','created_at','updated_at',
+];
+
 async function generateOrderNumber(tenant_id, transaction) {
   const year   = new Date().getFullYear();
   const prefix = `OT-${year}-`;
@@ -69,6 +80,7 @@ const list = async (req, res) => {
 
     const { count, rows } = await WorkOrder.findAndCountAll({
       where,
+      attributes: WO_SAFE_ATTRS,
       include: [
         { model: Vehicle,  as: 'vehicle',    attributes: ['id', 'plate', 'brand', 'model', 'year', 'color'] },
         { model: Customer, as: 'customer',   attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone'] },
@@ -825,6 +837,7 @@ const getReport = async (req, res) => {
 
     const orders = await WorkOrder.findAll({
       where,
+      attributes: WO_SAFE_ATTRS,
       include: [
         { model: User,          as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
         { model: Customer,      as: 'customer',   attributes: ['id', 'first_name', 'last_name', 'business_name'] },
@@ -888,33 +901,53 @@ const getReport = async (req, res) => {
  */
 const generateShareToken = async (req, res) => {
   try {
+    // Verificar que la OT existe y pertenece al tenant usando solo atributos seguros
     const order = await WorkOrder.findOne({
       where: { id: req.params.id, tenant_id: req.user.tenant_id },
+      attributes: WO_SAFE_ATTRS,
+      include: [
+        { model: Customer, as: 'customer', attributes: ['first_name', 'phone', 'mobile'] },
+      ],
     });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
-    // Si ya tiene token, reutilizarlo
-    let token = order.share_token;
+    // Usar raw query para leer/escribir share_token — la columna puede no existir en BD
+    let token;
+    try {
+      const rows = await sequelize.query(
+        'SELECT share_token FROM work_orders WHERE id = :id',
+        { replacements: { id: req.params.id }, type: sequelize.QueryTypes.SELECT }
+      );
+      token = rows[0]?.share_token;
+    } catch {
+      // Columna no existe aún en la BD
+      return res.status(503).json({
+        success: false,
+        message: 'La función de compartir OT requiere una actualización de la base de datos. Ejecuta el script de migración.',
+      });
+    }
+
     if (!token) {
       const { v4: uuidv4 } = require('uuid');
       token = uuidv4();
-      await order.update({ share_token: token });
+      await sequelize.query(
+        'UPDATE work_orders SET share_token = :token WHERE id = :id',
+        { replacements: { token, id: req.params.id }, type: sequelize.QueryTypes.UPDATE }
+      );
     }
 
-    // Construir URL pública (usa variable de entorno o el referer)
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
 
-    // Link de WhatsApp
-    const customerName = order.customer
-      ? order.customer.first_name || 'cliente'
-      : 'cliente';
     const whatsappText = encodeURIComponent(
       `Hola! Puedes consultar el estado de tu orden de trabajo ${order.order_number} aquí:\n${shareUrl}`
     );
+
+    // Usar el teléfono del cliente registrado (mobile tiene prioridad sobre phone)
     const customerPhone = order.customer?.mobile || order.customer?.phone || '';
-    const whatsappUrl = customerPhone
-      ? `https://wa.me/${customerPhone.replace(/\D/g, '')}?text=${whatsappText}`
+    const cleanPhone = customerPhone.replace(/\D/g, '');
+    const whatsappUrl = cleanPhone
+      ? `https://wa.me/${cleanPhone}?text=${whatsappText}`
       : `https://wa.me/?text=${whatsappText}`;
 
     res.json({
@@ -935,8 +968,25 @@ const getPublicOrder = async (req, res) => {
   try {
     const { token } = req.params;
 
+    // Primero buscar el ID de la OT por share_token con raw query (columna puede no existir)
+    let orderId;
+    try {
+      const rows = await sequelize.query(
+        'SELECT id FROM work_orders WHERE share_token = :token LIMIT 1',
+        { replacements: { token }, type: sequelize.QueryTypes.SELECT }
+      );
+      orderId = rows[0]?.id;
+    } catch {
+      return res.status(503).json({ success: false, message: 'Función no disponible aún' });
+    }
+
+    if (!orderId) {
+      return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
+    }
+
     const order = await WorkOrder.findOne({
-      where: { share_token: token },
+      where: { id: orderId },
+      attributes: WO_SAFE_ATTRS,
       include: [
         {
           model: Vehicle,
