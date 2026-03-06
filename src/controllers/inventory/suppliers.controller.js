@@ -291,6 +291,32 @@ const updateSupplier = async (req, res) => {
       }
     }
 
+    // Campos NOT NULL — si llegan vacíos/undefined se eliminan para no sobrescribir
+    const notNullFields = ['name', 'tenant_id'];
+    notNullFields.forEach(field => {
+      if (updateData[field] === '' || updateData[field] === undefined || updateData[field] === null) {
+        delete updateData[field];
+      }
+    });
+
+    // Campos opcionales (allowNull: true) — strings vacíos se convierten a null
+    const nullableFields = [
+      'code', 'business_name', 'trade_name', 'tax_id', 'email', 'phone', 'mobile',
+      'website', 'address', 'city', 'state', 'country', 'postal_code',
+      'contact_name', 'contact_email', 'contact_phone', 'contact_position',
+      'supplier_type', 'bank_name', 'account_number', 'account_type', 'notes'
+    ];
+    nullableFields.forEach(field => {
+      if (updateData[field] === '' || updateData[field] === undefined) {
+        updateData[field] = null;
+      }
+    });
+
+    // Eliminar cualquier undefined residual
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] === undefined) delete updateData[key];
+    });
+
     await supplier.update(updateData);
 
     res.json({
@@ -302,8 +328,7 @@ const updateSupplier = async (req, res) => {
     console.error('Error en updateSupplier:', error);
     res.status(500).json({ 
       success: false, 
-      message: 'Error al actualizar proveedor', 
-      error: error.message 
+      message: 'Error al actualizar proveedor'
     });
   }
 };

@@ -417,35 +417,35 @@ const updatePurchase = async (req, res) => {
         parseFloat(shipping_cost || 0);
 
       await purchase.update({
-        supplier_id,
-        purchase_date,
-        expected_delivery_date,
+        supplier_id:              supplier_id              ?? purchase.supplier_id,
+        purchase_date:            purchase_date            ?? purchase.purchase_date,
+        expected_delivery_date:   expected_delivery_date   !== undefined ? expected_delivery_date : purchase.expected_delivery_date,
         subtotal,
         tax_amount,
-        discount_amount: parseFloat(discount_amount || 0),
-        shipping_cost: parseFloat(shipping_cost || 0),
+        discount_amount:          parseFloat(discount_amount || 0),
+        shipping_cost:            parseFloat(shipping_cost  || 0),
         total_amount,
-        payment_method,
-        invoice_number,
-        reference,
-        notes,
-        internal_notes,
-        warehouse_id
+        payment_method:           payment_method           !== undefined ? (payment_method  || null) : purchase.payment_method,
+        invoice_number:           invoice_number           !== undefined ? (invoice_number  || null) : purchase.invoice_number,
+        reference:                reference                !== undefined ? (reference       || null) : purchase.reference,
+        notes:                    notes                    !== undefined ? (notes           || null) : purchase.notes,
+        internal_notes:           internal_notes           !== undefined ? (internal_notes  || null) : purchase.internal_notes,
+        warehouse_id:             warehouse_id             ?? purchase.warehouse_id,
       }, { transaction: t });
     } else {
       // Solo actualizar campos de la compra
       await purchase.update({
-        supplier_id,
-        purchase_date,
-        expected_delivery_date,
-        discount_amount: discount_amount !== undefined ? parseFloat(discount_amount) : purchase.discount_amount,
-        shipping_cost: shipping_cost !== undefined ? parseFloat(shipping_cost) : purchase.shipping_cost,
-        payment_method,
-        invoice_number,
-        reference,
-        notes,
-        internal_notes,
-        warehouse_id
+        supplier_id:            supplier_id            ?? purchase.supplier_id,
+        purchase_date:          purchase_date          ?? purchase.purchase_date,
+        expected_delivery_date: expected_delivery_date !== undefined ? expected_delivery_date : purchase.expected_delivery_date,
+        discount_amount:        discount_amount        !== undefined ? parseFloat(discount_amount) : purchase.discount_amount,
+        shipping_cost:          shipping_cost          !== undefined ? parseFloat(shipping_cost)   : purchase.shipping_cost,
+        payment_method:         payment_method         !== undefined ? (payment_method  || null) : purchase.payment_method,
+        invoice_number:         invoice_number         !== undefined ? (invoice_number  || null) : purchase.invoice_number,
+        reference:              reference              !== undefined ? (reference       || null) : purchase.reference,
+        notes:                  notes                  !== undefined ? (notes           || null) : purchase.notes,
+        internal_notes:         internal_notes         !== undefined ? (internal_notes  || null) : purchase.internal_notes,
+        warehouse_id:           warehouse_id           ?? purchase.warehouse_id,
       }, { transaction: t });
     }
 
