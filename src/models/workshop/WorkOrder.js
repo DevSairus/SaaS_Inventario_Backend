@@ -155,6 +155,13 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.UUID,
     allowNull: true,
     comment: 'Liquidación en la que fue incluida'
+  },
+  // Token público para compartir estado de la OT con el cliente (sin auth)
+  share_token: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    unique: true,
+    comment: 'Token único para que el cliente consulte el estado de su OT sin autenticarse'
   }
 }, {
   tableName: 'work_orders',

@@ -6,10 +6,16 @@
       "use": "@vercel/node"
     }
   ],
-    "routes": [
-      {
-        "src": "/(.*)",
-        "dest": "src/server.js"
-      }
-    ]
-  }
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "src/server.js"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/vehicle-reminders",
+      "schedule": "0 13 * * *"
+    }
+  ]
+}

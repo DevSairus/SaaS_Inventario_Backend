@@ -7,6 +7,7 @@ const {
 } = require('../../models');
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
+const Tenant = require('../../models/auth/Tenant');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -713,7 +714,6 @@ const productivity = async (req, res) => {
 
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
 const { generatePaymentReceipt, generateIntakeForm, generateWorkOrderPDF } = require('../../services/workshopPdfService');
-const Tenant = require('../../models/auth/Tenant');
 
 async function getOrderWithTenant(id, tenant_id) {
   const order = await WorkOrder.findOne({
@@ -881,4 +881,142 @@ const getReport = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport };
+/**
+ * POST /work-orders/:id/share-token
+ * Genera (o devuelve el existente) token único para compartir la OT por WhatsApp.
+ * Requiere autenticación (solo el taller puede generar el link).
+ */
+const generateShareToken = async (req, res) => {
+  try {
+    const order = await WorkOrder.findOne({
+      where: { id: req.params.id, tenant_id: req.user.tenant_id },
+    });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    // Si ya tiene token, reutilizarlo
+    let token = order.share_token;
+    if (!token) {
+      const { v4: uuidv4 } = require('uuid');
+      token = uuidv4();
+      await order.update({ share_token: token });
+    }
+
+    // Construir URL pública (usa variable de entorno o el referer)
+    const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
+    const shareUrl = `${frontendUrl}/ot/${token}`;
+
+    // Link de WhatsApp
+    const customerName = order.customer
+      ? order.customer.first_name || 'cliente'
+      : 'cliente';
+    const whatsappText = encodeURIComponent(
+      `Hola! Puedes consultar el estado de tu orden de trabajo ${order.order_number} aquí:\n${shareUrl}`
+    );
+    const customerPhone = order.customer?.mobile || order.customer?.phone || '';
+    const whatsappUrl = customerPhone
+      ? `https://wa.me/${customerPhone.replace(/\D/g, '')}?text=${whatsappText}`
+      : `https://wa.me/?text=${whatsappText}`;
+
+    res.json({
+      success: true,
+      data: { token, share_url: shareUrl, whatsapp_url: whatsappUrl },
+    });
+  } catch (error) {
+    logger.error('Error generando share token:', error);
+    res.status(500).json({ success: false, message: 'Error al generar enlace' });
+  }
+};
+
+/**
+ * GET /public/work-orders/:token
+ * Endpoint PÚBLICO (sin autenticación) para que el cliente consulte su OT.
+ */
+const getPublicOrder = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const order = await WorkOrder.findOne({
+      where: { share_token: token },
+      include: [
+        {
+          model: Vehicle,
+          as: 'vehicle',
+          attributes: ['plate', 'brand', 'model', 'year', 'color', 'fuel_type'],
+        },
+        {
+          model: Customer,
+          as: 'customer',
+          attributes: ['first_name', 'last_name', 'business_name', 'phone', 'mobile'],
+        },
+        {
+          model: User,
+          as: 'technician',
+          attributes: ['first_name', 'last_name'],
+        },
+        {
+          model: WorkOrderItem,
+          as: 'items',
+          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'total'],
+        },
+      ],
+    });
+
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
+    }
+
+    // Buscar datos del taller (tenant) para mostrar nombre y contacto
+    const tenant = await Tenant.findByPk(order.tenant_id, {
+      attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color'],
+    });
+
+    // Retornar solo campos seguros para el cliente (sin notas internas, sin IDs)
+    const publicData = {
+      order_number: order.order_number,
+      status: order.status,
+      problem_description: order.problem_description,
+      diagnosis: order.diagnosis,
+      work_performed: order.work_performed,
+      mileage_in: order.mileage_in,
+      mileage_out: order.mileage_out,
+      received_at: order.received_at,
+      promised_at: order.promised_at,
+      completed_at: order.completed_at,
+      delivered_at: order.delivered_at,
+      subtotal: order.subtotal,
+      tax_amount: order.tax_amount,
+      total_amount: order.total_amount,
+      photos_in: order.photos_in || [],
+      photos_out: order.photos_out || [],
+      notes: order.notes,
+      vehicle: order.vehicle,
+      customer: order.customer ? {
+        name: order.customer.business_name || `${order.customer.first_name} ${order.customer.last_name || ''}`.trim(),
+      } : null,
+      technician: order.technician ? `${order.technician.first_name} ${order.technician.last_name}` : null,
+      items: (order.items || []).map(i => ({
+        item_type: i.item_type,
+        product_name: i.product_name,
+        product_sku: i.product_sku,
+        quantity: parseFloat(i.quantity),
+        unit_price: parseFloat(i.unit_price),
+        total: parseFloat(i.total),
+      })),
+      workshop: tenant ? {
+        name: tenant.company_name,
+        phone: tenant.phone,
+        email: tenant.email,
+        address: tenant.address,
+        logo_url: tenant.logo_url,
+        primary_color: tenant.primary_color || '#2563eb',
+      } : null,
+    };
+
+    res.json({ success: true, data: publicData });
+  } catch (error) {
+    logger.error('Error en getPublicOrder:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener orden' });
+  }
+};
+
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder };

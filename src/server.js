@@ -115,10 +115,20 @@ const announcementsRoutes = require('./routes/announcements.routes');
 // ✅ NUEVO: Gestión de Cartera (Cuentas por Cobrar)
 const accountsReceivableRoutes = require('./routes/accounts-receivable.routes');
 
+// ✅ RUTAS PÚBLICAS (sin auth) y CRON
+const publicRoutes = require('./routes/public.routes');
+const cronRoutes   = require('./routes/cron.routes');
+
 // Rate limiting global
 app.use('/api/', generalLimiter);
 
-// Public
+// ✅ Rutas PÚBLICAS (sin autenticación) — ANTES del authMiddleware
+app.use('/api/public', publicRoutes);
+
+// ✅ Rutas CRON (protegidas con CRON_SECRET)
+app.use('/api/cron', cronRoutes);
+
+// Public auth
 app.use('/api/auth', authRoutes);
 
 // Super Admin Routes (sin tenant middleware)
