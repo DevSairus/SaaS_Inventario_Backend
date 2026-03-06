@@ -454,19 +454,27 @@ const updateProduct = async (req, res) => {
       updateData.available_stock = current - reserved;
     }
 
-    // Convertir strings vacíos a null para campos UUID y opcionales
-    const fieldsToSanitize = [
-      'category_id',
-      'barcode',
-      'description',
-      'brand',
-      'unit_of_measure',
-      'max_stock'
-    ];
-
-    fieldsToSanitize.forEach(field => {
+    // Campos opcionales que SÍ pueden ser null en la BD
+    const nullableFields = ['category_id', 'barcode', 'description', 'brand', 'max_stock'];
+    nullableFields.forEach(field => {
       if (updateData[field] === '' || updateData[field] === undefined) {
         updateData[field] = null;
+      }
+    });
+
+    // Campos NOT NULL con defaultValue: nunca convertir a null.
+    // Si llegan vacíos o undefined, se eliminan del payload para no sobrescribir el valor existente.
+    const notNullFields = ['unit_of_measure', 'sku', 'name'];
+    notNullFields.forEach(field => {
+      if (updateData[field] === '' || updateData[field] === undefined || updateData[field] === null) {
+        delete updateData[field];
+      }
+    });
+
+    // Eliminar cualquier otro campo undefined para no pasar valores no intencionados a Sequelize
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] === undefined) {
+        delete updateData[key];
       }
     });
 
