@@ -15,7 +15,7 @@ const Tenant = require('../../models/auth/Tenant');
 // (share_token, checklist_in, settled_at, settlement_id) hasta que se ejecute la migración.
 const WO_SAFE_ATTRS = [
   'id','tenant_id','order_number','vehicle_id','customer_id','technician_id',
-  'warehouse_id','status','mileage_in','mileage_out','problem_description',
+  'warehouse_id','status','mileage_in','problem_description',
   'diagnosis','work_performed','photos_in','photos_out','received_at',
   'promised_at','completed_at','delivered_at','subtotal','tax_amount',
   'discount_amount','total_amount','sale_id','notes','internal_notes',
@@ -211,13 +211,13 @@ const update = async (req, res) => {
     const {
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
-      notes, mileage_in, mileage_out, discount_amount,
+      notes, mileage_in, discount_amount,
     } = req.body;
 
     await order.update({
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
-      notes, mileage_in, mileage_out,
+      notes, mileage_in,
       discount_amount: discount_amount != null ? parseFloat(discount_amount) : order.discount_amount,
     });
 
@@ -236,25 +236,88 @@ const update = async (req, res) => {
 // ── CHANGE STATUS ─────────────────────────────────────────────────────────────
 
 const changeStatus = async (req, res) => {
+  const transaction = await sequelize.transaction();
   try {
-    const { status, mileage_out } = req.body;
+    const { status } = req.body;
     const validStatuses = ['recibido', 'en_proceso', 'en_espera', 'listo', 'entregado', 'cancelado'];
-    if (!validStatuses.includes(status))
+    if (!validStatuses.includes(status)) {
+      await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Estado inválido' });
+    }
 
-    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
-    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    const order = await WorkOrder.findOne({
+      where: { id: req.params.id, tenant_id: req.user.tenant_id },
+      transaction,
+    });
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    }
+
+    if (['entregado', 'cancelado'].includes(order.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: `La OT ya está ${order.status} y no puede cambiar de estado` });
+    }
 
     const updates = { status };
     if (status === 'listo')     updates.completed_at = new Date();
-    if (status === 'entregado') {
-      updates.delivered_at = new Date();
-      if (mileage_out) updates.mileage_out = mileage_out;
+    if (status === 'entregado') updates.delivered_at  = new Date();
+
+    // ── Cancelación: devolver stock de todos los repuestos descontados ──────────
+    if (status === 'cancelado') {
+      const items = await WorkOrderItem.findAll({
+        where: { work_order_id: order.id },
+        transaction,
+      });
+
+      for (const item of items) {
+        if (item.item_type !== 'repuesto' || !item.inventory_movement_id) continue;
+
+        const product = await Product.findByPk(item.product_id, { transaction });
+        if (!product || !product.track_inventory) continue;
+
+        const qty       = parseFloat(item.quantity);
+        const prevStock = parseFloat(product.current_stock) || 0;
+        const newStock  = prevStock + qty;
+
+        await product.update({ current_stock: newStock }, { transaction });
+
+        // Eliminar el movimiento de salida original para mantener el historial limpio
+        await InventoryMovement.destroy({
+          where: { id: item.inventory_movement_id },
+          transaction,
+        });
+
+        // Limpiar la referencia en el ítem
+        await item.update({ inventory_movement_id: null }, { transaction });
+
+        logger.info(`OT cancelada: stock revertido ${product.name} +${qty} (${prevStock} → ${newStock})`);
+      }
     }
 
-    await order.update(updates);
-    res.json({ success: true, message: `Estado actualizado a: ${status}`, data: order });
+    await order.update(updates, { transaction });
+    await transaction.commit();
+
+    // Retornar la OT completa con includes
+    const full = await WorkOrder.findOne({
+      where: { id: req.params.id, tenant_id: req.user.tenant_id },
+      include: [
+        { model: Vehicle,  as: 'vehicle' },
+        { model: Customer, as: 'customer' },
+        { model: User,     as: 'technician', attributes: ['id', 'first_name', 'last_name', 'phone'] },
+        { model: User,     as: 'creator_wo', attributes: ['id', 'first_name', 'last_name'] },
+        { model: Warehouse,as: 'warehouse',  attributes: ['id', 'name'] },
+        { model: Sale,     as: 'sale',       attributes: ['id', 'sale_number', 'status', 'total_amount'] },
+        {
+          model: WorkOrderItem, as: 'items',
+          include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] }],
+        },
+      ],
+    });
+
+    res.json({ success: true, message: `Estado actualizado a: ${status}`, data: full });
   } catch (error) {
+    await transaction.rollback();
     logger.error('Error cambiando estado OT:', error);
     res.status(500).json({ success: false, message: 'Error al cambiar estado' });
   }
@@ -302,12 +365,35 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: `Stock insuficiente. Disponible: ${product.current_stock}` });
     }
 
-    // Calcular importes
-    const price    = parseFloat(unit_price) || parseFloat(product.base_price) || 0;
-    const taxPct   = parseFloat(tax_percentage ?? product.tax_percentage ?? 19);
-    const subtotal = qty * price;
-    const tax_amount = (product.has_tax !== false) ? Math.round(subtotal * (taxPct / 100)) : 0;
-    const total    = subtotal + tax_amount;
+    // Calcular importes — respetar price_includes_tax y has_tax
+    // Normalizar booleanos: Sequelize/PG puede devolver true/false/null/string/'true'/'false'
+    const toBool = (v, def = false) => {
+      if (v === true  || v === 'true'  || v === 1) return true;
+      if (v === false || v === 'false' || v === 0) return false;
+      return def;
+    };
+
+    const price           = parseFloat(unit_price) || parseFloat(product.base_price) || 0;
+    const taxPct          = parseFloat(tax_percentage ?? product.tax_percentage ?? 19);
+    const hasTax          = toBool(product.has_tax, true) && taxPct > 0;
+    const priceIncludesTax = toBool(product.price_includes_tax, false);
+
+    let subtotal, tax_amount;
+    if (!hasTax) {
+      // Producto exento de IVA
+      subtotal   = qty * price;
+      tax_amount = 0;
+    } else if (priceIncludesTax) {
+      // El precio ya incluye IVA — extraer el impuesto embebido
+      const totalBruto = qty * price;
+      subtotal   = Math.round(totalBruto / (1 + taxPct / 100));
+      tax_amount = totalBruto - subtotal;
+    } else {
+      // Precio no incluye IVA — sumarlo encima
+      subtotal   = qty * price;
+      tax_amount = Math.round(subtotal * (taxPct / 100));
+    }
+    const total = subtotal + tax_amount;
 
     // Crear ítem
     const item = await WorkOrderItem.create({
@@ -478,7 +564,7 @@ const generateSale = async (req, res) => {
       customer_phone:   customer?.phone  || null,
       customer_email:   customer?.email  || null,
       vehicle_plate:    order.vehicle?.plate || null,
-      mileage:          order.mileage_out || order.mileage_in || null,
+      mileage:          order.mileage_in || null,
       warehouse_id:     order.warehouse_id,
       subtotal:         order.subtotal,
       tax_amount:       order.tax_amount,
@@ -1028,7 +1114,6 @@ const getPublicOrder = async (req, res) => {
       diagnosis: order.diagnosis,
       work_performed: order.work_performed,
       mileage_in: order.mileage_in,
-      mileage_out: order.mileage_out,
       received_at: order.received_at,
       promised_at: order.promised_at,
       completed_at: order.completed_at,
