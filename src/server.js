@@ -105,6 +105,7 @@ const publicRoutes                  = require('./routes/public.routes');
 const cronRoutes                    = require('./routes/cron.routes');
 
 // ✅ DIAN — Facturación Electrónica
+const whatsappRoutes = require('./routes/whatsapp.routes');
 const dianRoutes                    = require('./routes/dian.routes');
 
 // Rate limiting global
@@ -156,6 +157,7 @@ app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware,
 app.use('/api/users',                          authMiddleware, tenantMiddleware, userRoutes);
 
 // ✅ DIAN — Facturación Electrónica (con tenant)
+app.use('/api/whatsapp',                      authMiddleware, whatsappRoutes);
 app.use('/api/dian',                           authMiddleware, tenantMiddleware, dianRoutes);
 
 const path = require('path');

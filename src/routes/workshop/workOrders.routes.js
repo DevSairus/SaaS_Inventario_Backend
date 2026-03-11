@@ -33,7 +33,10 @@ router.post('/:id/generate-sale', ctrl.generateSale);
 router.post('/:id/photos/:phase', upload.array('photos', 10), ctrl.uploadPhotos);
 router.delete('/:id/photos/:phase/:photoIndex', ctrl.deletePhoto);
 
-// ✅ NUEVO: Generar/obtener link de compartir para WhatsApp
+// Compartir por WhatsApp (link público)
 router.post('/:id/share-token', ctrl.generateShareToken);
+
+// Enviar enlace OT por WhatsApp (WPPConnect)
+router.post('/:id/send-whatsapp', ctrl.sendWhatsApp);
 
 module.exports = router;

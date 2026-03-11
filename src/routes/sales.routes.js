@@ -23,6 +23,9 @@ router.post('/:id/payments', salesController.registerPayment);
 
 // Generar PDF
 router.get('/:id/pdf', salesController.generatePDF);
+
+// Enviar por WhatsApp
+router.post('/:id/send-whatsapp', salesController.sendWhatsApp);
 router.get('/:id/payment-receipt', salesController.generatePaymentReceipt);
 
 module.exports = router;

@@ -23,6 +23,9 @@ const downloadImage = (url) => {
 };
 
 const generateSalePDF = async (res, sale, tenant) => {
+  const bufferMode = !res;
+  let bufferPromise = null;
+
   try {
     const docType = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
     // hide_remision_tax: si el tenant activa esta opción, la remisión oculta el IVA
@@ -33,9 +36,18 @@ const generateSalePDF = async (res, sale, tenant) => {
 
     const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${docType.title}-${sale.sale_number}.pdf"`);
-    doc.pipe(res);
+    if (!bufferMode) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${docType.title}-${sale.sale_number}.pdf"`);
+      doc.pipe(res);
+    } else {
+      const chunks = [];
+      bufferPromise = new Promise((resolve, reject) => {
+        doc.on('data', c => chunks.push(c));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+      });
+    }
 
     /* ── PALETA ─────────────────────────────────────────────── */
     const red      = '#8b0000';
@@ -366,11 +378,17 @@ const generateSalePDF = async (res, sale, tenant) => {
     doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(red);
 
     doc.end();
+    if (bufferMode) return await bufferPromise;
+
   } catch (error) {
     console.error(error);
-    if (!res.headersSent) res.status(500).json({ message: 'Error generando PDF' });
+    if (!bufferMode && !res.headersSent) res.status(500).json({ message: 'Error generando PDF' });
+    if (bufferMode) throw error;
   }
 };
+
+// Wrapper que devuelve Buffer — usado por sendWhatsApp
+const generateSalePDFBuffer = (sale, tenant) => generateSalePDF(null, sale, tenant);
 
 /* ── HELPERS ────────────────────────────────────────────────── */
 function formatDate(date) {
@@ -516,4 +534,4 @@ const generatePaymentReceiptPDF = async (res, sale, tenant, payment) => {
   }
 };
 
-module.exports = { generateSalePDF, generatePaymentReceiptPDF };
+module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF };

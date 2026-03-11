@@ -4,7 +4,8 @@ const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolu
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
-const { generateSalePDF, generatePaymentReceiptPDF } = require('../../services/pdfService');
+const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF } = require('../../services/pdfService');
+const whatsappService = require('../../services/whatsappService');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const dianService = require('../../services/dian/dianService');
@@ -891,6 +892,53 @@ async function generateSaleNumber(tenant_id, document_type, transaction) {
   return `FAC-${year}-${sequence.toString().padStart(4, '0')}`;
 }
 
+// Enviar PDF por WhatsApp
+const sendWhatsApp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenant_id;
+
+    // Verificar que WhatsApp está conectado
+    const { status } = whatsappService.getStatus();
+    if (status !== 'CONNECTED') {
+      return res.status(400).json({
+        success: false,
+        message: `WhatsApp no está conectado (estado: ${status}). Ve a Configuración → WhatsApp y escanea el QR.`
+      });
+    }
+
+    const sale = await Sale.findOne({
+      where: { id, tenant_id: tenantId },
+      include: [
+        { model: Customer, as: 'customer' },
+        { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] }
+      ]
+    });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+
+    const customerPhone = sale.customer?.phone || sale.customer?.mobile || sale.customer_phone;
+    if (!customerPhone) {
+      return res.status(400).json({ success: false, message: 'El cliente no tiene número de teléfono registrado.' });
+    }
+
+    const tenant = await Tenant.findByPk(tenantId);
+    if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
+
+    const TYPES = { factura: 'Factura', remision: 'Remisión', cotizacion: 'Cotización' };
+    const docLabel = TYPES[sale.document_type] || 'Documento';
+    const filename = `${docLabel.toUpperCase()}-${sale.sale_number}.pdf`;
+    const caption  = `Hola! Te enviamos tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*. Total: $${Number(sale.total_amount).toLocaleString('es-CO')}. Cualquier duda estamos a tu servicio.`;
+
+    const pdfBuffer = await generateSalePDFBuffer(sale, tenant);
+    await whatsappService.sendDocument(customerPhone, pdfBuffer, filename, caption);
+
+    res.json({ success: true, message: `${docLabel} enviada por WhatsApp a ${customerPhone}` });
+  } catch (error) {
+    logger.error('Error enviando WhatsApp:', error);
+    res.status(500).json({ success: false, message: error.message || 'Error al enviar por WhatsApp' });
+  }
+};
+
 module.exports = {
   getAll,
   getById,
@@ -903,5 +951,6 @@ module.exports = {
   delete: deleteById,
   getStats,
   generatePDF,
+  sendWhatsApp,
   generatePaymentReceipt
 };

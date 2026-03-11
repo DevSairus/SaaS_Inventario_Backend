@@ -812,6 +812,7 @@ const productivity = async (req, res) => {
 
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
 const { generatePaymentReceipt, generateIntakeForm, generateWorkOrderPDF } = require('../../services/workshopPdfService');
+const whatsappService = require('../../services/whatsappService');
 
 async function getOrderWithTenant(id, tenant_id) {
   const order = await WorkOrder.findOne({
@@ -1014,8 +1015,7 @@ const generateShareToken = async (req, res) => {
     }
 
     if (!token) {
-      const { v4: uuidv4 } = require('uuid');
-      token = uuidv4();
+      token = require('crypto').randomUUID();
       await sequelize.query(
         'UPDATE work_orders SET share_token = :token WHERE id = :id',
         { replacements: { token, id: req.params.id }, type: sequelize.QueryTypes.UPDATE }
@@ -1154,4 +1154,55 @@ const getPublicOrder = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder };
+// Enviar enlace OT por WhatsApp (WPPConnect)
+const sendWhatsApp = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenant_id = req.user.tenant_id;
+
+    // Verificar que WhatsApp está conectado
+    const { status } = whatsappService.getStatus();
+    if (status !== 'CONNECTED') {
+      return res.status(400).json({
+        success: false,
+        message: `WhatsApp no está conectado (estado: ${status}). Ve a Configuración → WhatsApp y escanea el QR.`
+      });
+    }
+
+    // Obtener o crear share token
+    const rows = await sequelize.query(
+      'SELECT share_token FROM work_orders WHERE id = :id AND tenant_id = :tenant_id',
+      { replacements: { id, tenant_id }, type: sequelize.QueryTypes.SELECT }
+    );
+    if (!rows.length) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    let token = rows[0].share_token;
+    if (!token) {
+      token = require('crypto').randomUUID();
+      await sequelize.query(
+        'UPDATE work_orders SET share_token = :token WHERE id = :id',
+        { replacements: { token, id }, type: sequelize.QueryTypes.UPDATE }
+      );
+    }
+
+    // Datos del cliente y la orden
+    const { order } = await getOrderWithTenant(id, tenant_id);
+    const phone = order?.customer?.mobile || order?.customer?.phone;
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'El cliente no tiene número de teléfono registrado.' });
+    }
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
+    const shareUrl = `${frontendUrl}/ot/${token}`;
+    const message = `Hola! Te compartimos el estado de tu Orden de Trabajo *${order.order_number}*.\nPuedes consultarla en tiempo real aquí:\n${shareUrl}`;
+
+    logger.info(`[WhatsApp] Enviando enlace OT ${order.order_number} a ${phone}`);
+    await whatsappService.sendText(phone, message);
+
+    res.json({ success: true, message: `Enlace enviado por WhatsApp a ${phone}` });
+  } catch (error) {
+    logger.error('[WhatsApp] Error enviando OT:', error.message, error.stack);
+    res.status(500).json({ success: false, message: error.message || 'Error al enviar por WhatsApp' });
+  }
+}
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp };

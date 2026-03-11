@@ -617,4 +617,5 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
   }
 };
 
+// Wrapper que devuelve Buffer — usado por sendWhatsApp
 module.exports = { generatePaymentReceipt, generateIntakeForm, generateWorkOrderPDF };
