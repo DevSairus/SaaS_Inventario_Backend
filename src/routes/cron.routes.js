@@ -70,7 +70,6 @@ router.post('/test-reminder', cronAuth, async (req, res) => {
     const Vehicle  = require('../models/workshop/Vehicle');
     const Customer = require('../models/sales/Customer');
     const Tenant   = require('../models/auth/Tenant');
-    const whatsappService = require('../services/whatsappService');
     const { sendEmail }   = require('../services/emailService');
 
     const { tenant_id, plate, days = 7, type = 'both' } = req.body;
@@ -126,40 +125,10 @@ router.post('/test-reminder', cronAuth, async (req, res) => {
         fakeExpiry.setDate(fakeExpiry.getDate() + Number(days));
         const expiryDate = fakeExpiry.toLocaleDateString('es-CO', { year: 'numeric', month: 'long', day: 'numeric' });
 
-        const whatsappMsg = [
-          `${urgencyEmoji} *[PRUEBA] Recordatorio ${urgencyText}* — ${typeLabel}`,
-          ``,
-          `Hola *${customerName}*,`,
-          ``,
-          `Tu vehículo *${plate_upper}* tiene el *${typeLabel}* venciendo en *${days} día${days > 1 ? 's' : ''}* (${expiryDate}).`,
-          ``,
-          `Renuévalo a tiempo para evitar multas y conducir con tranquilidad. 😊`,
-          ``,
-          `— ${workshopName}`,
-          ``,
-          `_(Este es un mensaje de prueba del sistema de recordatorios)_`,
-        ].join('\n');
-
-        const phone = customer?.mobile || customer?.phone;
         let channel = null;
 
-        // Intentar WhatsApp primero
-        if (phone) {
-          const { status } = whatsappService.getStatus();
-          if (status === 'CONNECTED') {
-            try {
-              await whatsappService.sendText(phone, whatsappMsg);
-              channel = 'whatsapp';
-            } catch (e) {
-              channel = `whatsapp_error: ${e.message}`;
-            }
-          } else {
-            channel = `whatsapp_skip (estado: ${status})`;
-          }
-        }
-
-        // Fallback email
-        if (!channel?.startsWith('whatsapp') && customer?.email) {
+        // Enviar por email
+        if (customer?.email) {
           try {
             await sendEmail({
               to: customer.email,

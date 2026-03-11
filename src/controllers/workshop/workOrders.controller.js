@@ -1154,20 +1154,13 @@ const getPublicOrder = async (req, res) => {
   }
 };
 
-// Enviar enlace OT por WhatsApp (WPPConnect)
+// Enviar enlace OT por WhatsApp (wa.me)
+// Genera un enlace wa.me con el estado de la OT pre-cargado.
+// El frontend lo abre; el usuario presiona Enviar en WhatsApp.
 const sendWhatsApp = async (req, res) => {
   try {
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
-
-    // Verificar que WhatsApp está conectado
-    const { status } = whatsappService.getStatus();
-    if (status !== 'CONNECTED') {
-      return res.status(400).json({
-        success: false,
-        message: `WhatsApp no está conectado (estado: ${status}). Ve a Configuración → WhatsApp y escanea el QR.`
-      });
-    }
 
     // Obtener o crear share token
     const rows = await sequelize.query(
@@ -1194,15 +1187,21 @@ const sendWhatsApp = async (req, res) => {
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
-    const message = `Hola! Te compartimos el estado de tu Orden de Trabajo *${order.order_number}*.\nPuedes consultarla en tiempo real aquí:\n${shareUrl}`;
+    const message  = `Hola! Te compartimos el estado de tu Orden de Trabajo *${order.order_number}*.\nPuedes consultarla en tiempo real aquí:\n${shareUrl}`;
 
-    logger.info(`[WhatsApp] Enviando enlace OT ${order.order_number} a ${phone}`);
-    await whatsappService.sendText(phone, message);
+    // Genera enlace wa.me (no envía automáticamente)
+    const result = await whatsappService.sendText(phone, message);
 
-    res.json({ success: true, message: `Enlace enviado por WhatsApp a ${phone}` });
+    logger.info(`[WhatsApp] wa.me OT ${order.order_number} generado para ${phone}`);
+    res.json({
+      success: true,
+      waLink:   result.waLink,   // El frontend abre este enlace
+      shareUrl,
+      message: `Enlace listo para enviar a ${phone}. Haz clic en "Abrir WhatsApp".`,
+    });
   } catch (error) {
-    logger.error('[WhatsApp] Error enviando OT:', error.message, error.stack);
-    res.status(500).json({ success: false, message: error.message || 'Error al enviar por WhatsApp' });
+    logger.error('[WhatsApp] Error generando enlace OT:', error.message, error.stack);
+    res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
 module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp };

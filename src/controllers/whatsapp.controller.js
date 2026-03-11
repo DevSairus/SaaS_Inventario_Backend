@@ -1,44 +1,24 @@
 // backend/src/controllers/whatsapp.controller.js
-const whatsappService = require('../services/whatsappService');
+//
+// Con la nueva arquitectura wa.me + CallMeBot ya no hay sesión que gestionar.
+// El endpoint /status siempre retorna CONNECTED.
+// /connect y /disconnect se mantienen por compatibilidad con el frontend.
+
 const logger = require('../config/logger');
 
-/** GET /api/whatsapp/status */
+/** GET /api/whatsapp/status — siempre CONNECTED */
 const getStatus = (req, res) => {
-  const { status, qr } = whatsappService.getStatus();
-  res.json({ success: true, status, qr });
+  res.json({ success: true, status: 'CONNECTED', qr: null });
 };
 
-/** POST /api/whatsapp/connect — inicia sesión / genera QR */
+/** POST /api/whatsapp/connect — no-op, responde inmediatamente */
 const connect = async (req, res) => {
-  try {
-    const { status } = whatsappService.getStatus();
-    if (status === 'CONNECTED') {
-      return res.json({ success: true, status: 'CONNECTED', message: 'Ya conectado' });
-    }
-    if (status === 'CONNECTING' || status === 'QR_READY') {
-      return res.json({ success: true, status, message: 'Conexión en progreso' });
-    }
-
-    // Iniciar en background — el QR se obtiene vía polling /status
-    whatsappService.initialize().catch(err => {
-      logger.error('[WhatsApp] Error background init:', err.message);
-    });
-
-    res.json({ success: true, status: 'CONNECTING', message: 'Iniciando conexión...' });
-  } catch (error) {
-    logger.error('[WhatsApp] Error connect:', error.message);
-    res.status(500).json({ success: false, message: error.message });
-  }
+  res.json({ success: true, status: 'CONNECTED', message: 'Modo wa.me activo — no requiere conexión.' });
 };
 
-/** POST /api/whatsapp/disconnect */
+/** POST /api/whatsapp/disconnect — no-op */
 const disconnect = async (req, res) => {
-  try {
-    await whatsappService.disconnect();
-    res.json({ success: true, message: 'Desconectado correctamente' });
-  } catch (error) {
-    res.status(500).json({ success: false, message: error.message });
-  }
+  res.json({ success: true, message: 'Modo wa.me — no hay sesión que cerrar.' });
 };
 
 module.exports = { getStatus, connect, disconnect };

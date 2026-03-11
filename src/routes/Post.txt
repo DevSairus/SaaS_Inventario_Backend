@@ -1,0 +1,8 @@
+curl -X POST http://localhost:5000/api/cron/test-reminder \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenant_id": "c9bf8c49-d0e5-40ab-9373-b42baa9a09a1",
+    "plate": "MGZ73F",
+    "days": 7,
+    "type": "TECNO"
+  }'
