@@ -73,7 +73,13 @@ const sendDocument = async (phone, pdfBuffer, filename, caption) => {
 
   const pdfUrl = await new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { resource_type: 'raw', public_id: publicId, format: 'pdf' },
+      {
+        resource_type: 'raw',
+        public_id:     publicId,
+        format:        'pdf',
+        type:          'upload',      // acceso público
+        access_mode:   'public',      // sin autenticación requerida
+      },
       (error, result) => {
         if (error) return reject(new Error(`Cloudinary: ${error.message}`));
         resolve(result.secure_url);

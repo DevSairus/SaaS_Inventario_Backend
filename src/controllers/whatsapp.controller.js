@@ -77,7 +77,7 @@ const testCloudinary = async (req, res) => {
     // Subir
     const uploadResult = await new Promise((resolve, reject) => {
       const stream = cloudinary.uploader.upload_stream(
-        { resource_type: 'raw', public_id: publicId, format: 'pdf' },
+        { resource_type: 'raw', public_id: publicId, format: 'pdf', type: 'upload', access_mode: 'public' },
         (error, result) => error ? reject(error) : resolve(result)
       );
       stream.end(minimalPdf);
