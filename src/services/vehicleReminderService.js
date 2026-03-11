@@ -6,11 +6,11 @@
 //
 // Lógica: Envía notificación cuando el vencimiento es exactamente
 // 15, 7 o 3 días desde hoy.
-// Canal preferido: WhatsApp (Twilio) → fallback Email (Gmail).
+// Canal: WPPConnect (whatsappService) → fallback Email (Gmail).
 
 const { Op } = require('sequelize');
 const { sendEmail } = require('./emailService');
-const { formatPhoneNumber } = require('../config/sms');
+const whatsappService = require('./whatsappService');
 
 // Días de anticipación para los recordatorios
 const REMINDER_DAYS = [15, 7, 3];
@@ -26,26 +26,18 @@ function addDays(days) {
 }
 
 /**
- * Envía un SMS/WhatsApp de recordatorio via Twilio.
- * Retorna true si se envió, false si no hay configuración.
+ * Envía un mensaje de recordatorio via WPPConnect (whatsappService).
+ * Retorna true si se envió, false si WPP no está conectado.
  */
-async function sendWhatsApp(phone, message) {
+async function sendWhatsAppWPP(phone, message) {
   try {
-    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN || !process.env.TWILIO_WHATSAPP_FROM) {
-      return false; // Twilio no configurado
+    const { status } = whatsappService.getStatus();
+    if (status !== 'CONNECTED') {
+      console.warn(`⚠️ [REMINDER] WPPConnect no conectado (estado: ${status}) — usando fallback email`);
+      return false;
     }
-    const twilio = require('twilio');
-    const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-
-    const formattedPhone = formatPhoneNumber(phone);
-
-    await client.messages.create({
-      from: `whatsapp:${process.env.TWILIO_WHATSAPP_FROM}`,
-      to:   `whatsapp:${formattedPhone}`,
-      body: message,
-    });
-
-    console.log(`✅ [REMINDER] WhatsApp enviado a ${formattedPhone}`);
+    await whatsappService.sendText(phone, message);
+    console.log(`✅ [REMINDER] WhatsApp enviado a ${phone}`);
     return true;
   } catch (err) {
     console.error('❌ [REMINDER] Error enviando WhatsApp:', err.message);
@@ -199,7 +191,7 @@ async function sendReminder(vehicle, customer, type, daysLeft, workshopName, res
 
     // Intentar WhatsApp primero
     if (phone) {
-      sent = await sendWhatsApp(phone, whatsappMsg);
+      sent = await sendWhatsAppWPP(phone, whatsappMsg);
     }
 
     // Fallback a email
@@ -215,7 +207,7 @@ async function sendReminder(vehicle, customer, type, daysLeft, workshopName, res
         customer: customer.first_name,
         type,
         daysLeft,
-        channel: phone && sent ? 'whatsapp' : 'email',
+        channel: sent && phone ? 'whatsapp_wpp' : 'email',
       });
     } else {
       results.skipped++;
