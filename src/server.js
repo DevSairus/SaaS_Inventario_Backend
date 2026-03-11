@@ -1,6 +1,6 @@
 require('dotenv').config();
 const validateEnv = require('./config/validateEnv');
-validateEnv();
+try { validateEnv(); } catch (e) { console.error('[ENV] Advertencia:', e.message); }
 
 const express = require('express');
 const cors = require('cors');
@@ -188,11 +188,22 @@ app.use((req, res) => {
 });
 
 // ================= START =================
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, async () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
-  const connected = await testConnection();
-  console.log(connected ? '✅ DB conectada' : '❌ Error DB');
-});
+// Vercel = serverless: no llamar app.listen(), usar module.exports = app
+// Local / Railway / Render: levantar servidor normal
+const isVercel = !!process.env.VERCEL;
+
+if (!isVercel) {
+  const PORT = process.env.PORT || 5000;
+  app.listen(PORT, async () => {
+    console.log('Servidor corriendo en puerto ' + PORT);
+    const connected = await testConnection();
+    console.log(connected ? 'DB conectada OK' : 'ERROR: DB no conectada');
+  });
+} else {
+  // Warm-up de conexion en serverless
+  testConnection().then(ok => {
+    if (!ok) console.error('[Vercel] No se pudo conectar a la BD al iniciar');
+  });
+}
 
 module.exports = app;
