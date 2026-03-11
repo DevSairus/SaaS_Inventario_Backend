@@ -892,9 +892,7 @@ async function generateSaleNumber(tenant_id, document_type, transaction) {
   return `FAC-${year}-${sequence.toString().padStart(4, '0')}`;
 }
 
-// Enviar PDF por WhatsApp (wa.me + Cloudinary)
-// Sube el PDF a Cloudinary y retorna un enlace wa.me pre-cargado.
-// El frontend lo abre en una pestaña nueva; el usuario presiona Enviar.
+// Enviar PDF por WhatsApp — enlace temporal JWT (sin Cloudinary)
 const sendWhatsApp = async (req, res) => {
   try {
     const { id } = req.params;
@@ -919,34 +917,25 @@ const sendWhatsApp = async (req, res) => {
 
     const TYPES = { factura: 'Factura', remision: 'Remisión', cotizacion: 'Cotización' };
     const docLabel = TYPES[sale.document_type] || 'Documento';
-    const filename = `${docLabel.toUpperCase()}-${sale.sale_number}.pdf`;
-    const caption  = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\nCualquier duda estamos a tu servicio. 😊`;
 
-    // Si Cloudinary está configurado: subir PDF e incluir link de descarga.
-    // Si no está configurado: enviar wa.me con los datos de texto (sin PDF).
-    const cloudinaryReady = !!(
-      process.env.CLOUDINARY_CLOUD_NAME &&
-      process.env.CLOUDINARY_API_KEY &&
-      process.env.CLOUDINARY_API_SECRET
+    // Token JWT temporal (48h) — da acceso público al PDF sin sesión
+    const jwt = require('jsonwebtoken');
+    const token = jwt.sign(
+      { type: 'pdf_share', saleId: id, tenantId },
+      process.env.JWT_SECRET,
+      { expiresIn: '48h' }
     );
 
-    let result;
-    if (cloudinaryReady) {
-      const pdfBuffer = await generateSalePDFBuffer(sale, tenant);
-      result = await whatsappService.sendDocument(customerPhone, pdfBuffer, filename, caption);
-    } else {
-      // Fallback: wa.me con resumen de texto + items
-      const itemLines = (sale.items || [])
-        .map(i => `  • ${i.product_name} x${i.quantity} = $${Number(i.total).toLocaleString('es-CO')}`)
-        .join('\n');
-      const textMsg = `${caption}\n\n${itemLines ? `Detalle:\n${itemLines}\n\n` : ''}(Para recibir el PDF configura Cloudinary en el servidor)`;
-      result = await whatsappService.sendText(customerPhone, textMsg);
-    }
+    const backendUrl = (process.env.BACKEND_URL || '').replace(/\/$/, '');
+    const pdfUrl  = `${backendUrl}/api/public/pdf/${token}`;
+    const caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Descarga tu documento:\n${pdfUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+
+    const result = await whatsappService.sendText(customerPhone, caption);
 
     res.json({
       success: true,
       waLink:  result.waLink,
-      pdfUrl:  result.pdfUrl || null,
+      pdfUrl,
       message: `Enlace listo para ${customerPhone}. Se abrirá WhatsApp con el mensaje.`,
     });
   } catch (error) {

@@ -105,7 +105,8 @@ const publicRoutes                  = require('./routes/public.routes');
 const cronRoutes                    = require('./routes/cron.routes');
 
 // ✅ DIAN — Facturación Electrónica
-const whatsappRoutes = require('./routes/whatsapp.routes');
+const whatsappRoutes  = require('./routes/whatsapp.routes');
+const publicPdfRoutes = require('./routes/publicPdf.routes');
 const dianRoutes                    = require('./routes/dian.routes');
 
 // Rate limiting global
@@ -117,6 +118,9 @@ app.use('/api/cron', cronRoutes);
 app.use('/api/auth', authRoutes);
 
 // ── Super Admin (sin tenant) ──
+// Ruta pública para PDFs compartidos (sin auth, token JWT temporal)
+app.use('/api/public/pdf', publicPdfRoutes);
+
 app.use('/api/superadmin', authMiddleware, superadminRoutes);
 
 // ── Anuncios (sin tenant) ──
