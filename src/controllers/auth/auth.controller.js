@@ -223,8 +223,38 @@ const verifyToken = (req, res) => {
   });
 };
 
+/* =====================================================
+   REFRESH TOKEN
+   Re-emite un token nuevo con los datos actuales del usuario
+   El frontend lo llama cada 10 min para mantener la sesión
+===================================================== */
+
+const refreshToken = async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: ['id', 'email', 'role', 'tenant_id', 'is_active'],
+    });
+
+    if (!user || !user.is_active) {
+      return res.status(401).json({ success: false, message: 'Usuario no válido' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id },
+      JWT_SECRET,
+      { expiresIn: JWT_EXPIRES_IN }
+    );
+
+    res.json({ success: true, data: { token } });
+  } catch (error) {
+    logger.error('Error en refreshToken:', error);
+    res.status(500).json({ success: false, message: 'Error en el servidor' });
+  }
+};
+
 module.exports = {
   login,
   getProfile,
-  verifyToken
+  verifyToken,
+  refreshToken,
 };

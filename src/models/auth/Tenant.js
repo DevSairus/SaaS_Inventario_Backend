@@ -142,6 +142,14 @@ const Tenant = sequelize.define('Tenant', {
     allowNull: true
   },
 
+  // Configuración DIAN - Facturación Electrónica
+  dian_config: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: null,
+    comment: 'Configuración DIAN: NIT, software_id, certificado, resoluciones, etc.'
+  },
+
   created_at: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW

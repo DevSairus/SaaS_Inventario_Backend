@@ -1,37 +1,35 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { generateSalePDF, generatePaymentReceiptPDF } = require('../../services/pdfService');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const dianService = require('../../services/dian/dianService');
 
 // Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, limit = 50, offset = 0 } = req.query;
+    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, limit = 50, offset = 0 } = req.query;
 
     const where = { tenant_id: tenantId };
 
-    // Filtros opcionales
     if (status) where.status = status;
     if (customer_id) where.customer_id = customer_id;
     if (document_type) where.document_type = document_type;
-    
-    // Filtro específico por nombre de cliente
+    if (dian_status) where.dian_status = dian_status;
+
     if (customer_name) {
       where.customer_name = { [Op.iLike]: `%${customer_name}%` };
     }
-    
-    // Filtro específico por placa de vehículo
+
     if (vehicle_plate) {
       where.vehicle_plate = { [Op.iLike]: `%${vehicle_plate}%` };
     }
-    
-    // Búsqueda general por término (solo si no hay filtros específicos)
+
     if (search && !customer_name && !vehicle_plate) {
       where[Op.or] = [
         { sale_number: { [Op.iLike]: `%${search}%` } },
@@ -39,14 +37,13 @@ const getAll = async (req, res) => {
         { customer_tax_id: { [Op.iLike]: `%${search}%` } },
         { customer_email: { [Op.iLike]: `%${search}%` } },
         { customer_phone: { [Op.iLike]: `%${search}%` } },
-        { vehicle_plate: { [Op.iLike]: `%${search}%` } }
+        { vehicle_plate: { [Op.iLike]: `%${search}%` } },
+        { dian_invoice_number: { [Op.iLike]: `%${search}%` } },
       ];
     }
-    
+
     if (from_date && to_date) {
-      where.sale_date = {
-        [Op.between]: [from_date, to_date]
-      };
+      where.sale_date = { [Op.between]: [from_date, to_date] };
     } else if (from_date) {
       where.sale_date = { [Op.gte]: from_date };
     } else if (to_date) {
@@ -64,13 +61,7 @@ const getAll = async (req, res) => {
         {
           model: SaleItem,
           as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product',
-              attributes: ['id', 'name', 'sku']
-            }
-          ]
+          include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }]
         }
       ],
       order: [['sale_date', 'DESC'], ['created_at', 'DESC']],
@@ -92,9 +83,7 @@ const getAll = async (req, res) => {
     });
   } catch (error) {
     logger.error('Error al obtener ventas:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener ventas'});
+    res.status(500).json({ success: false, message: 'Error al obtener ventas' });
   }
 };
 
@@ -107,39 +96,23 @@ const getById = async (req, res) => {
     const sale = await Sale.findOne({
       where: { id, tenant_id: tenantId },
       include: [
-        {
-          model: Customer,
-          as: 'customer'
-        },
+        { model: Customer, as: 'customer' },
         {
           model: SaleItem,
           as: 'items',
-          include: [
-            {
-              model: Product,
-              as: 'product'
-            }
-          ]
+          include: [{ model: Product, as: 'product' }]
         }
       ]
     });
 
     if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
+      return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     }
 
-    res.json({
-      success: true,
-      data: sale
-    });
+    res.json({ success: true, data: sale });
   } catch (error) {
     logger.error('Error al obtener venta:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener venta'});
+    res.status(500).json({ success: false, message: 'Error al obtener venta' });
   }
 };
 
@@ -162,24 +135,16 @@ const create = async (req, res) => {
       document_type = 'remision',
       sale_date,
     } = req.body;
-    
+
     let finalCustomerId = customer_id;
     let customerInfo = {};
-    
-    // Si se proporciona customer_id, obtener datos del cliente
+
     if (customer_id) {
-      const customer = await Customer.findOne({
-        where: { id: customer_id, tenant_id: tenantId },
-      });
-      
+      const customer = await Customer.findOne({ where: { id: customer_id, tenant_id: tenantId } });
       if (!customer) {
         await transaction.rollback();
-        return res.status(404).json({ 
-          success: false,
-          message: 'Cliente no encontrado' 
-        });
+        return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
       }
-      
       customerInfo = {
         customer_name: [customer.first_name, customer.last_name].filter(Boolean).join(' '),
         customer_tax_id: customer.tax_id,
@@ -187,22 +152,17 @@ const create = async (req, res) => {
         customer_phone: customer.phone || customer.mobile,
         customer_address: customer.address,
       };
-    }
-    // Si no hay customer_id pero hay customer_data, crear cliente rápido
-    else if (customer_data) {
+    } else if (customer_data) {
       const { full_name: cdFullName, ...cdRest } = customer_data;
       let cdNames = {};
       if (cdFullName) {
         const parts = cdFullName.trim().split(/\s+/);
         cdNames = { first_name: parts[0] || '', last_name: parts.slice(1).join(' ') || '' };
       }
-      const newCustomer = await Customer.create({
-        tenant_id: tenantId,
-        ...cdRest,
-        ...cdNames,
-        is_active: true,
-      }, { transaction });
-      
+      const newCustomer = await Customer.create(
+        { tenant_id: tenantId, ...cdRest, ...cdNames, is_active: true },
+        { transaction }
+      );
       finalCustomerId = newCustomer.id;
       customerInfo = {
         customer_name: [newCustomer.first_name, newCustomer.last_name].filter(Boolean).join(' '),
@@ -213,36 +173,34 @@ const create = async (req, res) => {
       };
     } else {
       await transaction.rollback();
-      return res.status(400).json({ 
-        success: false,
-        message: 'Debe proporcionar customer_id o customer_data' 
-      });
+      return res.status(400).json({ success: false, message: 'Debe proporcionar customer_id o customer_data' });
     }
-    
-    // Generar número de venta
-    const saleNumber = await generateSaleNumber(tenantId, document_type);
-    
+
+    // ── Generar número de venta ──────────────────────────────────────
+    // FACTURAS: usa consecutivo de la resolución DIAN activa (con su prefijo)
+    // REMISIONES / COTIZACIONES: consecutivo interno (sin cambios)
+    const saleNumber = await generateSaleNumber(tenantId, document_type, transaction);
+
     // Calcular totales
     let subtotal = 0;
     let tax_amount = 0;
     let discount_amount = 0;
-    
-    // Validar productos y calcular
     const saleItems = [];
+
     for (const item of items) {
       const itemType = item.item_type || 'product';
 
-      // ── Línea libre ad-hoc (sin product_id) ──────────────
+      // Línea libre ad-hoc
       if (itemType === 'free_line') {
         const fs  = item.quantity * item.unit_price;
         const fd  = fs * (item.discount_percentage || 0) / 100;
         const ftb = fs - fd;
-        let ftax = 0, ftotal = 0, ftaxpct = 0;
+        let ftax = 0, ftaxpct = 0, ftotal = ftb;
         if (item.tax_percentage > 0) {
           ftaxpct = item.tax_percentage;
           ftax    = ftb * ftaxpct / 100;
           ftotal  = ftb + ftax;
-        } else { ftotal = ftb; }
+        }
         subtotal += fs; discount_amount += fd; tax_amount += ftax;
         saleItems.push({
           tenant_id: tenantId, item_type: 'free_line', product_id: null,
@@ -255,57 +213,34 @@ const create = async (req, res) => {
         continue;
       }
 
-      // ── Producto o servicio del catálogo ─────────────────
-      const product = await Product.findOne({
-        where: { id: item.product_id, tenant_id: tenantId },
-      });
-      
+      const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId } });
       if (!product) {
         await transaction.rollback();
-        return res.status(404).json({ 
-          success: false,
-          message: `Producto ${item.product_id} no encontrado` 
-        });
+        return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
       }
-      
+
       const itemSubtotal = item.quantity * item.unit_price;
       const itemDiscount = itemSubtotal * (item.discount_percentage || 0) / 100;
-      const itemTaxBase = itemSubtotal - itemDiscount;
-      
-      // ✅ CORREGIDO: Considerar si el precio incluye IVA
-      // 🆕 NUEVO: Las remisiones NO llevan IVA, solo las facturas
-      let itemTax = 0;
-      let itemTotal = 0;
-      let itemBaseWithoutTax = 0;
-      let taxPercentage = 0; // Declarar aquí para que esté disponible en todo el scope
-      
+      const itemTaxBase  = itemSubtotal - itemDiscount;
+      let itemTax = 0, itemTotal = 0, itemBaseWithoutTax = 0, taxPercentage = 0;
+
       if (product.has_tax === false) {
-        // Producto exento de IVA
-        itemTax = 0;
-        itemBaseWithoutTax = itemTaxBase;
-        itemTotal = itemTaxBase;
-        taxPercentage = 0;
+        itemTax = 0; itemBaseWithoutTax = itemTaxBase; itemTotal = itemTaxBase;
       } else {
         taxPercentage = item.tax_percentage || product.tax_percentage || 19;
         const priceIncludesTax = product.price_includes_tax || false;
-
         if (priceIncludesTax) {
-          // El precio YA INCLUYE el IVA - extraerlo
           itemTax = (itemTaxBase * taxPercentage) / (100 + taxPercentage);
           itemBaseWithoutTax = itemTaxBase - itemTax;
           itemTotal = itemTaxBase;
         } else {
-          // El precio NO incluye IVA - sumarlo
           itemTax = itemTaxBase * taxPercentage / 100;
           itemBaseWithoutTax = itemTaxBase;
           itemTotal = itemTaxBase + itemTax;
         }
       }
-      
-      subtotal += itemSubtotal;
-      discount_amount += itemDiscount;
-      tax_amount += itemTax;
-      
+
+      subtotal += itemSubtotal; discount_amount += itemDiscount; tax_amount += itemTax;
       saleItems.push({
         tenant_id: tenantId,
         item_type: product.product_type === 'service' ? 'service' : 'product',
@@ -323,11 +258,9 @@ const create = async (req, res) => {
         unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
       });
     }
-    
-    // ✅ CORREGIDO: Sumar los totales individuales (ya consideran si IVA está incluido)
-    const total_amount = saleItems.reduce((sum, item) => sum + item.total, 0);
-    
-    // ✨ NUEVO: Preparar datos de venta incluyendo vehicle_plate
+
+    const total_amount = saleItems.reduce((sum, i) => sum + i.total, 0);
+
     const saleData = {
       tenant_id: tenantId,
       sale_number: saleNumber,
@@ -345,6 +278,8 @@ const create = async (req, res) => {
       notes,
       status: 'draft',
       created_by: userId,
+      // DIAN: las facturas se enviarán después del commit; el resto no aplica
+      dian_status: document_type === 'factura' ? 'pending' : 'not_applicable',
     };
 
     if (vehicle_plate && vehicle_plate.trim()) {
@@ -352,15 +287,11 @@ const create = async (req, res) => {
     }
     if (mileage !== undefined && mileage !== null && mileage !== '') {
       const parsedMileage = parseInt(mileage);
-      if (!isNaN(parsedMileage)) {
-        saleData.mileage = parsedMileage;
-      }
+      if (!isNaN(parsedMileage)) saleData.mileage = parsedMileage;
     }
 
-    // Crear venta
     const sale = await Sale.create(saleData, { transaction });
 
-    // Crear items
     for (const item of saleItems) {
       await SaleItem.create({
         sale_id: sale.id,
@@ -384,26 +315,36 @@ const create = async (req, res) => {
 
     await transaction.commit();
 
-    // Recargar con relaciones (DESPUÉS del commit)
+    // ── DIAN: disparar envío asíncrono para facturas (no bloquea response) ──
+    if (document_type === 'factura') {
+      const saleCopy = { ...sale.toJSON(), items: saleItems };
+      setImmediate(async () => {
+        try {
+          const tenant = await Tenant.findByPk(tenantId);
+          await dianService.sendInvoiceToDian(saleCopy, tenant);
+        } catch (err) {
+          logger.error(`[DIAN] Error async al enviar factura ${sale.sale_number}:`, err.message);
+        }
+      });
+    }
+
     const completeSale = await Sale.findByPk(sale.id, {
       include: [
         { model: SaleItem, as: 'items' },
         { model: Customer, as: 'customer' },
       ],
     });
-    
+
     res.status(201).json({
       success: true,
       message: 'Venta creada exitosamente',
       data: completeSale
     });
-    
+
   } catch (error) {
     await transaction.rollback();
     logger.error('Error creando venta:', error);
-    res.status(500).json({ 
-      success: false,
-      message: 'Error creando venta'});
+    res.status(500).json({ success: false, message: 'Error creando venta' });
   }
 };
 
@@ -415,12 +356,10 @@ const update = async (req, res) => {
     const tenantId = req.tenant_id;
 
     const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
-
     if (!sale) {
       await transaction.rollback();
       return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     }
-
     if (sale.status !== 'draft') {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Solo se pueden editar ventas en borrador' });
@@ -447,23 +386,17 @@ const update = async (req, res) => {
       updateData.mileage = isNaN(parsed) ? null : parsed;
     }
 
-    // Si viene customer_id válido, actualizar info del cliente en la venta
     if (updateData.customer_id) {
-      const customer = await Customer.findOne({
-        where: { id: updateData.customer_id, tenant_id: tenantId }
-      });
+      const customer = await Customer.findOne({ where: { id: updateData.customer_id, tenant_id: tenantId } });
       if (customer) {
-        updateData.customer_name = [customer.first_name, customer.last_name].filter(Boolean).join(' ');
-        updateData.customer_tax_id = customer.tax_id;
-        updateData.customer_email = customer.email;
-        updateData.customer_phone = customer.phone || customer.mobile;
+        updateData.customer_name    = [customer.first_name, customer.last_name].filter(Boolean).join(' ');
+        updateData.customer_tax_id  = customer.tax_id;
+        updateData.customer_email   = customer.email;
+        updateData.customer_phone   = customer.phone || customer.mobile;
         updateData.customer_address = customer.address;
       }
     }
 
-    const document_type = updateData.document_type || sale.document_type;
-
-    // Recalcular y guardar items si vienen en el body
     if (items && Array.isArray(items) && items.length > 0) {
       await SaleItem.destroy({ where: { sale_id: id }, transaction });
 
@@ -478,29 +411,19 @@ const update = async (req, res) => {
           const fd  = fs * (item.discount_percentage || 0) / 100;
           const ftb = fs - fd;
           let ftax = 0, ftaxpct = 0, ftotal = ftb;
-
-          if (item.tax_percentage > 0) {
-            ftaxpct = item.tax_percentage;
-            ftax    = ftb * ftaxpct / 100;
-            ftotal  = ftb + ftax;
-          }
-
+          if (item.tax_percentage > 0) { ftaxpct = item.tax_percentage; ftax = ftb * ftaxpct / 100; ftotal = ftb + ftax; }
           subtotal += fs; discount_amount += fd; tax_amount += ftax;
           newItems.push({
             sale_id: id, tenant_id: tenantId, item_type: 'free_line',
             product_id: null, product_name: item.product_name, product_sku: null,
             quantity: item.quantity, unit_price: item.unit_price,
             discount_percentage: item.discount_percentage || 0, discount_amount: fd,
-            tax_percentage: ftaxpct, tax_amount: ftax,
-            subtotal: fs, total: ftotal, unit_cost: 0,
+            tax_percentage: ftaxpct, tax_amount: ftax, subtotal: fs, total: ftotal, unit_cost: 0,
           });
           continue;
         }
 
-        const product = await Product.findOne({
-          where: { id: item.product_id, tenant_id: tenantId }
-        });
-
+        const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId } });
         if (!product) {
           await transaction.rollback();
           return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
@@ -509,7 +432,6 @@ const update = async (req, res) => {
         const itemSubtotal = item.quantity * item.unit_price;
         const itemDiscount = itemSubtotal * (item.discount_percentage || 0) / 100;
         const itemTaxBase  = itemSubtotal - itemDiscount;
-
         let itemTax = 0, itemTotal = 0, taxPercentage = 0;
 
         if (product.has_tax === false) {
@@ -525,10 +447,7 @@ const update = async (req, res) => {
           }
         }
 
-        subtotal        += itemSubtotal;
-        discount_amount += itemDiscount;
-        tax_amount      += itemTax;
-
+        subtotal += itemSubtotal; discount_amount += itemDiscount; tax_amount += itemTax;
         newItems.push({
           sale_id: id, tenant_id: tenantId,
           item_type: product.product_type === 'service' ? 'service' : 'product',
@@ -541,9 +460,7 @@ const update = async (req, res) => {
         });
       }
 
-      for (const item of newItems) {
-        await SaleItem.create(item, { transaction });
-      }
+      for (const item of newItems) await SaleItem.create(item, { transaction });
 
       const total_amount = newItems.reduce((sum, i) => sum + i.total, 0);
       updateData.subtotal        = subtotal;
@@ -556,10 +473,7 @@ const update = async (req, res) => {
     await transaction.commit();
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [
-        { model: SaleItem, as: 'items' },
-        { model: Customer, as: 'customer' }
-      ]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
 
     res.json({ success: true, message: 'Venta actualizada exitosamente', data: updatedSale });
@@ -567,7 +481,7 @@ const update = async (req, res) => {
   } catch (error) {
     await transaction.rollback();
     logger.error('Error actualizando venta:', error);
-    res.status(500).json({ success: false, message: 'Error actualizando venta'});
+    res.status(500).json({ success: false, message: 'Error actualizando venta' });
   }
 };
 
@@ -579,12 +493,8 @@ const confirm = async (req, res) => {
     const userId = req.user_id || req.user?.id;
     const { payment_method, paid_amount } = req.body;
 
-    // Validar que se proporcione método de pago
     if (!payment_method) {
-      return res.status(400).json({
-        success: false,
-        message: 'Debe especificar el método de pago'
-      });
+      return res.status(400).json({ success: false, message: 'Debe especificar el método de pago' });
     }
 
     const sale = await Sale.findOne({
@@ -592,30 +502,18 @@ const confirm = async (req, res) => {
       include: [{ model: SaleItem, as: 'items' }]
     });
 
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
-    }
-
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     if (sale.status !== 'draft') {
-      return res.status(400).json({
-        success: false,
-        message: 'Solo se pueden confirmar ventas en borrador'
-      });
+      return res.status(400).json({ success: false, message: 'Solo se pueden confirmar ventas en borrador' });
     }
 
-    // Validar límite de crédito si el método es crédito
+    // Validar límite de crédito
     if (payment_method === 'credito' && sale.customer_id) {
-      const creditCustomer = await Customer.findOne({
-        where: { id: sale.customer_id, tenant_id: tenantId }
-      });
+      const creditCustomer = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } });
       if (creditCustomer && parseFloat(creditCustomer.credit_limit || 0) > 0) {
         const pendingResult = await Sale.findOne({
           where: {
-            customer_id: sale.customer_id,
-            tenant_id: tenantId,
+            customer_id: sale.customer_id, tenant_id: tenantId,
             payment_status: { [Op.in]: ['pending', 'partial'] },
             status: { [Op.in]: ['completed', 'pending'] },
             id: { [Op.ne]: sale.id }
@@ -634,9 +532,7 @@ const confirm = async (req, res) => {
           return res.status(400).json({
             success: false,
             message: `Límite de crédito excedido para ${name}. Límite: $${limit.toLocaleString('es-CO')}, Deuda actual: $${currentDebt.toLocaleString('es-CO')}, Esta venta: $${parseFloat(sale.total_amount).toLocaleString('es-CO')}`,
-            credit_limit: limit,
-            current_debt: currentDebt,
-            sale_total: parseFloat(sale.total_amount)
+            credit_limit: limit, current_debt: currentDebt, sale_total: parseFloat(sale.total_amount)
           });
         }
       }
@@ -644,15 +540,12 @@ const confirm = async (req, res) => {
 
     const transaction = await sequelize.transaction();
     try {
-      // Pre-validar stock de TODOS los items antes de mover
+      // Pre-validar stock
       const stockErrors = [];
       for (const item of sale.items) {
         if (item.item_type === 'service' || item.item_type === 'free_line') continue;
         if (!item.product_id) continue;
-        const prodCheck = await Product.findOne({
-          where: { id: item.product_id, tenant_id: tenantId },
-          transaction
-        });
+        const prodCheck = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
         if (prodCheck && prodCheck.track_inventory && !prodCheck.allow_negative_stock) {
           const disponible = parseFloat(prodCheck.current_stock);
           const solicitado = parseFloat(item.quantity);
@@ -663,34 +556,20 @@ const confirm = async (req, res) => {
       }
       if (stockErrors.length > 0) {
         await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stock insuficiente: ${stockErrors.join(', ')}`
-        });
+        return res.status(400).json({ success: false, message: `Stock insuficiente: ${stockErrors.join(', ')}` });
       }
 
-      // Crear movimiento de salida por cada item
+      // Crear movimientos de salida
       for (const item of sale.items) {
-        // Servicios y líneas libres no mueven inventario
         if (item.item_type === 'service' || item.item_type === 'free_line') continue;
         if (item.product_id) {
-          const product = await Product.findOne({
-            where: { id: item.product_id, tenant_id: tenantId },
-            transaction
-          });
-
+          const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
           if (product && product.track_inventory) {
             await createMovement({
-              tenant_id: tenantId,
-              movement_type: 'salida',
-              movement_reason: 'sale',
-              reference_type: 'sale',
-              reference_id: sale.id,
-              product_id: item.product_id,
-              warehouse_id: sale.warehouse_id || null,
-              quantity: item.quantity,
-              unit_cost: item.unit_cost || product.average_cost || item.unit_price,
-              user_id: userId,
+              tenant_id: tenantId, movement_type: 'salida', movement_reason: 'sale',
+              reference_type: 'sale', reference_id: sale.id, product_id: item.product_id,
+              warehouse_id: sale.warehouse_id || null, quantity: item.quantity,
+              unit_cost: item.unit_cost || product.average_cost || item.unit_price, user_id: userId,
               movement_date: sale.sale_date ? new Date(sale.sale_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
               notes: `Venta ${sale.sale_number} - ${item.product_name}`
             }, transaction);
@@ -698,58 +577,38 @@ const confirm = async (req, res) => {
         }
       }
 
-      // Preparar datos de actualización con pago
       const amountPaid = paid_amount !== undefined ? parseFloat(paid_amount) : parseFloat(sale.total_amount);
-      
-      const updateData = { 
-        status: 'completed',
-        payment_method: payment_method,
-        paid_amount: amountPaid
-      };
+      const updateData = { status: 'completed', payment_method, paid_amount: amountPaid };
 
-      // Determinar el estado de pago
-      if (amountPaid >= parseFloat(sale.total_amount)) {
-        updateData.payment_status = 'paid';
-      } else if (amountPaid > 0) {
-        updateData.payment_status = 'partial';
-      } else {
-        updateData.payment_status = 'pending';
-      }
+      if (amountPaid >= parseFloat(sale.total_amount)) updateData.payment_status = 'paid';
+      else if (amountPaid > 0) updateData.payment_status = 'partial';
+      else updateData.payment_status = 'pending';
 
       await sale.update(updateData, { transaction });
       await transaction.commit();
 
-      // Audit
-      await audit({ tenant_id: tenantId, user_id: userId, action: 'CONFIRM_SALE',
+      await audit({
+        tenant_id: tenantId, user_id: userId, action: 'CONFIRM_SALE',
         entity: 'sale', entity_id: sale.id,
-        changes: { sale_number: sale.sale_number, total_amount: sale.total_amount, payment_method },
-        req });
+        changes: { sale_number: sale.sale_number, total_amount: sale.total_amount, payment_method }, req
+      });
     } catch (err) {
       await transaction.rollback();
       throw err;
     }
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [
-        { model: SaleItem, as: 'items' },
-        { model: Customer, as: 'customer' }
-      ]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
 
-    // 🔔 Verificación automática de alertas
-    const product_ids = sale.items.map(item => item.product_id);
+    const product_ids = sale.items.map(i => i.product_id);
     markProductsForAlertCheck(res, product_ids, tenantId);
 
-    res.json({
-      success: true,
-      message: 'Venta confirmada y pago registrado exitosamente',
-      data: updatedSale
-    });
+    res.json({ success: true, message: 'Venta confirmada y pago registrado exitosamente', data: updatedSale });
+
   } catch (error) {
     logger.error('Error confirmando venta:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error confirmando venta'});
+    res.status(500).json({ success: false, message: 'Error confirmando venta' });
   }
 };
 
@@ -766,43 +625,21 @@ const cancel = async (req, res) => {
       include: [{ model: SaleItem, as: 'items' }]
     });
 
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
-    }
-
-    if (sale.status === 'cancelled') {
-      return res.status(400).json({
-        success: false,
-        message: 'La venta ya está cancelada'
-      });
-    }
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+    if (sale.status === 'cancelled') return res.status(400).json({ success: false, message: 'La venta ya está cancelada' });
 
     const transaction = await sequelize.transaction();
     try {
-      // Si ya estaba confirmada o entregada, revertir stock con movimiento de entrada
       if (sale.status === 'completed' || sale.status === 'delivered') {
         for (const item of sale.items) {
           if (item.product_id) {
-            const product = await Product.findOne({
-              where: { id: item.product_id, tenant_id: tenantId },
-              transaction
-            });
-
+            const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
             if (product && product.track_inventory) {
               await createMovement({
-                tenant_id: tenantId,
-                movement_type: 'entrada',
-                movement_reason: 'sale_reversal',
-                reference_type: 'sale',
-                reference_id: sale.id,
-                product_id: item.product_id,
-                warehouse_id: sale.warehouse_id || null,
-                quantity: item.quantity,
-                unit_cost: item.unit_cost || product.average_cost || item.unit_price,
-                user_id: userId,
+                tenant_id: tenantId, movement_type: 'entrada', movement_reason: 'sale_reversal',
+                reference_type: 'sale', reference_id: sale.id, product_id: item.product_id,
+                warehouse_id: sale.warehouse_id || null, quantity: item.quantity,
+                unit_cost: item.unit_cost || product.average_cost || item.unit_price, user_id: userId,
                 notes: `Reversión venta ${sale.sale_number} cancelada - ${item.product_name}`
               }, transaction);
             }
@@ -810,11 +647,7 @@ const cancel = async (req, res) => {
         }
       }
 
-      await sale.update({
-        status: 'cancelled',
-        internal_notes: reason || 'Venta cancelada'
-      }, { transaction });
-
+      await sale.update({ status: 'cancelled', internal_notes: reason || 'Venta cancelada' }, { transaction });
       await transaction.commit();
     } catch (err) {
       await transaction.rollback();
@@ -822,22 +655,14 @@ const cancel = async (req, res) => {
     }
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [
-        { model: SaleItem, as: 'items' },
-        { model: Customer, as: 'customer' }
-      ]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
 
-    res.json({
-      success: true,
-      message: 'Venta cancelada exitosamente',
-      data: updatedSale
-    });
+    res.json({ success: true, message: 'Venta cancelada exitosamente', data: updatedSale });
+
   } catch (error) {
     logger.error('Error cancelando venta:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error cancelando venta'});
+    res.status(500).json({ success: false, message: 'Error cancelando venta' });
   }
 };
 
@@ -847,47 +672,23 @@ const markAsDelivered = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenant_id;
     const { delivery_date } = req.body;
-    
-    const sale = await Sale.findOne({
-      where: { id, tenant_id: tenantId }
-    });
-    
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
-    }
-    
+
+    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     if (sale.status !== 'confirmed') {
-      return res.status(400).json({
-        success: false,
-        message: 'Solo se pueden marcar como entregadas las ventas confirmadas'
-      });
+      return res.status(400).json({ success: false, message: 'Solo se pueden marcar como entregadas las ventas confirmadas' });
     }
-    
-    await sale.update({ 
-      status: 'delivered',
-      delivery_date: delivery_date || new Date()
-    });
-    
+
+    await sale.update({ status: 'delivered', delivery_date: delivery_date || new Date() });
+
     const updatedSale = await Sale.findByPk(id, {
-      include: [
-        { model: SaleItem, as: 'items' },
-        { model: Customer, as: 'customer' }
-      ]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
-    
-    res.json({
-      success: true,
-      message: 'Venta marcada como entregada',
-      data: updatedSale
-    });
+
+    res.json({ success: true, message: 'Venta marcada como entregada', data: updatedSale });
   } catch (error) {
     logger.error('Error actualizando venta:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error actualizando venta'});
+    res.status(500).json({ success: false, message: 'Error actualizando venta' });
   }
 };
 
@@ -900,43 +701,21 @@ const registerPayment = async (req, res) => {
     const { amount, payment_method, payment_date, notes } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'El monto debe ser mayor a 0'
-      });
+      return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
     }
 
-    const sale = await Sale.findOne({
-      where: { id, tenant_id: tenantId }
-    });
-
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
-    }
-
+    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     if (sale.status === 'draft') {
-      return res.status(400).json({
-        success: false,
-        message: 'No se puede registrar pago en una venta en borrador'
-      });
+      return res.status(400).json({ success: false, message: 'No se puede registrar pago en una venta en borrador' });
     }
 
     const paid_amount = parseFloat(sale.paid_amount || 0) + parseFloat(amount);
     let payment_status = 'pending';
+    if (paid_amount >= parseFloat(sale.total_amount)) payment_status = 'paid';
+    else if (paid_amount > 0) payment_status = 'partial';
 
-    if (paid_amount >= parseFloat(sale.total_amount)) {
-      payment_status = 'paid';
-    } else if (paid_amount > 0) {
-      payment_status = 'partial';
-    }
-
-    // Obtener historial actual o inicializar array vacío
     const payment_history = sale.payment_history || [];
-    
-    // Agregar nuevo pago al historial
     payment_history.push({
       date: payment_date || new Date(),
       amount: parseFloat(amount),
@@ -945,30 +724,16 @@ const registerPayment = async (req, res) => {
       notes: notes || null
     });
 
-    await sale.update({
-      paid_amount,
-      payment_status,
-      payment_method: payment_method || sale.payment_method,
-      payment_history
-    });
+    await sale.update({ paid_amount, payment_status, payment_method: payment_method || sale.payment_method, payment_history });
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [
-        { model: SaleItem, as: 'items' },
-        { model: Customer, as: 'customer' }
-      ]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
 
-    res.json({
-      success: true,
-      message: 'Pago registrado exitosamente',
-      data: updatedSale
-    });
+    res.json({ success: true, message: 'Pago registrado exitosamente', data: updatedSale });
   } catch (error) {
     logger.error('Error registrando pago:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error registrando pago'});
+    res.status(500).json({ success: false, message: 'Error registrando pago' });
   }
 };
 
@@ -977,81 +742,51 @@ const deleteById = async (req, res) => {
   try {
     const { id } = req.params;
     const tenantId = req.tenant_id;
-    
-    const sale = await Sale.findOne({
-      where: { id, tenant_id: tenantId }
-    });
-    
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
-    }
-    
+    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     if (sale.status !== 'draft') {
-      return res.status(400).json({
-        success: false,
-        message: 'Solo se pueden eliminar ventas en borrador'
-      });
+      return res.status(400).json({ success: false, message: 'Solo se pueden eliminar ventas en borrador' });
     }
-    
     await sale.destroy();
-    
-    res.json({
-      success: true,
-      message: 'Venta eliminada exitosamente'
-    });
+    res.json({ success: true, message: 'Venta eliminada exitosamente' });
   } catch (error) {
     logger.error('Error eliminando venta:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error eliminando venta'});
+    res.status(500).json({ success: false, message: 'Error eliminando venta' });
   }
 };
 
-// Obtener estadísticas
+// Estadísticas
 const getStats = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
     const { from_date, to_date } = req.query;
-    
     const where = { tenant_id: tenantId };
-    
-    if (from_date && to_date) {
-      where.sale_date = {
-        [Op.between]: [from_date, to_date]
-      };
-    } else if (from_date) {
-      where.sale_date = { [Op.gte]: from_date };
-    } else if (to_date) {
-      where.sale_date = { [Op.lte]: to_date };
-    }
-    
+    if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
+    else if (from_date) where.sale_date = { [Op.gte]: from_date };
+    else if (to_date) where.sale_date = { [Op.lte]: to_date };
+
     const stats = await Sale.findAll({
       where,
       attributes: [
         [sequelize.fn('COUNT', sequelize.col('id')), 'total_sales'],
         [sequelize.fn('SUM', sequelize.col('total_amount')), 'total_amount'],
-        [sequelize.fn('SUM', sequelize.literal('CASE WHEN payment_status = \'pending\' THEN total_amount ELSE 0 END')), 'pending_amount'],
+        [sequelize.fn('SUM', sequelize.literal("CASE WHEN payment_status = 'pending' THEN total_amount ELSE 0 END")), 'pending_amount'],
       ],
       raw: true
     });
-    
+
     res.json({
       success: true,
       data: {
-        total_sales: parseInt(stats[0].total_sales) || 0,
-        total_amount: parseFloat(stats[0].total_amount) || 0,
+        total_sales:    parseInt(stats[0].total_sales)    || 0,
+        total_amount:   parseFloat(stats[0].total_amount) || 0,
         pending_amount: parseFloat(stats[0].pending_amount) || 0,
-        sales_count: parseInt(stats[0].total_sales) || 0
+        sales_count:    parseInt(stats[0].total_sales)    || 0
       }
     });
   } catch (error) {
     logger.error('Error obteniendo estadísticas:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo estadísticas'});
+    res.status(500).json({ success: false, message: 'Error obteniendo estadísticas' });
   }
 };
 
@@ -1060,108 +795,44 @@ const generatePDF = async (req, res) => {
   try {
     const { id } = req.params;
     const tenantId = req.tenant_id;
-    
     const sale = await Sale.findOne({
       where: { id, tenant_id: tenantId },
       include: [
         { model: Customer, as: 'customer' },
-        {
-          model: SaleItem,
-          as: 'items',
-          include: [{ model: Product, as: 'product' }]
-        }
+        { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] }
       ]
     });
-    
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Venta no encontrada'
-      });
-    }
-
-    // Obtener datos del tenant para el branding del PDF
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     const tenant = await Tenant.findByPk(tenantId);
-    if (!tenant) {
-      return res.status(404).json({
-        success: false,
-        message: 'Tenant no encontrado'
-      });
-    }
-
-    // Genera el PDF y hace pipe directamente a la respuesta
+    if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
     generateSalePDF(res, sale, tenant);
-
   } catch (error) {
     logger.error('Error generando PDF:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error generando PDF'});
+    res.status(500).json({ success: false, message: 'Error generando PDF' });
   }
 };
-
-// Función auxiliar para generar número de venta
-async function generateSaleNumber(tenant_id, document_type) {
-  const prefix = document_type === 'remision' ? 'REM' : 
-                 document_type === 'factura' ? 'FAC' : 'COT';
-  
-  const year = new Date().getFullYear();
-  
-  const lastSale = await Sale.findOne({
-    where: {
-      tenant_id,
-      sale_number: {
-        [Op.like]: `${prefix}-${year}-%`
-      }
-    },
-    order: [['sale_number', 'DESC']],
-  });
-  
-  let sequence = 1;
-  if (lastSale) {
-    const lastNumber = lastSale.sale_number.split('-').pop();
-    sequence = parseInt(lastNumber) + 1;
-  }
-  
-  return `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
-}
 
 const generatePaymentReceipt = async (req, res) => {
   try {
     const { id } = req.params;
     const tenantId = req.tenant_id;
-    // payment_index: indice en payment_history (0-based), o -1 para el ultimo
-    const paymentIndex = req.query.payment_index !== undefined
-      ? parseInt(req.query.payment_index)
-      : -1;
-
+    const paymentIndex = req.query.payment_index !== undefined ? parseInt(req.query.payment_index) : -1;
     const sale = await Sale.findOne({
       where: { id, tenant_id: tenantId },
       include: [{ model: Customer, as: 'customer' }, { model: SaleItem, as: 'items' }]
     });
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
-
     const history = sale.payment_history || [];
-
-    let payment;
-    let idx;
+    let payment, idx;
     if (history.length > 0) {
       idx = paymentIndex === -1 ? history.length - 1 : Math.min(paymentIndex, history.length - 1);
       payment = { ...history[idx] };
     } else {
-      // Sin historial detallado — usar datos globales de la venta
       idx = 0;
-      payment = {
-        amount:  sale.paid_amount || 0,
-        method:  sale.payment_method || 'efectivo',
-        date:    sale.updated_at || sale.created_at,
-        notes:   null,
-      };
+      payment = { amount: sale.paid_amount || 0, method: sale.payment_method || 'efectivo', date: sale.updated_at || sale.created_at, notes: null };
     }
-
     payment.index = idx;
     payment.receipt_number = `REC-${sale.sale_number}-${String(idx + 1).padStart(2, '0')}`;
-
     const tenant = await Tenant.findByPk(tenantId);
     generatePaymentReceiptPDF(res, sale, tenant, payment);
   } catch (e) {
@@ -1169,6 +840,56 @@ const generatePaymentReceipt = async (req, res) => {
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando recibo' });
   }
 };
+
+// ─── Función auxiliar para generar número de venta ───────────────────────────
+// FACTURAS: usa el consecutivo de la resolución DIAN activa (prefijo + número)
+// REMISIONES / COTIZACIONES: consecutivo interno REM-YYYY-XXXX / COT-YYYY-XXXX
+async function generateSaleNumber(tenant_id, document_type, transaction) {
+  if (document_type !== 'factura') {
+    // Consecutivo interno (sin cambios respecto al original)
+    const prefix = document_type === 'remision' ? 'REM' : 'COT';
+    const year = new Date().getFullYear();
+    const lastSale = await Sale.findOne({
+      where: { tenant_id, sale_number: { [Op.like]: `${prefix}-${year}-%` } },
+      order: [['sale_number', 'DESC']],
+      transaction,
+    });
+    let sequence = 1;
+    if (lastSale) {
+      const lastNumber = lastSale.sale_number.split('-').pop();
+      sequence = parseInt(lastNumber) + 1;
+    }
+    return `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
+  }
+
+  // ── FACTURA: buscar resolución DIAN activa y obtener consecutivo ──────────
+  // Se intenta con resolución de producción primero, luego pruebas
+  const resolution = await DianResolution.findOne({
+    where: { tenant_id, is_active: true, document_type: 'invoice' },
+    order: [['is_test', 'ASC']], // producción (false) primero
+    transaction,
+  });
+
+  if (resolution) {
+    // El dian_invoice_number definitivo se asigna al enviar (con lock en dianService)
+    // El sale_number usa el consecutivo actual como referencia provisional
+    return `${resolution.prefix}${resolution.current_number}`;
+  }
+
+  // Fallback: si no hay resolución DIAN configurada, usar numeración interna
+  const year = new Date().getFullYear();
+  const lastSale = await Sale.findOne({
+    where: { tenant_id, sale_number: { [Op.like]: `FAC-${year}-%` } },
+    order: [['sale_number', 'DESC']],
+    transaction,
+  });
+  let sequence = 1;
+  if (lastSale) {
+    const lastNumber = lastSale.sale_number.split('-').pop();
+    sequence = parseInt(lastNumber) + 1;
+  }
+  return `FAC-${year}-${sequence.toString().padStart(4, '0')}`;
+}
 
 module.exports = {
   getAll,

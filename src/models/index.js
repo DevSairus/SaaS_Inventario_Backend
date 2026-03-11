@@ -51,6 +51,10 @@ const WorkOrder = require('./workshop/WorkOrder');
 const WorkOrderItem = require('./workshop/WorkOrderItem');
 const CommissionSettlement = require('./workshop/CommissionSettlement');
 const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
+
+// DIAN - Facturación Electrónica
+const DianResolution = require('./dian/DianResolution');
+const DianEvent = require('./dian/DianEvent');
 // ============= RELACIONES EXISTENTES =============
 Tenant.hasMany(User, { foreignKey: 'tenant_id', as: 'users' });
 User.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -249,6 +253,20 @@ WorkOrder.hasMany(CommissionSettlementItem, { foreignKey: 'work_order_id', as: '
 // WorkOrder ↔ CommissionSettlement (liquidación en la que fue incluida)
 WorkOrder.belongsTo(CommissionSettlement, { foreignKey: 'settlement_id', as: 'commission_settlement' });
 
+// ============= RELACIONES - DIAN =============
+
+// DianResolution ↔ Tenant
+DianResolution.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(DianResolution, { foreignKey: 'tenant_id', as: 'dian_resolutions' });
+
+// DianEvent ↔ Tenant
+DianEvent.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(DianEvent, { foreignKey: 'tenant_id', as: 'dian_events' });
+
+// DianEvent ↔ Sale
+DianEvent.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+Sale.hasMany(DianEvent, { foreignKey: 'sale_id', as: 'dian_events' });
+
 module.exports = {
   sequelize,
   Tenant,
@@ -290,4 +308,6 @@ module.exports = {
   WorkOrderItem,
   CommissionSettlement,
   CommissionSettlementItem,
+  DianResolution,
+  DianEvent,
 };
