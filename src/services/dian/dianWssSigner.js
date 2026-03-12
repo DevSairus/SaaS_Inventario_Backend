@@ -325,8 +325,8 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
     signedInfo +
     `<ds:SignatureValue>${sigB64}</ds:SignatureValue>` +
     `<ds:KeyInfo>` +
-    `<wsse:SecurityTokenReference xmlns:wsse="${NS.WSSE}" xmlns:wsse11="http://docs.oasis-open.org/wss/oasis-wss-wssecurity-secext-1.1.xsd" wsse11:TokenType="${NS.X509VT}">` +
-    `<wsse:KeyIdentifier ValueType="http://docs.oasis-open.org/wss/oasis-wss-soap-message-security-1.1#ThumbprintSHA1" EncodingType="${NS.B64ET}">${thumbprintB64}</wsse:KeyIdentifier>` +
+    `<wsse:SecurityTokenReference xmlns:wsse="${NS.WSSE}">` +
+    `<wsse:Reference URI="#${tokenId}" ValueType="${NS.X509VT}"/>` +
     `</wsse:SecurityTokenReference>` +
     `</ds:KeyInfo>` +
     `</ds:Signature>` +

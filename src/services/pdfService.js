@@ -101,7 +101,7 @@ const generateSalePDF = async (res, sale, tenant) => {
     doc.moveTo(MARGIN + V2B, y + ROW1_H).lineTo(MARGIN + V2B, y + HDR_H).strokeColor(border).lineWidth(0.5).stroke();
 
     /* ── ROW1: Logo · Empresa · Tipo doc ── */
-    const LOGO_W = 72, LOGO_H = 44;
+    const LOGO_W = 90, LOGO_H = 44;
     const LOGO_X = MARGIN + 12;
     const LOGO_Y = y + (ROW1_H - LOGO_H) / 2;
 
@@ -116,13 +116,16 @@ const generateSalePDF = async (res, sale, tenant) => {
           if (fs.existsSync(p)) src = p;
         }
         if (src) {
-          doc.image(src, LOGO_X, LOGO_Y, { height: LOGO_H, fit: [LOGO_W, LOGO_H] });
+          // ⚠️ Solo usar `fit` — NO pasar height por separado.
+          // Si se pasan ambos, PDFKit escala por height e ignora el ancho del fit,
+          // haciendo que logos anchos se desborden sobre el texto.
+          doc.image(src, LOGO_X, LOGO_Y, { fit: [LOGO_W, LOGO_H], align: 'left', valign: 'center' });
           logoDrawn = true;
         }
       } catch (e) { /* sin logo */ }
     }
 
-    const EMP_X = logoDrawn ? LOGO_X + LOGO_W + 12 : MARGIN + 14;
+    const EMP_X = logoDrawn ? LOGO_X + LOGO_W + 14 : MARGIN + 14;
     const DOC_W = 160;
     const EMP_W = INNER_W - (EMP_X - MARGIN) - DOC_W - 16;
 

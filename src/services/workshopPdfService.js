@@ -65,7 +65,8 @@ async function drawHeader(doc, tenant, title, subtitle, docNumber) {
         ? await downloadImage(tenant.logo_url)
         : (() => { const p = path.join(__dirname, '../../uploads/logos', tenant.logo_url); return fs.existsSync(p) ? p : null; })();
       if (src) {
-        doc.image(src, MARGIN + 10, y + 8, { height: 52, fit: [80, 52] });
+        // ⚠️ Solo usar `fit` — NO pasar height por separado.
+        doc.image(src, MARGIN + 10, y + 8, { fit: [80, 52], align: 'left', valign: 'center' });
         logoW = 90;
       }
     } catch {}
