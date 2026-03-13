@@ -20,6 +20,10 @@ Product.belongsTo(Category, { foreignKey: 'category_id', as: 'category' });
 Category.hasMany(Category, { foreignKey: 'parent_id', as: 'children' });
 Category.belongsTo(Category, { foreignKey: 'parent_id', as: 'parent' });
 
+// Product - Warehouse (N:1)
+Product.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'warehouse' });
+Warehouse.hasMany(Product, { foreignKey: 'warehouse_id', as: 'products' });
+
 // NOTA: Product - Supplier (N:M) ya está definido en Product.js
 // No se define aquí para evitar duplicación
 

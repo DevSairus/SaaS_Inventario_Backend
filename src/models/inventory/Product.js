@@ -1,4 +1,3 @@
-// backend/src/models/inventory/Product.js
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../../config/database');
 
@@ -18,14 +17,16 @@ const Product = sequelize.define('Product', {
     allowNull: true,
     references: { model: 'categories', key: 'id' }
   },
-  // ── Tipo de ítem ─────────────────────────────────────────
+  warehouse_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'warehouses', key: 'id' }
+  },
   product_type: {
     type: DataTypes.ENUM('simple', 'variant', 'service', 'bundle', 'raw_material'),
     allowNull: false,
-    defaultValue: 'simple',
-    comment: 'simple = producto estándar, variant = con variantes, service = servicio, bundle = kit, raw_material = materia prima'
+    defaultValue: 'simple'
   },
-  // ─────────────────────────────────────────────────────────
   sku: {
     type: DataTypes.STRING(50),
     allowNull: false,
@@ -77,20 +78,17 @@ const Product = sequelize.define('Product', {
   has_tax: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
-    defaultValue: true,
-    comment: 'Indica si el producto/servicio tiene IVA (true) o está exento (false)'
+    defaultValue: true
   },
   tax_percentage: {
     type: DataTypes.DECIMAL(5, 2),
     allowNull: false,
-    defaultValue: 19.00,
-    comment: 'Porcentaje de IVA aplicable (0, 5, 10, 19, etc.)'
+    defaultValue: 19.00
   },
   price_includes_tax: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
-    defaultValue: false,
-    comment: 'Indica si el precio base ya incluye el IVA (true) o hay que sumarlo (false)'
+    defaultValue: false
   },
   current_stock: {
     type: DataTypes.DECIMAL(15, 2),
