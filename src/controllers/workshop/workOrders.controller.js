@@ -15,10 +15,10 @@ const Tenant = require('../../models/auth/Tenant');
 // (share_token, checklist_in, settled_at, settlement_id) hasta que se ejecute la migración.
 const WO_SAFE_ATTRS = [
   'id','tenant_id','order_number','vehicle_id','customer_id','technician_id',
-  'warehouse_id','status','mileage_in','problem_description',
+  'warehouse_id','status','mileage_in','mileage_out','problem_description',
   'diagnosis','work_performed','photos_in','photos_out','received_at',
   'promised_at','completed_at','delivered_at','subtotal','tax_amount',
-  'discount_amount','total_amount','sale_id','notes','internal_notes',
+  'discount_amount','total_amount','paid_amount','sale_id','notes','internal_notes',
   'created_by','created_at','updated_at',
 ];
 
@@ -211,13 +211,13 @@ const update = async (req, res) => {
     const {
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
-      notes, mileage_in, discount_amount,
+      notes, mileage_in, mileage_out, discount_amount,
     } = req.body;
 
     await order.update({
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
-      notes, mileage_in,
+      notes, mileage_in, mileage_out,
       discount_amount: discount_amount != null ? parseFloat(discount_amount) : order.discount_amount,
     });
 
@@ -238,7 +238,7 @@ const update = async (req, res) => {
 const changeStatus = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { status } = req.body;
+    const { status, mileage_out } = req.body;
     const validStatuses = ['recibido', 'en_proceso', 'en_espera', 'listo', 'entregado', 'cancelado'];
     if (!validStatuses.includes(status)) {
       await transaction.rollback();
@@ -261,7 +261,18 @@ const changeStatus = async (req, res) => {
 
     const updates = { status };
     if (status === 'listo')     updates.completed_at = new Date();
-    if (status === 'entregado') updates.delivered_at  = new Date();
+    if (status === 'entregado') {
+      updates.delivered_at  = new Date();
+      // Registrar km de salida si se proporciona
+      if (mileage_out) {
+        updates.mileage_out = parseInt(mileage_out);
+        // Actualizar también el km actual del vehículo
+        await Vehicle.update(
+          { current_mileage: parseInt(mileage_out) },
+          { where: { id: order.vehicle_id, tenant_id: req.user.tenant_id }, transaction }
+        );
+      }
+    }
 
     // ── Cancelación: devolver stock de todos los repuestos descontados ──────────
     if (status === 'cancelado') {
@@ -529,26 +540,51 @@ const generateSale = async (req, res) => {
     });
 
     if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
-    if (order.sale_id) { await transaction.rollback(); return res.status(400).json({ success: false, message: 'Esta OT ya tiene una remisión generada' }); }
+    if (order.sale_id) { await transaction.rollback(); return res.status(400).json({ success: false, message: 'Esta OT ya tiene un documento generado' }); }
     if (!['listo', 'entregado'].includes(order.status)) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'La OT debe estar en estado "listo" para generar la remisión' });
+      return res.status(400).json({ success: false, message: 'La OT debe estar en estado "listo" para generar el documento' });
     }
     if (!order.items || order.items.length === 0) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'La OT no tiene ítems' });
     }
 
-    // Número de remisión
+    // Tipo de documento: factura o remisión (el frontend pregunta al usuario)
+    const { document_type = 'remision' } = req.body;
+    if (!['factura', 'remision'].includes(document_type)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'document_type debe ser "factura" o "remision"' });
+    }
+
+    // Número del documento
     const year   = new Date().getFullYear();
-    const prefix = `REM-${year}-`;
-    const lastSale = await Sale.findOne({
-      where: { tenant_id, sale_number: { [Op.like]: `${prefix}%` } },
-      order: [['created_at', 'DESC']],
-      transaction,
-    });
-    const saleSeq    = lastSale ? parseInt(lastSale.sale_number.replace(prefix, '')) + 1 : 1;
-    const sale_number = `${prefix}${String(saleSeq).padStart(4, '0')}`;
+    let sale_number;
+    if (document_type === 'factura') {
+      // Usar resolución DIAN activa del tenant
+      const { DianResolution } = require('../../models');
+      const resolution = await DianResolution.findOne({
+        where: { tenant_id, is_active: true, document_type: 'invoice' },
+        order: [['created_at', 'DESC']],
+        transaction,
+      });
+      if (!resolution) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'No hay resolución DIAN activa para generar facturas. Configure la resolución en ajustes DIAN.' });
+      }
+      const nextNum = parseInt(resolution.current_number || resolution.from_number) + 1;
+      sale_number = `${resolution.prefix || ''}${String(nextNum).padStart(5, '0')}`;
+      await resolution.update({ current_number: nextNum }, { transaction });
+    } else {
+      const prefix = 'REM';
+      const lastSale = await Sale.findOne({
+        where: { tenant_id, sale_number: { [Op.like]: `${prefix}-${year}-%` } },
+        order: [['created_at', 'DESC']],
+        transaction,
+      });
+      const saleSeq = lastSale ? parseInt(lastSale.sale_number.split('-')[2]) + 1 : 1;
+      sale_number = `${prefix}-${year}-${String(saleSeq).padStart(4, '0')}`;
+    }
 
     const customer     = order.customer;
     const customerName = customer
@@ -558,12 +594,16 @@ const generateSale = async (req, res) => {
     const sale = await Sale.create({
       tenant_id,
       sale_number,
-      document_type:    'remision',
+      document_type,
       customer_id:      order.customer_id,
       customer_name:    customerName,
       customer_phone:   customer?.phone  || null,
       customer_email:   customer?.email  || null,
       vehicle_plate:    order.vehicle?.plate || null,
+      vehicle_brand:    order.vehicle?.brand || null,
+      vehicle_model:    order.vehicle?.model || null,
+      vehicle_year:     order.vehicle?.year  || null,
+      vehicle_color:    order.vehicle?.color || null,
       mileage:          order.mileage_in || null,
       warehouse_id:     order.warehouse_id,
       subtotal:         order.subtotal,
@@ -572,6 +612,7 @@ const generateSale = async (req, res) => {
       total_amount:     order.total_amount,
       status:           'pending',
       payment_status:   'pending',
+      dian_status:      document_type === 'factura' ? 'pending' : 'not_applicable',
       notes: `Generada desde OT ${order.order_number}${order.work_performed ? '. ' + order.work_performed : ''}`.trim(),
       created_by: req.user.id,
     }, { transaction });

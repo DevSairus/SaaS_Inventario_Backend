@@ -133,7 +133,7 @@ const create = async (req, res) => {
       notes,
       vehicle_plate,
       mileage,
-      document_type = 'remision',
+      document_type = null,
       sale_date,
     } = req.body;
 
@@ -177,10 +177,10 @@ const create = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Debe proporcionar customer_id o customer_data' });
     }
 
-    // ── Generar número de venta ──────────────────────────────────────
-    // FACTURAS: usa consecutivo de la resolución DIAN activa (con su prefijo)
-    // REMISIONES / COTIZACIONES: consecutivo interno (sin cambios)
-    const saleNumber = await generateSaleNumber(tenantId, document_type, transaction);
+    // ── Número de venta: se asigna al CONFIRMAR ───────────────────────────────
+    // El borrador no tiene tipo ni numeración hasta que el usuario confirme
+    // y elija el tipo de documento en el modal.
+    const saleNumber = `BORRADOR-${Date.now()}`;
 
     // Calcular totales
     let subtotal = 0;
@@ -265,7 +265,7 @@ const create = async (req, res) => {
     const saleData = {
       tenant_id: tenantId,
       sale_number: saleNumber,
-      document_type,
+      // document_type: null — se asigna al confirmar, no al crear
       sale_date: sale_date || new Date(),
       customer_id: finalCustomerId,
       ...customerInfo,
@@ -279,16 +279,23 @@ const create = async (req, res) => {
       notes,
       status: 'draft',
       created_by: userId,
-      // DIAN: las facturas se enviarán después del commit; el resto no aplica
-      dian_status: document_type === 'factura' ? 'pending' : 'not_applicable',
+      // DIAN: el tipo de documento se asigna al confirmar, no al crear
+      dian_status: 'not_applicable',
     };
 
-    if (vehicle_plate && vehicle_plate.trim()) {
-      saleData.vehicle_plate = vehicle_plate.trim().toUpperCase();
-    }
-    if (mileage !== undefined && mileage !== null && mileage !== '') {
-      const parsedMileage = parseInt(mileage);
-      if (!isNaN(parsedMileage)) saleData.mileage = parsedMileage;
+    // ── Campo vehículo: respetar configuración del tenant ────────────────────
+    // El tenant puede desactivar el campo placa/km en features.vehicle_field_enabled = false
+    const tenantCfg = await Tenant.findByPk(tenantId, { attributes: ['features'] });
+    const vehicleEnabled = tenantCfg?.features?.vehicle_field_enabled !== false; // default: habilitado
+
+    if (vehicleEnabled) {
+      if (vehicle_plate && vehicle_plate.trim()) {
+        saleData.vehicle_plate = vehicle_plate.trim().toUpperCase();
+      }
+      if (mileage !== undefined && mileage !== null && mileage !== '') {
+        const parsedMileage = parseInt(mileage);
+        if (!isNaN(parsedMileage)) saleData.mileage = parsedMileage;
+      }
     }
 
     const sale = await Sale.create(saleData, { transaction });
@@ -492,10 +499,15 @@ const confirm = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenant_id;
     const userId = req.user_id || req.user?.id;
-    const { payment_method, paid_amount } = req.body;
+    const { payment_method, paid_amount, document_type } = req.body;
 
     if (!payment_method) {
       return res.status(400).json({ success: false, message: 'Debe especificar el método de pago' });
+    }
+
+    // document_type es opcional — si se envía, debe ser factura o remision
+    if (document_type && !['factura', 'remision'].includes(document_type)) {
+      return res.status(400).json({ success: false, message: 'document_type debe ser "factura" o "remision"' });
     }
 
     const sale = await Sale.findOne({
@@ -585,13 +597,38 @@ const confirm = async (req, res) => {
       else if (amountPaid > 0) updateData.payment_status = 'partial';
       else updateData.payment_status = 'pending';
 
+      // ── Asignar tipo de documento al confirmar ───────────────────────────────
+      // El tipo siempre se elige en este momento. Si llega document_type lo aplicamos;
+      // si no viene, usar remision como fallback solo si ya tenía tipo previo.
+      const finalDocType = document_type || (sale.document_type !== null ? sale.document_type : 'remision');
+      if (finalDocType !== sale.document_type) {
+        updateData.document_type = finalDocType;
+        updateData.dian_status   = finalDocType === 'factura' ? 'pending' : 'not_applicable';
+        const newNumber = await generateSaleNumber(tenantId, finalDocType, transaction);
+        updateData.sale_number = newNumber;
+      } else if (document_type) {
+        updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
+      }
+
       await sale.update(updateData, { transaction });
       await transaction.commit();
+
+      // ── Disparar envío DIAN si quedó como factura ───────────────────────────
+      if (finalDocType === 'factura') {
+        const finalSale = await Sale.findByPk(id);
+        setImmediate(async () => {
+          try {
+            await dianService.sendInvoice(finalSale, tenantId);
+          } catch (err) {
+            logger.error(`[DIAN] Error async al enviar factura ${finalSale.sale_number}:`, err.message);
+          }
+        });
+      }
 
       await audit({
         tenant_id: tenantId, user_id: userId, action: 'CONFIRM_SALE',
         entity: 'sale', entity_id: sale.id,
-        changes: { sale_number: sale.sale_number, total_amount: sale.total_amount, payment_method }, req
+        changes: { sale_number: updateData.sale_number || sale.sale_number, document_type: finalDocType, total_amount: sale.total_amount, payment_method }, req
       });
     } catch (err) {
       await transaction.rollback();
@@ -846,6 +883,22 @@ const generatePaymentReceipt = async (req, res) => {
 // FACTURAS: usa el consecutivo de la resolución DIAN activa (prefijo + número)
 // REMISIONES / COTIZACIONES: consecutivo interno REM-YYYY-XXXX / COT-YYYY-XXXX
 async function generateSaleNumber(tenant_id, document_type, transaction) {
+  // Sin tipo aún (borrador): número provisional BOD-
+  if (!document_type || document_type === null) {
+    const year = new Date().getFullYear();
+    const lastSale = await Sale.findOne({
+      where: { tenant_id, sale_number: { [Op.like]: `BOD-${year}-%` } },
+      order: [['sale_number', 'DESC']],
+      transaction,
+    });
+    let sequence = 1;
+    if (lastSale) {
+      const lastNumber = lastSale.sale_number.split('-').pop();
+      sequence = parseInt(lastNumber) + 1;
+    }
+    return `BOD-${year}-${sequence.toString().padStart(4, '0')}`;
+  }
+
   if (document_type !== 'factura') {
     // Consecutivo interno (sin cambios respecto al original)
     const prefix = document_type === 'remision' ? 'REM' : 'COT';

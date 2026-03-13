@@ -10,7 +10,10 @@ const {
 } = require('../../models');
 const logger = require('../../config/logger');
 
+// Tipos de ítem que cuentan como mano de obra (servicios)
 const SERVICE_TYPES = ['service', 'servicio', 'mano_obra'];
+// Tipos de ítem que cuentan como producto/repuesto
+const PRODUCT_TYPES = ['product', 'repuesto'];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -29,14 +32,102 @@ async function generateSettlementNumber(tenant_id, transaction) {
   return `LIQ-${year}-${String(next).padStart(4, '0')}`;
 }
 
-function calcLaborFromOrder(order) {
-  return (order.items || []).reduce((sum, item) => {
-    if (SERVICE_TYPES.includes(item.item_type)) {
-      return sum + parseFloat(item.total || 0);
-    }
-    return sum;
-  }, 0);
+function calcAmountsFromOrder(order) {
+  let labor_amount   = 0;
+  let product_amount = 0;
+  for (const item of (order.items || [])) {
+    const total = parseFloat(item.total || 0);
+    if (SERVICE_TYPES.includes(item.item_type))  labor_amount   += total;
+    if (PRODUCT_TYPES.includes(item.item_type))  product_amount += total;
+  }
+  return { labor_amount, product_amount, total_amount: labor_amount + product_amount };
 }
+
+// ── INFORME DE COMISIONES POR PRODUCTOS (sin liquidar) ───────────────────────
+// Devuelve detalle de ventas de productos por usuario (cualquier rol)
+// para calcular una comisión sobre el monto vendido en productos/repuestos.
+const productCommissionReport = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { user_id, date_from, date_to, commission_percentage } = req.query;
+
+    const where = { tenant_id };
+    if (user_id) where.created_by = user_id;
+    if (date_from || date_to) {
+      where.received_at = {};
+      if (date_from) where.received_at[Op.gte] = new Date(date_from);
+      if (date_to)   where.received_at[Op.lte] = new Date(date_to + 'T23:59:59');
+    }
+
+    const orders = await WorkOrder.findAll({
+      where,
+      include: [
+        { model: WorkOrderItem, as: 'items', attributes: ['item_type', 'product_name', 'quantity', 'unit_price', 'total'] },
+        { model: User,          as: 'creator_wo', attributes: ['id', 'first_name', 'last_name', 'role'] },
+      ],
+      order: [['received_at', 'DESC']],
+    });
+
+    // Agrupar por usuario (created_by)
+    const byUser = {};
+    for (const o of orders) {
+      const uid    = o.created_by || '__sin_usuario__';
+      const uLabel = o.creator_wo
+        ? `${o.creator_wo.first_name} ${o.creator_wo.last_name}`
+        : 'Sin usuario';
+      const uRole  = o.creator_wo?.role || '—';
+
+      if (!byUser[uid]) {
+        byUser[uid] = {
+          user_id:   uid === '__sin_usuario__' ? null : uid,
+          user_name: uLabel,
+          role:      uRole,
+          orders:    [],
+          total_products: 0,
+          total_labor:    0,
+          total_grand:    0,
+        };
+      }
+
+      const { labor_amount, product_amount, total_amount } = calcAmountsFromOrder(o);
+      if (product_amount === 0 && labor_amount === 0) continue;
+
+      byUser[uid].orders.push({
+        order_number:   o.order_number,
+        received_at:    o.received_at,
+        status:         o.status,
+        labor_amount,
+        product_amount,
+        total_amount,
+      });
+      byUser[uid].total_products += product_amount;
+      byUser[uid].total_labor    += labor_amount;
+      byUser[uid].total_grand    += total_amount;
+    }
+
+    const pct = parseFloat(commission_percentage) || 0;
+    const result = Object.values(byUser).map(u => ({
+      ...u,
+      commission_percentage: pct,
+      commission_on_products: Math.round(u.total_products * pct / 100),
+    }));
+
+    result.sort((a, b) => b.total_products - a.total_products);
+
+    const summary = {
+      total_users:    result.length,
+      total_orders:   result.reduce((s, u) => s + u.orders.length, 0),
+      total_products: result.reduce((s, u) => s + u.total_products, 0),
+      total_labor:    result.reduce((s, u) => s + u.total_labor, 0),
+      commission_on_products: result.reduce((s, u) => s + u.commission_on_products, 0),
+    };
+
+    res.json({ success: true, data: result, summary, period: { date_from, date_to } });
+  } catch (error) {
+    logger.error('Error en informe de comisiones por productos:', error);
+    res.status(500).json({ success: false, message: 'Error al generar informe' });
+  }
+};
 
 // ── PREVIEW (calcular sin liquidar) ──────────────────────────────────────────
 const preview = async (req, res) => {
@@ -73,7 +164,7 @@ const preview = async (req, res) => {
       order_number: o.order_number,
       received_at: o.received_at,
       status: o.status,
-      labor_amount: calcLaborFromOrder(o),
+      labor_amount: calcAmountsFromOrder(o).labor_amount,
     })).filter(o => o.labor_amount > 0);
 
     const base_amount = orderSummary.reduce((s, o) => s + o.labor_amount, 0);
@@ -143,7 +234,7 @@ const create = async (req, res) => {
     });
 
     const eligibleOrders = orders
-      .map(o => ({ order: o, labor: calcLaborFromOrder(o) }))
+      .map(o => ({ order: o, labor: calcAmountsFromOrder(o).labor_amount }))
       .filter(e => e.labor > 0);
 
     if (eligibleOrders.length === 0) {
@@ -266,23 +357,27 @@ const getById = async (req, res) => {
   }
 };
 
-// ── TECHNICIANS LIST (para el selector) ──────────────────────────────────────
+// ── USERS LIST (para el selector de liquidación — todos los roles) ────────────
 const getTechnicians = async (req, res) => {
   try {
-    const technicians = await User.findAll({
-      where: {
-        tenant_id: req.user.tenant_id,
-        role: 'technician',
-        is_active: true,
-      },
-      attributes: ['id', 'first_name', 'last_name', 'phone'],
+    const { role } = req.query; // opcional: filtrar por rol específico
+
+    const where = {
+      tenant_id: req.user.tenant_id,
+      is_active: true,
+    };
+    if (role) where.role = role;
+
+    const users = await User.findAll({
+      where,
+      attributes: ['id', 'first_name', 'last_name', 'phone', 'role'],
       order: [['first_name', 'ASC']],
     });
-    res.json({ success: true, data: technicians });
+    res.json({ success: true, data: users });
   } catch (error) {
-    logger.error('Error obteniendo técnicos:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener técnicos' });
+    logger.error('Error obteniendo usuarios:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener usuarios' });
   }
 };
 
-module.exports = { preview, create, list, getById, getTechnicians };
+module.exports = { preview, create, list, getById, getTechnicians, productCommissionReport };

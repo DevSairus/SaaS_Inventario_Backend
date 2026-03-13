@@ -20,7 +20,8 @@ const Sale = sequelize.define('Sale', {
   },
   document_type: {
     type: DataTypes.ENUM('remision', 'factura', 'cotizacion'),
-    defaultValue: 'remision',
+    defaultValue: null,
+    allowNull: true,
   },
   customer_id: {
     type: DataTypes.UUID,
@@ -39,6 +40,26 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.STRING(20),
     allowNull: true,
     comment: 'Número de placa del vehículo (opcional)',
+  },
+  vehicle_brand: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    comment: 'Marca del vehículo',
+  },
+  vehicle_model: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    comment: 'Modelo del vehículo',
+  },
+  vehicle_year: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    comment: 'Año del vehículo',
+  },
+  vehicle_color: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
+    comment: 'Color del vehículo',
   },
   // ── Kilometraje ───────────────────────────────────────────
   mileage: {

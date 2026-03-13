@@ -167,17 +167,32 @@ const generateSalePDF = async (res, sale, tenant) => {
     cDetails.slice(0, 3).forEach(d => { doc.text(d, CX, cy2, { width: CW, ellipsis: true }); cy2 += 11; });
 
     // Celda 2 — VEHÍCULO
+    // Se muestra si la venta tiene datos de vehículo (ej: generada desde OT),
+    // o si el tenant tiene habilitado el campo. Se oculta solo cuando el tenant
+    // desactivó el campo Y la venta no tiene datos de vehículo.
+    const vehicleEnabled = tenant?.features?.vehicle_field_enabled !== false;
+    const hasVehicleData = !!(sale.vehicle_plate || sale.vehicle_brand);
     const VX = MARGIN + V2A + 12, VW = V2B - V2A - 20, VY = R2Y + 10;
-    doc.font('Helvetica-Bold').fontSize(6.5).fillColor(gray).text('VEHÍCULO', VX, VY);
-    if (sale.vehicle_plate) {
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(darkGray).text(`Placa: ${sale.vehicle_plate}`, VX, VY + 12, { width: VW });
-    }
-    if (sale.mileage) {
-      doc.font('Helvetica').fontSize(8.5).fillColor(darkGray)
-        .text(`Km: ${Number(sale.mileage).toLocaleString('es-CO')}`, VX, VY + (sale.vehicle_plate ? 28 : 12), { width: VW });
-    }
-    if (!sale.vehicle_plate && !sale.mileage) {
-      doc.font('Helvetica').fontSize(8).fillColor(border).text('—', VX, VY + 12);
+    if (vehicleEnabled || hasVehicleData) {
+      doc.font('Helvetica-Bold').fontSize(6.5).fillColor(gray).text('VEHÍCULO', VX, VY);
+      if (hasVehicleData) {
+        let vy = VY + 12;
+        if (sale.vehicle_plate) {
+          doc.font('Helvetica-Bold').fontSize(9).fillColor(darkGray).text(`Placa: ${sale.vehicle_plate}`, VX, vy, { width: VW });
+          vy += 14;
+        }
+        const vehicleDesc = [
+          sale.vehicle_brand,
+          sale.vehicle_model,
+          sale.vehicle_year,
+          sale.vehicle_color ? `(${sale.vehicle_color})` : null,
+        ].filter(Boolean).join(' ');
+        if (vehicleDesc) {
+          doc.font('Helvetica').fontSize(8).fillColor(darkGray).text(vehicleDesc, VX, vy, { width: VW });
+        }
+      } else {
+        doc.font('Helvetica').fontSize(8).fillColor(border).text('—', VX, VY + 12);
+      }
     }
 
     // Celda 3 — ESTADO
