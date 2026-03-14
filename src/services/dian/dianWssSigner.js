@@ -16,20 +16,25 @@
  * DOCUMENTO FINAL:
  *   soap:Envelope [xmlns:soap, xmlns:a, xmlns:wsu]
  *     soap:Header
- *       a:Action      ← ancestors renderizan: soap, a, wsu → canónico sin xmlns
- *       a:To          ← idem
- *       wsse:Security [xmlns:wsse, xmlns:wsu (mismo valor)]
- *         wsu:Timestamp ← ancestors renderizan wsu → canónico sin xmlns
+ *       a:Action      ← ancestors: soap,a,wsu → canónico sin xmlns   (ENVELOPE_NS)
+ *       a:To          ← idem                                          (ENVELOPE_NS)
+ *       wsse:Security [xmlns:wsse]
+ *         wsu:Timestamp ← ancestors: soap,a,wsu,wsse → sin xmlns      (SECURITY_NS)
+ *         wsse:BinarySecurityToken  ← cert DER en base64 (no se firma)
  *         ds:Signature [xmlns:ds]
- *           ds:SignedInfo ← padre renderiza ds → canónico sin xmlns:ds
- *     soap:Body       ← ancestors renderizan soap, wsu → canónico sin xmlns
+ *           ds:SignedInfo ← padre renderiza ds → sin xmlns:ds         (SIGNATURE_NS)
+ *     soap:Body       ← ancestors: soap,wsu → sin xmlns               (ENVELOPE_NS)
  *
- * BUGS corregidos:
- *   - En docs 1-3: SignedInfo tenía <tag/> en vez de <tag></tag> → WCF expande → mismatch firma
- *   - En doc 4: Se cambió contexto de SIGNATURE_NS a SECURITY_NS → añadía xmlns:ds → WCF no lo tiene
- *   - En doc 5: Contexto {} para todo → añadía xmlns a referencias → WCF no los tiene
- *
- * FIX: mantener contextos originales (docs 1-3), solo expandir elementos vacíos.
+ * HISTORIAL DE BUGS:
+ *   v1-3: SignedInfo tenía <tag/> → WCF expande → mismatch firma
+ *   v4:   contexto SECURITY_NS para SignedInfo → añadía xmlns:ds
+ *   v5:   contexto {} para referencias → añadía xmlns que WCF no ve en doc context
+ *   v6:   contextos ENVELOPE_NS/SECURITY_NS correctos → digests OK,
+ *         pero SignedInfo tenía redundante xmlns:ds en el documento
+ *   v7:   sin xmlns:ds redundante en SignedInfo ✓; cambió a ThumbprintSHA1 ← incorrecto:
+ *         el sistema C# usa BinarySecurityToken + Direct Reference y funciona
+ *   v8:   se restaura BinarySecurityToken + Direct Reference (lo que el cliente WCF
+ *         de C# envía y DIAN acepta); se mantienen todos los fixes de canonicalización
  */
 
 'use strict';
@@ -53,17 +58,17 @@ const NS = {
 };
 
 /* ── Contextos de ancestros (NS ya "rendered" en el documento) ── */
-// Refleja exactamente los xmlns declarados en los ancestros de cada elemento
-const ENVELOPE_NS = {          // Envelope declara estos tres
+// Refleja exactamente los xmlns declarados en los ancestros de cada elemento.
+const ENVELOPE_NS = {          // soap:Envelope declara estos tres
   'soap': NS.SOAP,
   'a':    NS.ADDR,
   'wsu':  NS.WSU,
 };
-const SECURITY_NS = {          // Security añade wsse (wsu ya está en Envelope)
+const SECURITY_NS = {          // wsse:Security añade wsse
   ...ENVELOPE_NS,
   'wsse': NS.WSSE,
 };
-const SIGNATURE_NS = {         // Signature añade ds
+const SIGNATURE_NS = {         // ds:Signature añade ds
   ...SECURITY_NS,
   'ds': NS.DS,
 };
@@ -94,8 +99,6 @@ function extractFromP12(p12Base64, password) {
   const subject    = entityCert.cert.subject.attributes
     .map(a => `${a.shortName || a.type}=${a.value}`).join(', ');
 
-  // Thumbprint SHA1 = SHA1(DER bytes) — requerido por sp:RequireThumbprintReference
-  // certDer.getBytes() fue consumido por encode64() arriba; usamos certBase64 (mismo DER).
   const thumbprintB64 = crypto.createHash('sha1')
     .update(Buffer.from(certBase64, 'base64'))
     .digest('base64');
@@ -134,8 +137,6 @@ function fmtUtc(d) {
  * @param {string} elementXml  Elemento XML a canonicalizar
  * @param {Object} ancestorNS  { prefix: uri } ya renderizados por ancestros
  *                             EN EL MISMO CONTEXTO DOCUMENTAL que verá WCF.
- *                             Ej: ENVELOPE_NS para a:Action (hijo del Envelope),
- *                                 SIGNATURE_NS para ds:SignedInfo (hijo de ds:Signature)
  */
 function excC14nWithContext(elementXml, ancestorNS = {}) {
   const openTagMatch = elementXml.match(/^<([^\s>\/]+)((?:\s[^>]*?)?)\s*>/s);
@@ -146,7 +147,6 @@ function excC14nWithContext(elementXml, ancestorNS = {}) {
   const innerClose  = elementXml.slice(openTagMatch[0].length, -(`</${fullTagName}>`).length);
   const elemPrefix  = fullTagName.includes(':') ? fullTagName.split(':')[0] : '';
 
-  // Separar xmlns:* de atributos regulares
   const nsDeclared   = {};
   const regularAttrs = {};
   const attrRe = /\s+((?:xmlns(?::([^\s=]+))?|([^\s=:]+:)?([^\s=]+))\s*=\s*"([^"]*)")/g;
@@ -163,7 +163,6 @@ function excC14nWithContext(elementXml, ancestorNS = {}) {
     }
   }
 
-  // Prefijos visiblemente utilizados por este elemento y sus descendientes
   const usedPrefixes = new Set();
   if (elemPrefix) usedPrefixes.add(elemPrefix);
   for (const { prefix } of Object.values(regularAttrs)) {
@@ -172,12 +171,11 @@ function excC14nWithContext(elementXml, ancestorNS = {}) {
   const innerHits = innerClose.match(/(?:<|[\s])([a-zA-Z][a-zA-Z0-9]*):(?:[a-zA-Z])/g) || [];
   for (const h of innerHits) usedPrefixes.add(h.replace(/^[<\s]/, '').replace(/:.*/, ''));
 
-  // ExcC14N: incluir xmlns si visiblemente utilizado Y no ya renderizado por ancestro
   const nsToRender = {};
   for (const prefix of usedPrefixes) {
     const uri = nsDeclared[prefix] ?? ancestorNS[prefix];
     if (!uri) continue;
-    if (ancestorNS[prefix] === uri) continue; // ya renderizado → no incluir
+    if (ancestorNS[prefix] === uri) continue;
     nsToRender[prefix] = uri;
   }
   for (const [prefix, uri] of Object.entries(nsDeclared)) {
@@ -186,10 +184,8 @@ function excC14nWithContext(elementXml, ancestorNS = {}) {
     }
   }
 
-  // xmlns:* ordenados ALFABÉTICAMENTE POR NOMBRE DE PREFIJO (spec ExcC14N)
   const nsSorted = Object.entries(nsToRender).sort(([a], [b]) => a.localeCompare(b));
 
-  // Atributos regulares: sin prefijo primero (por localName), luego prefijados (por nsURI, localName)
   const scope = { ...ancestorNS, ...nsDeclared };
   const attrsSorted = Object.values(regularAttrs).sort((a, b) => {
     const aUri = a.prefix ? (scope[a.prefix] || '') : '';
@@ -212,7 +208,6 @@ function excC14nWithContext(elementXml, ancestorNS = {}) {
 
 /* ── Construir ds:Reference ─────────────────────────────── */
 function buildRef(id, digest) {
-  // ⚠️  Elementos vacíos con <tag></tag> (nunca <tag/>) → requerido por C14N
   return (
     `<ds:Reference URI="#${id}">` +
     `<ds:Transforms><ds:Transform Algorithm="${NS.EXC_C14N}"></ds:Transform></ds:Transforms>` +
@@ -235,27 +230,28 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
   const created = fmtUtc(now);
   const exp     = fmtUtc(expires);
 
-  // ── Canonicalizar referencias: WCF extrae el elemento por wsu:Id como nodo
-  //    HUERFANO (sin ancestros), por lo que TODOS los namespaces visiblemente
-  //    utilizados deben aparecer en el propio elemento (ExcC14N con contexto {}).
+  // ── Canonicalizar referencias con el contexto de ancestros REAL del documento ──
   //
-  //    CONFIRMADO: digests sin xmlns = firma localmente valida pero WCF rechaza.
-  //                digests con xmlns = lo que WCF computa al extraer por ID.
+  //  WCF verifica cada referencia canonicalizando el elemento EN SU CONTEXTO
+  //  DOCUMENTAL (no como nodo huérfano):
+  //    a:Action, a:To, soap:Body → ENVELOPE_NS  (bajo soap:Envelope[soap,a,wsu])
+  //    wsu:Timestamp             → SECURITY_NS  (bajo wsse:Security[wsse])
+
   const canonAction = excC14nWithContext(
     `<a:Action xmlns:a="${NS.ADDR}" xmlns:soap="${NS.SOAP}" xmlns:wsu="${NS.WSU}" wsu:Id="${actionId}" soap:mustUnderstand="1">${action}</a:Action>`,
-    {}
+    ENVELOPE_NS
   );
   const canonTo = excC14nWithContext(
     `<a:To xmlns:a="${NS.ADDR}" xmlns:soap="${NS.SOAP}" xmlns:wsu="${NS.WSU}" wsu:Id="${toId}" soap:mustUnderstand="1">${endpoint}</a:To>`,
-    {}
+    ENVELOPE_NS
   );
   const canonTS = excC14nWithContext(
     `<wsu:Timestamp xmlns:wsu="${NS.WSU}" wsu:Id="${tsId}"><wsu:Created>${created}</wsu:Created><wsu:Expires>${exp}</wsu:Expires></wsu:Timestamp>`,
-    {}
+    SECURITY_NS
   );
   const canonBody = excC14nWithContext(
     `<soap:Body xmlns:soap="${NS.SOAP}" xmlns:wsu="${NS.WSU}" wsu:Id="${bodyId}">${bodyContent}</soap:Body>`,
-    {}
+    ENVELOPE_NS
   );
 
   if (process.env.DEBUG_WSS) {
@@ -271,19 +267,11 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
   const dBody   = sha256b64(canonBody);
 
   // ── ds:SignedInfo ──────────────────────────────────────────────────────────
-  // SignedInfo vive DENTRO de ds:Signature en el documento. WCF lo canonicaliza
-  // con el contexto del documento donde ds:Signature ya renderizó xmlns:ds.
-  // → canónico de SignedInfo = sin xmlns:ds → firmamos sin xmlns:ds.
-  //
-  // En el string del documento incluimos xmlns:ds explícitamente en SignedInfo
-  // (redundante respecto a Signature, pero hace que excC14nWithContext pueda
-  // encontrar la URI del prefijo ds: al canonicalizar con SIGNATURE_NS).
-  //
-  // ⚠️  CRÍTICO: los elementos vacíos DEBEN ser <tag></tag>, no <tag/>
-  //     WCF expande siempre; si nosotros usamos <tag/>, los strings difieren
-  //     → hash diferente → firma inválida.
+  // Sin xmlns:ds en SignedInfo: ds:Signature (padre) ya lo declara en el documento.
+  // excC14nWithContext con SIGNATURE_NS resuelve el prefijo ds: correctamente.
+  // ⚠️  Elementos vacíos DEBEN ser <tag></tag>, no <tag/>
   const signedInfo = expandEmptyElements(
-    `<ds:SignedInfo xmlns:ds="${NS.DS}">` +
+    `<ds:SignedInfo>` +
     `<ds:CanonicalizationMethod Algorithm="${NS.EXC_C14N}"/>` +
     `<ds:SignatureMethod Algorithm="${NS.RSA_SHA256}"/>` +
     buildRef(actionId, dAction) +
@@ -300,15 +288,14 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
     console.log('[WSS] canonSignedInfo:', canonSignedInfo);
   }
 
-  // ── Firma RSA-SHA256 con Node.js crypto (OpenSSL) ──────────────────────────
-  // Usamos crypto.createSign en lugar de forge para mayor compatibilidad con WCF.
-  // forge.privateKey.sign() y crypto.createSign('RSA-SHA256') deben ser equivalentes
-  // (ambos usan PKCS#1 v1.5), pero OpenSSL es la referencia estándar.
+  // ── Firma RSA-SHA256 ───────────────────────────────────────────────────────
   const sigB64 = crypto.createSign('RSA-SHA256')
     .update(canonSignedInfo, 'utf8')
     .sign(keyPem, 'base64');
 
   // ── Envelope SOAP final ────────────────────────────────────────────────────
+  // KeyInfo: Direct Reference al BinarySecurityToken embebido en el mensaje.
+  // Esto es lo que el cliente WCF de C# envía y DIAN acepta.
   return (
     `<?xml version="1.0" encoding="utf-8"?>` +
     `<soap:Envelope xmlns:soap="${NS.SOAP}" xmlns:a="${NS.ADDR}" xmlns:wsu="${NS.WSU}">` +

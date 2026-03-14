@@ -5,18 +5,27 @@
  * Diagnóstico DIAN — WS-Security X.509 + WS-Addressing
  *
  * USO:
- *   # Tomar datos del tenant en la DB (por slug o NIT):
- *   node src/services/dian/dianConnectivityTest.js avmmotos
+ *   # Habilitación (default):
  *   node src/services/dian/dianConnectivityTest.js 900072256
  *
- *   # Probar con un P12/PFX alternativo (descarta si es problema del cert):
- *   node src/services/dian/dianConnectivityTest.js avmmotos --p12 C:\certs\otro.pfx --pass MiClave
+ *   # PRODUCCIÓN (prueba definitiva — usa CUFE real de una factura aceptada):
+ *   node src/services/dian/dianConnectivityTest.js 900072256 --prod
  *
- *   # Modo producción:
- *   node src/services/dian/dianConnectivityTest.js avmmotos --prod
+ *   # Producción con CUFE específico:
+ *   node src/services/dian/dianConnectivityTest.js 900072256 --prod --cufe 8466c9a754c0cf52ad0f29e4b7e27e3c66a5692eecd072fe992ebd3c3f6315875feaaf9d27a0e03c80566e5a0b7bb489
  *
- *   # Sin DB (hardcoded):
- *   node src/services/dian/dianConnectivityTest.js --no-db
+ *   # Con P12 alternativo (descarta si es problema del cert):
+ *   node src/services/dian/dianConnectivityTest.js 900072256 --p12 C:\certs\otro.pfx --pass MiClave
+ *
+ *   # Sin DB (variables de entorno):
+ *   node src/services/dian/dianConnectivityTest.js --no-db --p12 ruta.pfx --pass clave
+ *
+ * INTERPRETACIÓN DE RESULTADOS:
+ *   InvalidSecurity  → WCF rechazó la firma
+ *                      Si la firma local es VÁLIDA: problema de registro/entorno en DIAN
+ *                      (verificar en portal DIAN que el software esté registrado)
+ *   Error de negocio → ✅ Autenticación OK — el WS-Security funciona correctamente
+ *   HTTP 200 OK      → ✅ Todo funciona perfectamente
  * ═══════════════════════════════════════════════════════════════════════════
  */
 
@@ -25,13 +34,11 @@
 require('dotenv').config();
 
 const https  = require('https');
-const http   = require('http');
 const net    = require('net');
 const dns    = require('dns');
 const fs     = require('fs');
 const path   = require('path');
 const crypto = require('crypto');
-const forge  = require('node-forge');
 const axios  = require('axios');
 
 // ─── Parsear argumentos CLI ────────────────────────────────────────────────
@@ -40,21 +47,27 @@ const USE_PRODUCTION = args.includes('--prod');
 const NO_DB          = args.includes('--no-db');
 const p12FileIdx     = args.indexOf('--p12');
 const passIdx        = args.indexOf('--pass');
+const cufeIdx        = args.indexOf('--cufe');
 const ALT_P12_FILE   = p12FileIdx !== -1 ? args[p12FileIdx + 1] : null;
 const ALT_P12_PASS   = passIdx    !== -1 ? args[passIdx    + 1] : null;
-// Valores de flags que no son el tenant
-const flagValues = new Set([
-  ALT_P12_FILE, ALT_P12_PASS,
-].filter(Boolean));
-// Primer argumento posicional que no sea flag ni valor de flag
+const CLI_CUFE       = cufeIdx    !== -1 ? args[cufeIdx    + 1] : null;
+
+const flagValues = new Set([ALT_P12_FILE, ALT_P12_PASS, CLI_CUFE].filter(Boolean));
 const TENANT_ARG = args.find(a => !a.startsWith('--') && !flagValues.has(a));
 
-const DIAN_URL = USE_PRODUCTION
+const DIAN_URL  = USE_PRODUCTION
   ? 'https://vpfe.dian.gov.co/WcfDianCustomerServices.svc'
   : 'https://vpfe-hab.dian.gov.co/WcfDianCustomerServices.svc';
 const DIAN_HOST = new URL(DIAN_URL).hostname;
 
-// ─── Signer (ExcC14N con contexto real) ─────────────────────────────────────
+// CUFE por defecto según entorno:
+//   Producción  → factura E2656 de AVM MOTOS (aceptada por DIAN el 2025-12-31)
+//   Habilitación → CUFE de prueba genérico
+const DEFAULT_CUFE_PROD = '8466c9a754c0cf52ad0f29e4b7e27e3c66a5692eecd072fe992ebd3c3f6315875feaaf9d27a0e03c80566e5a0b7bb489';
+const DEFAULT_CUFE_HAB  = 'bf89bb64188f8ee29c642b27b013bebc0902efb921c087269f92755dd1387d7fea681fa58555114c40f9a0886f93c4af';
+const TEST_CUFE = CLI_CUFE || (USE_PRODUCTION ? DEFAULT_CUFE_PROD : DEFAULT_CUFE_HAB);
+
+// ─── Signer ────────────────────────────────────────────────────────────────
 const { extractFromP12, buildSignedEnvelope, NS } = require('./dianWssSigner');
 
 // ─── SOAP transport ────────────────────────────────────────────────────────
@@ -98,26 +111,36 @@ async function getTenantFromDB(slugOrNit) {
 
 // ─── Imprimir resultado SOAP ───────────────────────────────────────────────
 function printResult(label, { status, body, ms }) {
-  const ok = status === 200;
+  const ok            = status === 200;
   const hasInvalidSec = body.includes('InvalidSecurity');
-  const hasFault = body.includes('Fault') || body.includes('fault');
-  const icon = ok && !hasFault ? '✅' : '❌';
+  const hasFault      = body.includes('Fault') || body.includes('fault');
+  const icon          = ok && !hasFault ? '✅' : '❌';
   console.log(`   ${icon} HTTP ${status || 'ERR'} (${ms}ms)`);
+
   if (hasInvalidSec) {
-    console.log('   ❌ InvalidSecurity — firma no verificada por WCF');
+    console.log('   ❌ InvalidSecurity — WCF rechazó la firma');
+    console.log('      Si la firma local es VÁLIDA: problema de registro en DIAN');
+    console.log('      → Verificar en portal DIAN que el software esté registrado');
+    if (USE_PRODUCTION) {
+      console.log('      → En producción: https://catalogo-vpfe.dian.gov.co');
+    } else {
+      console.log('      → En habilitación: https://catalogo-vpfe-hab.dian.gov.co');
+    }
   } else if (hasFault) {
-    const txt = body.match(/<[^:>]+:Text[^>]*>([^<]+)<\/[^:>]+:Text>/)?.[1]
-             || body.match(/<faultstring>([^<]+)<\/faultstring>/)?.[1]
-             || 'Error desconocido';
+    const txt  = body.match(/<[^:>]+:Text[^>]*>([^<]+)<\/[^:>]+:Text>/)?.[1]
+              || body.match(/<faultstring>([^<]+)<\/faultstring>/)?.[1]
+              || 'Error desconocido';
     const code = body.match(/<[^:>]+:Value[^>]*>([^<]+)<\/[^:>]+:Value>/)?.[1] || '';
     if (ok) {
-      console.log(`   ✅ Error de negocio (autenticación OK): ${code} — ${txt}`);
+      console.log(`   ✅ Error de negocio (autenticación WS-Security OK): ${code} — ${txt}`);
+      console.log('      → El WS-Security funciona. El CUFE puede no existir en este entorno.');
     } else {
       console.log(`   ❌ Fault: ${code} — ${txt}`);
     }
   } else if (ok) {
     const isValid = body.includes('<IsValid>true</IsValid>') || body.includes('<b:IsValid>true</b:IsValid>');
-    console.log(`   ✅ Respuesta OK — IsValid: ${isValid ? 'true' : 'false/no aplica'}`);
+    console.log(`   ✅ Respuesta OK — IsValid: ${isValid ? 'true ✅' : 'false/no aplica'}`);
+    if (isValid) console.log('   🎉 DIAN reconoció el documento. WS-Security 100% funcional.');
   }
   console.log(`   Respuesta (600 chars): ${body.substring(0, 600)}`);
 }
@@ -130,7 +153,7 @@ async function run() {
   console.log(`  Ambiente: ${USE_PRODUCTION ? '🔴 PRODUCCIÓN' : '🟡 HABILITACIÓN'}`);
   console.log('═'.repeat(68));
 
-  // ── Obtener configuración ──────────────────────────────────────────────
+  // ── Obtener configuración ────────────────────────────────────────────────
   let cfg = {};
 
   if (!NO_DB && TENANT_ARG) {
@@ -148,33 +171,32 @@ async function run() {
       console.log(`   ✅ Tenant: ${tenant.company_name}`);
       console.log(`   NIT:        ${cfg.nit}`);
       console.log(`   Software ID: ${cfg.softwareId || '(no configurado)'}`);
-      console.log(`   Certificado: ${cfg.p12Base64 ? '✅ presente (' + Math.round(cfg.p12Base64.length*3/4/1024) + ' KB)' : '❌ no configurado'}`);
+      console.log(`   Certificado: ${cfg.p12Base64
+        ? '✅ presente (' + Math.round(cfg.p12Base64.length * 3 / 4 / 1024) + ' KB)'
+        : '❌ no configurado'}`);
     } catch (e) {
       console.log(`   ❌ Error DB: ${e.message}`);
-      console.log(`   Stack: ${e.stack}`);
-      console.log('\n   💡 Si el error es de conexión, verifica que el .env esté cargado');
-      console.log('   o usa: node src/services/dian/dianConnectivityTest.js --no-db --p12 ruta.pfx --pass clave');
+      console.log('\n   💡 Usa: node dianConnectivityTest.js --no-db --p12 ruta.pfx --pass clave');
       process.exit(1);
     }
   } else if (NO_DB) {
-    // Hardcoded fallback para pruebas sin DB
     cfg = {
-      nit:        process.env.DIAN_NIT        || '900072256',
-      softwareId: process.env.DIAN_SOFTWARE_ID || '94e5a334-3c1b-40f6-a8e1-7f2ec1fee692',
+      nit:        process.env.DIAN_NIT         || '900072256',
+      softwareId: process.env.DIAN_SOFTWARE_ID || '',
       p12Base64:  process.env.DIAN_CERT_P12,
-      password:   process.env.DIAN_CERT_PASS  || process.env.DIAN_CERT_PASSWORD,
-      label:      `NIT ${process.env.DIAN_NIT || '900072256'} (hardcoded)`,
+      password:   process.env.DIAN_CERT_PASS   || process.env.DIAN_CERT_PASSWORD || '',
+      label:      `NIT ${process.env.DIAN_NIT || '900072256'} (env)`,
     };
   }
 
-  // ── P12 alternativo por CLI ────────────────────────────────────────────
+  // ── P12 alternativo por CLI ──────────────────────────────────────────────
   if (ALT_P12_FILE) {
     console.log(`\n🔄 P12 alternativo: ${ALT_P12_FILE}`);
     try {
-      const p12Buf = fs.readFileSync(ALT_P12_FILE);
+      const p12Buf  = fs.readFileSync(ALT_P12_FILE);
       cfg.p12Base64 = p12Buf.toString('base64');
       cfg.password  = ALT_P12_PASS || cfg.password || '';
-      console.log(`   ✅ Cargado (${Math.round(p12Buf.length/1024)} KB), contraseña: "${cfg.password}"`);
+      console.log(`   ✅ Cargado (${Math.round(p12Buf.length / 1024)} KB), contraseña: "${cfg.password}"`);
     } catch (e) {
       console.log(`   ❌ No se pudo leer: ${e.message}`);
       process.exit(1);
@@ -182,13 +204,14 @@ async function run() {
   }
 
   if (!cfg.p12Base64) {
-    console.log('\n❌ No hay certificado P12. Usa:');
+    console.log('\n❌ No hay certificado P12 configurado.');
     console.log('   node dianConnectivityTest.js <slug_o_nit>');
     console.log('   node dianConnectivityTest.js --no-db --p12 ruta/cert.pfx --pass clave');
     process.exit(1);
   }
 
   console.log(`\n── Endpoint: ${DIAN_URL}`);
+  console.log(`── CUFE a consultar: ${TEST_CUFE.substring(0, 20)}...`);
 
   // ── 1. DNS ──────────────────────────────────────────────────────────────
   process.stdout.write('\n1. DNS... ');
@@ -215,24 +238,24 @@ async function run() {
     const now     = new Date();
     const expired = now < certInfo.notBefore || now > certInfo.notAfter;
     console.log(`   ✅ OK`);
-    console.log(`   Subject: ${certInfo.subject}`);
-    console.log(`   Serial : ${certInfo.serialHex}`);
-    console.log(`   Válido : ${certInfo.notBefore.toISOString()} → ${certInfo.notAfter.toISOString()}`);
+    console.log(`   Subject:    ${certInfo.subject}`);
+    console.log(`   Serial:     ${certInfo.serialHex}`);
+    console.log(`   Thumbprint: ${Buffer.from(certInfo.thumbprintB64, 'base64').toString('hex').toUpperCase()}`);
+    console.log(`   Válido:     ${certInfo.notBefore.toISOString()} → ${certInfo.notAfter.toISOString()}`);
     if (expired) console.log('   ⚠️  CERTIFICADO VENCIDO');
   } catch (e) {
     console.log(`   ❌ ${e.message}`);
-    console.log('   Verifica que la contraseña sea correcta');
+    console.log('   Verifica que la contraseña del P12 sea correcta');
     return;
   }
 
-  // Agente mTLS
   const agent = new https.Agent({
     key:                certInfo.keyPem,
     cert:               certInfo.certPem,
     rejectUnauthorized: false,
   });
 
-  // ── 4. WSDL + Análisis de política de seguridad ─────────────────────────
+  // ── 4. WSDL ──────────────────────────────────────────────────────────────
   process.stdout.write('\n4. WSDL... ');
   let wsdlXml = '';
   try {
@@ -245,15 +268,10 @@ async function run() {
     console.log('\n   🔍 Política WS-Security del WSDL:');
     const algoMatch = wsdlXml.match(/<[\w:]*AlgorithmSuite[^>]*>([^<]+)<\/[\w:]*AlgorithmSuite>/);
     if (algoMatch) console.log('   AlgorithmSuite:', algoMatch[1].trim());
-    for (const bt of ['TransportBinding','AsymmetricBinding','SymmetricBinding']) {
+    for (const bt of ['TransportBinding', 'AsymmetricBinding', 'SymmetricBinding']) {
       if (wsdlXml.includes(bt)) console.log('   Binding:', bt);
     }
-    if (wsdlXml.includes('InclusiveNamespaces')) {
-      const m = wsdlXml.match(/InclusiveNamespaces[^>]*/);
-      console.log('   InclusiveNamespaces:', m ? m[0] : 'presente');
-    } else {
-      console.log('   InclusiveNamespaces: NO encontrado');
-    }
+    console.log('   InclusiveNamespaces:', wsdlXml.includes('InclusiveNamespaces') ? 'presente' : 'NO encontrado');
     const spElems = [...new Set((wsdlXml.match(/sp:[\w]+/g) || []))].slice(0, 12);
     if (spElems.length) console.log('   sp: elementos:', spElems.join(', '));
     const wsdlFile = path.join(__dirname, 'dian_wsdl_dump.xml');
@@ -261,13 +279,12 @@ async function run() {
     console.log('   📄 WSDL guardado:', wsdlFile);
   }
 
-  // ── 5. GetStatus firmado ──────────────────────────────────────────────────
+  // ── 5. GetStatus con WS-Security ─────────────────────────────────────────
   console.log('\n5. GetStatus con WS-Security X.509 + WS-Addressing:');
-  const TEST_CUFE = 'bf89bb64188f8ee29c642b27b013bebc0902efb921c087269f92755dd1387d7fea681fa58555114c40f9a0886f93c4af';
   const soapXml = buildSignedEnvelope({
-    action:      `http://wcf.dian.colombia/IWcfDianCustomerServices/GetStatus`,
-    endpoint:    DIAN_URL,
-    bodyContent: bodyGetStatus(TEST_CUFE),
+    action:        `http://wcf.dian.colombia/IWcfDianCustomerServices/GetStatus`,
+    endpoint:      DIAN_URL,
+    bodyContent:   bodyGetStatus(TEST_CUFE),
     certBase64:    certInfo.certBase64,
     privateKey:    certInfo.privateKey,
     keyPem:        certInfo.keyPem,
@@ -279,49 +296,62 @@ async function run() {
   fs.writeFileSync(dumpFile, soapXml, 'utf8');
   console.log(`   📄 Dump: ${dumpFile}`);
 
-  // Auto-verificar digest canónicos antes de enviar
-  const { checkDigests } = (() => {
-    const xml = soapXml;
-    const extractDigests = () => {
-      const refs = [...xml.matchAll(/<ds:Reference URI="#([^"]+)"[\s\S]*?<ds:DigestValue>([^<]+)<\/ds:DigestValue>/g)];
-      return Object.fromEntries(refs.map(m => [m[1], m[2]]));
-    };
-    return { checkDigests: extractDigests };
-  })();
-  const digests = checkDigests();
-  console.log(`   Referencias firmadas: ${Object.keys(digests).join(', ')}`);
-  const hasAction = Object.keys(digests).includes('Action-1');
-  const hasTo     = Object.keys(digests).includes('To-1');
-  console.log(`   WS-Addressing: a:Action ${hasAction ? '✅' : '❌'}  a:To ${hasTo ? '✅' : '❌'}`);
+  // Referencias firmadas
+  const refs = [...soapXml.matchAll(/<ds:Reference URI="#([^"]+)"[\s\S]*?<ds:DigestValue>([^<]+)<\/ds:DigestValue>/g)];
+  const digestMap = Object.fromEntries(refs.map(m => [m[1], m[2]]));
+  console.log(`   Referencias firmadas: ${Object.keys(digestMap).join(', ')}`);
+  console.log(`   WS-Addressing: a:Action ${digestMap['Action-1'] ? '✅' : '❌'}  a:To ${digestMap['To-1'] ? '✅' : '❌'}`);
 
-  // ── Auto-verificación local de firma ANTES de enviar a DIAN ──────────────
-  // Si pasa aquí pero WCF rechaza → el problema es política/cert, no criptografía
+  if (process.env.DEBUG_WSS) {
+    console.log('\n   Digests:');
+    for (const [id, val] of Object.entries(digestMap)) {
+      console.log(`     ${id}: ${val}`);
+    }
+  }
+
+  // ── Auto-verificación local ──────────────────────────────────────────────
   try {
     const sigValMatch  = soapXml.match(/<ds:SignatureValue>([^<]+)<\/ds:SignatureValue>/);
     const certB64Match = soapXml.match(/<wsse:BinarySecurityToken[^>]*>([^<]+)<\/wsse:BinarySecurityToken>/);
     const siMatch      = soapXml.match(/<ds:SignedInfo>([\s\S]+?)<\/ds:SignedInfo>/);
     if (sigValMatch && certB64Match && siMatch) {
       const canonSI  = '<ds:SignedInfo>' + siMatch[1] + '</ds:SignedInfo>';
-      const certPem  = '-----BEGIN CERTIFICATE-----\n' + certB64Match[1].match(/.{1,64}/g).join('\n') + '\n-----END CERTIFICATE-----';
-      const sigBytes = Buffer.from(sigValMatch[1].replace(/\s/g,''), 'base64');
-      const ok = require('crypto').createVerify('RSA-SHA256').update(canonSI,'utf8').verify(certPem, sigBytes);
+      const certPem  = '-----BEGIN CERTIFICATE-----\n'
+                     + certB64Match[1].match(/.{1,64}/g).join('\n')
+                     + '\n-----END CERTIFICATE-----';
+      const sigBytes = Buffer.from(sigValMatch[1].replace(/\s/g, ''), 'base64');
+      const ok = crypto.createVerify('RSA-SHA256').update(canonSI, 'utf8').verify(certPem, sigBytes);
       console.log(`   🔐 Auto-verify firma local: ${ok ? '✅ VÁLIDA' : '❌ INVÁLIDA'}`);
-      if (ok) console.log('      → Si DIAN rechaza, es problema de política/cert no criptográfico');
+      if (ok)  console.log('      → Si DIAN rechaza, es problema de política/registro, no criptografía');
+      if (!ok) console.log('      → Error en la firma RSA — revisar extracción de clave del P12');
+    } else {
+      console.log('   🔐 Auto-verify: no se encontraron todos los elementos para verificar');
     }
-  } catch(e) { console.log('   Auto-verify error:', e.message); }
+  } catch (e) {
+    console.log('   Auto-verify error:', e.message);
+  }
 
   printResult('GetStatus', await sendSoap(agent, 'GetStatus', soapXml));
 
-  // ── 6. Resumen ────────────────────────────────────────────────────────────
+  // ── Resumen ───────────────────────────────────────────────────────────────
   console.log('\n' + '═'.repeat(68));
   console.log('INTERPRETACIÓN:');
-  console.log('  InvalidSecurity  → WCF rechazó la firma (ver dump para analizar)');
-  console.log('  Error de negocio → ✅ Autenticación OK, problema en datos/CUFE');
-  console.log('  HTTP 200 OK      → ✅ Todo funciona correctamente');
+  console.log('  InvalidSecurity + firma VÁLIDA  → Registro/entorno en portal DIAN');
+  console.log('  InvalidSecurity + firma INVÁLIDA → Bug en WS-Security (revisar código)');
+  console.log('  Error de negocio (HTTP 200)     → ✅ WS-Security OK, CUFE no existe aquí');
+  console.log('  IsValid: true                   → ✅ Todo funciona perfectamente');
+  console.log('');
+  if (USE_PRODUCTION) {
+    console.log('  Portales DIAN:');
+    console.log('    Producción:   https://catalogo-vpfe.dian.gov.co');
+  } else {
+    console.log('  Si InvalidSecurity persiste, prueba en producción:');
+    console.log('    node dianConnectivityTest.js ' + (TENANT_ARG || '900072256') + ' --prod');
+    console.log('  Portal habilitación: https://catalogo-vpfe-hab.dian.gov.co');
+  }
   console.log('═'.repeat(68));
 }
 
-// ⚠️  Solo ejecutar si es el script principal (no si es require'd por el servidor)
 if (require.main === module) {
   run().catch(e => {
     console.error('\n❌ Error fatal:', e.message);

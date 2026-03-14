@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -102,6 +102,12 @@ const getById = async (req, res) => {
           model: SaleItem,
           as: 'items',
           include: [{ model: Product, as: 'product' }]
+        },
+        {
+          model: CustomerReturn,
+          as: 'returns',
+          attributes: ['id', 'return_number', 'return_date', 'total_amount', 'status', 'reason'],
+          required: false,
         }
       ]
     });
