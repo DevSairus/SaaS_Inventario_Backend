@@ -51,6 +51,8 @@ const WorkOrder = require('./workshop/WorkOrder');
 const WorkOrderItem = require('./workshop/WorkOrderItem');
 const CommissionSettlement = require('./workshop/CommissionSettlement');
 const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
+const ProductCommissionSettlement = require('./workshop/ProductCommissionSettlement');
+const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSettlementItem');
 
 // DIAN - Facturación Electrónica
 const DianResolution = require('./dian/DianResolution');
@@ -253,6 +255,32 @@ WorkOrder.hasMany(CommissionSettlementItem, { foreignKey: 'work_order_id', as: '
 // WorkOrder ↔ CommissionSettlement (liquidación en la que fue incluida)
 WorkOrder.belongsTo(CommissionSettlement, { foreignKey: 'settlement_id', as: 'commission_settlement' });
 
+// ProductCommissionSettlement ↔ User
+ProductCommissionSettlement.belongsTo(User, { foreignKey: 'user_id', as: 'user_pcs' });
+User.hasMany(ProductCommissionSettlement, { foreignKey: 'user_id', as: 'product_commission_settlements' });
+ProductCommissionSettlement.belongsTo(User, { foreignKey: 'created_by', as: 'creator_pcs' });
+
+// ProductCommissionSettlement ↔ Items
+ProductCommissionSettlement.hasMany(ProductCommissionSettlementItem, { foreignKey: 'settlement_id', as: 'items' });
+ProductCommissionSettlementItem.belongsTo(ProductCommissionSettlement, { foreignKey: 'settlement_id', as: 'settlement' });
+
+// ProductCommissionSettlementItem ↔ WorkOrder
+ProductCommissionSettlementItem.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+WorkOrder.hasMany(ProductCommissionSettlementItem, { foreignKey: 'work_order_id', as: 'product_settlement_items' });
+
+// WorkOrder ↔ ProductCommissionSettlement
+WorkOrder.belongsTo(ProductCommissionSettlement, { foreignKey: 'product_settlement_id', as: 'product_commission_settlement' });
+
+// Sale ↔ ProductCommissionSettlement (ventas directas liquidadas en productos)
+Sale.belongsTo(ProductCommissionSettlement, { foreignKey: 'product_settlement_id', as: 'product_commission_settlement' });
+// Sale ↔ CommissionSettlement (ventas directas liquidadas en servicios)
+Sale.belongsTo(CommissionSettlement, { foreignKey: 'labor_settlement_id', as: 'labor_commission_settlement' });
+
+// CommissionSettlementItem ↔ Sale (item de venta directa)
+CommissionSettlementItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+// ProductCommissionSettlementItem ↔ Sale (item de venta directa)
+ProductCommissionSettlementItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+
 // ============= RELACIONES - DIAN =============
 
 // DianResolution ↔ Tenant
@@ -308,6 +336,8 @@ module.exports = {
   WorkOrderItem,
   CommissionSettlement,
   CommissionSettlementItem,
+  ProductCommissionSettlement,
+  ProductCommissionSettlementItem,
   DianResolution,
   DianEvent,
 };

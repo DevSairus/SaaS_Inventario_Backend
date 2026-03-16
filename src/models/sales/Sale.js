@@ -101,6 +101,11 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW,
   },
+  // ── Liquidaciones de comisiones ──────────────────────────
+  product_settled_at: { type: DataTypes.DATE, allowNull: true },
+  product_settlement_id: { type: DataTypes.UUID, allowNull: true },
+  labor_settled_at: { type: DataTypes.DATE, allowNull: true },
+  labor_settlement_id: { type: DataTypes.UUID, allowNull: true },
   delivery_date: { type: DataTypes.DATE },
   credit_days: {
     type: DataTypes.INTEGER,

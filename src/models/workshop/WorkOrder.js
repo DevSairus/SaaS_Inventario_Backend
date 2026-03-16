@@ -145,7 +145,7 @@ const WorkOrder = sequelize.define('WorkOrder', {
     references: { model: 'users', key: 'id' },
     onDelete: 'SET NULL'
   },
-  // Liquidación de comisiones
+  // Liquidación de comisiones — mano de obra
   settled_at: {
     type: DataTypes.DATE,
     allowNull: true,
@@ -154,7 +154,18 @@ const WorkOrder = sequelize.define('WorkOrder', {
   settlement_id: {
     type: DataTypes.UUID,
     allowNull: true,
-    comment: 'Liquidación en la que fue incluida'
+    comment: 'Liquidación de servicios en la que fue incluida'
+  },
+  // Liquidación de comisiones — productos/repuestos
+  product_settled_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    comment: 'Fecha en que los productos fueron liquidados'
+  },
+  product_settlement_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Liquidación de productos en la que fue incluida'
   },
   // Token público para compartir estado de la OT con el cliente (sin auth)
   share_token: {

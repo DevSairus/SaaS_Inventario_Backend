@@ -13,11 +13,19 @@ const CommissionSettlementItem = sequelize.define('CommissionSettlementItem', {
   },
   work_order_id: {
     type: DataTypes.UUID,
-    allowNull: false,
+    allowNull: true,   // nullable cuando viene de venta directa
   },
   order_number: {
     type: DataTypes.STRING(50),
-    allowNull: false,
+    allowNull: true,
+  },
+  sale_id: {
+    type: DataTypes.UUID,
+    allowNull: true,   // solo cuando es venta directa sin OT
+  },
+  sale_number: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
   },
   labor_amount: {
     type: DataTypes.DECIMAL(15, 2),
