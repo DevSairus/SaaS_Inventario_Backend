@@ -166,6 +166,7 @@ app.use('/api/dian',                           authMiddleware, tenantMiddleware,
 
 const path = require('path');
 app.use('/uploads/logos', express.static(path.join(__dirname, '../uploads/logos')));
+app.use('/uploads/products', express.static(path.join(__dirname, '../uploads/products')));
 
 // ================= HEALTH =================
 app.get('/api/health', (req, res) => {

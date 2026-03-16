@@ -333,6 +333,60 @@ const getProductSuppliers = async (req, res) => {
   }
 };
 
+
+// ── Subir imagen de producto ──────────────────────────────────────────────────
+const uploadProductImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.user?.tenant_id;
+
+    const product = await Product.findOne({ where: { id, ...(tenantId ? { tenant_id: tenantId } : {}) } });
+    if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    if (!req.file) return res.status(400).json({ success: false, message: 'No se recibió ningún archivo' });
+
+    // Eliminar imagen anterior si existe
+    if (product.image_url) {
+      const fs = require('fs');
+      const path = require('path');
+      const oldPath = path.join(__dirname, '../../../uploads/products', path.basename(product.image_url));
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    }
+
+    const imageUrl = `/uploads/products/${req.file.filename}`;
+    await product.update({ image_url: imageUrl });
+
+    res.json({ success: true, message: 'Imagen actualizada', data: { image_url: imageUrl } });
+  } catch (error) {
+    console.error('Error en uploadProductImage:', error);
+    res.status(500).json({ success: false, message: 'Error al subir imagen' });
+  }
+};
+
+// ── Eliminar imagen de producto ───────────────────────────────────────────────
+const deleteProductImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.user?.tenant_id;
+
+    const product = await Product.findOne({ where: { id, ...(tenantId ? { tenant_id: tenantId } : {}) } });
+    if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    if (product.image_url) {
+      const fs = require('fs');
+      const path = require('path');
+      const filePath = path.join(__dirname, '../../../uploads/products', path.basename(product.image_url));
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      await product.update({ image_url: null });
+    }
+
+    res.json({ success: true, message: 'Imagen eliminada' });
+  } catch (error) {
+    console.error('Error en deleteProductImage:', error);
+    res.status(500).json({ success: false, message: 'Error al eliminar imagen' });
+  }
+};
+
 module.exports = {
   getAllProducts,
   getProductById,
@@ -343,5 +397,7 @@ module.exports = {
   deleteProductPermanently,
   getProductStats,
   getProductByBarcode,
-  checkBarcodeExists
+  checkBarcodeExists,
+  uploadProductImage,
+  deleteProductImage
 };
