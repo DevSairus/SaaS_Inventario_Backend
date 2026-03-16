@@ -334,6 +334,36 @@ const getProductSuppliers = async (req, res) => {
 };
 
 
+// ── Helpers Cloudinary ───────────────────────────────────────────────────────
+const getCloudinary = () => {
+  const { v2 } = require('cloudinary');
+  v2.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key:    process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure:     true,
+  });
+  return v2;
+};
+
+/** Sube un buffer a Cloudinary y devuelve la URL segura */
+const uploadBufferToCloudinary = (buffer, publicId) =>
+  new Promise((resolve, reject) => {
+    const cloudinary = getCloudinary();
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: 'products', public_id: publicId, overwrite: true, resource_type: 'image' },
+      (err, result) => err ? reject(err) : resolve(result)
+    );
+    stream.end(buffer);
+  });
+
+/** Extrae el public_id de Cloudinary desde una URL */
+const extractPublicId = (url) => {
+  // URL format: https://res.cloudinary.com/<cloud>/image/upload/v123/products/<name>.ext
+  const match = url?.match(/\/products\/([^.]+)/);
+  return match ? `products/${match[1]}` : null;
+};
+
 // ── Subir imagen de producto ──────────────────────────────────────────────────
 const uploadProductImage = async (req, res) => {
   try {
@@ -343,20 +373,23 @@ const uploadProductImage = async (req, res) => {
     const product = await Product.findOne({ where: { id, ...(tenantId ? { tenant_id: tenantId } : {}) } });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
 
-    if (!req.file) return res.status(400).json({ success: false, message: 'No se recibió ningún archivo' });
+    if (!req.file?.buffer) return res.status(400).json({ success: false, message: 'No se recibió ningún archivo' });
 
-    // Eliminar imagen anterior si existe
+    // Eliminar imagen anterior de Cloudinary si existe
     if (product.image_url) {
-      const fs = require('fs');
-      const path = require('path');
-      const oldPath = path.join(__dirname, '../../../uploads/products', path.basename(product.image_url));
-      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      try {
+        const oldPublicId = extractPublicId(product.image_url);
+        if (oldPublicId) await getCloudinary().uploader.destroy(oldPublicId);
+      } catch { /* no bloquear si falla el borrado */ }
     }
 
-    const imageUrl = `/uploads/products/${req.file.filename}`;
-    await product.update({ image_url: imageUrl });
+    // Subir nuevo archivo desde buffer (sin tocar disco)
+    const publicId = `product-${id}-${Date.now()}`;
+    const result = await uploadBufferToCloudinary(req.file.buffer, publicId);
 
-    res.json({ success: true, message: 'Imagen actualizada', data: { image_url: imageUrl } });
+    await product.update({ image_url: result.secure_url });
+
+    res.json({ success: true, message: 'Imagen actualizada', data: { image_url: result.secure_url } });
   } catch (error) {
     console.error('Error en uploadProductImage:', error);
     res.status(500).json({ success: false, message: 'Error al subir imagen' });
@@ -373,10 +406,10 @@ const deleteProductImage = async (req, res) => {
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
 
     if (product.image_url) {
-      const fs = require('fs');
-      const path = require('path');
-      const filePath = path.join(__dirname, '../../../uploads/products', path.basename(product.image_url));
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+      try {
+        const publicId = extractPublicId(product.image_url);
+        if (publicId) await getCloudinary().uploader.destroy(publicId);
+      } catch { /* no bloquear si falla */ }
       await product.update({ image_url: null });
     }
 
