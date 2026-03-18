@@ -156,7 +156,7 @@ exports.getValuation = async (req, res) => {
     `;
 
     const by_category = await sequelize.query(query, {
-      replacements: { tenantId, fromDate: from_date, toDate: to_date ? `${to_date} 23:59:59` : null },
+      replacements: { tenantId },
       type: QueryTypes.SELECT
     });
 
@@ -278,7 +278,7 @@ exports.getProfitReport = async (req, res) => {
         AND s.status IN ('completed', 'pending')
     `;
     const [totalsRow] = await sequelize.query(totalsQuery, {
-      replacements: { tenantId, fromDate: from_date, toDate: to_date },
+      replacements: { tenantId },
       type: QueryTypes.SELECT
     });
     const totals = {
