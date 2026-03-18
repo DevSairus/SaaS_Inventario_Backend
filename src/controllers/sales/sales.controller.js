@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -63,6 +63,12 @@ const getAll = async (req, res) => {
           model: SaleItem,
           as: 'items',
           include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }]
+        },
+        {
+          model: User,
+          as: 'technician',
+          attributes: ['id', 'first_name', 'last_name'],
+          required: false,
         }
       ],
       order: [['sale_date', 'DESC'], ['created_at', 'DESC']],
@@ -108,6 +114,12 @@ const getById = async (req, res) => {
           as: 'returns',
           attributes: ['id', 'return_number', 'return_date', 'total_amount', 'status', 'reason'],
           required: false,
+        },
+        {
+          model: User,
+          as: 'technician',
+          attributes: ['id', 'first_name', 'last_name'],
+          required: false,
         }
       ]
     });
@@ -141,6 +153,7 @@ const create = async (req, res) => {
       mileage,
       document_type = null,
       sale_date,
+      technician_id,
     } = req.body;
 
     let finalCustomerId = customer_id;
@@ -304,6 +317,19 @@ const create = async (req, res) => {
       }
     }
 
+    // ── Técnico en venta directa: respetar configuración del tenant ──────────
+    const technicianEnabled = tenantCfg?.features?.technician_field_enabled === true;
+    if (technicianEnabled && technician_id) {
+      const techUser = await User.findOne({
+        where: { id: technician_id, tenant_id: tenantId, role: 'technician', is_active: true },
+        attributes: ['id', 'first_name', 'last_name'],
+      });
+      if (techUser) {
+        saleData.technician_id   = techUser.id;
+        saleData.technician_name = `${techUser.first_name} ${techUser.last_name}`.trim();
+      }
+    }
+
     const sale = await Sale.create(saleData, { transaction });
 
     for (const item of saleItems) {
@@ -346,6 +372,7 @@ const create = async (req, res) => {
       include: [
         { model: SaleItem, as: 'items' },
         { model: Customer, as: 'customer' },
+        { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false },
       ],
     });
 
@@ -398,6 +425,34 @@ const update = async (req, res) => {
     if ('mileage' in updateData) {
       const parsed = parseInt(updateData.mileage);
       updateData.mileage = isNaN(parsed) ? null : parsed;
+    }
+
+    // ── Técnico en venta directa ─────────────────────────────────────────────
+    if ('technician_id' in updateData) {
+      if (updateData.technician_id) {
+        const tenantCfgUpd = await Tenant.findByPk(tenantId, { attributes: ['features'] });
+        const techEnabledUpd = tenantCfgUpd?.features?.technician_field_enabled === true;
+        if (techEnabledUpd) {
+          const techUser = await User.findOne({
+            where: { id: updateData.technician_id, tenant_id: tenantId, role: 'technician', is_active: true },
+            attributes: ['id', 'first_name', 'last_name'],
+          });
+          if (techUser) {
+            updateData.technician_id   = techUser.id;
+            updateData.technician_name = `${techUser.first_name} ${techUser.last_name}`.trim();
+          } else {
+            delete updateData.technician_id;
+            delete updateData.technician_name;
+          }
+        } else {
+          delete updateData.technician_id;
+          delete updateData.technician_name;
+        }
+      } else {
+        // Limpiar técnico si se envía null/vacío
+        updateData.technician_id   = null;
+        updateData.technician_name = null;
+      }
     }
 
     if (updateData.customer_id) {
@@ -487,7 +542,7 @@ const update = async (req, res) => {
     await transaction.commit();
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }, { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false }]
     });
 
     res.json({ success: true, message: 'Venta actualizada exitosamente', data: updatedSale });
@@ -642,7 +697,7 @@ const confirm = async (req, res) => {
     }
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }, { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false }]
     });
 
     const product_ids = sale.items.map(i => i.product_id);
@@ -699,7 +754,7 @@ const cancel = async (req, res) => {
     }
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }, { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false }]
     });
 
     res.json({ success: true, message: 'Venta cancelada exitosamente', data: updatedSale });
@@ -726,7 +781,7 @@ const markAsDelivered = async (req, res) => {
     await sale.update({ status: 'delivered', delivery_date: delivery_date || new Date() });
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }, { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false }]
     });
 
     res.json({ success: true, message: 'Venta marcada como entregada', data: updatedSale });
@@ -771,7 +826,7 @@ const registerPayment = async (req, res) => {
     await sale.update({ paid_amount, payment_status, payment_method: payment_method || sale.payment_method, payment_history });
 
     const updatedSale = await Sale.findByPk(id, {
-      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }, { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false }]
     });
 
     res.json({ success: true, message: 'Pago registrado exitosamente', data: updatedSale });

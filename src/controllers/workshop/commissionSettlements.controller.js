@@ -59,7 +59,8 @@ async function getDirectSales({ tenant_id, user_id, date_from, date_to, product_
 
   const where = {
     tenant_id,
-    ...(user_id ? { created_by: user_id } : {}),
+    // Ventas directas se atribuyen al TÉCNICO asignado, no al creador
+    ...(user_id ? { technician_id: user_id } : { technician_id: { [Op.not]: null } }),
     status: { [Op.in]: ['completed', 'pending'] },
     document_type: { [Op.in]: ['remision', 'factura'] }, // excluir cotizaciones
     ...(excludedIds.length ? { id: { [Op.notIn]: excludedIds } } : {}),
@@ -80,7 +81,7 @@ async function getDirectSales({ tenant_id, user_id, date_from, date_to, product_
     where,
     include: [
       { model: SaleItem, as: 'items', attributes: ['item_type', 'product_name', 'total'] },
-      { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name', 'role'] },
+      { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name', 'role'] },
     ],
     order: [['sale_date', 'DESC']],
     transaction,
@@ -160,9 +161,9 @@ const productCommissionReport = async (req, res) => {
       byUser[uid].total_grand    += labor_amount + product_amount;
     }
     for (const s of directSales) {
-      const uid = s.created_by || '__sin__';
-      const label = s.creator ? `${s.creator.first_name} ${s.creator.last_name}` : 'Sin usuario';
-      ensureUser(uid, label, s.creator?.role || '—');
+      const uid = s.technician_id || '__sin__';
+      const label = s.technician ? `${s.technician.first_name} ${s.technician.last_name}` : 'Sin técnico';
+      ensureUser(uid, label, s.technician?.role || 'technician');
       const { labor_amount, product_amount } = calcAmountsFromSale(s);
       if (product_amount === 0 && labor_amount === 0) continue;
       byUser[uid].orders.push({ source: 'sale', order_number: s.sale_number, received_at: s.sale_date, status: s.status, labor_amount, product_amount, total_amount: labor_amount + product_amount });

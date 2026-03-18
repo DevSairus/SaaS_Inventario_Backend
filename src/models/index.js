@@ -114,6 +114,10 @@ Tenant.hasMany(Sale, { foreignKey: 'tenant_id', as: 'sales' });
 Sale.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 User.hasMany(Sale, { foreignKey: 'created_by', as: 'created_sales' });
 
+// Técnico asignado en venta directa
+Sale.belongsTo(User, { foreignKey: 'technician_id', as: 'technician' });
+User.hasMany(Sale, { foreignKey: 'technician_id', as: 'technician_sales' });
+
 Sale.hasMany(SaleItem, { foreignKey: 'sale_id', as: 'items' });
 SaleItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 

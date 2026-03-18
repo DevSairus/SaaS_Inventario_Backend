@@ -136,6 +136,20 @@ const Sale = sequelize.define('Sale', {
   notes:          { type: DataTypes.TEXT },
   internal_notes: { type: DataTypes.TEXT },
   pdf_url:        { type: DataTypes.STRING(500) },
+  // ── Técnico asignado (venta directa, sin orden de trabajo) ───────────
+  technician_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'users', key: 'id' },
+    onDelete: 'SET NULL',
+    comment: 'Técnico asignado a la venta directa (feature: technician_field_enabled)',
+  },
+  technician_name: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    comment: 'Nombre del técnico al momento de la venta (copia desnormalizada)',
+  },
+  // ─────────────────────────────────────────────────────────────────────
   created_by: {
     type: DataTypes.UUID,
     references: { model: 'users', key: 'id' },
