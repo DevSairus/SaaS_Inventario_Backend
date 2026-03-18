@@ -1,5 +1,9 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+
+// ── Helpers de seguridad para parámetros de query ────────────────────────────
+const isValidDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d));
+const safeMonths  = (m) => Math.max(1, Math.min(60, parseInt(m) || 6));
 const Sale = require('../../models/sales/Sale');
 const SaleItem = require('../../models/sales/SaleItem');
 const Product = require('../../models/inventory/Product');
@@ -12,6 +16,15 @@ exports.getMovementsByMonth = async (req, res) => {
   try {
     const { months, from_date, to_date } = req.query;
     const tenantId = req.user.tenant_id;
+
+    // Validar fechas
+    if (from_date && !isValidDate(from_date)) {
+      return res.status(400).json({ success: false, message: 'from_date inválido. Use formato YYYY-MM-DD' });
+    }
+    if (to_date && !isValidDate(to_date)) {
+      return res.status(400).json({ success: false, message: 'to_date inválido. Use formato YYYY-MM-DD' });
+    }
+    const safeM = safeMonths(months);
 
     // Determinar filtro de fecha: rango personalizado o período en meses
     const dateFilter = from_date && to_date
