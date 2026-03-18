@@ -189,8 +189,8 @@ exports.getAllAnnouncements = async (req, res) => {
         }
       ],
       order: [['created_at', 'DESC']],
-      limit: parseInt(limit),
-      offset: (parseInt(page) - 1) * parseInt(limit)
+      limit: Math.min(Math.max(1, parseInt(limit) || 20), 200),
+      offset: (Math.max(1, parseInt(page) || 1) - 1) * Math.min(Math.max(1, parseInt(limit) || 20), 200)
     });
 
     // Obtener estadísticas de visualización para cada anuncio
@@ -214,7 +214,7 @@ exports.getAllAnnouncements = async (req, res) => {
         total: announcements.count,
         page: parseInt(page),
         limit: parseInt(limit),
-        totalPages: Math.ceil(announcements.count / parseInt(limit))
+        totalPages: Math.ceil(announcements.count / Math.min(Math.max(1, parseInt(limit) || 20), 200))
       }
     });
   } catch (error) {

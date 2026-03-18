@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/user.controller');
+const { authLimiter } = require('../middleware/rateLimiter');
 const { checkRole } = require('../middleware/auth');
 const { checkLimits } = require('../middleware/checkLimits');
 const { body } = require('express-validator');
@@ -12,7 +13,7 @@ router.get('/profile', userController.getProfile);
 router.put('/profile', userController.updateProfile);
 
 // Cambiar contraseña
-router.put('/change-password', userController.changePassword);
+router.put('/change-password', authLimiter, userController.changePassword);
 
 // Obtener todos los usuarios (admin, manager, seller)
 router.get('/', checkRole('admin', 'manager', 'seller'), userController.getAllUsers);
@@ -28,8 +29,9 @@ router.post(
   [
     body('email').isEmail().withMessage('Email inválido'),
     body('password')
-      .isLength({ min: 6 })
-      .withMessage('Contraseña mínimo 6 caracteres'),
+      .isLength({ min: 8 }).withMessage('Contraseña mínimo 8 caracteres')
+      .matches(/[A-Z]/).withMessage('Debe contener al menos una mayúscula')
+      .matches(/[0-9]/).withMessage('Debe contener al menos un número'),
     body('first_name').notEmpty().withMessage('Nombre es requerido'),
     body('last_name').notEmpty().withMessage('Apellido es requerido'),
     body('role')

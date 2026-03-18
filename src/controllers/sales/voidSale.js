@@ -322,7 +322,7 @@ const voidSale = async (req, res) => {
       await transaction.rollback().catch(() => {});
     }
     logger.error('[VOID] Error en voidSale:', error);
-    return res.status(500).json({ success: false, message: 'Error al procesar la anulación: ' + error.message });
+    return res.status(500).json({ success: false, message: process.env.NODE_ENV === 'development' ? 'Error al procesar la anulación: ' + error.message : 'Error al procesar la anulación' });
   }
 };
 

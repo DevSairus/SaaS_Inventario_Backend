@@ -32,7 +32,7 @@ const getStockAlerts = async (req, res) => {
       sort_by = 'created_at', // ✅ Cambiado de 'alert_date' a 'created_at'
       sort_order = 'DESC',
       page = 1,
-      limit = 500 // ✅ Aumentado el límite por defecto a 500
+      limit = 20
     } = req.query;
 
     const tenant_id = req.user.tenant_id;
@@ -42,7 +42,7 @@ const getStockAlerts = async (req, res) => {
     console.log('📋 [getStockAlerts] Filtros recibidos:', { search, alert_type, severity, status, category_id, sort_by, sort_order, page, limit });
     
     // Permitir límites más altos pero con un máximo razonable
-    const maxLimit = Math.min(parseInt(limit), 500);
+    const maxLimit = Math.min(Math.max(1, parseInt(limit) || 20), 200);
     const offset = (page - 1) * maxLimit;
 
     // Construir condiciones de búsqueda

@@ -109,12 +109,11 @@ const generateSalePDF = async (res, sale, tenant) => {
     if (tenant.logo_url) {
       try {
         let src;
+        // Logo siempre desde URL (Cloudinary) — sin acceso a disco local
         if (tenant.logo_url.startsWith('http')) {
           src = await downloadImage(tenant.logo_url);
-        } else {
-          const p = path.join(__dirname, '../../uploads/logos', tenant.logo_url);
-          if (fs.existsSync(p)) src = p;
         }
+        // Logos sin URL HTTP (legacy disco) simplemente no se muestran
         if (src) {
           // ⚠️ Solo usar `fit` — NO pasar height por separado.
           // Si se pasan ambos, PDFKit escala por height e ignora el ancho del fit,

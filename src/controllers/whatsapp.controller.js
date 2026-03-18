@@ -28,7 +28,7 @@ const testCloudinary = async (req, res) => {
       CLOUDINARY_CLOUD_NAME: !!process.env.CLOUDINARY_CLOUD_NAME,
       CLOUDINARY_API_KEY:    !!process.env.CLOUDINARY_API_KEY,
       CLOUDINARY_API_SECRET: !!process.env.CLOUDINARY_API_SECRET,
-      cloud_name_value:      process.env.CLOUDINARY_CLOUD_NAME || '(no definido)',
+      // cloud_name_value omitido por seguridad
     },
     upload: null,
     error:  null,

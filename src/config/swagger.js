@@ -4,7 +4,7 @@ const options = {
   definition: {
     openapi: '3.0.0',
     info: {
-      title: 'API Control de Inventario',
+      title: 'API Pitbox by DataCore',
       version: '1.0.0',
       description: `
 ## Sistema de Gestión de Inventario — API REST

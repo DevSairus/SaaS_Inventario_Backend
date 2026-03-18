@@ -27,7 +27,15 @@ const getProductStats = async (req, res) => {
 const getAllProducts = async (req, res) => {
   try {
     const { page = 1, limit = 10, search = '', category_id = '', is_active = '', sort_by = 'name', sort_order = 'ASC' } = req.query;
-    const offset = (page - 1) * limit;
+
+    // ── Seguridad: whitelist ORDER BY — Sequelize NO parametriza ORDER BY ────
+    const ALLOWED_SORT_FIELDS = ['name', 'sku', 'base_price', 'current_stock', 'average_cost', 'created_at', 'updated_at'];
+    const safeSortBy    = ALLOWED_SORT_FIELDS.includes(sort_by) ? sort_by : 'name';
+    const safeSortOrder = sort_order.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+    // ── Cap de paginación: máximo 200 por request ─────────────────────────────
+    const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 10), 200);
+    const safePage   = Math.max(1, parseInt(page) || 1);
+    const offset = (safePage - 1) * safeLimit;
     if (!req.user) return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     let whereClause = {};
     if (req.user.role !== 'super_admin') {
@@ -47,11 +55,11 @@ const getAllProducts = async (req, res) => {
     const { count, rows } = await Product.findAndCountAll({
       where: whereClause,
       include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }],
-      limit: parseInt(limit),
-      offset: parseInt(offset),
-      order: [[sort_by, sort_order.toUpperCase()]]
+      limit: safeLimit,
+      offset: offset,
+      order: [[safeSortBy, safeSortOrder]]
     });
-    res.json({ success: true, data: rows, pagination: { total: count, page: parseInt(page), limit: parseInt(limit), totalPages: Math.ceil(count / limit) } });
+    res.json({ success: true, data: rows, pagination: { total: count, page: safePage, limit: safeLimit, totalPages: Math.ceil(count / limit) } });
   } catch (error) {
     console.error('Error en getAllProducts:', error);
     res.status(500).json({ success: false, message: 'Error al obtener productos' });

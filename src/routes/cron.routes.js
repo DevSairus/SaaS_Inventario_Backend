@@ -16,14 +16,11 @@ const router  = express.Router();
 
 // Middleware de protección
 // Vercel Cron Jobs llama el endpoint directamente sin Authorization header,
-// pero sí envía el header x-vercel-cron: 1 en producción.
-// El Bearer token sigue funcionando para llamadas manuales (Postman, etc).
+// NOTA: x-vercel-cron es spoofeable — la autenticación real es exclusivamente via CRON_SECRET.
+// En vercel.json configurar: { "crons": [{ "path": "/api/cron/...", "schedule": "..." }] }
 const cronAuth = (req, res, next) => {
-  // Llamada automática de Vercel Cron (producción)
-  if (req.headers['x-vercel-cron'] === '1') {
-    return next();
-  }
-
+  // Verificar CRON_SECRET siempre (x-vercel-cron es spoofeable por cualquier cliente)
+  // Vercel incluye el header Authorization con el secret configurado en vercel.json
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {

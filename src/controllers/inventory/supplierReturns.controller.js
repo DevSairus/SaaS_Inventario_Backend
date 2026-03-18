@@ -91,9 +91,9 @@ const getSupplierReturns = async (req, res) => {
           attributes: ['id', 'purchase_number', 'purchase_date']
         }
       ],
-      order: [[sort_by, sort_order.toUpperCase()]],
-      limit: parseInt(limit),
-      offset: parseInt(offset)
+      order: [['created_at', 'DESC']],
+      limit: Math.min(Math.max(1, parseInt(limit) || 10), 200),
+      offset: (Math.max(1, parseInt(page) || 1) - 1) * Math.min(Math.max(1, parseInt(limit) || 10), 200)
     });
 
     res.json({
@@ -101,9 +101,9 @@ const getSupplierReturns = async (req, res) => {
       data: rows,
       pagination: {
         total: count,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        pages: Math.ceil(count / limit)
+        page: Math.max(1, parseInt(page) || 1),
+        limit: Math.min(Math.max(1, parseInt(limit) || 10), 200),
+        pages: Math.ceil(count / Math.min(Math.max(1, parseInt(limit) || 10), 200))
       }
     });
   } catch (error) {

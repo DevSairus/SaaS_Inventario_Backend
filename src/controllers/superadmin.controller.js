@@ -380,7 +380,10 @@ const createTenant = async (req, res) => {
     }, { transaction: t });
 
     // ✅ FIX: Hashear la contraseña antes de guardarla en la BD
-    const hashedPassword = await bcrypt.hash(admin_password || 'temporal123', 10);
+    if (!admin_password || admin_password.trim().length < 8) {
+      return res.status(400).json({ success: false, message: 'admin_password es requerido y debe tener mínimo 8 caracteres' });
+    }
+    const hashedPassword = await bcrypt.hash(admin_password.trim(), 12);
 
     // ✅ FIX: Crear usuario admin sin campos que no existen en el modelo (email_verified, created_by)
     // El modelo User.js no define esos campos → Sequelize puede lanzar error inesperado
@@ -1252,7 +1255,7 @@ const resetTenantUserPassword = async (req, res) => {
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
 
     await user.update({ password_hash: hashedPassword });
 

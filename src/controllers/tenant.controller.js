@@ -3,24 +3,15 @@ const { Tenant } = require('../models');
 const path = require('path');
 const fs = require('fs');
 
-// Configuración de Cloudinary (solo si está configurado)
-let cloudinary = null;
-const useCloudinary = process.env.USE_CLOUDINARY === 'true' && 
-                      process.env.CLOUDINARY_CLOUD_NAME && 
-                      process.env.CLOUDINARY_API_KEY && 
-                      process.env.CLOUDINARY_API_SECRET;
-
-if (useCloudinary) {
-  cloudinary = require('cloudinary').v2;
-  cloudinary.config({
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    api_secret: process.env.CLOUDINARY_API_SECRET
-  });
-  console.log('📦 Cloudinary configurado para almacenamiento de logos');
-} else {
-  console.log('📁 Usando almacenamiento local para logos');
-}
+// Cloudinary — siempre requerido (Vercel es stateless, sin disco persistente)
+const { v2: cloudinary } = require('cloudinary');
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key:    process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+  secure:     true,
+});
+const useCloudinary = true; // siempre Cloudinary
 
 /**
  * Obtener configuración del tenant actual
@@ -223,39 +214,6 @@ const uploadLogo = async (req, res) => {
 
       logoUrl = uploadResult.secure_url;
 
-    } else {
-      // ========== LOCAL (DESARROLLO) ==========
-      console.log('📤 Guardando logo localmente...');
-      
-      // Crear directorio si no existe
-      const uploadsDir = path.join(__dirname, '../../uploads/logos');
-      if (!fs.existsSync(uploadsDir)) {
-        fs.mkdirSync(uploadsDir, { recursive: true });
-      }
-
-      // Generar nombre único para el archivo
-      const fileExtension = path.extname(req.file.originalname);
-      const fileName = `logo-${tenantId}-${Date.now()}${fileExtension}`;
-      const filePath = path.join(uploadsDir, fileName);
-
-      // Guardar archivo
-      fs.writeFileSync(filePath, req.file.buffer);
-      console.log('✅ Logo guardado:', fileName);
-
-      // Eliminar logo anterior si existe
-      if (tenant.logo_url && !tenant.logo_url.includes('cloudinary')) {
-        const oldLogoPath = path.join(uploadsDir, tenant.logo_url);
-        if (fs.existsSync(oldLogoPath)) {
-          try {
-            fs.unlinkSync(oldLogoPath);
-            console.log('🗑️ Logo anterior eliminado');
-          } catch (err) {
-            console.error('⚠️ Error eliminando logo anterior:', err);
-          }
-        }
-      }
-
-      logoUrl = fileName;
     }
 
     // Actualizar tenant
@@ -266,7 +224,7 @@ const uploadLogo = async (req, res) => {
       message: 'Logo subido exitosamente',
       data: {
         logo_url: logoUrl,
-        storage: useCloudinary ? 'cloudinary' : 'local'
+        storage: 'cloudinary'
       }
     });
 
@@ -311,30 +269,15 @@ const deleteLogo = async (req, res) => {
       });
     }
 
-    if (useCloudinary && tenant.logo_url.includes('cloudinary')) {
-      // ========== ELIMINAR DE CLOUDINARY ==========
+    // Eliminar de Cloudinary (único storage soportado)
+    if (tenant.logo_url.includes('cloudinary')) {
       try {
         const urlParts = tenant.logo_url.split('/');
         const publicIdWithExt = urlParts[urlParts.length - 1];
         const publicId = publicIdWithExt.split('.')[0];
-        console.log('🗑️ Eliminando logo de Cloudinary...');
         await cloudinary.uploader.destroy(`tenant-logos/${publicId}`);
-        console.log('✅ Logo eliminado de Cloudinary');
       } catch (err) {
-        console.error('⚠️ Error eliminando de Cloudinary:', err);
-      }
-    } else {
-      // ========== ELIMINAR LOCAL ==========
-      const uploadsDir = path.join(__dirname, '../../uploads/logos');
-      const logoPath = path.join(uploadsDir, tenant.logo_url);
-      
-      if (fs.existsSync(logoPath)) {
-        try {
-          fs.unlinkSync(logoPath);
-          console.log('🗑️ Logo eliminado del sistema de archivos');
-        } catch (err) {
-          console.error('⚠️ Error eliminando archivo:', err);
-        }
+        console.error('Error eliminando logo de Cloudinary:', err.message);
       }
     }
 

@@ -1,12 +1,13 @@
 const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const audit = require('../../utils/audit');
 
 const User = require('../../models/auth/User');
 const Tenant = require('../../models/auth/Tenant');
 
 const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = '365d'; // Sesión larga
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h'; // Configurable via env, default 24h
 
 const login = async (req, res) => {
   try {
@@ -63,7 +64,7 @@ const login = async (req, res) => {
     if (!user.is_active) {
       return res.status(403).json({
         success: false,
-        message: 'Usuario desactivado'
+        message: 'Credenciales inválidas'
       });
     }
 
@@ -77,21 +78,21 @@ const login = async (req, res) => {
       if (!tenant) {
         return res.status(403).json({
           success: false,
-          message: 'Empresa no encontrada'
+          message: 'Credenciales inválidas'
         });
       }
 
       if (!tenant.is_active) {
         return res.status(403).json({
           success: false,
-          message: 'Esta empresa ha sido desactivada. Contacte a soporte.'
+          message: 'Acceso restringido. Contacte a soporte.'
         });
       }
 
       if (tenant.subscription_status === 'suspended') {
         return res.status(402).json({
           success: false,
-          message: 'Suscripción suspendida. Por favor actualice su método de pago.',
+          message: 'Acceso restringido. Contacte a soporte.',
           code: 'SUBSCRIPTION_SUSPENDED'
         });
       }
@@ -99,7 +100,7 @@ const login = async (req, res) => {
       if (tenant.subscription_status === 'cancelled') {
         return res.status(403).json({
           success: false,
-          message: 'Suscripción cancelada. Contacte a ventas para reactivar.',
+          message: 'Acceso restringido. Contacte a soporte.',
           code: 'SUBSCRIPTION_CANCELLED'
         });
       }
@@ -108,7 +109,7 @@ const login = async (req, res) => {
         if (new Date() > new Date(tenant.trial_ends_at)) {
           return res.status(402).json({
             success: false,
-            message: 'Período de prueba finalizado. Por favor seleccione un plan.',
+            message: 'Acceso restringido. Contacte a soporte.',
             code: 'TRIAL_EXPIRED'
           });
         }
@@ -152,6 +153,9 @@ const login = async (req, res) => {
     /* =====================================================
        RESPUESTA
     ===================================================== */
+
+    // Audit: registrar login exitoso
+    setImmediate(() => audit({ tenant_id: user.tenant_id, user_id: user.id, action: 'LOGIN', entity: 'user', entity_id: user.id, changes: { email: user.email }, req }));
 
     res.json({
       success: true,

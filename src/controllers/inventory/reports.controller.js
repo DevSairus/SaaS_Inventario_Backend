@@ -15,12 +15,12 @@ exports.getMovementsByMonth = async (req, res) => {
 
     // Determinar filtro de fecha: rango personalizado o período en meses
     const dateFilter = from_date && to_date
-      ? `movement_date BETWEEN '${from_date}' AND '${to_date} 23:59:59'`
-      : `movement_date >= NOW() - INTERVAL '${parseInt(months || 6)} months'`;
+      ? `movement_date BETWEEN :fromDate AND :toDate`
+      : `movement_date >= NOW() - INTERVAL '${safeM} months'`;
 
     const dateFilterWithAlias = from_date && to_date
-      ? `im.movement_date BETWEEN '${from_date}' AND '${to_date} 23:59:59'`
-      : `im.movement_date >= NOW() - INTERVAL '${parseInt(months || 6)} months'`;
+      ? `im.movement_date BETWEEN :fromDate AND :toDate`
+      : `im.movement_date >= NOW() - INTERVAL '${safeM} months'`;
 
     // Consulta para cantidades y conteo de movimientos
     const quantityQuery = `
@@ -143,7 +143,7 @@ exports.getValuation = async (req, res) => {
     `;
 
     const by_category = await sequelize.query(query, {
-      replacements: { tenantId },
+      replacements: { tenantId, fromDate: from_date, toDate: to_date ? `${to_date} 23:59:59` : null },
       type: QueryTypes.SELECT
     });
 
@@ -194,13 +194,21 @@ exports.getProfitReport = async (req, res) => {
     const { months, from_date, to_date, limit = 100 } = req.query;
     const tenantId = req.user.tenant_id;
 
-    // Determinar el filtro de fecha
+    // ── Validar fechas — prevenir SQL injection ───────────────────────────
+    if (from_date && !isValidDate(from_date)) {
+      return res.status(400).json({ success: false, message: 'from_date inválido. Use formato YYYY-MM-DD' });
+    }
+    if (to_date && !isValidDate(to_date)) {
+      return res.status(400).json({ success: false, message: 'to_date inválido. Use formato YYYY-MM-DD' });
+    }
+    const safeLimit = Math.max(1, Math.min(500, parseInt(limit) || 100));
+
     let dateFilter;
     if (from_date && to_date) {
-      dateFilter = `COALESCE(s.sale_date, s.created_at) BETWEEN '${from_date}' AND '${to_date}'`;
+      dateFilter = `COALESCE(s.sale_date, s.created_at) BETWEEN :fromDate AND :toDate`;
     } else {
-      const monthsToUse = months || 3;
-      dateFilter = `COALESCE(s.sale_date, s.created_at) >= NOW() - INTERVAL '${parseInt(monthsToUse)} months'`;
+      const monthsToUse = safeMonths(months || 3);
+      dateFilter = `COALESCE(s.sale_date, s.created_at) >= NOW() - INTERVAL '${monthsToUse} months'`;
     }
 
     const query = `
@@ -257,7 +265,7 @@ exports.getProfitReport = async (req, res) => {
         AND s.status IN ('completed', 'pending')
     `;
     const [totalsRow] = await sequelize.query(totalsQuery, {
-      replacements: { tenantId },
+      replacements: { tenantId, fromDate: from_date, toDate: to_date },
       type: QueryTypes.SELECT
     });
     const totals = {
@@ -318,10 +326,18 @@ exports.getRotationReport = async (req, res) => {
     const { months = 3, from_date, to_date } = req.query;
     const tenantId = req.user.tenant_id;
 
+    // ── Validar fechas — prevenir SQL injection ───────────────────────────
+    if (from_date && !isValidDate(from_date)) {
+      return res.status(400).json({ success: false, message: 'from_date inválido. Use formato YYYY-MM-DD' });
+    }
+    if (to_date && !isValidDate(to_date)) {
+      return res.status(400).json({ success: false, message: 'to_date inválido. Use formato YYYY-MM-DD' });
+    }
+
     // Construir filtro de fecha dinámico
     const dateFilter = from_date && to_date
-      ? `s.sale_date BETWEEN '${from_date}' AND '${to_date} 23:59:59'`
-      : `s.sale_date >= NOW() - INTERVAL '${parseInt(months)} months'`;
+      ? `s.sale_date BETWEEN :fromDate AND :toDate`
+      : `s.sale_date >= NOW() - INTERVAL '${safeMonths(months)} months'`;
 
     const query = `
       SELECT 

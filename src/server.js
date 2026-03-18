@@ -20,7 +20,21 @@ require('./models');
 const app = express();
 
 // ================= MIDDLEWARE =================
-app.use(helmet({ contentSecurityPolicy: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],  // unsafe-eval necesario para algunos bundlers en dev
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", "data:"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+    }
+  },
+  crossOriginEmbedderPolicy: false, // evita romper PDF embeds
+}));
 app.set('etag', false);
 
 const allowedOrigins = [
@@ -41,12 +55,12 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(morgan('dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // ================= SWAGGER =================
 const swaggerUiOptions = {
-  customSiteTitle: 'API Inventario — Docs',
+  customSiteTitle: 'Pitbox API — Docs',
   customCssUrl: 'https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui.min.css',
   customJs: [
     'https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.11.0/swagger-ui-bundle.min.js',
@@ -62,8 +76,17 @@ const swaggerUiOptions = {
   swaggerOptions: { persistAuthorization: true, displayRequestDuration: true, docExpansion: 'none', filter: true },
 };
 
-app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
-app.get('/api/docs.json', (req, res) => { res.setHeader('Content-Type', 'application/json'); res.send(swaggerSpec); });
+// Swagger solo disponible fuera de producción
+if (process.env.NODE_ENV !== 'production') {
+  app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
+  app.get('/api/docs.json', (req, res) => { res.setHeader('Content-Type', 'application/json'); res.send(swaggerSpec); });
+} else {
+  // En producción — docs solo para super_admin autenticado
+  const { authMiddleware: _am } = require('./middleware/auth');
+  const { checkRole: _cr } = require('./middleware/auth');
+  app.use('/api/docs', _am, _cr('super_admin'), swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
+  app.get('/api/docs.json', _am, _cr('super_admin'), (req, res) => { res.setHeader('Content-Type', 'application/json'); res.send(swaggerSpec); });
+}
 
 // ================= ROUTES =================
 const authRoutes                    = require('./routes/auth/auth.routes');
@@ -165,7 +188,7 @@ app.use('/api/whatsapp',                      authMiddleware, whatsappRoutes);
 app.use('/api/dian',                           authMiddleware, tenantMiddleware, dianRoutes);
 
 const path = require('path');
-app.use('/uploads/logos', express.static(path.join(__dirname, '../uploads/logos')));
+// /uploads/logos eliminado — logos ahora en Cloudinary (Vercel stateless)
 
 // ================= HEALTH =================
 app.get('/api/health', (req, res) => {

@@ -321,7 +321,7 @@ const createPurchase = async (req, res) => {
     console.error('Error en createPurchase:', error);
     res.status(500).json({ 
       success: false, 
-      message: error.message || 'Error al crear compra'
+      message: process.env.NODE_ENV === 'development' ? (error.message || 'Error al crear compra') : 'Error al crear compra'
     });
   }
 };
@@ -674,7 +674,7 @@ const receivePurchase = async (req, res) => {
     console.error('Error en receivePurchase:', error);
     res.status(500).json({ 
       success: false, 
-      message: error.message || 'Error al recibir compra'
+      message: process.env.NODE_ENV === 'development' ? (error.message || 'Error al recibir compra') : 'Error al recibir compra'
     });
   }
 };

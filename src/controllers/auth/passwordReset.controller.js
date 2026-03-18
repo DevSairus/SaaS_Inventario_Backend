@@ -113,7 +113,7 @@ const resetPassword = async (req, res) => {
       return res.status(400).json({ success: false, message: 'El enlace de recuperación ha expirado. Solicita uno nuevo.' });
     }
 
-    const password_hash = await bcrypt.hash(password, 10);
+    const password_hash = await bcrypt.hash(password, 12);
 
     await user.update({
       password_hash,

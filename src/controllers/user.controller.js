@@ -2,6 +2,7 @@ const User = require('../models/User');
 const { Op } = require('sequelize');
 const { validationResult } = require('express-validator');
 const bcrypt = require('bcryptjs');
+const audit = require('../utils/audit');
 const {
   addTenantScope,
   addTenantData,
@@ -12,6 +13,8 @@ const {
 const getAllUsers = async (req, res) => {
   try {
     const { page = 1, limit = 10, role, search, is_active } = req.query;
+    const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 10), 200);
+    const safePage   = Math.max(1, parseInt(page) || 1);
 
     const offset = (page - 1) * limit;
     let where = {
@@ -42,8 +45,8 @@ const getAllUsers = async (req, res) => {
     const { count, rows: users } = await User.findAndCountAll({
       where,
       attributes: { exclude: ['password_hash'] },
-      limit: parseInt(limit),
-      offset: parseInt(offset),
+      limit: safeLimit,
+      offset: (safePage - 1) * safeLimit,
       order: [['created_at', 'DESC']],
     });
 
@@ -51,8 +54,8 @@ const getAllUsers = async (req, res) => {
       success: true,
       data: {
         users,
-        currentPage: parseInt(page),
-        totalPages: Math.ceil(count / limit),
+        currentPage: safePage,
+        totalPages: Math.ceil(count / safeLimit),
         totalItems: count,
       },
     });
@@ -210,8 +213,10 @@ const changePassword = async (req, res) => {
     }
 
     // Actualizar contraseña
-    const hashedPassword = await bcrypt.hash(new_password, 10);
+    const hashedPassword = await bcrypt.hash(new_password, 12);
     await user.update({ password_hash: hashedPassword });
+
+    setImmediate(() => audit({ tenant_id: user.tenant_id, user_id: user.id, action: 'CHANGE_PASSWORD', entity: 'user', entity_id: user.id, changes: {}, req }));
 
     res.status(200).json({
       success: true,
@@ -269,7 +274,7 @@ const createUser = async (req, res) => {
     }
 
     // Hash de la contraseña
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12);
 
     // Crear usuario con tenant_id
     let userData = {
@@ -341,7 +346,7 @@ const createClient = async (req, res) => {
     // Generar contraseña temporal
     const tempPassword = Math.random().toString(36).slice(-8);
     // ✅ FIX: Hashear la contraseña temporal antes de guardarla en la BD
-    const hashedTempPassword = await bcrypt.hash(tempPassword, 10);
+    const hashedTempPassword = await bcrypt.hash(tempPassword, 12);
 
     // Crear cliente con tenant_id
     let userData = {
