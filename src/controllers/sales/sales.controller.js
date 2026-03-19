@@ -391,6 +391,10 @@ const update = async (req, res) => {
       updateData.customer_id = (updateData.customer_id && uuidRegex.test(updateData.customer_id))
         ? updateData.customer_id : null;
     }
+    if ('technician_id' in updateData) {
+      updateData.technician_id = (updateData.technician_id && uuidRegex.test(updateData.technician_id))
+        ? updateData.technician_id : null;
+    }
     if ('vehicle_plate' in updateData) {
       updateData.vehicle_plate = updateData.vehicle_plate?.trim()
         ? updateData.vehicle_plate.trim().toUpperCase() : null;
