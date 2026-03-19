@@ -20,6 +20,8 @@ function prepareCustomerData(body) {
     data.first_name = first_name;
     data.last_name = last_name;
   }
+  // Normalizar customer_type: mapear 'business' -> 'company' (CHECK constraint de DB)
+  if (data.customer_type === 'business') data.customer_type = 'company';
   // Eliminar campos que no existen en la tabla
   delete data.discount_percentage;
   delete data.sales_representative_id;
