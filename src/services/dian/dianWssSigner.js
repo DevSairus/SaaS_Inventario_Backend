@@ -41,6 +41,7 @@
 
 const forge  = require('node-forge');
 const crypto = require('crypto');
+const logger = require('../../config/logger');
 
 /* ── Namespaces ─────────────────────────────────────────── */
 const NS = {
