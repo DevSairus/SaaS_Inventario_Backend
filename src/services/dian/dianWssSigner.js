@@ -172,7 +172,7 @@ function buildRef(id, digest) {
 /* ── buildSignedEnvelope ─────────────────────────────────── */
 function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privateKey, keyPem, thumbprintB64 }) {
   const bodyId   = 'Body-1', tsId = 'TS-1', tokenId = 'X509Token-1';
-  const actionId = 'Action-1', toId = 'To-1';
+  const actionId = 'Action-1', toId = 'To-1', msgId = 'MsgId-1';
 
   const now     = new Date();
   const expires = new Date(now.getTime() + 5 * 60 * 1000);
@@ -180,6 +180,13 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
   const exp     = fmtUtc(expires);
 
   // Canonicalizar cada referencia con DOM ExcC14N y el contexto de ancestros exacto
+  // wsa:MessageID — firmado igual que Action y To
+  const messageId = 'urn:uuid:' + require('crypto').randomUUID();
+  const canonMsgId = domExcC14n(
+    '<a:MessageID xmlns:a="' + NS.ADDR + '" xmlns:soap="' + NS.SOAP + '" xmlns:wsu="' + NS.WSU + '" wsu:Id="' + msgId + '">' + messageId + '</a:MessageID>',
+    ENVELOPE_NS
+  );
+
   const canonAction = domExcC14n(
     '<a:Action xmlns:a="' + NS.ADDR + '" xmlns:soap="' + NS.SOAP + '" xmlns:wsu="' + NS.WSU + '" wsu:Id="' + actionId + '" soap:mustUnderstand="1">' + escapeText(action) + '</a:Action>',
     ENVELOPE_NS
@@ -197,8 +204,9 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
     ENVELOPE_NS
   );
 
-  logger.info('[DIAN WSS] Digests — action=' + sha256b64(canonAction).substring(0,12) + ' to=' + sha256b64(canonTo).substring(0,12) + ' ts=' + sha256b64(canonTS).substring(0,12) + ' body=' + sha256b64(canonBody).substring(0,12));
+  logger.info('[DIAN WSS] Digests — msgid=' + sha256b64(canonMsgId).substring(0,12) + ' action=' + sha256b64(canonAction).substring(0,12) + ' to=' + sha256b64(canonTo).substring(0,12) + ' ts=' + sha256b64(canonTS).substring(0,12) + ' body=' + sha256b64(canonBody).substring(0,12));
 
+  const dMsgId  = sha256b64(canonMsgId);
   const dAction = sha256b64(canonAction);
   const dTo     = sha256b64(canonTo);
   const dTS     = sha256b64(canonTS);
@@ -209,6 +217,7 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
     '<ds:SignedInfo>' +
     '<ds:CanonicalizationMethod Algorithm="' + NS.EXC_C14N + '"></ds:CanonicalizationMethod>' +
     '<ds:SignatureMethod Algorithm="' + NS.RSA_SHA256 + '"></ds:SignatureMethod>' +
+    buildRef(msgId,    dMsgId)  +
     buildRef(actionId, dAction) +
     buildRef(toId,     dTo)     +
     buildRef(tsId,     dTS)     +
@@ -230,8 +239,10 @@ function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privat
     '<?xml version="1.0" encoding="utf-8"?>' +
     '<soap:Envelope xmlns:soap="' + NS.SOAP + '" xmlns:a="' + NS.ADDR + '" xmlns:wsu="' + NS.WSU + '">' +
     '<soap:Header>' +
+    '<a:MessageID wsu:Id="' + msgId + '">' + messageId + '</a:MessageID>' +
     '<a:Action wsu:Id="' + actionId + '" soap:mustUnderstand="1">' + action + '</a:Action>' +
     '<a:To wsu:Id="' + toId + '" soap:mustUnderstand="1">' + endpoint + '</a:To>' +
+    '<a:ReplyTo><a:Address>' + NS.ADDR + '/anonymous</a:Address></a:ReplyTo>' +
     '<wsse:Security xmlns:wsse="' + NS.WSSE + '" soap:mustUnderstand="1">' +
     '<wsu:Timestamp wsu:Id="' + tsId + '">' +
     '<wsu:Created>' + created + '</wsu:Created>' +
