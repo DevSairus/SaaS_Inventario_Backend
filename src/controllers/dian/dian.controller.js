@@ -357,7 +357,13 @@ const testConnection = async (req, res) => {
     const connectionOk = hasResponse && !result.isFault;
 
     if (result.isFault) {
-      return fail(res, `Error DIAN: ${result.statusDescription || result.statusMessage}`, 400);
+      return res.status(400).json({
+        success: false,
+        message: `Error DIAN: ${result.statusDescription || result.statusMessage}`,
+        dian_raw: result.raw || 'Sin respuesta',
+        dian_code: result.statusCode,
+        environment,
+      });
     }
 
     ok(res, {
