@@ -581,6 +581,103 @@ const sendAutoTestDocuments = async (req, res) => {
   }
 };
 
+
+/* ──────────────────────────────────────────────────────────
+ * GET /api/dian/diagnose-cert
+ * Diagnóstico completo del certificado P12 configurado
+ * ────────────────────────────────────────────────────────── */
+const diagnoseCert = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const cfg = tenant.dian_config || {};
+
+    if (!cfg.certificate_p12_base64 || cfg.certificate_p12_base64 === '[CONFIGURADO]') {
+      return fail(res, 'No hay certificado configurado. Cargue el archivo .p12 primero.');
+    }
+    if (!cfg.certificate_password || cfg.certificate_password === '[CONFIGURADO]') {
+      return fail(res, 'No hay contraseña del certificado configurada.');
+    }
+
+    const { extractFromP12 } = require('../../services/dian/dianWssSigner');
+
+    let certInfo;
+    try {
+      certInfo = extractFromP12(cfg.certificate_p12_base64, cfg.certificate_password);
+    } catch (e) {
+      return fail(res, `Error al leer el P12: ${e.message}`);
+    }
+
+    const forge = require('node-forge');
+    const p12Der  = forge.util.decode64(cfg.certificate_p12_base64);
+    const p12Asn1 = forge.asn1.fromDer(p12Der);
+    const p12obj  = forge.pkcs12.pkcs12FromAsn1(p12Asn1, cfg.certificate_password);
+    const certBags = p12obj.getBags({ bagType: forge.pki.oids.certBag });
+    const certs    = certBags[forge.pki.oids.certBag] || [];
+    const entityCert = certs.find(b => { const bc = b.cert.getExtension('basicConstraints'); return !bc || !bc.cA; }) || certs[0];
+
+    const subjAttrs = entityCert.cert.subject.attributes.map(a => ({ shortName: a.shortName || a.type, value: a.value }));
+    const nitAttr   = entityCert.cert.subject.attributes.find(a => a.shortName === 'SERIALNUMBER' || a.type === '2.5.4.5');
+    const cnAttr    = entityCert.cert.subject.attributes.find(a => a.shortName === 'CN');
+    const certNit   = nitAttr?.value || 'NO ENCONTRADO';
+
+    const notAfter  = entityCert.cert.validity.notAfter;
+    const notBefore = entityCert.cert.validity.notBefore;
+    const isExpired = new Date() > notAfter;
+    const nitMatch  = cfg.nit && (certNit === cfg.nit || certNit === cfg.nit + '-' + (cfg.dv || ''));
+
+    // Verificar firma interna
+    const crypto = require('crypto');
+    let signatureOk = false;
+    let signatureError = null;
+    try {
+      const testMsg = Buffer.from('dian-diag-test');
+      const keyBags = p12obj.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
+      const keyBag  = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag]?.[0];
+      if (!keyBag) throw new Error('No se encontró clave privada');
+      const keyPem  = forge.pki.privateKeyToPem(keyBag.key);
+      const certPem = forge.pki.certificateToPem(entityCert.cert);
+      const sig = crypto.createSign('RSA-SHA256').update(testMsg).sign(keyPem);
+      signatureOk = crypto.createVerify('RSA-SHA256').update(testMsg).verify(certPem, sig);
+    } catch (e) {
+      signatureError = e.message;
+    }
+
+    ok(res, {
+      data: {
+        // Identidad del certificado
+        cn: cnAttr?.value || '?',
+        nit_cert: certNit,
+        nit_config: cfg.nit || 'NO CONFIGURADO',
+        nit_match: nitMatch,
+        subject: subjAttrs,
+        // Vigencia
+        not_before: notBefore,
+        not_after: notAfter,
+        is_expired: isExpired,
+        days_remaining: Math.floor((notAfter - new Date()) / (1000*60*60*24)),
+        // Par clave/certificado
+        key_cert_match: signatureOk,
+        key_cert_error: signatureError,
+        // Datos de configuración que deben coincidir con el portal DIAN
+        software_id: cfg.software_id || 'NO CONFIGURADO',
+        test_set_id: cfg.test_set_id ? cfg.test_set_id.substring(0,8) + '...' : 'NO CONFIGURADO',
+        environment: cfg.environment || 'test',
+        // Diagnóstico
+        issues: [
+          !signatureOk && `❌ La clave privada NO corresponde al certificado${signatureError ? ': ' + signatureError : ''}`,
+          isExpired && `❌ El certificado está VENCIDO (venció el ${notAfter.toISOString?.() || notAfter})`,
+          !nitMatch && `⚠️  NIT del certificado (${certNit}) NO coincide con NIT configurado (${cfg.nit || 'vacío'})`,
+          !cfg.software_id && '❌ Software ID no configurado',
+          !cfg.test_set_id && '⚠️  TestSetId no configurado',
+        ].filter(Boolean),
+      }
+    });
+  } catch (e) {
+    logger.error('Error diagnoseCert:', e);
+    fail(res, `Error en diagnóstico: ${e.message}`, 500);
+  }
+};
+
 module.exports = {
   getConfig,
   updateConfig,
@@ -597,4 +694,5 @@ module.exports = {
   sendToTestSet,
   getHabilitacionStatus,
   sendAutoTestDocuments,
+  diagnoseCert,
 };
