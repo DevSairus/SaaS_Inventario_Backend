@@ -19,6 +19,12 @@ require('./models');
 
 const app = express();
 
+// ✅ CRÍTICO para Vercel y cualquier proxy inverso:
+// Sin esto, express-rate-limit no puede leer IPs reales desde X-Forwarded-For,
+// lo que hace que TODOS los usuarios compartan el mismo cupo de rate limit
+// y tenants distintos se bloqueen entre sí.
+app.set('trust proxy', 1);
+
 // ================= MIDDLEWARE =================
 app.use(helmet({
   contentSecurityPolicy: {

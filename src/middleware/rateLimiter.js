@@ -7,11 +7,20 @@
  * - Brute force en login
  * - Spam de requests
  * - Abuso de recursos
+ *
+ * REQUISITO: app.set('trust proxy', 1) debe estar en server.js
+ * para que req.ip resuelva la IP real desde X-Forwarded-For (Vercel/proxies).
  */
 
 const rateLimit = require('express-rate-limit');
-const { ipKeyGenerator } = require('express-rate-limit');
 const logger = require('../config/logger');
+
+// ============================================
+// KEY GENERATOR — usa IP real tras el proxy
+// ============================================
+// Con app.set('trust proxy', 1), req.ip ya devuelve la IP real del cliente.
+// No se necesita ipKeyGenerator de la librería; req.ip es suficiente y correcto.
+const ipKey = (req) => req.ip;
 
 // ============================================
 // CONFIGURACIONES DE RATE LIMITING
@@ -19,20 +28,21 @@ const logger = require('../config/logger');
 
 /**
  * Rate limiter general para todas las rutas
- * 100 requests por 15 minutos
+ * 500 requests por 15 minutos por IP real
+ * (antes 100 — demasiado bajo: búsquedas con debounce consumen ~1 req/300ms)
  */
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 100, // Límite de requests
+  max: 500,
   message: {
     success: false,
     error: 'Demasiadas peticiones desde esta IP, intenta de nuevo más tarde',
-    retryAfter: 15, // minutos
+    retryAfter: 15,
   },
-  standardHeaders: true, // Retorna rate limit info en headers `RateLimit-*`
-  legacyHeaders: false, // Deshabilita headers `X-RateLimit-*`
+  standardHeaders: true,  // Retorna rate limit info en headers `RateLimit-*`
+  legacyHeaders: false,   // Deshabilita headers `X-RateLimit-*`
+  keyGenerator: ipKey,
 
-  // Handler cuando se excede el límite
   handler: (req, res) => {
     logger.warn('Rate limit exceeded', {
       ip: req.ip,
@@ -43,27 +53,24 @@ const generalLimiter = rateLimit({
     res.status(429).json({
       success: false,
       error: 'Demasiadas peticiones, intenta de nuevo más tarde',
-      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000 / 60), // minutos
+      retryAfter: Math.ceil(req.rateLimit.resetTime / 1000 / 60),
     });
   },
-
-  // Función para generar la key compatible con IPv6
-  keyGenerator: (req) => ipKeyGenerator(req),
 });
 
 /**
  * Rate limiter estricto para autenticación
- * 5 intentos por 15 minutos
- * Solo cuenta intentos fallidos
+ * 10 intentos fallidos por 15 minutos por IP real
+ * (antes 5 — muy restrictivo cuando múltiples usuarios comparten IP corporativa/NAT)
  */
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 5,
+  max: 10,
   skipSuccessfulRequests: true, // No cuenta requests exitosos
+  keyGenerator: ipKey,
   message: {
     success: false,
-    error:
-      'Demasiados intentos de login fallidos. Intenta de nuevo en 15 minutos',
+    error: 'Demasiados intentos de login fallidos. Intenta de nuevo en 15 minutos',
   },
 
   handler: (req, res) => {
@@ -74,8 +81,7 @@ const authLimiter = rateLimit({
 
     res.status(429).json({
       success: false,
-      error:
-        'Demasiados intentos de login. Por seguridad, intenta de nuevo en 15 minutos',
+      error: 'Demasiados intentos de login. Por seguridad, intenta de nuevo en 15 minutos',
       retryAfter: 15,
     });
   },
@@ -86,13 +92,13 @@ const authLimiter = rateLimit({
  * 20 requests por hora
  */
 const createResourceLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hora
+  windowMs: 60 * 60 * 1000,
   max: 20,
+  keyGenerator: ipKey,
   message: {
     success: false,
     error: 'Límite de creación de recursos alcanzado',
   },
-
   skipSuccessfulRequests: false,
 
   handler: (req, res) => {
@@ -117,6 +123,7 @@ const createResourceLimiter = rateLimit({
 const paymentLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+  keyGenerator: ipKey,
   message: {
     success: false,
     error: 'Límite de transacciones alcanzado',
@@ -130,8 +137,7 @@ const paymentLimiter = rateLimit({
 
     res.status(429).json({
       success: false,
-      error:
-        'Límite de transacciones de pago alcanzado. Contacta soporte si necesitas aumentar el límite',
+      error: 'Límite de transacciones de pago alcanzado. Contacta soporte si necesitas aumentar el límite',
       retryAfter: 60,
     });
   },
@@ -144,6 +150,7 @@ const paymentLimiter = rateLimit({
 const pdfLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  keyGenerator: ipKey,
 
   handler: (req, res) => {
     logger.warn('PDF generation rate limit exceeded', {
@@ -166,6 +173,7 @@ const pdfLimiter = rateLimit({
 const exportLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+  keyGenerator: ipKey,
 
   handler: (req, res) => {
     logger.warn('Export rate limit exceeded', {
@@ -188,6 +196,7 @@ const exportLimiter = rateLimit({
 const importLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
+  keyGenerator: ipKey,
 
   handler: (req, res) => {
     logger.warn('Import rate limit exceeded', {
@@ -197,8 +206,7 @@ const importLimiter = rateLimit({
 
     res.status(429).json({
       success: false,
-      error:
-        'Límite de importaciones alcanzado. Las importaciones consumen muchos recursos, intenta más tarde',
+      error: 'Límite de importaciones alcanzado. Las importaciones consumen muchos recursos, intenta más tarde',
       retryAfter: 60,
     });
   },
@@ -211,6 +219,7 @@ const importLimiter = rateLimit({
 const notificationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 50,
+  keyGenerator: ipKey,
 
   handler: (req, res) => {
     logger.warn('Notification rate limit exceeded', {
@@ -233,15 +242,14 @@ const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
   return rateLimit({
     windowMs: 15 * 60 * 1000,
     max: (req) => {
-      // Admin tiene límite más alto
       if (req.user?.role === 'admin' || req.user?.role === 'super_admin') {
         return maxForAdmin;
       }
       return maxForUser;
     },
     keyGenerator: (req) => {
-      // Si está autenticado, usar user ID, sino IP compatible IPv6
-      return req.user?.id || ipKeyGenerator(req);
+      // Si está autenticado, usar user ID para no penalizar IPs compartidas
+      return req.user?.id?.toString() || req.ip;
     },
   });
 };
