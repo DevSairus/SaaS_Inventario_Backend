@@ -122,16 +122,37 @@ function extractFromP12(p12Base64, password) {
 
   // Issuer en formato RFC 2253 (igual que C# X509Certificate2.IssuerName)
   // El C# produce: "CN=...,OU=...,O=...,..." — mismo formato que forge
+  // Issuer en orden INVERSO con comas+espacio (RFC 2253 — lo que DIAN valida en XAdES)
   const issuerName = entityCert.cert.issuer.attributes
+    .slice()
+    .reverse()
     .map(a => `${a.shortName || a.type}=${a.value}`)
-    .join(',');
+    .join(', ');
+
+  // serialNumber: node-forge devuelve HEX — la DIAN requiere DECIMAL en ds:X509SerialNumber
+  const serialNumberHex = entityCert.cert.serialNumber;
+  const serialNumber    = BigInt('0x' + serialNumberHex).toString(10);
+
+  // Verificar que clave privada corresponde al certificado (detecta P12 corruptos)
+  try {
+    const testMsg = Buffer.from('dian-key-verify');
+    const sig = crypto.createSign('SHA256').update(testMsg)
+      .sign(forge.pki.privateKeyToPem(keyBag.key));
+    const certPemCheck = forge.pki.certificateToPem(entityCert.cert);
+    const ok = crypto.createVerify('SHA256').update(testMsg).verify(certPemCheck, sig);
+    if (!ok) throw new Error('La clave privada no corresponde al certificado');
+    logger.info('[DIAN Signer] P12 OK: clave privada ↔ certificado verificados');
+  } catch (verifyErr) {
+    logger.error('[DIAN Signer] P12 inválido:', verifyErr.message);
+    throw new Error(`Certificado P12 inválido: ${verifyErr.message}`);
+  }
 
   return {
     privateKey:  keyBag.key,
     certBase64,
     certDigest:  crypto.createHash('sha256').update(certDerBuf).digest('base64'),
     issuerName,
-    serialNumber: entityCert.cert.serialNumber,
+    serialNumber,
   };
 }
 

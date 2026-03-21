@@ -99,6 +99,27 @@ function extractFromP12(p12Base64, password) {
   const subject    = entityCert.cert.subject.attributes
     .map(a => `${a.shortName || a.type}=${a.value}`).join(', ');
 
+  // Log del NIT del certificado para diagnóstico de InvalidSecurity
+  const certNit = entityCert.cert.subject.attributes.find(
+    a => a.shortName === 'SERIALNUMBER' || a.type === '2.5.4.5'
+  );
+  const certNotAfter = entityCert.cert.validity.notAfter;
+  logger.info(
+    `[DIAN WSS] Cert: sujeto=${subject.substring(0,80)} | NIT-cert=${certNit?.value || 'N/A'} | vence=${certNotAfter.toISOString?.() || certNotAfter}`
+  );
+
+  // Verificar que clave y certificado coinciden antes de firmar el SOAP
+  try {
+    const keyPemCheck = forge.pki.privateKeyToPem(keyBag.key);
+    const testData = Buffer.from('wss-check');
+    const testSig = crypto.createSign('RSA-SHA256').update(testData).sign(keyPemCheck);
+    const certPemCheck = forge.pki.certificateToPem(entityCert.cert);
+    const valid = crypto.createVerify('RSA-SHA256').update(testData).verify(certPemCheck, testSig);
+    if (!valid) throw new Error('Clave privada y certificado P12 no coinciden');
+  } catch (e) {
+    throw new Error(`P12 WSS inválido: ${e.message}`);
+  }
+
   const thumbprintB64 = crypto.createHash('sha1')
     .update(Buffer.from(certBase64, 'base64'))
     .digest('base64');
