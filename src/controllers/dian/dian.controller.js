@@ -589,6 +589,56 @@ const sendAutoTestDocuments = async (req, res) => {
 
 
 /* ──────────────────────────────────────────────────────────
+ * POST /api/dian/test-connection-prod
+ * Prueba de conectividad forzando endpoint de PRODUCCIÓN
+ * Sirve para diagnosticar si el problema es del endpoint de habilitación
+ * ────────────────────────────────────────────────────────── */
+const testConnectionProd = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const cfg = tenant.dian_config || {};
+
+    if (!cfg.nit || !cfg.software_id) {
+      return fail(res, 'Configure primero NIT y Software ID');
+    }
+    if (!cfg.certificate_p12_base64 || !cfg.certificate_password) {
+      return fail(res, 'Certificado no configurado');
+    }
+
+    // Forzar PRODUCCIÓN independientemente del cfg.environment
+    const result = await dianApi.getNumberingRange({
+      nit: cfg.nit,
+      softwareId: cfg.software_id,
+      softwarePin: cfg.software_pin,
+      environment: 'production',
+      p12Base64: cfg.certificate_p12_base64,
+      password:  cfg.certificate_password,
+    });
+
+    if (result.isFault) {
+      return res.status(400).json({
+        success: false,
+        message: `PRODUCCIÓN: ${result.statusDescription || result.statusMessage}`,
+        dian_raw: result.raw,
+        dian_code: result.statusCode,
+        environment: 'production (forzado para diagnóstico)',
+        diagnostico: result.statusCode === 's:Sender' && result.raw?.includes('InvalidSecurity')
+          ? 'InvalidSecurity también en PRODUCCIÓN → problema de código/certificado'
+          : 'Error diferente en PRODUCCIÓN → el problema es específico del endpoint de habilitación',
+      });
+    }
+
+    ok(res, {
+      data: { ...result, environment: 'production' },
+      message: '✅ PRODUCCIÓN funciona — el problema es específico del endpoint de habilitación (portal DIAN)',
+      diagnostico: 'Para habilitación: registrar el software + certificado en catalogo-vpfe-hab.dian.gov.co',
+    });
+  } catch (e) {
+    fail(res, `Error: ${e.message}`, 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
  * GET /api/dian/diagnose-cert
  * Diagnóstico completo del certificado P12 configurado
  * ────────────────────────────────────────────────────────── */
@@ -701,4 +751,5 @@ module.exports = {
   getHabilitacionStatus,
   sendAutoTestDocuments,
   diagnoseCert,
+  testConnectionProd,
 };

@@ -28,6 +28,7 @@ router.get('/habilitacion-status',   ctrl.getHabilitacionStatus);
 router.post('/test-connection',      ctrl.testConnection);
 router.get('/numbering-range',       ctrl.getNumberingRange);
 router.get('/diagnose-cert',         ctrl.diagnoseCert);
+router.post('/test-connection-prod', ctrl.testConnectionProd);
 
 // Pruebas automáticas — puede tardar hasta 2 min por polling
 router.post('/send-auto-test', (req, res, next) => {
