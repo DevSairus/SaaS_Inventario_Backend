@@ -143,13 +143,26 @@ function extractFromP12(p12Base64, password) {
   const certNit = entityCert.cert.subject.attributes.find(a => a.shortName === 'SERIALNUMBER' || a.type === '2.5.4.5');
   logger.info('[DIAN WSS] Cert: NIT=' + (certNit?.value || 'N/A') + ' vence=' + entityCert.cert.validity.notAfter);
 
+  // CROSS-VERIFY: firma con keyPem, verifica con la clave pública del certBase64
+  // usando Node.js nativo (OpenSSL) — no forge — para detectar extracción incorrecta de clave
   try {
-    const testMsg = Buffer.from('dian-wss-verify');
-    const sig = crypto.createSign('RSA-SHA256').update(testMsg).sign(keyPem);
-    const ok  = crypto.createVerify('RSA-SHA256').update(testMsg).verify(certPem, sig);
-    if (!ok) throw new Error('La clave privada no corresponde al certificado');
-    logger.info('[DIAN WSS] P12 OK: clave <-> certificado verificados');
-  } catch (e) { throw new Error('P12 inválido: ' + e.message); }
+    const testMsg = Buffer.from('dian-wss-cross-verify');
+    const testSig = crypto.createSign('RSA-SHA256').update(testMsg).sign(keyPem);
+    const certDerBuf2 = Buffer.from(certBase64, 'base64');
+    const x509native = new crypto.X509Certificate(certDerBuf2);
+    const crossOk = crypto.createVerify('RSA-SHA256').update(testMsg).verify(x509native.publicKey, testSig);
+    if (!crossOk) {
+      throw new Error(
+        'CROSS-VERIFY FALLIDO: keyPem NO firma correctamente para certBase64. ' +
+        'node-forge extrajo la clave privada equivocada del P12. ' +
+        'El P12 puede tener múltiples certs o usar cifrado incompatible con node-forge.'
+      );
+    }
+    logger.info('[DIAN WSS] Cross-verify OK: keyPem es correcto para certBase64 (verificado con OpenSSL nativo)');
+  } catch (e) {
+    logger.error('[DIAN WSS] Cross-verify FALLIDO: ' + e.message);
+    throw new Error('P12 cross-verify fallido: ' + e.message);
+  }
 
   return { certPem, keyPem, privateKey: keyBag.key, certBase64, thumbprintB64 };
 }
