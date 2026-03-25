@@ -384,7 +384,7 @@ const approveSupplierReturn = async (req, res) => {
     await transaction.commit();
 
     const product_ids = supplierReturn.items.map(item => item.product_id);
-    markProductsForAlertCheck(res, product_ids, tenantId);
+    markProductsForAlertCheck(res, product_ids, tenant_id);
 
     res.json({ success: true, message: 'Devolución aprobada exitosamente', data: supplierReturn });
   } catch (error) {
