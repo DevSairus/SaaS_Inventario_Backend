@@ -58,23 +58,15 @@ const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSet
 const DianResolution = require('./dian/DianResolution');
 const DianEvent = require('./dian/DianEvent');
 // ============= RELACIONES EXISTENTES =============
+// Las asociaciones de Purchase, PurchaseItem, Supplier, Product e inventario base
+// están definidas en ./inventory/index.js. Se requiere aquí para garantizar que
+// estén inicializadas cuando otros controllers (ej: supplierReturns) usen este módulo.
+require('./inventory');
 Tenant.hasMany(User, { foreignKey: 'tenant_id', as: 'users' });
 User.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
 Purchase.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(Purchase, { foreignKey: 'user_id', as: 'purchases' });
-
-// Purchase - PurchaseItem
-Purchase.hasMany(PurchaseItem, { foreignKey: 'purchase_id', as: 'items' });
-PurchaseItem.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
-
-// Purchase - Supplier
-Purchase.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
-Supplier.hasMany(Purchase, { foreignKey: 'supplier_id', as: 'purchases' });
-
-// PurchaseItem - Product
-PurchaseItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
-Product.hasMany(PurchaseItem, { foreignKey: 'product_id', as: 'purchase_items' });
 
 InventoryMovement.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(InventoryMovement, { foreignKey: 'user_id', as: 'movements' });
