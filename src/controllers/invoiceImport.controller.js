@@ -20,6 +20,8 @@ const importInvoice = async (req, res) => {
     const removed_items  = JSON.parse(req.body.removed_items || '[]');
     const shipping_cost   = parseFloat(req.body.shipping_cost) || 0;
     const discount_amount = parseFloat(req.body.discount_amount) || 0;
+    // Override de IVA por ítem: { "0": 19, "1": 0, "2": 5 } (índice original → porcentaje)
+    const items_tax_overrides = JSON.parse(req.body.items_tax_overrides || '{}');
 
     if (!req.file) {
       return res.status(400).json({
@@ -94,7 +96,22 @@ const importInvoice = async (req, res) => {
       : invoiceData.supplier;
     const supplier = await findOrCreateSupplier(supplierData, tenant_id, transaction);
     // Filtrar ítems que el usuario decidió excluir en el modal
-    const filteredItems = invoiceData.items.filter((_, idx) => !removed_items.includes(idx));
+    const filteredItems = invoiceData.items
+      .map((item, originalIdx) => ({
+        ...item,
+        // Si hay override de IVA para este índice original, aplicarlo
+        tax_percentage: items_tax_overrides[originalIdx] !== undefined
+          ? parseFloat(items_tax_overrides[originalIdx])
+          : item.tax_percentage,
+      }))
+      .filter((_, idx) => !removed_items.includes(idx));
+
+    // Recalcular tax_amount con el porcentaje posiblemente editado
+    filteredItems.forEach(item => {
+      item.tax_amount = Math.round(item.subtotal * (item.tax_percentage / 100));
+      item.total = item.subtotal + item.tax_amount;
+    });
+
     const processedItems = await processInvoiceItems(filteredItems, tenant_id, transaction, profit_margin, margin_multiplier);
     const purchase = await createPurchaseFromInvoice(
       invoiceData,

@@ -64,6 +64,18 @@ User.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Purchase.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(Purchase, { foreignKey: 'user_id', as: 'purchases' });
 
+// Purchase - PurchaseItem
+Purchase.hasMany(PurchaseItem, { foreignKey: 'purchase_id', as: 'items' });
+PurchaseItem.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+
+// Purchase - Supplier
+Purchase.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+Supplier.hasMany(Purchase, { foreignKey: 'supplier_id', as: 'purchases' });
+
+// PurchaseItem - Product
+PurchaseItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Product.hasMany(PurchaseItem, { foreignKey: 'product_id', as: 'purchase_items' });
+
 InventoryMovement.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(InventoryMovement, { foreignKey: 'user_id', as: 'movements' });
 
