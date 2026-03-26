@@ -8,24 +8,24 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 /**
  * Generar número de compra único
  */
-const generatePurchaseNumber = async (tenant_id) => {
+const generatePurchaseNumber = async (tenant_id, transaction = null) => {
   const year = new Date().getFullYear();
   const prefix = `PC-${year}-`;
-  
+
   const lastPurchase = await Purchase.findOne({
     where: {
       tenant_id,
-      purchase_number: {
-        [Op.like]: `${prefix}%`
-      }
+      purchase_number: { [Op.like]: `${prefix}%` }
     },
-    order: [['created_at', 'DESC']]
+    order: [['purchase_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    transaction: transaction || undefined
   });
 
   let nextNumber = 1;
   if (lastPurchase) {
-    const lastNumber = parseInt(lastPurchase.purchase_number.split('-').pop());
-    nextNumber = lastNumber + 1;
+    const lastNumber = parseInt(lastPurchase.purchase_number.split('-').pop(), 10);
+    if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
   }
 
   return `${prefix}${String(nextNumber).padStart(5, '0')}`;
@@ -198,9 +198,6 @@ const createPurchase = async (req, res) => {
       throw new Error('Proveedor no encontrado');
     }
 
-    // Generar número de compra
-    const purchase_number = await generatePurchaseNumber(tenant_id);
-
     // Calcular totales
     let subtotal = 0;
     let tax_amount = 0;
@@ -250,28 +247,45 @@ const createPurchase = async (req, res) => {
 
     const total_amount = subtotal + tax_amount - parseFloat(discount_amount) + parseFloat(shipping_cost);
 
-    // Crear la compra
-    const purchase = await Purchase.create({
-      tenant_id,
-      purchase_number,
-      supplier_id,
-      user_id,
-      purchase_date: purchase_date || new Date(),
-      expected_delivery_date,
-      status: 'draft',
-      subtotal,
-      tax_amount,
-      discount_amount: parseFloat(discount_amount),
-      shipping_cost: parseFloat(shipping_cost),
-      total_amount,
-      payment_method,
-      payment_status: 'pending',
-      invoice_number,
-      reference,
-      notes,
-      internal_notes,
-      warehouse_id
-    }, { transaction: t });
+    // Generar número de compra con lock dentro de la transacción (evita duplicados bajo concurrencia)
+    const MAX_RETRIES = 5;
+    let purchase;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const purchase_number = await generatePurchaseNumber(tenant_id, t);
+      try {
+        purchase = await Purchase.create({
+          tenant_id,
+          purchase_number,
+          supplier_id,
+          user_id,
+          purchase_date: purchase_date || new Date(),
+          expected_delivery_date,
+          status: 'draft',
+          subtotal,
+          tax_amount,
+          discount_amount: parseFloat(discount_amount),
+          shipping_cost: parseFloat(shipping_cost),
+          total_amount,
+          payment_method,
+          payment_status: 'pending',
+          invoice_number,
+          reference,
+          notes,
+          internal_notes,
+          warehouse_id
+        }, { transaction: t });
+        break; // éxito
+      } catch (uniqueErr) {
+        if (
+          uniqueErr.name === 'SequelizeUniqueConstraintError' &&
+          uniqueErr.fields?.purchase_number &&
+          attempt < MAX_RETRIES
+        ) {
+          continue;
+        }
+        throw uniqueErr;
+      }
+    }
 
     // Crear los items
     for (const itemData of itemsToCreate) {

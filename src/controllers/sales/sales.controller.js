@@ -723,8 +723,8 @@ const markAsDelivered = async (req, res) => {
 
     const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
-    if (sale.status !== 'confirmed') {
-      return res.status(400).json({ success: false, message: 'Solo se pueden marcar como entregadas las ventas confirmadas' });
+    if (sale.status !== 'completed') {
+      return res.status(400).json({ success: false, message: 'Solo se pueden marcar como entregadas las ventas completadas' });
     }
 
     await sale.update({ status: 'delivered', delivery_date: delivery_date || new Date() });

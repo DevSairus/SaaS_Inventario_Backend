@@ -252,7 +252,7 @@ const createCustomerReturn = async (req, res) => {
     const returnItems = items.map(item => {
       const saleItem = sale.items.find(si => si.id === item.sale_item_id);
       const itemSubtotal = parseFloat(item.quantity) * parseFloat(saleItem.unit_price);
-      const itemTax = itemSubtotal * (parseFloat(saleItem.tax_rate || 0) / 100);
+      const itemTax = itemSubtotal * (parseFloat(saleItem.tax_percentage || 0) / 100);
 
       subtotal += itemSubtotal;
       tax += itemTax;

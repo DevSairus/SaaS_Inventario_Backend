@@ -8,22 +8,24 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
-const generateTransferNumber = async (tenant_id) => {
+const generateTransferNumber = async (tenant_id, transaction = null) => {
   const year = new Date().getFullYear();
   const prefix = `TRANS-${year}-`;
-  
+
   const lastTransfer = await Transfer.findOne({
     where: {
       tenant_id,
       transfer_number: { [Op.like]: `${prefix}%` }
     },
-    order: [['created_at', 'DESC']]
+    order: [['transfer_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    transaction: transaction || undefined
   });
 
   let nextNumber = 1;
   if (lastTransfer) {
-    const lastNum = parseInt(lastTransfer.transfer_number.split('-').pop());
-    nextNumber = lastNum + 1;
+    const lastNum = parseInt(lastTransfer.transfer_number.split('-').pop(), 10);
+    if (!isNaN(lastNum)) nextNumber = lastNum + 1;
   }
 
   return `${prefix}${String(nextNumber).padStart(5, '0')}`;
@@ -236,23 +238,38 @@ const createTransfer = async (req, res) => {
       }
     }
 
-    const transfer_number = await generateTransferNumber(tenant_id);
-
-    const transfer = await Transfer.create({
-      tenant_id,
-      transfer_number,
-      from_warehouse_id,
-      to_warehouse_id,
-      transfer_date: new Date(),
-      shipping_method,
-      tracking_number,
-      notes,
-      status: 'draft',
-      created_by: req.user.id
-    }, { transaction });
+    const MAX_RETRIES = 5;
+    let transfer;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const transfer_number = await generateTransferNumber(tenant_id, transaction);
+      try {
+        transfer = await Transfer.create({
+          tenant_id,
+          transfer_number,
+          from_warehouse_id,
+          to_warehouse_id,
+          transfer_date: new Date(),
+          shipping_method,
+          tracking_number,
+          notes,
+          status: 'draft',
+          created_by: req.user.id
+        }, { transaction });
+        break;
+      } catch (uniqueErr) {
+        if (
+          uniqueErr.name === 'SequelizeUniqueConstraintError' &&
+          uniqueErr.fields?.transfer_number &&
+          attempt < MAX_RETRIES
+        ) {
+          continue;
+        }
+        throw uniqueErr;
+      }
+    }
 
     for (const item of items) {
-      const product = await Product.findByPk(item.product_id);
+      const product = await Product.findByPk(item.product_id, { transaction });
       
       await TransferItem.create({
         transfer_id: transfer.id,
@@ -475,7 +492,7 @@ const receiveTransfer = async (req, res) => {
     await transaction.commit();
 
     const product_ids = transfer.items.map(item => item.product_id);
-    markProductsForAlertCheck(res, product_ids, tenantId);
+    markProductsForAlertCheck(res, product_ids, tenant_id);
 
     res.json({ success: true, message: 'Transferencia recibida exitosamente', data: transfer });
   } catch (error) {

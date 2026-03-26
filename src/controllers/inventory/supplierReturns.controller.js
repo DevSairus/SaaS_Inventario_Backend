@@ -10,22 +10,26 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
-const generateReturnNumber = async (tenant_id) => {
+const generateReturnNumber = async (tenant_id, transaction = null) => {
   const year = new Date().getFullYear();
   const prefix = `DEVP-${year}-`;
-  
-  const lastReturn = await SupplierReturn.findOne({
+
+  const findOptions = {
     where: {
       tenant_id,
       return_number: { [Op.like]: `${prefix}%` }
     },
-    order: [['created_at', 'DESC']]
-  });
+    order: [['return_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    transaction: transaction || undefined
+  };
+
+  const lastReturn = await SupplierReturn.findOne(findOptions);
 
   let nextNumber = 1;
   if (lastReturn) {
-    const lastNum = parseInt(lastReturn.return_number.split('-').pop());
-    nextNumber = lastNum + 1;
+    const lastNum = parseInt(lastReturn.return_number.split('-').pop(), 10);
+    if (!isNaN(lastNum)) nextNumber = lastNum + 1;
   }
 
   return `${prefix}${String(nextNumber).padStart(5, '0')}`;
@@ -252,22 +256,46 @@ const createSupplierReturn = async (req, res) => {
     });
 
     const total_amount = subtotal + tax;
-    const return_number = await generateReturnNumber(tenant_id);
 
-    const supplierReturn = await SupplierReturn.create({
+    // Generate number inside the transaction with a row-level lock to prevent
+    // duplicate numbers under concurrent requests. A retry handles the rare
+    // case where two transactions commit simultaneously with the same number.
+    const MAX_RETRIES = 5;
+    let supplierReturn;
+
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const return_number = await generateReturnNumber(tenant_id, transaction);
+
+      try {
+        supplierReturn = await SupplierReturn.create({
       tenant_id,
-      return_number,
-      purchase_id,
-      supplier_id: purchase.supplier_id,
-      return_date: new Date(),
-      reason,
-      notes,
-      subtotal,
-      tax,
-      total_amount,
-      status: 'pending',
-      created_by: req.user.id
-    }, { transaction });
+          return_number,
+          purchase_id,
+          supplier_id: purchase.supplier_id,
+          return_date: new Date(),
+          reason,
+          notes,
+          subtotal,
+          tax,
+          total_amount,
+          status: 'pending',
+          created_by: req.user.id
+        }, { transaction });
+
+        break; // success — exit retry loop
+      } catch (uniqueErr) {
+        if (
+          uniqueErr.name === 'SequelizeUniqueConstraintError' &&
+          uniqueErr.fields &&
+          uniqueErr.fields.return_number &&
+          attempt < MAX_RETRIES
+        ) {
+          // Another request grabbed this number — try again with the next one
+          continue;
+        }
+        throw uniqueErr; // unrelated error or max retries exceeded
+      }
+    }
 
     for (const item of returnItems) {
       await SupplierReturnItem.create({

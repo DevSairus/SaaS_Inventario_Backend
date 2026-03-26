@@ -8,22 +8,24 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
-const generateConsumptionNumber = async (tenant_id) => {
+const generateConsumptionNumber = async (tenant_id, transaction = null) => {
   const year = new Date().getFullYear();
   const prefix = `CONS-${year}-`;
-  
+
   const lastConsumption = await InternalConsumption.findOne({
     where: {
       tenant_id,
       consumption_number: { [Op.like]: `${prefix}%` }
     },
-    order: [['created_at', 'DESC']]
+    order: [['consumption_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    transaction: transaction || undefined
   });
 
   let nextNumber = 1;
   if (lastConsumption) {
-    const lastNum = parseInt(lastConsumption.consumption_number.split('-').pop());
-    nextNumber = lastNum + 1;
+    const lastNum = parseInt(lastConsumption.consumption_number.split('-').pop(), 10);
+    if (!isNaN(lastNum)) nextNumber = lastNum + 1;
   }
 
   return `${prefix}${String(nextNumber).padStart(5, '0')}`;
@@ -231,20 +233,35 @@ const createInternalConsumption = async (req, res) => {
       });
     }
 
-    const consumption_number = await generateConsumptionNumber(tenant_id);
-
-    const consumption = await InternalConsumption.create({
-      tenant_id,
-      consumption_number,
-      warehouse_id,
-      department,
-      consumption_date: new Date(),
-      purpose,
-      notes,
-      total_cost,
-      status: 'pending',
-      requested_by: req.user.id
-    }, { transaction });
+    const MAX_RETRIES = 5;
+    let consumption;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const consumption_number = await generateConsumptionNumber(tenant_id, transaction);
+      try {
+        consumption = await InternalConsumption.create({
+          tenant_id,
+          consumption_number,
+          warehouse_id,
+          department,
+          consumption_date: new Date(),
+          purpose,
+          notes,
+          total_cost,
+          status: 'pending',
+          requested_by: req.user.id
+        }, { transaction });
+        break;
+      } catch (uniqueErr) {
+        if (
+          uniqueErr.name === 'SequelizeUniqueConstraintError' &&
+          uniqueErr.fields?.consumption_number &&
+          attempt < MAX_RETRIES
+        ) {
+          continue;
+        }
+        throw uniqueErr;
+      }
+    }
 
     for (const item of consumptionItems) {
       await InternalConsumptionItem.create({
