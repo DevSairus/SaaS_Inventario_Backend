@@ -742,6 +742,7 @@ const markAsDelivered = async (req, res) => {
 
 // Registrar pago
 const registerPayment = async (req, res) => {
+  const transaction = await sequelize.transaction();
   try {
     const { id } = req.params;
     const tenantId = req.tenant_id;
@@ -749,30 +750,57 @@ const registerPayment = async (req, res) => {
     const { amount, payment_method, payment_date, notes } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
+      await transaction.rollback();
       return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
     }
 
-    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
-    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+    // SELECT FOR UPDATE: evita que dos pagos concurrentes lean el mismo paid_amount
+    const sale = await Sale.findOne({
+      where: { id, tenant_id: tenantId },
+      lock: transaction.LOCK.UPDATE,
+      transaction
+    });
+    if (!sale) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+    }
     if (sale.status === 'draft') {
+      await transaction.rollback();
       return res.status(400).json({ success: false, message: 'No se puede registrar pago en una venta en borrador' });
     }
 
-    const paid_amount = parseFloat(sale.paid_amount || 0) + parseFloat(amount);
+    const total = parseFloat(sale.total_amount);
+    const alreadyPaid = parseFloat(sale.paid_amount || 0);
+    const remaining = total - alreadyPaid;
+
+    if (remaining <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Esta venta ya está pagada en su totalidad' });
+    }
+
+    // Limitar el monto al saldo pendiente para evitar sobrepagos
+    const effectiveAmount = Math.min(parseFloat(amount), remaining);
+    const paid_amount = alreadyPaid + effectiveAmount;
+
     let payment_status = 'pending';
-    if (paid_amount >= parseFloat(sale.total_amount)) payment_status = 'paid';
+    if (paid_amount >= total) payment_status = 'paid';
     else if (paid_amount > 0) payment_status = 'partial';
 
     const payment_history = sale.payment_history || [];
     payment_history.push({
       date: payment_date || new Date(),
-      amount: parseFloat(amount),
+      amount: effectiveAmount,
       method: payment_method || sale.payment_method || 'Efectivo',
       user_id: userId,
       notes: notes || null
     });
 
-    await sale.update({ paid_amount, payment_status, payment_method: payment_method || sale.payment_method, payment_history });
+    await sale.update(
+      { paid_amount, payment_status, payment_method: payment_method || sale.payment_method, payment_history },
+      { transaction }
+    );
+
+    await transaction.commit();
 
     const updatedSale = await Sale.findByPk(id, {
       include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
@@ -780,6 +808,7 @@ const registerPayment = async (req, res) => {
 
     res.json({ success: true, message: 'Pago registrado exitosamente', data: updatedSale });
   } catch (error) {
+    if (transaction && !transaction.finished) await transaction.rollback();
     logger.error('Error registrando pago:', error);
     res.status(500).json({ success: false, message: 'Error registrando pago' });
   }

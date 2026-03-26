@@ -27,7 +27,8 @@ async function generateSettlementNumber(tenant_id, transaction) {
   const year = new Date().getFullYear();
   const last = await CommissionSettlement.findOne({
     where: { tenant_id, settlement_number: { [Op.like]: `LIQ-${year}-%` } },
-    order: [['created_at', 'DESC']],
+    order: [['settlement_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
     transaction,
   });
   const next = last
@@ -40,7 +41,8 @@ async function generateProductSettlementNumber(tenant_id, transaction) {
   const year = new Date().getFullYear();
   const last = await ProductCommissionSettlement.findOne({
     where: { tenant_id, settlement_number: { [Op.like]: `LIQP-${year}-%` } },
-    order: [['created_at', 'DESC']],
+    order: [['settlement_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
     transaction,
   });
   const next = last ? parseInt(last.settlement_number.split('-')[2], 10) + 1 : 1;

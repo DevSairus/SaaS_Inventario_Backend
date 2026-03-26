@@ -27,10 +27,12 @@ async function generateOrderNumber(tenant_id, transaction) {
   const prefix = `OT-${year}-`;
   const last   = await WorkOrder.findOne({
     where: { tenant_id, order_number: { [Op.like]: `${prefix}%` } },
-    order: [['created_at', 'DESC']],
+    order: [['order_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
     transaction,
   });
-  const seq = last ? parseInt(last.order_number.replace(prefix, '')) + 1 : 1;
+  const lastSeq = last ? parseInt(last.order_number.replace(prefix, ''), 10) : 0;
+  const seq = (isNaN(lastSeq) ? 0 : lastSeq) + 1;
   return `${prefix}${String(seq).padStart(4, '0')}`;
 }
 
@@ -579,10 +581,11 @@ const generateSale = async (req, res) => {
       const prefix = 'REM';
       const lastSale = await Sale.findOne({
         where: { tenant_id, sale_number: { [Op.like]: `${prefix}-${year}-%` } },
-        order: [['created_at', 'DESC']],
+        order: [['sale_number', 'DESC']],
+        lock: transaction.LOCK.UPDATE,
         transaction,
       });
-      const saleSeq = lastSale ? parseInt(lastSale.sale_number.split('-')[2]) + 1 : 1;
+      const saleSeq = lastSale ? parseInt(lastSale.sale_number.split('-')[2], 10) + 1 : 1;
       sale_number = `${prefix}-${year}-${String(saleSeq).padStart(4, '0')}`;
     }
 

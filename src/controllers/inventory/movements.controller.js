@@ -316,6 +316,7 @@ const createMovement = async (movementData, transaction) => {
       }
     },
     order: [['movement_number', 'DESC']],
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
     transaction
   });
 
