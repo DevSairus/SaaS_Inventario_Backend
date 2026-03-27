@@ -91,8 +91,17 @@ async function runVehicleReminders() {
   const Customer = require('../models/sales/Customer');
   const Tenant   = require('../models/auth/Tenant');
 
-  const results     = { sent: 0, skipped: 0, errors: 0, details: [] };
-  const targetDates = REMINDER_DAYS.map(days => addDays(days).toISOString().slice(0, 10));
+  const results = { sent: 0, skipped: 0, errors: 0, details: [], skippedDetails: [] };
+
+  // Construir fechas target en zona horaria de Colombia (UTC-5)
+  // Se usa toISOString() + slice para evitar problemas de conversión local
+  const targetDates = REMINDER_DAYS.map(days => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    // Ajuste a medianoche UTC-5 (Colombia) para comparar con fechas DATEONLY de Postgres
+    const bogota = new Date(d.toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+    return bogota.toISOString().slice(0, 10);
+  });
 
   console.log(`🔔 [REMINDER] Verificando vencimientos para: ${targetDates.join(', ')}`);
 
@@ -114,25 +123,50 @@ async function runVehicleReminders() {
 
   console.log(`🔔 [REMINDER] Vehículos encontrados: ${vehicles.length}`);
 
+  // Precargar tenants únicos para evitar N+1
+  const tenantIds  = [...new Set(vehicles.map(v => v.tenant_id))];
+  const tenants    = await Tenant.findAll({ where: { id: tenantIds }, attributes: ['id', 'company_name'] });
+  const tenantMap  = Object.fromEntries(tenants.map(t => [t.id, t.company_name]));
+
   for (const vehicle of vehicles) {
-    const customer = vehicle.customer;
-    if (!customer) { results.skipped++; continue; }
+    const customer     = vehicle.customer;
+    const workshopName = tenantMap[vehicle.tenant_id] || 'Tu taller';
 
-    const tenant       = await Tenant.findByPk(vehicle.tenant_id, { attributes: ['company_name'] });
-    const workshopName = tenant?.company_name || 'Tu taller';
+    // Sin cliente asociado
+    if (!customer) {
+      results.skipped++;
+      results.skippedDetails.push({ plate: vehicle.plate, reason: 'sin_cliente' });
+      console.warn(`⚠️ [REMINDER] ${vehicle.plate} — sin cliente asociado`);
+      continue;
+    }
 
-    if (vehicle.soat_expiry && targetDates.includes(vehicle.soat_expiry)) {
-      const daysLeft = REMINDER_DAYS.find(d => addDays(d).toISOString().slice(0, 10) === vehicle.soat_expiry);
+    // Sin email
+    if (!customer.email) {
+      results.skipped++;
+      results.skippedDetails.push({ plate: vehicle.plate, reason: 'cliente_sin_email', customer: customer.id });
+      console.warn(`⚠️ [REMINDER] ${vehicle.plate} — cliente ${customer.id} sin email`);
+      continue;
+    }
+
+    // Normalizar fecha de Postgres (viene como Date object o string) a YYYY-MM-DD
+    const soatDate   = vehicle.soat_expiry          ? String(vehicle.soat_expiry).slice(0, 10)   : null;
+    const tecnoDate  = vehicle.tecnomecanica_expiry  ? String(vehicle.tecnomecanica_expiry).slice(0, 10) : null;
+
+    if (soatDate && targetDates.includes(soatDate)) {
+      const daysLeft = REMINDER_DAYS.find(d => targetDates[REMINDER_DAYS.indexOf(d)] === soatDate);
       await sendReminder(vehicle, customer, 'soat', daysLeft, workshopName, results);
     }
 
-    if (vehicle.tecnomecanica_expiry && targetDates.includes(vehicle.tecnomecanica_expiry)) {
-      const daysLeft = REMINDER_DAYS.find(d => addDays(d).toISOString().slice(0, 10) === vehicle.tecnomecanica_expiry);
+    if (tecnoDate && targetDates.includes(tecnoDate)) {
+      const daysLeft = REMINDER_DAYS.find(d => targetDates[REMINDER_DAYS.indexOf(d)] === tecnoDate);
       await sendReminder(vehicle, customer, 'tecnomecanica', daysLeft, workshopName, results);
     }
   }
 
   console.log(`✅ [REMINDER] Completado — Enviados: ${results.sent} | Omitidos: ${results.skipped} | Errores: ${results.errors}`);
+  if (results.skippedDetails.length > 0) {
+    console.log(`   Omitidos detalle:`, JSON.stringify(results.skippedDetails));
+  }
   return results;
 }
 

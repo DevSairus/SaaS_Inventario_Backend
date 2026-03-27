@@ -147,4 +147,18 @@ const getHistory = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, create, update, getHistory };
+const remove = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
+
+    // Soft-delete: marcar inactivo en lugar de borrar
+    await vehicle.update({ is_active: false });
+    res.json({ success: true, message: 'Vehículo eliminado' });
+  } catch (error) {
+    logger.error('Error eliminando vehículo:', error);
+    res.status(500).json({ success: false, message: 'Error al eliminar vehículo' });
+  }
+};
+
+module.exports = { list, getById, create, update, getHistory, remove };

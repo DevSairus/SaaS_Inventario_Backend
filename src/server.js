@@ -115,6 +115,7 @@ const permissionsRoutes             = require('./routes/permissions.routes');
 const vehiclesRoutes                = require('./routes/workshop/vehicles.routes');
 const workOrdersRoutes              = require('./routes/workshop/workOrders.routes');
 const commissionSettlementsRoutes   = require('./routes/workshop/commissionSettlements.routes');
+const runtRoutes                    = require('./routes/workshop/runt.routes');
 const userRoutes                    = require('./routes/user.routes');
 
 // Movimientos Avanzados
@@ -159,6 +160,7 @@ app.use('/api/announcements', authMiddleware, announcementsRoutes);
 app.use('/api/permissions', authMiddleware, permissionsRoutes);
 
 // ── Taller ──
+app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware, runtRoutes);
 app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware, vehiclesRoutes);
 app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, workOrdersRoutes);
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
