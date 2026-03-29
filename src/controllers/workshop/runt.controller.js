@@ -144,10 +144,11 @@ const consultarVehiculo = async (req, res) => {
     let rtmData      = [];
 
     if (sessionToken) {
-      // El RUNT espera esquema Bearer en las rutas secundarias (/soat, /rtms)
+      // El RUNT usa 'auth-token' (no Authorization) y requiere x-funcionalidad: SHELL
       const secondaryHeaders = {
         ...runtHeaders,
-        'Authorization': `Bearer ${sessionToken}`,
+        'auth-token':      `Bearer ${sessionToken}`,
+        'x-funcionalidad': 'SHELL',
       };
 
       // SOAT
