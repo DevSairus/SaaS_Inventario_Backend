@@ -245,6 +245,14 @@ WorkOrder.hasMany(WorkOrderItem, { foreignKey: 'work_order_id', as: 'items' });
 WorkOrderItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(WorkOrderItem, { foreignKey: 'product_id', as: 'work_order_items' });
 
+// WorkOrderItem ↔ User (técnico responsable del ítem)
+WorkOrderItem.belongsTo(User, { foreignKey: 'technician_id', as: 'item_technician' });
+User.hasMany(WorkOrderItem, { foreignKey: 'technician_id', as: 'work_order_items_assigned' });
+
+// SaleItem ↔ User (técnico responsable del ítem)
+SaleItem.belongsTo(User, { foreignKey: 'technician_id', as: 'item_technician' });
+User.hasMany(SaleItem, { foreignKey: 'technician_id', as: 'sale_items_assigned' });
+
 // CommissionSettlement ↔ User (técnico)
 CommissionSettlement.belongsTo(User, { foreignKey: 'technician_id', as: 'technician' });
 User.hasMany(CommissionSettlement, { foreignKey: 'technician_id', as: 'commission_settlements' });

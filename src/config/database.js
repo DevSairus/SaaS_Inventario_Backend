@@ -184,24 +184,23 @@ async function testConnection() {
     
     return true;
   } catch (error) {
+    const detail = error.original?.message || error.message || String(error);
     logger.error('❌ Error conectando a PostgreSQL:');
-    logger.error('   Mensaje:', error.message);
+    logger.error('   Detalle:', detail);
     
     // Ayuda de debugging
     if (!isProduction) {
       logger.error('\n💡 Verificaciones:');
       
-      if (!DATABASE_URL) {
-        logger.error('   ❌ No se encontró POSTGRES_URL ni DATABASE_URL');
-        logger.error('   → Agrega la variable de entorno en Vercel');
+      if (DATABASE_URL) {
+        logger.error('   Modo: cadena (POSTGRES_URL / DATABASE_URL)');
+        logger.error('   - ¿La URL es válida y el servidor acepta SSL si aplica?');
       } else {
-        logger.error('   ✅ Variable de conexión encontrada');
+        logger.error('   Modo: variables locales (DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASSWORD)');
+        logger.error(`   - Destino: ${process.env.DB_NAME || 'inventario_db'}@${process.env.DB_HOST || 'localhost'}:${process.env.DB_PORT || 5432}`);
+        logger.error('   - ¿PostgreSQL está corriendo y escuchando en ese puerto?');
+        logger.error('   - ¿Existe la base de datos y el usuario/contraseña son correctos?');
       }
-      
-      logger.error('   - ¿PostgreSQL está corriendo?');
-      logger.error('   - ¿Las credenciales son correctas?');
-      logger.error('   - ¿La base de datos existe?');
-      logger.error('   - ¿SSL está configurado correctamente?');
     }
     
     return false;

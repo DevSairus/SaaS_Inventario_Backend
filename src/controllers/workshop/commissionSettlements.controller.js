@@ -19,6 +19,154 @@ const SERVICE_TYPES = ['service', 'servicio', 'mano_obra'];
 // Tipos de ítem que cuentan como producto/repuesto
 const PRODUCT_TYPES = ['product', 'repuesto'];
 
+// ── Helper: Items de productos por técnico (ítem-level con fallback a orden/venta) ─────────────
+// Devuelve array de { uid, user_name, role, source, ref_number, ref_date, ref_id,
+//                    product_name, product_sku, quantity, unit_price, subtotal, total }
+async function getProductItemsByTechnician({ tenant_id, user_id, date_from, date_to, not_settled = false }) {
+  const dateFilter = {};
+  if (date_from) dateFilter[Op.gte] = new Date(date_from);
+  if (date_to)   dateFilter[Op.lte] = new Date(date_to + 'T23:59:59');
+
+  // ── 1. WorkOrderItems con technician_id a nivel de ítem ──────────────────
+  const woItemWhere = { tenant_id, item_type: { [Op.in]: PRODUCT_TYPES } };
+  if (user_id) woItemWhere.technician_id = user_id;
+  else woItemWhere.technician_id = { [Op.not]: null };
+
+  const woDateFilter = {};
+  if (date_from || date_to) woDateFilter.received_at = dateFilter;
+  if (not_settled) woDateFilter.product_settled_at = null;
+
+  const woItemsWithTech = await WorkOrderItem.findAll({
+    where: woItemWhere,
+    include: [
+      { model: WorkOrder, as: 'work_order', where: woDateFilter, required: true,
+        attributes: ['id', 'order_number', 'received_at', 'status', 'created_by', 'product_settled_at'] },
+      { model: User, as: 'item_technician', attributes: ['id', 'first_name', 'last_name', 'role'], required: true },
+    ],
+  });
+
+  // ── 2. WorkOrders donde los items NO tienen technician_id (fallback orden) ─
+  const fallbackWoWhere = { tenant_id, ...woDateFilter };
+  if (user_id) fallbackWoWhere.created_by = user_id;
+
+  const fallbackOrders = await WorkOrder.findAll({
+    where: fallbackWoWhere,
+    include: [
+      { model: WorkOrderItem, as: 'items',
+        where: { item_type: { [Op.in]: PRODUCT_TYPES }, technician_id: null },
+        required: false },
+      { model: User, as: 'creator_wo', attributes: ['id', 'first_name', 'last_name', 'role'] },
+    ],
+  });
+
+  // ── 3. SaleItems con technician_id a nivel de ítem ────────────────────────
+  const saleItemWhere = { tenant_id, item_type: { [Op.in]: ['product', 'service', 'free_line'] } };
+  if (user_id) saleItemWhere.technician_id = user_id;
+  else saleItemWhere.technician_id = { [Op.not]: null };
+
+  const saleDateFilter = {};
+  if (date_from || date_to) saleDateFilter.sale_date = dateFilter;
+  if (not_settled) saleDateFilter.product_settled_at = null;
+  // Solo ventas directas (no ligadas a OT) — se filtra abajo
+
+  const woSaleIds = (await WorkOrder.findAll({ where: { tenant_id, sale_id: { [Op.not]: null } }, attributes: ['sale_id'], raw: true })).map(r => r.sale_id).filter(Boolean);
+
+  const saleItemsWithTech = await SaleItem.findAll({
+    where: { ...saleItemWhere, item_type: { [Op.in]: PRODUCT_TYPES } },
+    include: [
+      { model: Sale, as: 'sale', where: {
+          ...saleDateFilter,
+          status: { [Op.in]: ['completed', 'pending'] },
+          document_type: { [Op.in]: ['remision', 'factura'] },
+          ...(woSaleIds.length ? { id: { [Op.notIn]: woSaleIds } } : {}),
+        }, required: true,
+        attributes: ['id', 'sale_number', 'sale_date', 'status', 'product_settled_at'] },
+      { model: User, as: 'item_technician', attributes: ['id', 'first_name', 'last_name', 'role'], required: true },
+    ],
+  });
+
+  // ── 4. Ventas directas donde los items NO tienen technician_id (fallback venta) ─
+  const directSalesWhere = {
+    tenant_id,
+    status: { [Op.in]: ['completed', 'pending'] },
+    document_type: { [Op.in]: ['remision', 'factura'] },
+    ...(not_settled ? { product_settled_at: null } : {}),
+    ...(date_from || date_to ? { sale_date: dateFilter } : {}),
+    ...(woSaleIds.length ? { id: { [Op.notIn]: woSaleIds } } : {}),
+    ...(user_id ? { technician_id: user_id } : { technician_id: { [Op.not]: null } }),
+  };
+
+  const fallbackSales = await Sale.findAll({
+    where: directSalesWhere,
+    include: [
+      { model: SaleItem, as: 'items',
+        where: { item_type: { [Op.in]: PRODUCT_TYPES }, technician_id: null }, required: false },
+      { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name', 'role'] },
+    ],
+  });
+
+  // ── Consolidar en una lista plana ──────────────────────────────────────────
+  const rows = [];
+
+  for (const woi of woItemsWithTech) {
+    const tech = woi.item_technician;
+    rows.push({
+      uid: tech.id, user_name: `${tech.first_name} ${tech.last_name}`, role: tech.role,
+      source: 'ot', ref_number: woi.work_order.order_number, ref_date: woi.work_order.received_at,
+      ref_id: woi.work_order.id, ref_settled: woi.work_order.product_settled_at,
+      product_name: woi.product_name, product_sku: woi.product_sku,
+      quantity: parseFloat(woi.quantity), unit_price: parseFloat(woi.unit_price),
+      subtotal: parseFloat(woi.subtotal || 0), total: parseFloat(woi.total || 0),
+    });
+  }
+
+  for (const order of fallbackOrders) {
+    if (!order.creator_wo) continue;
+    const tech = order.creator_wo;
+    for (const item of (order.items || [])) {
+      if (!PRODUCT_TYPES.includes(item.item_type)) continue;
+      rows.push({
+        uid: tech.id, user_name: `${tech.first_name} ${tech.last_name}`, role: tech.role,
+        source: 'ot', ref_number: order.order_number, ref_date: order.received_at,
+        ref_id: order.id, ref_settled: order.product_settled_at,
+        product_name: item.product_name, product_sku: item.product_sku,
+        quantity: parseFloat(item.quantity), unit_price: parseFloat(item.unit_price),
+        subtotal: parseFloat(item.subtotal || 0), total: parseFloat(item.total || 0),
+      });
+    }
+  }
+
+  for (const si of saleItemsWithTech) {
+    const tech = si.item_technician;
+    rows.push({
+      uid: tech.id, user_name: `${tech.first_name} ${tech.last_name}`, role: tech.role,
+      source: 'sale', ref_number: si.sale.sale_number, ref_date: si.sale.sale_date,
+      ref_id: si.sale.id, ref_settled: si.sale.product_settled_at,
+      product_name: si.product_name, product_sku: si.product_sku,
+      quantity: parseFloat(si.quantity), unit_price: parseFloat(si.unit_price),
+      subtotal: parseFloat(si.subtotal || 0), total: parseFloat(si.total || 0),
+    });
+  }
+
+  for (const sale of fallbackSales) {
+    if (!sale.technician) continue;
+    const tech = sale.technician;
+    for (const item of (sale.items || [])) {
+      if (!PRODUCT_TYPES.includes(item.item_type)) continue;
+      rows.push({
+        uid: tech.id, user_name: `${tech.first_name} ${tech.last_name}`, role: tech.role,
+        source: 'sale', ref_number: sale.sale_number, ref_date: sale.sale_date,
+        ref_id: sale.id, ref_settled: sale.product_settled_at,
+        product_name: item.product_name, product_sku: item.product_sku,
+        quantity: parseFloat(item.quantity), unit_price: parseFloat(item.unit_price),
+        subtotal: parseFloat(item.subtotal || 0), total: parseFloat(item.total || 0),
+      });
+    }
+  }
+
+  return rows;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const addTenantScope = (where, req) => ({ ...where, tenant_id: req.user.tenant_id });
@@ -116,75 +264,53 @@ const productCommissionReport = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
     const { user_id, date_from, date_to, commission_percentage, show_settled } = req.query;
+    const not_settled = show_settled !== 'true';
 
-    // ── OTs ──────────────────────────────────────────────────
-    const woWhere = { tenant_id };
-    if (user_id) woWhere.created_by = user_id;
-    if (show_settled !== 'true') woWhere.product_settled_at = null;
-    if (date_from || date_to) {
-      woWhere.received_at = {};
-      if (date_from) woWhere.received_at[Op.gte] = new Date(date_from);
-      if (date_to)   woWhere.received_at[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
-    const orders = await WorkOrder.findAll({
-      where: woWhere,
-      include: [
-        { model: WorkOrderItem, as: 'items', attributes: ['item_type', 'product_name', 'quantity', 'unit_price', 'total'] },
-        { model: User, as: 'creator_wo', attributes: ['id', 'first_name', 'last_name', 'role'] },
-      ],
-      order: [['received_at', 'DESC']],
-    });
+    const rows = await getProductItemsByTechnician({ tenant_id, user_id, date_from, date_to, not_settled });
 
-    // ── Ventas directas ───────────────────────────────────────
-    const directSales = await getDirectSales({
-      tenant_id, user_id, date_from, date_to,
-      product_settled_field: show_settled !== 'true' ? 'null' : null,
-    });
-
-    // ── Agrupar por usuario ───────────────────────────────────
+    // ── Agrupar por técnico ───────────────────────────────────
     const byUser = {};
-    const ensureUser = (uid, label, role) => {
-      if (!byUser[uid]) byUser[uid] = {
-        user_id: uid === '__sin__' ? null : uid,
-        user_name: label, role,
-        orders: [], total_products: 0, total_labor: 0, total_grand: 0,
+    for (const row of rows) {
+      if (!byUser[row.uid]) byUser[row.uid] = {
+        user_id: row.uid, user_name: row.user_name, role: row.role,
+        items: [], total_products: 0, total_grand: 0,
       };
-    };
-
-    for (const o of orders) {
-      const uid = o.created_by || '__sin__';
-      const label = o.creator_wo ? `${o.creator_wo.first_name} ${o.creator_wo.last_name}` : 'Sin usuario';
-      ensureUser(uid, label, o.creator_wo?.role || '—');
-      const { labor_amount, product_amount } = calcAmountsFromOrder(o);
-      if (product_amount === 0 && labor_amount === 0) continue;
-      byUser[uid].orders.push({ source: 'ot', order_number: o.order_number, received_at: o.received_at, status: o.status, labor_amount, product_amount, total_amount: labor_amount + product_amount });
-      byUser[uid].total_products += product_amount;
-      byUser[uid].total_labor    += labor_amount;
-      byUser[uid].total_grand    += labor_amount + product_amount;
-    }
-    for (const s of directSales) {
-      const uid = s.technician_id || '__sin__';
-      const label = s.technician ? `${s.technician.first_name} ${s.technician.last_name}` : 'Sin técnico';
-      ensureUser(uid, label, s.technician?.role || 'technician');
-      const { labor_amount, product_amount } = calcAmountsFromSale(s);
-      if (product_amount === 0 && labor_amount === 0) continue;
-      byUser[uid].orders.push({ source: 'sale', order_number: s.sale_number, received_at: s.sale_date, status: s.status, labor_amount, product_amount, total_amount: labor_amount + product_amount });
-      byUser[uid].total_products += product_amount;
-      byUser[uid].total_labor    += labor_amount;
-      byUser[uid].total_grand    += labor_amount + product_amount;
+      byUser[row.uid].items.push({
+        source: row.source, ref_number: row.ref_number, ref_date: row.ref_date,
+        ref_id: row.ref_id, ref_settled: row.ref_settled,
+        product_name: row.product_name, product_sku: row.product_sku,
+        quantity: row.quantity, unit_price: row.unit_price,
+        subtotal: row.subtotal, total: row.total,
+      });
+      byUser[row.uid].total_products += row.total;
+      byUser[row.uid].total_grand    += row.total;
     }
 
     const pct = parseFloat(commission_percentage) || 0;
     const result = Object.values(byUser)
-      .filter(u => u.orders.length > 0)
-      .map(u => ({ ...u, commission_percentage: pct, commission_on_products: Math.round(u.total_products * pct / 100) }))
+      .filter(u => u.items.length > 0)
+      .map(u => ({
+        ...u,
+        commission_percentage: pct,
+        commission_on_products: Math.round(u.total_products * pct / 100),
+        // Para compatibilidad frontend: exponer también "orders" con agregado por OT/Venta
+        orders: Object.values(
+          u.items.reduce((acc, i) => {
+            const key = `${i.source}::${i.ref_number}`;
+            if (!acc[key]) acc[key] = { source: i.source, order_number: i.ref_number, received_at: i.ref_date, ref_id: i.ref_id, ref_settled: i.ref_settled, product_amount: 0, labor_amount: 0 };
+            acc[key].product_amount += i.total;
+            acc[key].total_amount = acc[key].product_amount + acc[key].labor_amount;
+            return acc;
+          }, {})
+        ),
+      }))
       .sort((a, b) => b.total_products - a.total_products);
 
     const summary = {
       total_users:    result.length,
-      total_orders:   result.reduce((s, u) => s + u.orders.length, 0),
+      total_items:    result.reduce((s, u) => s + u.items.length, 0),
       total_products: result.reduce((s, u) => s + u.total_products, 0),
-      total_labor:    result.reduce((s, u) => s + u.total_labor, 0),
+      total_labor:    0,
       commission_on_products: result.reduce((s, u) => s + u.commission_on_products, 0),
     };
 
@@ -412,34 +538,24 @@ const productPreview = async (req, res) => {
     const { user_id, date_from, date_to, commission_percentage } = req.query;
     if (!user_id) return res.status(400).json({ success: false, message: 'El usuario es requerido' });
 
-    // OTs no liquidadas en productos
-    const woWhere = { tenant_id, created_by: user_id, product_settled_at: null };
-    if (date_from || date_to) {
-      woWhere.received_at = {};
-      if (date_from) woWhere.received_at[Op.gte] = new Date(date_from);
-      if (date_to)   woWhere.received_at[Op.lte] = new Date(date_to + 'T23:59:59');
+    const rows = await getProductItemsByTechnician({ tenant_id, user_id, date_from, date_to, not_settled: true });
+
+    // Agrupar por OT/Venta para mostrar en preview (compatible con UI anterior)
+    const byRef = {};
+    for (const row of rows) {
+      const key = `${row.source}::${row.ref_number}`;
+      if (!byRef[key]) byRef[key] = {
+        source: row.source, id: row.ref_id, order_number: row.ref_number,
+        received_at: row.ref_date, product_amount: 0, items: [],
+      };
+      byRef[key].product_amount += row.total;
+      byRef[key].items.push({
+        product_name: row.product_name, product_sku: row.product_sku,
+        quantity: row.quantity, unit_price: row.unit_price, total: row.total,
+      });
     }
-    const orders = await WorkOrder.findAll({
-      where: woWhere,
-      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'product_name', 'total'] }],
-      order: [['received_at', 'DESC']],
-    });
 
-    // Ventas directas no liquidadas en productos
-    const directSales = await getDirectSales({
-      tenant_id, user_id, date_from, date_to,
-      product_settled_field: 'null',
-    });
-
-    const items = [
-      ...orders
-        .map(o => ({ source: 'ot', id: o.id, order_number: o.order_number, received_at: o.received_at, status: o.status, product_amount: calcAmountsFromOrder(o).product_amount }))
-        .filter(o => o.product_amount > 0),
-      ...directSales
-        .map(s => ({ source: 'sale', id: s.id, order_number: s.sale_number, received_at: s.sale_date, status: s.status, product_amount: calcAmountsFromSale(s).product_amount }))
-        .filter(s => s.product_amount > 0),
-    ];
-
+    const items = Object.values(byRef).filter(o => o.product_amount > 0);
     const base_amount = items.reduce((s, i) => s + i.product_amount, 0);
     const pct = parseFloat(commission_percentage) || 0;
 
@@ -447,6 +563,13 @@ const productPreview = async (req, res) => {
       user_id, date_from, date_to, commission_percentage: pct,
       base_amount, commission_amount: Math.round(base_amount * pct / 100),
       orders: items, total_orders: items.length,
+      // Detalle plano por producto para la tabla del modal
+      product_items: rows.map(r => ({
+        source: r.source, ref_number: r.ref_number, ref_date: r.ref_date,
+        product_name: r.product_name, product_sku: r.product_sku,
+        quantity: r.quantity, unit_price: r.unit_price, total: r.total,
+        commission: Math.round(r.total * pct / 100),
+      })),
     }});
   } catch (error) {
     logger.error('Error en productPreview:', error);
@@ -468,34 +591,15 @@ const createProductSettlement = async (req, res) => {
     const user = await User.findOne({ where: { id: user_id, tenant_id }, transaction });
     if (!user) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Usuario no encontrado' }); }
 
-    // OTs no liquidadas en productos
-    const woWhere = { tenant_id, created_by: user_id, product_settled_at: null };
-    if (date_from || date_to) {
-      woWhere.received_at = {};
-      if (date_from) woWhere.received_at[Op.gte] = new Date(date_from);
-      if (date_to)   woWhere.received_at[Op.lte] = new Date(date_to + 'T23:59:59');
-    }
-    const orders = await WorkOrder.findAll({
-      where: woWhere,
-      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total'] }],
-      transaction,
-    });
+    // Obtener todos los ítems de producto pendientes del técnico
+    const rows = await getProductItemsByTechnician({ tenant_id, user_id, date_from, date_to, not_settled: true });
 
-    // Ventas directas no liquidadas en productos
-    const directSales = await getDirectSales({
-      tenant_id, user_id, date_from, date_to,
-      product_settled_field: 'null', transaction,
-    });
-
-    const eligibleOrders = orders.map(o => ({ order: o, product: calcAmountsFromOrder(o).product_amount })).filter(e => e.product > 0);
-    const eligibleSales  = directSales.map(s => ({ sale: s, product: calcAmountsFromSale(s).product_amount })).filter(e => e.product > 0);
-
-    if (eligibleOrders.length === 0 && eligibleSales.length === 0) {
+    if (rows.length === 0) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No hay órdenes con productos pendientes de liquidar en el período' });
+      return res.status(400).json({ success: false, message: 'No hay productos pendientes de liquidar en el período' });
     }
 
-    const base_amount = [...eligibleOrders.map(e => e.product), ...eligibleSales.map(e => e.product)].reduce((s, v) => s + v, 0);
+    const base_amount = rows.reduce((s, r) => s + r.total, 0);
     const pct = parseFloat(commission_percentage);
     const commission_amount = Math.round(base_amount * pct / 100);
     const settlement_number = await generateProductSettlementNumber(tenant_id, transaction);
@@ -507,26 +611,36 @@ const createProductSettlement = async (req, res) => {
       notes: notes || null, created_by: req.user.id,
     }, { transaction });
 
-    for (const { order, product } of eligibleOrders) {
+    // Registrar cada ítem individual con detalle de producto
+    for (const row of rows) {
       await ProductCommissionSettlementItem.create({
-        settlement_id: settlement.id, work_order_id: order.id,
-        order_number: order.order_number, product_amount: product,
+        settlement_id:  settlement.id,
+        work_order_id:  row.source === 'ot'   ? row.ref_id : null,
+        order_number:   row.source === 'ot'   ? row.ref_number : null,
+        sale_id:        row.source === 'sale' ? row.ref_id : null,
+        sale_number:    row.source === 'sale' ? row.ref_number : null,
+        product_amount: row.total,
+        product_name:   row.product_name,
+        product_sku:    row.product_sku,
+        quantity:       row.quantity,
+        unit_price:     row.unit_price,
       }, { transaction });
+    }
+
+    // Marcar los documentos padre (OT / Venta) como liquidados en productos
+    const settledOtIds   = [...new Set(rows.filter(r => r.source === 'ot').map(r => r.ref_id))];
+    const settledSaleIds = [...new Set(rows.filter(r => r.source === 'sale').map(r => r.ref_id))];
+
+    if (settledOtIds.length)
       await WorkOrder.update(
         { product_settled_at: new Date(), product_settlement_id: settlement.id },
-        { where: { id: order.id }, transaction }
+        { where: { id: { [Op.in]: settledOtIds } }, transaction }
       );
-    }
-    for (const { sale, product } of eligibleSales) {
-      await ProductCommissionSettlementItem.create({
-        settlement_id: settlement.id, sale_id: sale.id,
-        sale_number: sale.sale_number, product_amount: product,
-      }, { transaction });
+    if (settledSaleIds.length)
       await Sale.update(
         { product_settled_at: new Date(), product_settlement_id: settlement.id },
-        { where: { id: sale.id }, transaction }
+        { where: { id: { [Op.in]: settledSaleIds } }, transaction }
       );
-    }
 
     await transaction.commit();
 

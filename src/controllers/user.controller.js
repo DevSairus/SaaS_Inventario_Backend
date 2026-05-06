@@ -16,19 +16,22 @@ const getAllUsers = async (req, res) => {
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 10), 200);
     const safePage   = Math.max(1, parseInt(page) || 1);
 
-    const offset = (page - 1) * limit;
     let where = {
       role: { 
         [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'] 
       },
+      // Por defecto mostrar solo activos; el frontend puede pedir todos con is_active=all
+      is_active: true,
     };
 
     if (role) {
-      where.role = role; // Permite filtrar por rol específico
+      where.role = role;
     }
 
-    if (is_active !== undefined) {
-      where.is_active = is_active === 'true';
+    if (is_active === 'false') {
+      where.is_active = false;
+    } else if (is_active === 'all') {
+      delete where.is_active; // sin filtro → muestra todos
     }
 
     if (search) {
@@ -96,8 +99,9 @@ const getUserById = async (req, res) => {
       });
     }
 
-    // Solo admin o el mismo usuario pueden ver detalles
-    if (req.user.role !== 'admin' && req.user.id !== id) {
+    // Solo roles con gestión o el mismo usuario pueden ver detalles
+    const managerRoles = ['super_admin', 'admin', 'manager', 'seller'];
+    if (!managerRoles.includes(req.user.role) && req.user.id !== id) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver este usuario',
@@ -235,14 +239,6 @@ const changePassword = async (req, res) => {
 // Crear usuario (admin)
 const createUser = async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        errors: errors.array(),
-      });
-    }
-
     const {
       email,
       password,
@@ -421,7 +417,7 @@ const updateUser = async (req, res) => {
       stratum,
     };
 
-    if (req.user.role === 'admin') {
+    if (['admin', 'super_admin'].includes(req.user.role)) {
       if (is_active !== undefined) {
         updateData.is_active = is_active;
       }
@@ -487,12 +483,13 @@ const toggleUserStatus = async (req, res) => {
       });
     }
 
-    await user.update({ is_active: !user.is_active });
+    const newStatus = !user.is_active;
+    await user.update({ is_active: newStatus });
 
     res.status(200).json({
       success: true,
-      message: `Usuario ${user.is_active ? 'activado' : 'desactivado'} exitosamente`,
-      data: { user: { id: user.id, is_active: user.is_active } },
+      message: `Usuario ${newStatus ? 'activado' : 'desactivado'} exitosamente`,
+      data: { user: { id: user.id, is_active: newStatus } },
     });
   } catch (error) {
     console.error('Error cambiando estado:', error);
@@ -583,12 +580,12 @@ const deleteUser = async (req, res) => {
       });
     }
 
-    // Soft delete - desactivar usuario
-    await user.update({ is_active: false });
+    // Hard delete — eliminar permanentemente de la BD
+    await user.destroy();
 
     res.status(200).json({
       success: true,
-      message: 'Usuario desactivado exitosamente',
+      message: 'Usuario eliminado exitosamente',
     });
   } catch (error) {
     console.error('Error eliminando usuario:', error);

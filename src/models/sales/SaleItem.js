@@ -79,6 +79,13 @@ const SaleItem = sequelize.define('SaleItem', {
   notes: {
     type: DataTypes.TEXT,
   },
+  // Técnico responsable de este ítem (puede diferir del técnico de la venta)
+  technician_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'users', key: 'id' },
+    onDelete: 'SET NULL',
+  },
 }, {
   tableName: 'sale_items',
   timestamps: true,

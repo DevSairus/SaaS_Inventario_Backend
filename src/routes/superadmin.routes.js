@@ -371,6 +371,55 @@ router.put(
   }
 );
 
+// DELETE /tenants/:id - Eliminar empresa permanentemente
+router.delete(
+  '/tenants/:id',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    const transaction = await Tenant.sequelize.transaction();
+    try {
+      const { id } = req.params;
+
+      const tenant = await Tenant.findByPk(id, { transaction });
+      if (!tenant) {
+        await transaction.rollback();
+        return res.status(404).json({ error: 'Empresa no encontrada' });
+      }
+
+      // Eliminar en orden para respetar FK constraints
+      // 1. Usuarios del tenant
+      await User.destroy({ where: { tenant_id: id }, transaction });
+
+      // 2. Suscripciones
+      await TenantSubscription.destroy({ where: { tenant_id: id }, transaction });
+
+      // 3. El tenant mismo (el resto de tablas deben tener ON DELETE CASCADE)
+      await Tenant.destroy({ where: { id }, transaction });
+
+      await transaction.commit();
+
+      res.json({
+        success: true,
+        message: `Empresa "${tenant.company_name}" eliminada permanentemente`,
+      });
+    } catch (error) {
+      await transaction.rollback();
+      console.error('Error eliminando tenant:', error);
+
+      // FK constraint violation — hay datos relacionados que impiden el borrado
+      if (error.name === 'SequelizeForeignKeyConstraintError') {
+        return res.status(409).json({
+          error: 'No se puede eliminar la empresa porque tiene datos relacionados (ventas, inventario, etc.). Desactívala en su lugar.',
+          details: error.message,
+        });
+      }
+
+      res.status(500).json({ error: 'Error al eliminar la empresa', details: error.message });
+    }
+  }
+);
+
 // POST /tenants/:id/toggle-status
 router.post(
   '/tenants/:id/toggle-status',

@@ -11,16 +11,20 @@ const Tenant = require('../../models/auth/Tenant');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-// Atributos seguros de WorkOrder — excluye columnas que pueden no existir en BD
-// (share_token, checklist_in, settled_at, settlement_id) hasta que se ejecute la migración.
+// Atributos seguros de WorkOrder — share_token ya existe tras la migración
 const WO_SAFE_ATTRS = [
   'id','tenant_id','order_number','vehicle_id','customer_id','technician_id',
   'warehouse_id','status','mileage_in','mileage_out','problem_description',
   'diagnosis','work_performed','photos_in','photos_out','received_at',
   'promised_at','completed_at','delivered_at','subtotal','tax_amount',
   'discount_amount','total_amount','paid_amount','sale_id','notes','internal_notes',
-  'created_by','created_at','updated_at',
+  'created_by','created_at','updated_at','share_token',
 ];
+
+// Include para cargar el técnico responsable de cada ítem
+const ITEM_TECHNICIAN_INCLUDE = {
+  model: User, as: 'item_technician', attributes: ['id', 'first_name', 'last_name'], required: false,
+};
 
 async function generateOrderNumber(tenant_id, transaction) {
   const year   = new Date().getFullYear();
@@ -116,7 +120,10 @@ const getById = async (req, res) => {
         { model: Sale,     as: 'sale',       attributes: ['id', 'sale_number', 'status', 'total_amount'] },
         {
           model: WorkOrderItem, as: 'items',
-          include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] }],
+          include: [
+            { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] },
+            ITEM_TECHNICIAN_INCLUDE,
+          ],
         },
       ],
     });
@@ -323,7 +330,10 @@ const changeStatus = async (req, res) => {
         { model: Sale,     as: 'sale',       attributes: ['id', 'sale_number', 'status', 'total_amount'] },
         {
           model: WorkOrderItem, as: 'items',
-          include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] }],
+          include: [
+            { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] },
+            ITEM_TECHNICIAN_INCLUDE,
+          ],
         },
       ],
     });
@@ -353,7 +363,7 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT cerrada' });
     }
 
-    const { product_id, item_type, quantity, unit_price, tax_percentage } = req.body;
+    const { product_id, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId } = req.body;
     if (!product_id || !item_type || !quantity) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
@@ -422,6 +432,7 @@ const addItem = async (req, res) => {
       tax_amount,
       subtotal,
       total,
+      technician_id: itemTechnicianId || null,
     }, { transaction });
 
     // Descontar inventario si es repuesto físico con track_inventory
@@ -645,6 +656,7 @@ const generateSale = async (req, res) => {
         tax_amount:       item.tax_amount,
         subtotal:         item.subtotal,
         total:            item.total,
+        technician_id:    item.technician_id || null,
       }, { transaction });
 
       // Crear movimiento de salida de inventario
@@ -866,7 +878,10 @@ async function getOrderWithTenant(id, tenant_id) {
       { model: Customer,      as: 'customer' },
       { model: User,          as: 'technician', attributes: ['id', 'first_name', 'last_name', 'phone'] },
       { model: WorkOrderItem, as: 'items',
-        include: [{ model: require('../../models/inventory/Product'), as: 'product', attributes: ['id', 'name', 'sku'] }] },
+        include: [
+          { model: require('../../models/inventory/Product'), as: 'product', attributes: ['id', 'name', 'sku'] },
+          ITEM_TECHNICIAN_INCLUDE,
+        ] },
     ],
   });
 

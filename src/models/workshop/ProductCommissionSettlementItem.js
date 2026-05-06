@@ -9,6 +9,11 @@ const ProductCommissionSettlementItem = sequelize.define('ProductCommissionSettl
   sale_id:        { type: DataTypes.UUID, allowNull: true },   // solo ventas directas
   sale_number:    { type: DataTypes.STRING(50), allowNull: true },
   product_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+  // Detalle por producto (se rellena al crear la liquidación para historial completo)
+  product_name: { type: DataTypes.STRING(255), allowNull: true },
+  product_sku:  { type: DataTypes.STRING(50),  allowNull: true },
+  quantity:     { type: DataTypes.DECIMAL(10, 3), allowNull: true },
+  unit_price:   { type: DataTypes.DECIMAL(15, 2), allowNull: true },
 }, {
   tableName: 'product_commission_settlement_items',
   timestamps: true,

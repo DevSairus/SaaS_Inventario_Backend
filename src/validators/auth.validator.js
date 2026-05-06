@@ -19,7 +19,7 @@ const registerValidator = [
     .withMessage('El apellido es muy largo'),
   body('role')
     .optional()
-    .isIn(['admin', 'operario', 'cliente'])
+    .isIn(['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'])
     .withMessage('Rol inválido'),
   body('phone')
     .optional()

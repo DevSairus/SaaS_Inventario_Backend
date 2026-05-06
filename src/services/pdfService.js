@@ -28,11 +28,15 @@ const generateSalePDF = async (res, sale, tenant) => {
 
   try {
     const docType = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
-    // hide_remision_tax: si el tenant activa esta opción, la remisión oculta el IVA
+    // hide_remision_tax: oculta IVA en remisiones (activado por defecto)
     const hideRemisionTax = tenant?.features?.hide_remision_tax !== false
-      ? (sale.document_type === 'remision')   // por defecto activo para remisiones
-      : false;                                  // tenant desactivó la función
-    const isRemision = hideRemisionTax;
+      ? (sale.document_type === 'remision')
+      : false;
+    // hide_invoice_tax: oculta IVA en facturas (desactivado por defecto)
+    const hideInvoiceTax = !!(tenant?.features?.hide_invoice_tax)
+      && sale.document_type === 'factura';
+    // isRemision = cualquier caso donde se debe ocultar el desglose de IVA
+    const isRemision = hideRemisionTax || hideInvoiceTax;
 
     const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
 

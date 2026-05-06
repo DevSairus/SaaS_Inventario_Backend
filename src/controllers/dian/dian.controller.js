@@ -563,23 +563,26 @@ const sendAutoTestDocuments = async (req, res) => {
       return fail(res, 'No hay resolución de habilitación activa. Registre una resolución de pruebas primero.');
     }
 
-    const { count = 1 } = req.body; // cuántos documentos enviar (1 o 2)
-    const numDocs = Math.min(Math.max(parseInt(count) || 1, 1), 2);
-
+    const { count = 1, mode = 'invoices' } = req.body;
+    // mode='full'    → set completo (6 facturas + 2 NC + 2 ND = 10 docs)
+    // mode='invoices' → solo facturas (1–6)
     const dianAutoTest = require('../../services/dian/dianAutoTestService');
-    const results = await dianAutoTest.sendTestDocuments({
-      tenant,
-      cfg,
-      resolution,
-      count: numDocs,
-    });
+    let results;
+
+    if (mode === 'full') {
+      results = await dianAutoTest.sendFullHabilitacionSet({ tenant, cfg, resolution });
+    } else {
+      const numDocs = Math.min(Math.max(parseInt(count) || 1, 1), 6);
+      results = await dianAutoTest.sendTestDocuments({ tenant, cfg, resolution, count: numDocs });
+    }
 
     const allAccepted = results.every(r => r.accepted);
+    const acceptedCount = results.filter(r => r.accepted).length;
     ok(res, {
       data: results,
       message: allAccepted
-        ? `✅ ${numDocs} documento(s) de prueba aceptados por la DIAN`
-        : `⚠️ Documentos enviados. ${results.filter(r => r.accepted).length}/${numDocs} aceptados.`,
+        ? `✅ ${results.length} documentos aceptados por la DIAN`
+        : `⚠️ ${acceptedCount}/${results.length} documentos aceptados.`,
     });
   } catch (e) {
     logger.error('[DIAN] Error en auto-test:', e);

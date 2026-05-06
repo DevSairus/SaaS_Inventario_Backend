@@ -69,6 +69,13 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  // Técnico responsable de este ítem (puede diferir del técnico principal de la OT)
+  technician_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'users', key: 'id' },
+    onDelete: 'SET NULL',
+  },
   // Control de movimiento de inventario
   inventory_movement_id: {
     type: DataTypes.UUID,

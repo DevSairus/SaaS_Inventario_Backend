@@ -13,14 +13,15 @@
  */
 
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 const logger = require('../config/logger');
 
 // ============================================
 // KEY GENERATOR — usa IP real tras el proxy
 // ============================================
-// Con app.set('trust proxy', 1), req.ip ya devuelve la IP real del cliente.
-// No se necesita ipKeyGenerator de la librería; req.ip es suficiente y correcto.
-const ipKey = (req) => req.ip;
+// Con app.set('trust proxy', 1), express-rate-limit puede calcular correctamente la llave
+// incluso para IPv6 usando su helper. Esto evita bypasses y pasa la validación v8+.
+const ipKey = (req) => ipKeyGenerator(req);
 
 // ============================================
 // CONFIGURACIONES DE RATE LIMITING
@@ -249,7 +250,7 @@ const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
     },
     keyGenerator: (req) => {
       // Si está autenticado, usar user ID para no penalizar IPs compartidas
-      return req.user?.id?.toString() || req.ip;
+      return req.user?.id?.toString() || ipKeyGenerator(req);
     },
   });
 };

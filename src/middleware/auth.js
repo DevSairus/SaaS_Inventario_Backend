@@ -50,7 +50,8 @@ const checkRole = (...allowedRoles) => {
     if (!allowedRoles.includes(req.user.role)) {
       return res.status(403).json({
         success: false,
-        message: 'No tienes permisos para acceder a este recurso'
+        code: 'FORBIDDEN',
+        message: `Tu rol (${req.user.role}) no tiene permiso para realizar esta acción`
       });
     }
 

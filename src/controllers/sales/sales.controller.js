@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -15,6 +15,9 @@ const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
     const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, limit = 50, offset = 0 } = req.query;
+    // Cap de seguridad — evita requests que traigan miles de ventas en memoria
+    const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
+    const safeOffset = Math.max(0, parseInt(offset) || 0);
 
     const where = { tenant_id: tenantId };
 
@@ -66,8 +69,8 @@ const getAll = async (req, res) => {
         }
       ],
       order: [['sale_date', 'DESC'], ['created_at', 'DESC']],
-      limit: parseInt(limit),
-      offset: parseInt(offset)
+      limit: safeLimit,
+      offset: safeOffset,
     });
 
     const total = await Sale.count({ where });
@@ -77,9 +80,9 @@ const getAll = async (req, res) => {
       data: sales,
       pagination: {
         total,
-        limit: parseInt(limit),
-        offset: parseInt(offset),
-        hasMore: total > (parseInt(offset) + parseInt(limit))
+        limit: safeLimit,
+        offset: safeOffset,
+        hasMore: total > (safeOffset + safeLimit),
       }
     });
   } catch (error) {
@@ -101,7 +104,10 @@ const getById = async (req, res) => {
         {
           model: SaleItem,
           as: 'items',
-          include: [{ model: Product, as: 'product' }]
+          include: [
+            { model: Product, as: 'product' },
+            { model: User, as: 'item_technician', attributes: ['id', 'first_name', 'last_name'], required: false },
+          ]
         },
         {
           model: CustomerReturn,
@@ -194,6 +200,15 @@ const create = async (req, res) => {
     let discount_amount = 0;
     const saleItems = [];
 
+    // Batch-load de todos los productos en 1 query (elimina N+1)
+    const productIds = items
+      .filter(i => (i.item_type || 'product') !== 'free_line' && i.product_id)
+      .map(i => i.product_id);
+    const productRows = productIds.length
+      ? await Product.findAll({ where: { id: { [Op.in]: productIds }, tenant_id: tenantId }, transaction })
+      : [];
+    const productMap = Object.fromEntries(productRows.map(p => [p.id, p]));
+
     for (const item of items) {
       const itemType = item.item_type || 'product';
 
@@ -216,11 +231,12 @@ const create = async (req, res) => {
           discount_percentage: item.discount_percentage || 0, discount_amount: fd,
           tax_percentage: ftaxpct, tax_amount: ftax,
           subtotal: fs, total: ftotal, unit_cost: 0,
+          technician_id: item.technician_id || null,
         });
         continue;
       }
 
-      const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId } });
+      const product = productMap[item.product_id];
       if (!product) {
         await transaction.rollback();
         return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
@@ -263,6 +279,7 @@ const create = async (req, res) => {
         subtotal: itemSubtotal,
         total: itemTotal,
         unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
+        technician_id: item.technician_id || null,
       });
     }
 
@@ -323,7 +340,8 @@ const create = async (req, res) => {
         subtotal: item.subtotal,
         total: item.total,
         unit_cost: item.unit_cost,
-        notes: null
+        notes: null,
+        technician_id: item.technician_id || null,
       }, { transaction });
     }
 
@@ -437,6 +455,7 @@ const update = async (req, res) => {
             quantity: item.quantity, unit_price: item.unit_price,
             discount_percentage: item.discount_percentage || 0, discount_amount: fd,
             tax_percentage: ftaxpct, tax_amount: ftax, subtotal: fs, total: ftotal, unit_cost: 0,
+            technician_id: item.technician_id || null,
           });
           continue;
         }
@@ -475,6 +494,7 @@ const update = async (req, res) => {
           tax_percentage: taxPercentage, tax_amount: itemTax,
           subtotal: itemSubtotal, total: itemTotal,
           unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
+          technician_id: item.technician_id || null,
         });
       }
 
@@ -515,9 +535,9 @@ const confirm = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Debe especificar el método de pago' });
     }
 
-    // document_type es opcional — si se envía, debe ser factura o remision
-    if (document_type && !['factura', 'remision'].includes(document_type)) {
-      return res.status(400).json({ success: false, message: 'document_type debe ser "factura" o "remision"' });
+    // document_type es opcional — si se envía, debe ser uno de los tipos válidos
+    if (document_type && !['factura', 'remision', 'cotizacion'].includes(document_type)) {
+      return res.status(400).json({ success: false, message: 'document_type debe ser "factura", "remision" o "cotizacion"' });
     }
 
     const sale = await Sale.findOne({
@@ -618,6 +638,7 @@ const confirm = async (req, res) => {
         updateData.sale_number = newNumber;
       } else if (document_type) {
         updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
+
       }
 
       await sale.update(updateData, { transaction });
@@ -625,12 +646,13 @@ const confirm = async (req, res) => {
 
       // ── Disparar envío DIAN si quedó como factura ───────────────────────────
       if (finalDocType === 'factura') {
-        const finalSale = await Sale.findByPk(id);
+        const finalSale = await Sale.findByPk(id, { include: [{ model: SaleItem, as: 'items' }] });
         setImmediate(async () => {
           try {
-            await dianService.sendInvoice(finalSale, tenantId);
+            const tenant = await Tenant.findByPk(tenantId);
+            await dianService.sendInvoiceToDian(finalSale, tenant);
           } catch (err) {
-            logger.error(`[DIAN] Error async al enviar factura ${finalSale.sale_number}:`, err.message);
+            logger.error(`[DIAN] Error async al enviar factura ${finalSale?.sale_number}:`, err.message);
           }
         });
       }

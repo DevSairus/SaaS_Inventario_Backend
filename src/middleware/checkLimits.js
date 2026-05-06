@@ -68,6 +68,11 @@ const PLANS = {
 const checkLimits = (resourceType) => {
   return async (req, res, next) => {
     try {
+      // super_admin no tiene tenant y no tiene límites de plan
+      if (req.is_super_admin) {
+        return next();
+      }
+
       const tenantId = req.tenant_id;
 
       if (!tenantId) {
@@ -107,7 +112,7 @@ const checkLimits = (resourceType) => {
             where: {
               tenant_id: tenantId,
               role: {
-                [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer']
+                [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician']
               },
               is_active: true
             }
@@ -186,13 +191,15 @@ const checkLimits = (resourceType) => {
 
       // Verificar si se ha alcanzado el límite
       if (currentCount >= maxLimit) {
-        return res.status(403).json({
+        return res.status(402).json({
           success: false,
-          message: `Has alcanzado el límite de ${limitName} para tu plan ${plan.name}. Actual: ${currentCount}/${maxLimit}`,
+          code: 'PLAN_LIMIT_EXCEEDED',
+          message: `Has alcanzado el límite de ${limitName} en tu plan ${plan.name} (${currentCount}/${maxLimit}). Actualiza tu plan para agregar más.`,
           limit: {
             current: currentCount,
             max: maxLimit,
             plan: plan.name,
+            planCode: tenant.plan,
             resourceType: limitName
           }
         });

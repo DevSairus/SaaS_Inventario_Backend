@@ -10,13 +10,37 @@ const getProductStats = async (req, res) => {
       if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
       whereClause.tenant_id = req.user.tenant_id;
     }
-    const totalProducts = await Product.count({ where: whereClause });
-    const activeProducts = await Product.count({ where: { ...whereClause, is_active: true } });
-    const inactiveProducts = await Product.count({ where: { ...whereClause, is_active: false } });
-    const lowStockProducts = await Product.count({ where: { ...whereClause, current_stock: { [Op.lt]: sequelize.col('min_stock') }, track_inventory: true, is_active: true } });
-    const outOfStockProducts = await Product.count({ where: { ...whereClause, current_stock: { [Op.lte]: 0 }, track_inventory: true, is_active: true } });
-    const products = await Product.findAll({ where: { ...whereClause, is_active: true }, attributes: ['current_stock', 'average_cost'] });
-    const totalInventoryValue = products.reduce((sum, p) => sum + (parseFloat(p.current_stock) || 0) * (parseFloat(p.average_cost) || 0), 0);
+    // Una sola query agrupada reemplaza 6 queries independientes + findAll en memoria
+    const tenantFilter = whereClause.tenant_id
+      ? 'AND tenant_id = :tenantId'
+      : '';
+    const [[agg]] = await sequelize.query(
+      `SELECT
+         COUNT(*)                                                              AS total,
+         COUNT(*) FILTER (WHERE is_active)                                    AS active,
+         COUNT(*) FILTER (WHERE NOT is_active)                                AS inactive,
+         COUNT(*) FILTER (WHERE track_inventory AND is_active
+                          AND current_stock < min_stock
+                          AND current_stock > 0)                              AS low_stock,
+         COUNT(*) FILTER (WHERE track_inventory AND is_active
+                          AND current_stock <= 0)                             AS out_of_stock,
+         COALESCE(SUM(CASE WHEN is_active
+                      THEN current_stock * average_cost ELSE 0 END), 0)      AS inventory_value
+       FROM products
+       WHERE 1=1 ${tenantFilter}`,
+      {
+        replacements: whereClause.tenant_id ? { tenantId: whereClause.tenant_id } : {},
+        type: sequelize.QueryTypes.SELECT,
+      }
+    );
+
+    const totalProducts       = parseInt(agg.total);
+    const activeProducts      = parseInt(agg.active);
+    const inactiveProducts    = parseInt(agg.inactive);
+    const lowStockProducts    = parseInt(agg.low_stock);
+    const outOfStockProducts  = parseInt(agg.out_of_stock);
+    const totalInventoryValue = parseFloat(agg.inventory_value);
+
     res.json({ success: true, data: { total: totalProducts, total_products: totalProducts, active: activeProducts, active_products: activeProducts, inactive: inactiveProducts, inactive_products: inactiveProducts, lowStock: lowStockProducts, low_stock_products: lowStockProducts, outOfStock: outOfStockProducts, out_of_stock_products: outOfStockProducts, totalInventoryValue, total_inventory_value: totalInventoryValue } });
   } catch (error) {
     console.error('Error en getProductStats:', error);
@@ -59,7 +83,7 @@ const getAllProducts = async (req, res) => {
       offset: offset,
       order: [[safeSortBy, safeSortOrder]]
     });
-    res.json({ success: true, data: rows, pagination: { total: count, page: safePage, limit: safeLimit, totalPages: Math.ceil(count / limit) } });
+    res.json({ success: true, data: rows, pagination: { total: count, page: safePage, limit: safeLimit, totalPages: Math.ceil(count / safeLimit) } });
   } catch (error) {
     console.error('Error en getAllProducts:', error);
     res.status(500).json({ success: false, message: 'Error al obtener productos' });
