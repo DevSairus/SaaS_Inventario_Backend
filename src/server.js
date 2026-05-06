@@ -46,14 +46,16 @@ app.set('etag', false);
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
+  'https://saa-s-inventario-frontend.vercel.app',
   ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()) : []),
   ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.trim()] : []),
-];
+].filter(Boolean);
 
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    console.warn(`[CORS] Bloqueado para: ${origin}`);
     callback(new Error(`CORS bloqueado para: ${origin}`));
   },
   credentials: true,
