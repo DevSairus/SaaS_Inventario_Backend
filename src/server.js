@@ -47,6 +47,7 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:3000',
   'https://saa-s-inventario-frontend.vercel.app',
+  'https://pitbox.esc-datacore.com',
   ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',').map(o => o.trim()) : []),
   ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.trim()] : []),
 ].filter(Boolean);
