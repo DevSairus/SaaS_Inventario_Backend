@@ -427,13 +427,25 @@ function formatCurrency(value) {
    RECIBO DE PAGO / ANTICIPO  (A5 portrait)
    ══════════════════════════════════════════════════════════════ */
 const generatePaymentReceiptPDF = async (res, sale, tenant, payment) => {
+  const bufferMode = !res;
+  let bufferPromise = null;
+
   try {
     const doc = new PDFDocument({ size: 'A5', margin: 30, bufferPages: true });
     const recNum = payment.receipt_number || `REC-${String((payment.index ?? 0) + 1).padStart(4, '0')}`;
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="recibo-${recNum}.pdf"`);
-    doc.pipe(res);
+    if (!bufferMode) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="recibo-${recNum}.pdf"`);
+      doc.pipe(res);
+    } else {
+      const chunks = [];
+      bufferPromise = new Promise((resolve, reject) => {
+        doc.on('data', c => chunks.push(c));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+      });
+    }
 
     const PAGE_W  = doc.page.width;
     const MARGIN  = 30;
@@ -549,10 +561,15 @@ const generatePaymentReceiptPDF = async (res, sale, tenant, payment) => {
 
     doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(blue);
     doc.end();
+    if (bufferMode) return await bufferPromise;
   } catch (e) {
     console.error('Error generando recibo de pago:', e);
-    if (!res.headersSent) res.status(500).json({ message: 'Error generando recibo' });
+    if (!bufferMode && !res.headersSent) res.status(500).json({ message: 'Error generando recibo' });
+    if (bufferMode) throw e;
   }
 };
 
-module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF };
+const generatePaymentReceiptPDFBuffer = (sale, tenant, payment) =>
+  generatePaymentReceiptPDF(null, sale, tenant, payment);
+
+module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer };

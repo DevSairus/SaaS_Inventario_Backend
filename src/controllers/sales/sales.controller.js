@@ -4,7 +4,7 @@ const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolu
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
-const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF } = require('../../services/pdfService');
+const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer } = require('../../services/pdfService');
 const whatsappService = require('../../services/whatsappService');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
@@ -904,10 +904,22 @@ const generatePDF = async (req, res) => {
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     const tenant = await Tenant.findByPk(tenantId);
     if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
-    generateSalePDF(res, sale, tenant);
+
+    // Buffer mode: necesario para Vercel serverless (no soporta streaming)
+    const TYPES = { factura: 'Factura', remision: 'Remision', cotizacion: 'Cotizacion' };
+    const docLabel = TYPES[sale.document_type] || 'Documento';
+    const filename = `${docLabel}-${sale.sale_number}.pdf`;
+    const pdfBuffer = await generateSalePDFBuffer(sale, tenant);
+    res.set({
+      'Content-Type':        'application/pdf',
+      'Content-Disposition': `inline; filename="${filename}"`,
+      'Content-Length':      pdfBuffer.length,
+      'Cache-Control':       'no-store',
+    });
+    res.send(pdfBuffer);
   } catch (error) {
     logger.error('Error generando PDF:', error);
-    res.status(500).json({ success: false, message: 'Error generando PDF' });
+    if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando PDF' });
   }
 };
 
@@ -933,7 +945,17 @@ const generatePaymentReceipt = async (req, res) => {
     payment.index = idx;
     payment.receipt_number = `REC-${sale.sale_number}-${String(idx + 1).padStart(2, '0')}`;
     const tenant = await Tenant.findByPk(tenantId);
-    generatePaymentReceiptPDF(res, sale, tenant, payment);
+
+    // Buffer mode: necesario para Vercel serverless (no soporta streaming)
+    const recNum = payment.receipt_number;
+    const pdfBuffer = await generatePaymentReceiptPDFBuffer(sale, tenant, payment);
+    res.set({
+      'Content-Type':        'application/pdf',
+      'Content-Disposition': `inline; filename="recibo-${recNum}.pdf"`,
+      'Content-Length':      pdfBuffer.length,
+      'Cache-Control':       'no-store',
+    });
+    res.send(pdfBuffer);
   } catch (e) {
     logger.error('Error generando recibo:', e);
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando recibo' });
