@@ -619,5 +619,62 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
   }
 };
 
-// Wrapper que devuelve Buffer — usado por sendWhatsApp
-module.exports = { generatePaymentReceipt, generateIntakeForm, generateWorkOrderPDF };
+/* ══════════════════════════════════════════════════════════════
+   BUFFER WRAPPERS — necesarios para Vercel serverless
+   (doc.pipe(res) no funciona en serverless; se genera el PDF
+    completo en memoria y se envía de una sola vez)
+   ══════════════════════════════════════════════════════════════ */
+const { Writable } = require('stream');
+
+function createBufferStream() {
+  const chunks = [];
+  let resolveBuffer, rejectBuffer;
+  const bufferPromise = new Promise((res, rej) => {
+    resolveBuffer = res;
+    rejectBuffer  = rej;
+  });
+
+  const stream = new Writable({
+    write(chunk, encoding, callback) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding));
+      callback();
+    }
+  });
+
+  // Propiedades que los generadores usan en el objeto `res`
+  stream.setHeader   = () => {};
+  stream.headersSent = false;
+  stream.status      = () => ({ json: () => {} });
+
+  stream.on('finish', () => resolveBuffer(Buffer.concat(chunks)));
+  stream.on('error',  rejectBuffer);
+
+  return { stream, bufferPromise };
+}
+
+const generatePaymentReceiptBuffer = async (order, tenant, paymentData) => {
+  const { stream, bufferPromise } = createBufferStream();
+  await generatePaymentReceipt(stream, order, tenant, paymentData);
+  return bufferPromise;
+};
+
+const generateIntakeFormBuffer = async (order, tenant) => {
+  const { stream, bufferPromise } = createBufferStream();
+  await generateIntakeForm(stream, order, tenant);
+  return bufferPromise;
+};
+
+const generateWorkOrderPDFBuffer = async (order, tenant) => {
+  const { stream, bufferPromise } = createBufferStream();
+  await generateWorkOrderPDF(stream, order, tenant);
+  return bufferPromise;
+};
+
+module.exports = {
+  generatePaymentReceipt,
+  generateIntakeForm,
+  generateWorkOrderPDF,
+  generatePaymentReceiptBuffer,
+  generateIntakeFormBuffer,
+  generateWorkOrderPDFBuffer,
+};

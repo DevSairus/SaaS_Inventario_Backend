@@ -867,7 +867,7 @@ const productivity = async (req, res) => {
 
 
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
-const { generatePaymentReceipt, generateIntakeForm, generateWorkOrderPDF } = require('../../services/workshopPdfService');
+const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrderPDFBuffer } = require('../../services/workshopPdfService');
 const whatsappService = require('../../services/whatsappService');
 
 async function getOrderWithTenant(id, tenant_id) {
@@ -914,22 +914,33 @@ const generatePDF = async (req, res) => {
     const { order, tenant } = await getOrderWithTenant(id, tenant_id);
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
+    let pdfBuffer, filename;
+
     if (type === 'intake') {
-      return generateIntakeForm(res, order, tenant);
-    }
-    if (type === 'receipt') {
-      // Datos del pago vienen en query params para recibo rápido del último pago
+      pdfBuffer = await generateIntakeFormBuffer(order, tenant);
+      filename  = `ingreso-${order.order_number}.pdf`;
+    } else if (type === 'receipt') {
       const paymentData = {
-        amount:          parseFloat(req.query.amount || 0),
-        method:          req.query.method || 'cash',
-        notes:           req.query.notes  || '',
-        date:            req.query.date   || new Date(),
-        receipt_number:  req.query.receipt_number || `REC-${Date.now().toString().slice(-6)}`,
+        amount:         parseFloat(req.query.amount || 0),
+        method:         req.query.method || 'cash',
+        notes:          req.query.notes  || '',
+        date:           req.query.date   || new Date(),
+        receipt_number: req.query.receipt_number || `REC-${Date.now().toString().slice(-6)}`,
       };
-      return generatePaymentReceipt(res, order, tenant, paymentData);
+      pdfBuffer = await generatePaymentReceiptBuffer(order, tenant, paymentData);
+      filename  = `recibo-${order.order_number}.pdf`;
+    } else {
+      pdfBuffer = await generateWorkOrderPDFBuffer(order, tenant);
+      filename  = `OT-${order.order_number}.pdf`;
     }
-    // default: OT completa
-    return generateWorkOrderPDF(res, order, tenant);
+
+    res.set({
+      'Content-Type':        'application/pdf',
+      'Content-Disposition': `inline; filename="${filename}"`,
+      'Content-Length':      pdfBuffer.length,
+      'Cache-Control':       'no-store',
+    });
+    res.send(pdfBuffer);
   } catch (error) {
     logger.error('Error generando PDF taller:', error);
     if (!res.headersSent) res.status(500).json({ success: false, message: 'Error generando PDF' });
