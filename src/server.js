@@ -51,10 +51,17 @@ const allowedOrigins = [
   ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL.trim()] : []),
 ].filter(Boolean);
 
+// Patrones adicionales: cualquier preview/branch de Vercel del proyecto frontend
+const allowedOriginPatterns = [
+  /^https:\/\/saa-s-inventario-frontend[\w-]*\.vercel\.app$/,
+  /^https:\/\/saa-s-inventario-frontend-[\w-]+-devsairus-projects\.vercel\.app$/,
+];
+
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (allowedOriginPatterns.some(pattern => pattern.test(origin))) return callback(null, true);
     console.warn(`[CORS] Bloqueado para: ${origin}`);
     callback(new Error(`CORS bloqueado para: ${origin}`));
   },
