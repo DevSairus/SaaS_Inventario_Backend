@@ -484,8 +484,8 @@ const getHabilitacionStatus = async (req, res) => {
       },
       {
         key: 'test_invoices_sent',
-        label: `Facturas de prueba enviadas (${testDocs}/2 mínimo)`,
-        done: testDocs >= 2,
+        label: `Facturas de prueba enviadas (${testDocs}/1 mínimo)`,
+        done: testDocs >= 1,
         details: `${testDocs} documentos aceptados en set de pruebas`,
       },
     ];
