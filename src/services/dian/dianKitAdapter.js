@@ -309,10 +309,22 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
  * Si hay test_set_id, usa SendTestSetAsync y hace polling con GetStatusZip.
  */
 async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
-  const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
   const testSetId = cfg.test_set_id;
   const isTest = cfg.environment !== 'production';
+
+  // Si hay servicio DIAN remoto, usarlo
+  const dianServiceUrl = process.env.DIAN_SERVICE_URL;
+  if (dianServiceUrl) {
+    return callRemoteDianService(dianServiceUrl, '/api/dian/send', {
+      config: cfg,
+      signedXml,
+      invoiceNumber,
+      cufe,
+      method: isTest && testSetId ? 'SendTestSetAsync' : 'SendBillSync',
+      testSetId,
+    });
+  }
 
   // Determinar método de envío
   const sendOptions = {};
@@ -437,6 +449,14 @@ async function getStatusByCufe(tenant, cufe) {
  * Usado para verificar conectividad y configuración.
  */
 async function getNumberingRange(tenant) {
+  // Si hay servicio DIAN remoto, usarlo
+  const dianServiceUrl = process.env.DIAN_SERVICE_URL;
+  if (dianServiceUrl) {
+    return callRemoteDianService(dianServiceUrl, '/api/dian/get-numbering-range', {
+      config: tenant.dian_config,
+    });
+  }
+
   const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
 
@@ -451,6 +471,32 @@ async function getNumberingRange(tenant) {
     raw: JSON.stringify(response),
     ranges: response.ranges || [],
   };
+}
+
+/**
+ * Llama al servicio DIAN remoto (Hostinger)
+ */
+async function callRemoteDianService(baseUrl, path, body) {
+  const apiKey = process.env.DIAN_API_KEY || 'pitbox-dian-2026';
+  const url = `${baseUrl}${path}`;
+
+  logger.info(`[DIAN Proxy] → ${url}`);
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`DIAN Service error ${response.status}: ${err}`);
+  }
+
+  return response.json();
 }
 
 module.exports = {
