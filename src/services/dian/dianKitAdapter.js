@@ -86,12 +86,12 @@ function getKit(tenant) {
       providerName: cfg.company_name || tenant.company_name,
     },
     numbering: {
-      authorizationNumber: '', // se setea por documento
-      prefix: '',
-      startNumber: 0,
-      endNumber: 0,
-      startDate: new Date(),
-      endDate: new Date(),
+      authorizationNumber: '18760000001', // Resolución estándar DIAN habilitación
+      prefix: 'SETP',
+      startNumber: 990000000,
+      endNumber: 995000000,
+      startDate: new Date(2019, 0, 19),
+      endDate: new Date(2030, 0, 19),
       technicalKey: cfg.technical_key,
     },
     timeoutMs: 60000,
