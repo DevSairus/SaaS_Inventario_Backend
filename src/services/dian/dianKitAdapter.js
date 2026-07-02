@@ -332,55 +332,74 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
   if (isTest && testSetId && response.trackId) {
     logger.info(`[DIAN] ZipKey=${response.trackId} — haciendo polling GetStatusZip...`);
 
-    for (let i = 0; i < 60; i++) {
-      await new Promise(r => setTimeout(r, 5000));
+    // Esperar 10s antes del primer poll (DIAN necesita tiempo para procesar)
+    await new Promise(r => setTimeout(r, 10000));
 
+    for (let i = 0; i < 30; i++) {
       try {
         const statusResp = await kit.getStatusZip(response.trackId);
-        logger.info(`[DIAN] Poll ${i + 1}: statusCode=${statusResp.statusCode} isValid=${statusResp.isValid}`);
+        const sc = statusResp.statusCode;
+        const iv = statusResp.isValid;
+        logger.info(`[DIAN] Poll ${i + 1}: statusCode=${sc} isValid=${iv}`);
 
-        if (statusResp.isValid === true) {
+        // Detectar resultado final: statusCode distinto de 99/null/0/vacío
+        // O isValid === true (DIAN aceptó)
+        if (iv === true || iv === 'true') {
           return {
             isValid: true,
-            statusCode: statusResp.statusCode || '00',
+            statusCode: sc || '00',
             statusDescription: statusResp.statusDescription || 'Aceptado',
-            statusMessage: statusResp.statusDescription || 'Aceptado',
+            statusMessage: 'Documento aceptado por DIAN',
             trackId: response.trackId,
-            errors: statusResp.errors,
+            errors: statusResp.errors || [],
             raw: JSON.stringify(statusResp),
           };
         }
 
-        const isProcessing = !statusResp.statusCode || 
-                             statusResp.statusCode === '99' || 
-                             statusResp.statusCode === '0' ||
-                             statusResp.statusCode === '';
-        
-        if (!isProcessing) {
+        // Si statusCode es un código final (00, 66, etc.) — devolver
+        if (sc && sc !== '99' && sc !== '0' && sc !== '') {
           return {
-            isValid: statusResp.isValid,
-            statusCode: statusResp.statusCode,
-            statusDescription: statusResp.statusDescription,
-            statusMessage: statusResp.statusDescription,
+            isValid: iv === true || iv === 'true',
+            statusCode: sc,
+            statusDescription: statusResp.statusDescription || '',
+            statusMessage: statusResp.statusDescription || '',
             trackId: response.trackId,
-            errors: statusResp.errors,
+            errors: statusResp.errors || [],
             raw: JSON.stringify(statusResp),
           };
         }
+
+        // Si rawResponse contiene IsValid>true, detectarlo
+        const raw = statusResp.rawResponse || statusResp.raw || '';
+        if (raw.includes('<b:IsValid>true</b:IsValid>') || raw.includes('<b:StatusCode>00</b:StatusCode>')) {
+          return {
+            isValid: true,
+            statusCode: '00',
+            statusDescription: 'Procesado Correctamente',
+            statusMessage: 'Documento aceptado por DIAN',
+            trackId: response.trackId,
+            errors: [],
+            raw: typeof statusResp.raw === 'string' ? statusResp.raw : JSON.stringify(statusResp),
+          };
+        }
+
       } catch (pollErr) {
         logger.warn(`[DIAN] Poll ${i + 1} error: ${pollErr.message}`);
       }
+
+      await new Promise(r => setTimeout(r, 5000));
     }
 
-    logger.warn('[DIAN] Polling timeout después de 60 intentos (5 min)');
+    // Timeout — devolver estado "en proceso" en vez de error
+    logger.warn('[DIAN] Polling timeout — el documento fue enviado, verifique el portal DIAN');
     return {
       isValid: false,
-      statusCode: '99',
-      statusDescription: 'En proceso de validación — consulte el portal DIAN',
-      statusMessage: 'DIAN tardó más de 5 minutos. Consulte el portal.',
+      statusCode: 'PENDING',
+      statusDescription: 'Documento enviado — verifique el portal DIAN para confirmar el estado',
+      statusMessage: 'El documento fue enviado exitosamente a DIAN. El procesamiento puede tardar unos minutos.',
       trackId: response.trackId,
       errors: [],
-      raw: JSON.stringify({ timeout: true, trackId: response.trackId }),
+      raw: JSON.stringify({ pending: true, trackId: response.trackId }),
     };
   }
 

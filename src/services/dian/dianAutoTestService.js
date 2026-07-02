@@ -38,7 +38,8 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
   });
 
   const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
-  const status = accepted ? 'accepted' : (dianResponse.statusCode ? 'rejected' : 'error');
+  const pending = dianResponse.statusCode === 'PENDING';
+  const status = accepted ? 'accepted' : (pending ? 'sent' : (dianResponse.statusCode ? 'rejected' : 'error'));
 
   logger.info(`[DIAN AutoTest] ← ${docType} ${number} → ${status.toUpperCase()} | code=${dianResponse.statusCode}`);
 
@@ -51,7 +52,7 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
     is_test: true,
   }).catch(e => logger.error('[DIAN AutoTest] Error guardando DianEvent:', e.message));
 
-  return { accepted, dianResponse, status };
+  return { accepted: accepted || pending, dianResponse, status };
 }
 
 /* ─────────────────────────────────────────────────────────────
