@@ -115,9 +115,9 @@ async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionPara
 
   const kit = dianKit.getKit(tenant);
 
-  /* ── FASE 1: 6 facturas ── */
-  logger.info('[DIAN AutoTest] ═══ FASE 1: 6 Facturas ═══');
-  for (let i = 0; i < 6; i++) {
+  /* ── FASE 1: 2 facturas (mínimo para habilitación) ── */
+  logger.info('[DIAN AutoTest] ═══ FASE 1: 2 Facturas ═══');
+  for (let i = 0; i < 2; i++) {
     try {
       const resolution = await DianResolution.findByPk(resolutionParam.id);
       if (!resolution?.is_active) throw new Error('Resolución de pruebas inactiva');
@@ -155,126 +155,6 @@ async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionPara
       logger.error(`[DIAN AutoTest] Error factura ${i + 1}:`, err.message);
       invoices.push({ invoiceNumber: null, cufe: null, accepted: false });
       results.push({ index: i + 1, type: 'factura', label: `Factura ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
-    }
-  }
-
-  const resolution = await DianResolution.findByPk(resolutionParam.id);
-
-  /* ── FASE 2: 2 Notas Crédito ── */
-  logger.info('[DIAN AutoTest] ═══ FASE 2: 2 Notas Credito ═══');
-  for (let i = 0; i < 2; i++) {
-    try {
-      const refInv = invoices[i];
-      const noteNumber = `${resolution.prefix}${990000000 + 6 + i + 1}`;
-      const ncAmount = 50000;
-      const ncTax = Math.round(ncAmount * 0.19);
-
-      const { signedXml, uuid: cude } = await kit.createCreditNote({
-        id: noteNumber,
-        issueDate: new Date(),
-        issueTime: new Date(),
-        customer: {
-          name: TEST_BUYER.name,
-          identification: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' },
-          personType: '1',
-          fiscalResponsibilities: [TEST_BUYER.regimeCode === '49' ? 'R-99-PN' : 'O-13'],
-          taxInfo: { registrationName: TEST_BUYER.name, companyId: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' }, taxLevelCode: TEST_BUYER.taxLevelCode, taxScheme: { code: '01' }, address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' } },
-          address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' },
-          email: TEST_BUYER.email,
-        },
-        billingReference: {
-          id: refInv?.invoiceNumber || `${resolution.prefix}990000001`,
-          uuid: refInv?.cufe || '0'.repeat(96),
-          issueDate: new Date(),
-        },
-        discrepancyResponse: {
-          referenceId: refInv?.invoiceNumber || `${resolution.prefix}990000001`,
-          responseCode: String(i + 1),
-          description: i === 0 ? 'Devolucion parcial de los bienes' : 'Rebaja o descuento parcial del precio',
-        },
-        lines: [{ id: '1', quantity: 1, unitCode: 'EA', description: 'Devolucion parcial', price: ncAmount, lineExtensionAmount: ncAmount, taxTotals: [{ taxAmount: ncTax, subtotals: [{ taxableAmount: ncAmount, taxAmount: ncTax, percent: 19, taxScheme: { code: '01' } }] }] }],
-        taxTotals: [{ taxAmount: ncTax, subtotals: [{ taxableAmount: ncAmount, taxAmount: ncTax, percent: 19, taxScheme: { code: '01' } }] }],
-        legalMonetaryTotal: { lineExtensionAmount: ncAmount, taxExclusiveAmount: ncAmount, taxInclusiveAmount: ncAmount + ncTax, allowanceTotalAmount: 0, chargeTotalAmount: 0, prepaidAmount: 0, payableAmount: ncAmount + ncTax },
-        paymentMeans: { paymentForm: '1', paymentMethod: '10' },
-      });
-
-      const { accepted, dianResponse, status } = await sendAndLog({
-        signedXml, cufe: cude, number: noteNumber, docType: 'CreditNote',
-        cfg, tenant, DianEvent,
-      });
-
-      results.push({
-        index: 6 + i + 1, type: 'nota_credito', label: `Nota Credito ${i + 1}`,
-        invoiceNumber: noteNumber, cufe: cude, accepted, signed: true, status,
-        refInvoice: refInv?.invoiceNumber || '—',
-        statusCode: dianResponse.statusCode,
-        statusDescription: dianResponse.statusDescription,
-        statusMessage: dianResponse.statusMessage,
-        isFault: !accepted,
-        rawPreview: dianResponse.raw?.substring(0, 1500) || null,
-      });
-    } catch (err) {
-      logger.error(`[DIAN AutoTest] Error NC ${i + 1}:`, err.message);
-      results.push({ index: 6 + i + 1, type: 'nota_credito', label: `Nota Credito ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
-    }
-  }
-
-  /* ── FASE 3: 2 Notas Débito ── */
-  logger.info('[DIAN AutoTest] ═══ FASE 3: 2 Notas Debito ═══');
-  for (let i = 0; i < 2; i++) {
-    try {
-      const refInv = invoices[i + 2];
-      const noteNumber = `${resolution.prefix}${990000000 + 8 + i + 1}`;
-      const ndAmount = 25000;
-      const ndTax = Math.round(ndAmount * 0.19);
-
-      const { signedXml, uuid: cude } = await kit.createDebitNote({
-        id: noteNumber,
-        issueDate: new Date(),
-        issueTime: new Date(),
-        customer: {
-          name: TEST_BUYER.name,
-          identification: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' },
-          personType: '1',
-          fiscalResponsibilities: [TEST_BUYER.regimeCode === '49' ? 'R-99-PN' : 'O-13'],
-          taxInfo: { registrationName: TEST_BUYER.name, companyId: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' }, taxLevelCode: TEST_BUYER.taxLevelCode, taxScheme: { code: '01' }, address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' } },
-          address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' },
-          email: TEST_BUYER.email,
-        },
-        billingReference: {
-          id: refInv?.invoiceNumber || `${resolution.prefix}990000003`,
-          uuid: refInv?.cufe || '0'.repeat(96),
-          issueDate: new Date(),
-        },
-        discrepancyResponse: {
-          referenceId: refInv?.invoiceNumber || `${resolution.prefix}990000003`,
-          responseCode: String(i + 1),
-          description: i === 0 ? 'Intereses' : 'Gastos por cobrar',
-        },
-        lines: [{ id: '1', quantity: 1, unitCode: 'ZZ', description: 'Cargo adicional por intereses', price: ndAmount, lineExtensionAmount: ndAmount, taxTotals: [{ taxAmount: ndTax, subtotals: [{ taxableAmount: ndAmount, taxAmount: ndTax, percent: 19, taxScheme: { code: '01' } }] }] }],
-        taxTotals: [{ taxAmount: ndTax, subtotals: [{ taxableAmount: ndAmount, taxAmount: ndTax, percent: 19, taxScheme: { code: '01' } }] }],
-        legalMonetaryTotal: { lineExtensionAmount: ndAmount, taxExclusiveAmount: ndAmount, taxInclusiveAmount: ndAmount + ndTax, allowanceTotalAmount: 0, chargeTotalAmount: 0, prepaidAmount: 0, payableAmount: ndAmount + ndTax },
-        paymentMeans: { paymentForm: '1', paymentMethod: '10' },
-      });
-
-      const { accepted, dianResponse, status } = await sendAndLog({
-        signedXml, cufe: cude, number: noteNumber, docType: 'DebitNote',
-        cfg, tenant, DianEvent,
-      });
-
-      results.push({
-        index: 8 + i + 1, type: 'nota_debito', label: `Nota Debito ${i + 1}`,
-        invoiceNumber: noteNumber, cufe: cude, accepted, signed: true, status,
-        refInvoice: refInv?.invoiceNumber || '—',
-        statusCode: dianResponse.statusCode,
-        statusDescription: dianResponse.statusDescription,
-        statusMessage: dianResponse.statusMessage,
-        isFault: !accepted,
-        rawPreview: dianResponse.raw?.substring(0, 1500) || null,
-      });
-    } catch (err) {
-      logger.error(`[DIAN AutoTest] Error ND ${i + 1}:`, err.message);
-      results.push({ index: 8 + i + 1, type: 'nota_debito', label: `Nota Debito ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
     }
   }
 

@@ -333,19 +333,20 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
   if (isTest && testSetId && response.trackId) {
     logger.info(`[DIAN] ZipKey=${response.trackId} — haciendo polling GetStatusZip...`);
 
-    for (let i = 0; i < 15; i++) {
-      await new Promise(r => setTimeout(r, 3000));
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 5000));
 
       try {
         const statusResp = await kit.getStatusZip(response.trackId);
         logger.info(`[DIAN] Poll ${i + 1}: statusCode=${statusResp.statusCode} isValid=${statusResp.isValid}`);
 
         // statusCode 99 = procesando
+        // statusCode "0" = "En proceso de validación" (aún procesando)
         // statusCode null/undefined/vacío = procesando
-        // isValid=false + statusCode vacío = aún procesando
-        // Cualquier statusCode válido (00, 66, etc.) = resultado final
+        // Cualquier otro statusCode válido (00, 66, etc.) = resultado final
         const isProcessing = !statusResp.statusCode || 
                              statusResp.statusCode === '99' || 
+                             statusResp.statusCode === '0' ||
                              statusResp.statusCode === '' ||
                              (statusResp.statusCode === null);
         
