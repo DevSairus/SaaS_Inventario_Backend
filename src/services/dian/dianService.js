@@ -104,7 +104,7 @@ async function sendInvoiceToDian(sale, tenant) {
       cufe,
     });
 
-    const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+    const accepted = dianResponse.isValid || dianResponse.statusCode === '00' || dianResponse.statusCode === '2';
     const dianStatus = accepted ? 'accepted' : 'rejected';
 
     await Sale.update({
@@ -178,7 +178,7 @@ async function checkInvoiceStatus(sale, tenant) {
 
   const result = await dianKit.getStatusByCufe(tenant, sale.cufe);
 
-  const accepted = result.isValid || result.statusCode === '00';
+  const accepted = result.isValid || result.statusCode === '00' || result.statusCode === '2';
   await Sale.update({
     dian_status: accepted ? 'accepted' : 'rejected',
     dian_response: result,
@@ -312,7 +312,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       cufe: result.uuid,
     });
 
-    const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+    const accepted = dianResponse.isValid || dianResponse.statusCode === '00' || dianResponse.statusCode === '2';
     const dianStatus = accepted ? 'accepted' : 'rejected';
 
     if (note.id) {

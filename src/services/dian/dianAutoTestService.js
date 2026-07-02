@@ -37,7 +37,7 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
     cufe,
   });
 
-  const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+  const accepted = dianResponse.isValid || dianResponse.statusCode === '00' || dianResponse.statusCode === '2';
   const pending = dianResponse.statusCode === 'PENDING';
   const status = accepted ? 'accepted' : (pending ? 'sent' : (dianResponse.statusCode ? 'rejected' : 'error'));
 
