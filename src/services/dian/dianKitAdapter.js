@@ -354,9 +354,8 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
         const iv = statusResp.isValid;
         logger.info(`[DIAN] Poll ${i + 1}: statusCode=${sc} isValid=${iv}`);
 
-        // Detectar resultado final: statusCode distinto de 99/null/0/vacío
-        // O isValid === true (DIAN aceptó)
-        if (iv === true || iv === 'true') {
+        // statusCode 00 o 2 = éxito (2 = set ya aceptado)
+        if (iv === true || iv === 'true' || sc === '00' || sc === '2') {
           return {
             isValid: true,
             statusCode: sc || '00',
