@@ -115,49 +115,13 @@ function parseSoapResponse(xml) {
   };
 }
 
-// ZIP builder
-const _crcTable = (() => {
-  const t = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    t[n] = c;
-  }
-  return t;
-})();
-
-function crc32(buf) {
-  let c = 0xFFFFFFFF;
-  for (let i = 0; i < buf.length; i++) c = (c >>> 8) ^ _crcTable[(c ^ buf[i]) & 0xFF];
-  return (c ^ 0xFFFFFFFF) >>> 0;
-}
+// ZIP builder — usa adm-zip para compresión DEFLATE correcta
+const AdmZip = require('adm-zip');
 
 function createZip(fileContent, fileName) {
-  const nb = Buffer.from(fileName, 'utf8');
-  const crc = crc32(fileContent);
-  const now = new Date();
-  const dd = ((now.getFullYear()-1980)<<9)|((now.getMonth()+1)<<5)|now.getDate();
-  const dt = (now.getHours()<<11)|(now.getMinutes()<<5)|Math.floor(now.getSeconds()/2);
-  const lh = Buffer.alloc(30 + nb.length);
-  lh.writeUInt32LE(0x04034b50,0); lh.writeUInt16LE(20,4); lh.writeUInt16LE(0,6);
-  lh.writeUInt16LE(0,8); lh.writeUInt16LE(dt,10); lh.writeUInt16LE(dd,12);
-  lh.writeUInt32LE(crc,14); lh.writeUInt32LE(fileContent.length,18);
-  lh.writeUInt32LE(fileContent.length,22); lh.writeUInt16LE(nb.length,26);
-  lh.writeUInt16LE(0,28); nb.copy(lh,30);
-  const cd = Buffer.alloc(46 + nb.length);
-  cd.writeUInt32LE(0x02014b50,0); cd.writeUInt16LE(20,4); cd.writeUInt16LE(20,6);
-  cd.writeUInt16LE(0,8); cd.writeUInt16LE(0,10); cd.writeUInt16LE(dt,12);
-  cd.writeUInt16LE(dd,14); cd.writeUInt32LE(crc,16);
-  cd.writeUInt32LE(fileContent.length,20); cd.writeUInt32LE(fileContent.length,24);
-  cd.writeUInt16LE(nb.length,28); cd.writeUInt16LE(0,30); cd.writeUInt16LE(0,32);
-  cd.writeUInt16LE(0,34); cd.writeUInt16LE(0,36); cd.writeUInt32LE(0,38);
-  cd.writeUInt32LE(0,42); nb.copy(cd,46);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50,0); eocd.writeUInt16LE(0,4); eocd.writeUInt16LE(0,6);
-  eocd.writeUInt16LE(1,8); eocd.writeUInt16LE(1,10);
-  eocd.writeUInt32LE(cd.length,12); eocd.writeUInt32LE(lh.length+fileContent.length,16);
-  eocd.writeUInt16LE(0,20);
-  return Buffer.concat([lh, fileContent, cd, eocd]);
+  const zip = new AdmZip();
+  zip.addFile(fileName, Buffer.isBuffer(fileContent) ? fileContent : Buffer.from(fileContent, 'utf8'));
+  return zip.toBuffer();
 }
 
 // Helper central: construir y enviar SOAP firmado con WS-Addressing
@@ -169,10 +133,8 @@ async function signedCall({ p12Base64, password, environment, actionName, bodyCo
 
   const soapXml = buildSignedEnvelope({
     action, endpoint, bodyContent,
-    certBase64:    certInfo.certBase64,
-    privateKey:    certInfo.privateKey,
-    keyPem:        certInfo.keyPem,
-    thumbprintB64: certInfo.thumbprintB64,
+    certBase64: certInfo.certBase64,
+    keyPem:     certInfo.keyPem,
   });
 
   logger.info(`[DIAN] -> ${actionName} | ${environment} | ${Buffer.byteLength(soapXml)}b`);

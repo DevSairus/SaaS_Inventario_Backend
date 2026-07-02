@@ -1,73 +1,44 @@
 // backend/src/services/dian/dianAutoTestService.js
 /**
  * Set completo de pruebas para habilitación DIAN — Software Propio
- *
- * Según documentación oficial DIAN:
- *   - 6 Facturas de venta
- *   - 2 Notas Crédito (referenciando facturas 1 y 2)
- *   - 2 Notas Débito  (referenciando facturas 3 y 4)
- *   Total: 10 documentos
+ * Migrado a dian-kit SDK
  */
 
-const { buildInvoiceXml, buildCreditNoteXml, buildDebitNoteXml, getColombiaDateTime } = require('./dianXmlBuilder');
-const dianApi     = require('./dianApiService');
-const dianSigner  = require('./dianSignerService');
-const logger      = require('../../config/logger');
+const dianKit = require('./dianKitAdapter');
+const logger = require('../../config/logger');
 
-/* ── Comprador ficticio para documentos de prueba ─── */
+/* ── Comprador ficticio para documentos de prueba DIAN ─── */
 const TEST_BUYER = {
-  nit: '13832081', schemeID: '13',
-  name: 'COMPRADOR DE PRUEBA',
-  address: 'Calle 1 # 1-1', city: 'Bogotá', cityCode: '11001',
+  nit: '1036781830', schemeID: '31', dv: '9',
+  name: 'EL ALTERNADOR',
+  address: 'Calle 1 # 1-1', city: 'Bogota', cityCode: '11001',
   dept: 'Cundinamarca', email: 'prueba@test.com', phone: '3000000000',
-  taxLevelCode: 'R-99-PN', regimeCode: '49',
+  taxLevelCode: 'O-13', regimeCode: 'O-13',
 };
 
 /* ── Variaciones de ítems para los 6 documentos ─── */
 const TEST_ITEMS_INVOICE = [
-  [{ id:'1', description:'Producto sin IVA',              quantity:1, unit_price:150000, subtotal:150000, tax_amount:0,     tax_rate:0,  total:150000, unit_code:'EA' }],
-  [{ id:'1', description:'Servicio con IVA 19%',          quantity:2, unit_price:80000,  subtotal:160000, tax_amount:30400, tax_rate:19, total:190400, unit_code:'ZZ' }],
-  [{ id:'1', description:'Repuesto con IVA 19%',          quantity:1, unit_price:200000, subtotal:200000, tax_amount:38000, tax_rate:19, total:238000, unit_code:'EA' },
-   { id:'2', description:'Mano de obra sin IVA',          quantity:1, unit_price:50000,  subtotal:50000,  tax_amount:0,     tax_rate:0,  total:50000,  unit_code:'ZZ' }],
-  [{ id:'1', description:'Consultoría sin IVA',           quantity:3, unit_price:70000,  subtotal:210000, tax_amount:0,     tax_rate:0,  total:210000, unit_code:'ZZ' }],
-  [{ id:'1', description:'Equipo electrónico IVA 19%',    quantity:1, unit_price:450000, subtotal:450000, tax_amount:85500, tax_rate:19, total:535500, unit_code:'EA' }],
-  [{ id:'1', description:'Material de construcción 0%',   quantity:5, unit_price:30000,  subtotal:150000, tax_amount:0,     tax_rate:0,  total:150000, unit_code:'EA' }],
+  [{ id:'1', description:'Servicio de consultoria IVA 19%',        quantity:1, unit_price:150000, subtotal:150000, tax_amount:28500, tax_rate:19, total:178500, unit_code:'EA' }],
+  [{ id:'1', description:'Servicio con IVA 19%',                   quantity:2, unit_price:80000,  subtotal:160000, tax_amount:30400, tax_rate:19, total:190400, unit_code:'ZZ' }],
+  [{ id:'1', description:'Repuesto con IVA 19%',                   quantity:1, unit_price:200000, subtotal:200000, tax_amount:38000, tax_rate:19, total:238000, unit_code:'EA' },
+   { id:'2', description:'Servicio tecnico IVA 19%',               quantity:1, unit_price:50000,  subtotal:50000,  tax_amount:9500,  tax_rate:19, total:59500,  unit_code:'ZZ' }],
+  [{ id:'1', description:'Consultoria IVA 19%',                    quantity:3, unit_price:70000,  subtotal:210000, tax_amount:39900, tax_rate:19, total:249900, unit_code:'ZZ' }],
+  [{ id:'1', description:'Equipo electronico IVA 19%',             quantity:1, unit_price:450000, subtotal:450000, tax_amount:85500, tax_rate:19, total:535500, unit_code:'EA' }],
+  [{ id:'1', description:'Material de construccion IVA 19%',       quantity:5, unit_price:30000,  subtotal:150000, tax_amount:28500, tax_rate:19, total:178500, unit_code:'EA' }],
 ];
 
-/* ── Helper: firmar XML si hay certificado ─── */
-async function signIfCert(xml, noteNumber, cfg) {
-  const hasCert = cfg.certificate_p12_base64 &&
-                  cfg.certificate_p12_base64 !== '[CONFIGURADO]' &&
-                  cfg.certificate_password;
-  if (!hasCert) {
-    logger.warn(`[DIAN AutoTest] Sin certificado — ${noteNumber} sin firma`);
-    return { xml, signed: false };
-  }
-  try {
-    const signed = await dianSigner.signXml(xml, {
-      p12Base64: cfg.certificate_p12_base64,
-      password:  cfg.certificate_password,
-      invoiceNumber: noteNumber,
-    });
-    return { xml: signed, signed: true };
-  } catch (e) {
-    logger.warn(`[DIAN AutoTest] Firma falló (${noteNumber}): ${e.message} — enviando sin firma`);
-    return { xml, signed: false };
-  }
-}
+/* ── Helper: enviar y registrar evento ─── */
+async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianEvent }) {
+  logger.info(`[DIAN AutoTest] → ${docType} ${number}`);
 
-/* ── Helper: enviar al TestSet y registrar evento ─── */
-async function sendAndLog({ xmlContent, number, docType, cufe, cfg, tenant, DianEvent }) {
-  logger.info(`[DIAN AutoTest] → ${docType} ${number} | testSetId=${cfg.test_set_id?.substring(0,8)}...`);
-
-  const dianResponse = await dianApi.sendTestSetAsync({
-    xmlContent, nit: cfg.nit, invoiceNumber: number,
-    testSetId: cfg.test_set_id, environment: 'test',
-    p12Base64: cfg.certificate_p12_base64, password: cfg.certificate_password,
+  const dianResponse = await dianKit.sendToDian(tenant, {
+    signedXml,
+    invoiceNumber: number,
+    cufe,
   });
 
   const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
-  const status   = accepted ? 'accepted' : (dianResponse.isFault ? 'error' : 'rejected');
+  const status = accepted ? 'accepted' : (dianResponse.statusCode ? 'rejected' : 'error');
 
   logger.info(`[DIAN AutoTest] ← ${docType} ${number} → ${status.toUpperCase()} | code=${dianResponse.statusCode}`);
 
@@ -84,7 +55,7 @@ async function sendAndLog({ xmlContent, number, docType, cufe, cfg, tenant, Dian
 }
 
 /* ─────────────────────────────────────────────────────────────
- * sendTestDocuments — compatibilidad hacia atrás (solo facturas)
+ * sendTestDocuments — envía facturas de prueba
  * ───────────────────────────────────────────────────────────── */
 async function sendTestDocuments({ tenant, cfg, resolution: resolutionParam, count = 1 }) {
   const { DianEvent, DianResolution } = require('../../models');
@@ -101,28 +72,28 @@ async function sendTestDocuments({ tenant, cfg, resolution: resolutionParam, cou
       const invoiceNumber = `${resolution.prefix}${consecutive}`;
       await resolution.increment('current_number');
 
-      const { date: issueDate, time: issueTime } = getColombiaDateTime();
       const items = TEST_ITEMS_INVOICE[i % TEST_ITEMS_INVOICE.length];
-      const subtotal    = items.reduce((s, it) => s + it.subtotal, 0);
-      const taxAmount   = items.reduce((s, it) => s + it.tax_amount, 0);
-      const totalAmount = subtotal + taxAmount;
 
-      _validateCfg(cfg);
-      const payload = _buildInvoicePayload({ invoiceNumber, issueDate, issueTime, items, subtotal, taxAmount, totalAmount, cfg, tenant, resolution });
-      const { xml: unsignedXml, cufe } = buildInvoiceXml(payload);
-      const { xml: signedXml, signed } = await signIfCert(unsignedXml, invoiceNumber, cfg);
+      // Usar dian-kit para crear y firmar
+      const { signedXml, cufe } = await dianKit.createInvoice(tenant, {
+        invoiceNumber,
+        items,
+        resolution,
+        customer: TEST_BUYER,
+      });
 
       const { accepted, dianResponse, status } = await sendAndLog({
-        xmlContent: signedXml, number: invoiceNumber, docType: 'Invoice', cufe, cfg, tenant, DianEvent,
+        signedXml, cufe, number: invoiceNumber, docType: 'Invoice',
+        cfg, tenant, DianEvent,
       });
 
       results.push({
-        index: i + 1, type: 'factura', invoiceNumber, cufe, accepted, signed, status,
-        statusCode:        dianResponse.statusCode,
+        index: i + 1, type: 'factura', invoiceNumber, cufe, accepted, signed: true, status,
+        statusCode: dianResponse.statusCode,
         statusDescription: dianResponse.statusDescription,
-        statusMessage:     dianResponse.statusMessage,
-        isFault:           dianResponse.isFault || false,
-        rawPreview:        dianResponse.raw?.substring(0, 1500) || null,
+        statusMessage: dianResponse.statusMessage,
+        isFault: !accepted,
+        rawPreview: dianResponse.raw?.substring(0, 1500) || null,
       });
     } catch (err) {
       logger.error(`[DIAN AutoTest] Error factura ${i + 1}:`, err.message);
@@ -135,15 +106,14 @@ async function sendTestDocuments({ tenant, cfg, resolution: resolutionParam, cou
 
 /* ─────────────────────────────────────────────────────────────
  * sendFullHabilitacionSet
- * Envía el set completo requerido por la DIAN para habilitación
- * como Software Propio: 6 facturas + 2 NC + 2 ND = 10 documentos
  * ───────────────────────────────────────────────────────────── */
 async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionParam }) {
   const { DianEvent, DianResolution } = require('../../models');
-  _validateCfg(cfg, true);
 
   const results  = [];
-  const invoices = []; // { invoiceNumber, cufe, issueDate } — referencia para NC/ND
+  const invoices = [];
+
+  const kit = dianKit.getKit(tenant);
 
   /* ── FASE 1: 6 facturas ── */
   logger.info('[DIAN AutoTest] ═══ FASE 1: 6 Facturas ═══');
@@ -157,259 +127,160 @@ async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionPara
       const invoiceNumber = `${resolution.prefix}${consecutive}`;
       await resolution.increment('current_number');
 
-      const { date: issueDate, time: issueTime } = getColombiaDateTime();
-      const items       = TEST_ITEMS_INVOICE[i];
-      const subtotal    = items.reduce((s, it) => s + it.subtotal, 0);
-      const taxAmount   = items.reduce((s, it) => s + it.tax_amount, 0);
-      const totalAmount = subtotal + taxAmount;
+      const items = TEST_ITEMS_INVOICE[i];
 
-      const payload = _buildInvoicePayload({ invoiceNumber, issueDate, issueTime, items, subtotal, taxAmount, totalAmount, cfg, tenant, resolution });
-      const { xml: unsignedXml, cufe } = buildInvoiceXml(payload);
-      const { xml: signedXml, signed } = await signIfCert(unsignedXml, invoiceNumber, cfg);
-
-      const { accepted, dianResponse, status } = await sendAndLog({
-        xmlContent: signedXml, number: invoiceNumber, docType: 'Invoice', cufe, cfg, tenant, DianEvent,
+      const { signedXml, cufe } = await dianKit.createInvoice(tenant, {
+        invoiceNumber,
+        items,
+        resolution,
+        customer: TEST_BUYER,
       });
 
-      invoices.push({ invoiceNumber, cufe, issueDate, accepted });
+      const { accepted, dianResponse, status } = await sendAndLog({
+        signedXml, cufe, number: invoiceNumber, docType: 'Invoice',
+        cfg, tenant, DianEvent,
+      });
+
+      invoices.push({ invoiceNumber, cufe, accepted });
       results.push({
         index: i + 1, type: 'factura', label: `Factura ${i + 1}`,
-        invoiceNumber, cufe, accepted, signed, status,
-        statusCode:        dianResponse.statusCode,
+        invoiceNumber, cufe, accepted, signed: true, status,
+        statusCode: dianResponse.statusCode,
         statusDescription: dianResponse.statusDescription,
-        statusMessage:     dianResponse.statusMessage,
-        isFault:           dianResponse.isFault || false,
-        rawPreview:        dianResponse.raw?.substring(0, 1500) || null,
+        statusMessage: dianResponse.statusMessage,
+        isFault: !accepted,
+        rawPreview: dianResponse.raw?.substring(0, 1500) || null,
       });
     } catch (err) {
       logger.error(`[DIAN AutoTest] Error factura ${i + 1}:`, err.message);
-      invoices.push({ invoiceNumber: null, cufe: null, issueDate: null, accepted: false });
+      invoices.push({ invoiceNumber: null, cufe: null, accepted: false });
       results.push({ index: i + 1, type: 'factura', label: `Factura ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
     }
   }
 
   const resolution = await DianResolution.findByPk(resolutionParam.id);
 
-  /* ── FASE 2: 2 Notas Crédito (ref. facturas 1 y 2) ── */
-  logger.info('[DIAN AutoTest] ═══ FASE 2: 2 Notas Crédito ═══');
-  const NC_DESCS = [
-    { code: '1', desc: 'Devolución parcial de los bienes y/o servicios' },
-    { code: '3', desc: 'Rebaja o descuento parcial del precio' },
-  ];
+  /* ── FASE 2: 2 Notas Crédito ── */
+  logger.info('[DIAN AutoTest] ═══ FASE 2: 2 Notas Credito ═══');
   for (let i = 0; i < 2; i++) {
     try {
       const refInv = invoices[i];
-      const noteNumber = `NC${resolution.prefix}TS${String(i + 1).padStart(4, '0')}`;
-      const { date: issueDate, time: issueTime } = getColombiaDateTime();
+      const noteNumber = `${resolution.prefix}${990000000 + 6 + i + 1}`;
+      const ncAmount = 50000;
+      const ncTax = Math.round(ncAmount * 0.19);
 
-      const items     = [{ id:'1', description:`Devolución — ${NC_DESCS[i].desc}`, quantity:1, unit_price:50000, subtotal:50000, tax_amount:0, tax_rate:0, unit_code:'EA' }];
-      const subtotal    = 50000;
-      const taxAmount   = 0;
-      const totalAmount = 50000;
-
-      const payload = {
-        noteNumber, issueDate, issueTime,
-        items, subtotal, taxAmount, discountAmount: 0, totalAmount,
-        paymentMeans: '1', paymentMeansCode: '10',
-        supplierNit:          cfg.nit, supplierDv: cfg.dv || '0',
-        supplierName:         cfg.company_name || tenant.company_name,
-        supplierTradeName:    cfg.trade_name   || cfg.company_name || tenant.company_name,
-        supplierAddress:      cfg.address      || tenant.address   || 'Calle 1 # 1-1',
-        supplierCity:         cfg.city         || 'Bogotá',
-        supplierCityCode:     cfg.city_code    || '11001',
-        supplierDept:         cfg.dept         || 'Cundinamarca',
-        supplierPhone:        cfg.phone        || tenant.phone || '3000000000',
-        supplierEmail:        cfg.email        || tenant.email || 'facturacion@empresa.com',
-        supplierRegimeCode:   cfg.regime_code  || '48',
-        supplierTaxLevelCode: cfg.tax_level_code || 'R-99-PN',
-        supplierSchemeID: '31',
-        buyerNit: TEST_BUYER.nit, buyerName: TEST_BUYER.name,
-        buyerAddress: TEST_BUYER.address, buyerCity: TEST_BUYER.city,
-        buyerCityCode: TEST_BUYER.cityCode, buyerDept: TEST_BUYER.dept,
-        buyerPhone: TEST_BUYER.phone, buyerEmail: TEST_BUYER.email,
-        buyerSchemeID: TEST_BUYER.schemeID,
-        buyerTaxLevelCode: TEST_BUYER.taxLevelCode,
-        buyerRegimeCode: TEST_BUYER.regimeCode,
-        softwareId:          cfg.software_id,
-        softwareProviderId:  cfg.software_provider_nit || cfg.nit,
-        softwarePin:         cfg.software_pin,
-        technicalKey:        cfg.technical_key,
-        resolutionNumber:    resolution.resolution_number,
-        resolutionStartDate: resolution.valid_from,
-        resolutionEndDate:   resolution.valid_to,
-        resolutionPrefix:    resolution.prefix,
-        resolutionFrom:      Number(resolution.from_number),
-        resolutionTo:        Number(resolution.to_number),
-        environment: 'test', customizationID: '22',
-        correctedInvoiceNumber: refInv?.invoiceNumber || `${resolution.prefix}990000001`,
-        correctedInvoiceCufe:   refInv?.cufe          || '0'.repeat(96),
-        correctedInvoiceDate:   refInv?.issueDate      || issueDate,
-        discrepancyCode: NC_DESCS[i].code,
-        discrepancyDesc: NC_DESCS[i].desc,
-      };
-
-      const { xml: unsignedXml, cude } = buildCreditNoteXml(payload);
-      const { xml: signedXml, signed } = await signIfCert(unsignedXml, noteNumber, cfg);
+      const { signedXml, uuid: cude } = await kit.createCreditNote({
+        id: noteNumber,
+        issueDate: new Date(),
+        issueTime: new Date(),
+        customer: {
+          name: TEST_BUYER.name,
+          identification: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' },
+          personType: '1',
+          fiscalResponsibilities: [TEST_BUYER.regimeCode === '49' ? 'R-99-PN' : 'O-13'],
+          taxInfo: { registrationName: TEST_BUYER.name, companyId: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' }, taxLevelCode: TEST_BUYER.taxLevelCode, taxScheme: { code: '01' }, address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' } },
+          address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' },
+          email: TEST_BUYER.email,
+        },
+        billingReference: {
+          id: refInv?.invoiceNumber || `${resolution.prefix}990000001`,
+          uuid: refInv?.cufe || '0'.repeat(96),
+          issueDate: new Date(),
+        },
+        discrepancyResponse: {
+          referenceId: refInv?.invoiceNumber || `${resolution.prefix}990000001`,
+          responseCode: String(i + 1),
+          description: i === 0 ? 'Devolucion parcial de los bienes' : 'Rebaja o descuento parcial del precio',
+        },
+        lines: [{ id: '1', quantity: 1, unitCode: 'EA', description: 'Devolucion parcial', price: ncAmount, lineExtensionAmount: ncAmount, taxTotals: [{ taxAmount: ncTax, subtotals: [{ taxableAmount: ncAmount, taxAmount: ncTax, percent: 19, taxScheme: { code: '01' } }] }] }],
+        taxTotals: [{ taxAmount: ncTax, subtotals: [{ taxableAmount: ncAmount, taxAmount: ncTax, percent: 19, taxScheme: { code: '01' } }] }],
+        legalMonetaryTotal: { lineExtensionAmount: ncAmount, taxExclusiveAmount: ncAmount, taxInclusiveAmount: ncAmount + ncTax, allowanceTotalAmount: 0, chargeTotalAmount: 0, prepaidAmount: 0, payableAmount: ncAmount + ncTax },
+        paymentMeans: { paymentForm: '1', paymentMethod: '10' },
+      });
 
       const { accepted, dianResponse, status } = await sendAndLog({
-        xmlContent: signedXml, number: noteNumber, docType: 'CreditNote', cufe: cude, cfg, tenant, DianEvent,
+        signedXml, cufe: cude, number: noteNumber, docType: 'CreditNote',
+        cfg, tenant, DianEvent,
       });
 
       results.push({
-        index: 6 + i + 1, type: 'nota_credito', label: `Nota Crédito ${i + 1}`,
-        invoiceNumber: noteNumber, cufe: cude, accepted, signed, status,
+        index: 6 + i + 1, type: 'nota_credito', label: `Nota Credito ${i + 1}`,
+        invoiceNumber: noteNumber, cufe: cude, accepted, signed: true, status,
         refInvoice: refInv?.invoiceNumber || '—',
-        statusCode:        dianResponse.statusCode,
+        statusCode: dianResponse.statusCode,
         statusDescription: dianResponse.statusDescription,
-        statusMessage:     dianResponse.statusMessage,
-        isFault:           dianResponse.isFault || false,
-        rawPreview:        dianResponse.raw?.substring(0, 1500) || null,
+        statusMessage: dianResponse.statusMessage,
+        isFault: !accepted,
+        rawPreview: dianResponse.raw?.substring(0, 1500) || null,
       });
     } catch (err) {
       logger.error(`[DIAN AutoTest] Error NC ${i + 1}:`, err.message);
-      results.push({ index: 6 + i + 1, type: 'nota_credito', label: `Nota Crédito ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
+      results.push({ index: 6 + i + 1, type: 'nota_credito', label: `Nota Credito ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
     }
   }
 
-  /* ── FASE 3: 2 Notas Débito (ref. facturas 3 y 4) ── */
-  logger.info('[DIAN AutoTest] ═══ FASE 3: 2 Notas Débito ═══');
-  const ND_DESCS = [
-    { code: '1', desc: 'Intereses' },
-    { code: '2', desc: 'Gastos por cobrar' },
-  ];
+  /* ── FASE 3: 2 Notas Débito ── */
+  logger.info('[DIAN AutoTest] ═══ FASE 3: 2 Notas Debito ═══');
   for (let i = 0; i < 2; i++) {
     try {
       const refInv = invoices[i + 2];
-      const noteNumber = `ND${resolution.prefix}TS${String(i + 1).padStart(4, '0')}`;
-      const { date: issueDate, time: issueTime } = getColombiaDateTime();
+      const noteNumber = `${resolution.prefix}${990000000 + 8 + i + 1}`;
+      const ndAmount = 25000;
+      const ndTax = Math.round(ndAmount * 0.19);
 
-      const items     = [{ id:'1', description:`Cargo adicional — ${ND_DESCS[i].desc}`, quantity:1, unit_price:25000, subtotal:25000, tax_amount:0, tax_rate:0, unit_code:'ZZ' }];
-      const subtotal    = 25000;
-      const taxAmount   = 0;
-      const totalAmount = 25000;
-
-      const payload = {
-        noteNumber, issueDate, issueTime,
-        items, subtotal, taxAmount, discountAmount: 0, totalAmount,
-        paymentMeans: '1', paymentMeansCode: '10',
-        supplierNit:          cfg.nit, supplierDv: cfg.dv || '0',
-        supplierName:         cfg.company_name || tenant.company_name,
-        supplierTradeName:    cfg.trade_name   || cfg.company_name || tenant.company_name,
-        supplierAddress:      cfg.address      || tenant.address   || 'Calle 1 # 1-1',
-        supplierCity:         cfg.city         || 'Bogotá',
-        supplierCityCode:     cfg.city_code    || '11001',
-        supplierDept:         cfg.dept         || 'Cundinamarca',
-        supplierPhone:        cfg.phone        || tenant.phone || '3000000000',
-        supplierEmail:        cfg.email        || tenant.email || 'facturacion@empresa.com',
-        supplierRegimeCode:   cfg.regime_code  || '48',
-        supplierTaxLevelCode: cfg.tax_level_code || 'R-99-PN',
-        supplierSchemeID: '31',
-        buyerNit: TEST_BUYER.nit, buyerName: TEST_BUYER.name,
-        buyerAddress: TEST_BUYER.address, buyerCity: TEST_BUYER.city,
-        buyerCityCode: TEST_BUYER.cityCode, buyerDept: TEST_BUYER.dept,
-        buyerPhone: TEST_BUYER.phone, buyerEmail: TEST_BUYER.email,
-        buyerSchemeID: TEST_BUYER.schemeID,
-        buyerTaxLevelCode: TEST_BUYER.taxLevelCode,
-        buyerRegimeCode: TEST_BUYER.regimeCode,
-        softwareId:          cfg.software_id,
-        softwareProviderId:  cfg.software_provider_nit || cfg.nit,
-        softwarePin:         cfg.software_pin,
-        technicalKey:        cfg.technical_key,
-        resolutionNumber:    resolution.resolution_number,
-        resolutionStartDate: resolution.valid_from,
-        resolutionEndDate:   resolution.valid_to,
-        resolutionPrefix:    resolution.prefix,
-        resolutionFrom:      Number(resolution.from_number),
-        resolutionTo:        Number(resolution.to_number),
-        environment: 'test', customizationID: '22',
-        correctedInvoiceNumber: refInv?.invoiceNumber || `${resolution.prefix}990000003`,
-        correctedInvoiceCufe:   refInv?.cufe          || '0'.repeat(96),
-        correctedInvoiceDate:   refInv?.issueDate      || issueDate,
-        discrepancyCode: ND_DESCS[i].code,
-        discrepancyDesc: ND_DESCS[i].desc,
-      };
-
-      const { xml: unsignedXml, cude } = buildDebitNoteXml(payload);
-      const { xml: signedXml, signed } = await signIfCert(unsignedXml, noteNumber, cfg);
+      const { signedXml, uuid: cude } = await kit.createDebitNote({
+        id: noteNumber,
+        issueDate: new Date(),
+        issueTime: new Date(),
+        customer: {
+          name: TEST_BUYER.name,
+          identification: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' },
+          personType: '1',
+          fiscalResponsibilities: [TEST_BUYER.regimeCode === '49' ? 'R-99-PN' : 'O-13'],
+          taxInfo: { registrationName: TEST_BUYER.name, companyId: { number: TEST_BUYER.nit, type: TEST_BUYER.schemeID, dv: TEST_BUYER.dv || '0' }, taxLevelCode: TEST_BUYER.taxLevelCode, taxScheme: { code: '01' }, address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' } },
+          address: { street: TEST_BUYER.address, cityCode: TEST_BUYER.cityCode, cityName: TEST_BUYER.city, departmentCode: '11', departmentName: TEST_BUYER.dept, countryCode: 'CO', countryName: 'Colombia' },
+          email: TEST_BUYER.email,
+        },
+        billingReference: {
+          id: refInv?.invoiceNumber || `${resolution.prefix}990000003`,
+          uuid: refInv?.cufe || '0'.repeat(96),
+          issueDate: new Date(),
+        },
+        discrepancyResponse: {
+          referenceId: refInv?.invoiceNumber || `${resolution.prefix}990000003`,
+          responseCode: String(i + 1),
+          description: i === 0 ? 'Intereses' : 'Gastos por cobrar',
+        },
+        lines: [{ id: '1', quantity: 1, unitCode: 'ZZ', description: 'Cargo adicional por intereses', price: ndAmount, lineExtensionAmount: ndAmount, taxTotals: [{ taxAmount: ndTax, subtotals: [{ taxableAmount: ndAmount, taxAmount: ndTax, percent: 19, taxScheme: { code: '01' } }] }] }],
+        taxTotals: [{ taxAmount: ndTax, subtotals: [{ taxableAmount: ndAmount, taxAmount: ndTax, percent: 19, taxScheme: { code: '01' } }] }],
+        legalMonetaryTotal: { lineExtensionAmount: ndAmount, taxExclusiveAmount: ndAmount, taxInclusiveAmount: ndAmount + ndTax, allowanceTotalAmount: 0, chargeTotalAmount: 0, prepaidAmount: 0, payableAmount: ndAmount + ndTax },
+        paymentMeans: { paymentForm: '1', paymentMethod: '10' },
+      });
 
       const { accepted, dianResponse, status } = await sendAndLog({
-        xmlContent: signedXml, number: noteNumber, docType: 'DebitNote', cufe: cude, cfg, tenant, DianEvent,
+        signedXml, cufe: cude, number: noteNumber, docType: 'DebitNote',
+        cfg, tenant, DianEvent,
       });
 
       results.push({
-        index: 8 + i + 1, type: 'nota_debito', label: `Nota Débito ${i + 1}`,
-        invoiceNumber: noteNumber, cufe: cude, accepted, signed, status,
+        index: 8 + i + 1, type: 'nota_debito', label: `Nota Debito ${i + 1}`,
+        invoiceNumber: noteNumber, cufe: cude, accepted, signed: true, status,
         refInvoice: refInv?.invoiceNumber || '—',
-        statusCode:        dianResponse.statusCode,
+        statusCode: dianResponse.statusCode,
         statusDescription: dianResponse.statusDescription,
-        statusMessage:     dianResponse.statusMessage,
-        isFault:           dianResponse.isFault || false,
-        rawPreview:        dianResponse.raw?.substring(0, 1500) || null,
+        statusMessage: dianResponse.statusMessage,
+        isFault: !accepted,
+        rawPreview: dianResponse.raw?.substring(0, 1500) || null,
       });
     } catch (err) {
       logger.error(`[DIAN AutoTest] Error ND ${i + 1}:`, err.message);
-      results.push({ index: 8 + i + 1, type: 'nota_debito', label: `Nota Débito ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
+      results.push({ index: 8 + i + 1, type: 'nota_debito', label: `Nota Debito ${i + 1}`, invoiceNumber: null, accepted: false, error: err.message, isFault: true });
     }
   }
 
   const accepted = results.filter(r => r.accepted).length;
   logger.info(`[DIAN AutoTest] Set completo finalizado: ${accepted}/${results.length} aceptados`);
   return results;
-}
-
-/* ── helpers privados ─────────────────────────────────────── */
-function _validateCfg(cfg, full = false) {
-  const missing = [];
-  if (!cfg.nit)           missing.push('NIT');
-  if (!cfg.software_id)   missing.push('Software ID');
-  if (!cfg.software_pin)  missing.push('PIN Software');
-  if (!cfg.technical_key) missing.push('Llave Técnica');
-  if (!cfg.test_set_id)   missing.push('TestSetId');
-  if (full) {
-    if (!cfg.certificate_p12_base64 || cfg.certificate_p12_base64 === '[CONFIGURADO]') missing.push('Certificado P12');
-    if (!cfg.certificate_password)  missing.push('Contraseña del certificado');
-  }
-  if (missing.length) throw new Error(`Configuración incompleta. Faltan: ${missing.join(', ')}`);
-}
-
-function _buildInvoicePayload({ invoiceNumber, issueDate, issueTime, items, subtotal, taxAmount, totalAmount, cfg, tenant, resolution }) {
-  return {
-    invoiceNumber, issueDate, issueTime, invoiceTypeCode: '01',
-    items, subtotal, taxAmount, discountAmount: 0, totalAmount,
-    paymentMeans: '1', paymentMeansCode: '10',
-    supplierNit:          cfg.nit,
-    supplierDv:           cfg.dv || '0',
-    supplierName:         cfg.company_name || tenant.company_name,
-    supplierTradeName:    cfg.trade_name   || cfg.company_name || tenant.company_name,
-    supplierAddress:      cfg.address      || tenant.address   || 'Calle 1 # 1-1',
-    supplierCity:         cfg.city         || 'Bogotá',
-    supplierCityCode:     cfg.city_code    || '11001',
-    supplierDept:         cfg.dept         || 'Cundinamarca',
-    supplierPhone:        cfg.phone        || tenant.phone || '3000000000',
-    supplierEmail:        cfg.email        || tenant.email || 'facturacion@empresa.com',
-    supplierRegimeCode:   cfg.regime_code  || '48',
-    supplierTaxLevelCode: cfg.tax_level_code || 'R-99-PN',
-    supplierSchemeID: '31',
-    buyerNit: TEST_BUYER.nit, buyerName: TEST_BUYER.name,
-    buyerAddress: TEST_BUYER.address, buyerCity: TEST_BUYER.city,
-    buyerCityCode: TEST_BUYER.cityCode, buyerDept: TEST_BUYER.dept,
-    buyerPhone: TEST_BUYER.phone, buyerEmail: TEST_BUYER.email,
-    buyerSchemeID: TEST_BUYER.schemeID,
-    buyerTaxLevelCode: TEST_BUYER.taxLevelCode,
-    buyerRegimeCode: TEST_BUYER.regimeCode,
-    softwareId:          cfg.software_id,
-    softwareProviderId:  cfg.software_provider_nit || cfg.nit,
-    softwarePin:         cfg.software_pin,
-    technicalKey:        cfg.technical_key,
-    resolutionNumber:    resolution.resolution_number,
-    resolutionStartDate: resolution.valid_from,
-    resolutionEndDate:   resolution.valid_to,
-    resolutionPrefix:    resolution.prefix,
-    resolutionFrom:      Number(resolution.from_number),
-    resolutionTo:        Number(resolution.to_number),
-    environment: 'test',
-    customizationID: cfg.customization_id || '10',
-  };
 }
 
 module.exports = { sendTestDocuments, sendFullHabilitacionSet };

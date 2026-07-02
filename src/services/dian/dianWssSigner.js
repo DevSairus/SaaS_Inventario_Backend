@@ -1,15 +1,15 @@
 /**
- * dianWssSigner.js — WS-Security X.509 con ExcC14N correcto via DOM
+ * dianWssSigner.js — WS-Security X.509 Signature para DIAN
  * ═══════════════════════════════════════════════════════════════════
  *
- * Reescrito para usar xmldom (DOM real) en lugar de regex para ExcC14N.
+ * Basado en la especificación WS-Security y validado contra el sandbox DIAN.
+ * Solo firma el elemento wsa:To (no Body/Action/Timestamp/MessageID).
+ * Usa ec:InclusiveNamespaces para ExcC14N correcto.
  */
 'use strict';
 
 const forge  = require('node-forge');
 const crypto = require('crypto');
-const logger = require('../../config/logger');
-const { DOMParser } = require('xmldom');
 
 /* ── Namespaces ─────────────────────────────────────────── */
 const NS = {
@@ -26,100 +26,12 @@ const NS = {
   RSA_SHA256:'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
 };
 
-const ENVELOPE_NS = { 'soap': NS.SOAP, 'a': NS.ADDR, 'wsu': NS.WSU };
-const SECURITY_NS = { ...ENVELOPE_NS, 'wsse': NS.WSSE };
-const SIGNATURE_NS = { ...SECURITY_NS, 'ds': NS.DS };
-
-/* ── DOMParser ───────────────────────────────────────────── */
-const SILENT = { warning: () => {}, error: () => {}, fatalError: (e) => { throw e; } };
-function parseXml(str) {
-  return new DOMParser({ errorHandler: SILENT }).parseFromString(str, 'text/xml');
-}
-
-/* ── Escape C14N ─────────────────────────────────────────── */
-function escapeText(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#xD;');
-}
-function escapeAttr(s) {
-  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;').replace(/\t/g, '&#x9;').replace(/\n/g, '&#xA;').replace(/\r/g, '&#xD;');
-}
-
-/* ── Buscar URI de prefijo subiendo el árbol ─────────────── */
-function lookupNsUri(node, prefix) {
-  if (!node || node.nodeType !== 1) return null;
-  for (let i = 0; i < node.attributes.length; i++) {
-    const attr = node.attributes.item(i);
-    if (attr.name === 'xmlns:' + prefix) return attr.value;
-    if (attr.prefix === 'xmlns' && attr.localName === prefix) return attr.value;
-  }
-  return lookupNsUri(node.parentNode, prefix);
-}
-
-/* ── ExcC14N DOM recursivo ───────────────────────────────── */
-function excC14nElement(el, visibleNs) {
-  // 1. Prefijos utilizados visiblemente en este elemento
-  const usedPrefixes = new Set();
-  if (el.prefix) usedPrefixes.add(el.prefix);
-  for (let i = 0; i < el.attributes.length; i++) {
-    const attr = el.attributes.item(i);
-    if (attr.name === 'xmlns' || attr.prefix === 'xmlns') continue;
-    if (attr.prefix) usedPrefixes.add(attr.prefix);
-  }
-
-  // 2. Determinar qué xmlns renderizar
-  const nsToRender = {};
-  for (const prefix of usedPrefixes) {
-    const uri = lookupNsUri(el, prefix);
-    if (uri && visibleNs[prefix] !== uri) nsToRender[prefix] = uri;
-  }
-
-  // 3. Ordenar xmlns por prefijo
-  const nsSorted = Object.entries(nsToRender).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
-
-  // 4. Recopilar y ordenar atributos no-xmlns por (NS-URI, local-name)
-  const attrs = [];
-  for (let i = 0; i < el.attributes.length; i++) {
-    const attr = el.attributes.item(i);
-    if (attr.name === 'xmlns' || attr.prefix === 'xmlns') continue;
-    attrs.push(attr);
-  }
-  attrs.sort((a, b) => {
-    const aUri = a.prefix ? (lookupNsUri(el, a.prefix) || '') : '';
-    const bUri = b.prefix ? (lookupNsUri(el, b.prefix) || '') : '';
-    if (!a.prefix && !b.prefix) return a.localName < b.localName ? -1 : 1;
-    if (!a.prefix) return -1;
-    if (!b.prefix) return 1;
-    if (aUri !== bUri) return aUri < bUri ? -1 : 1;
-    return a.localName < b.localName ? -1 : 1;
-  });
-
-  // 5. Etiqueta de apertura
-  let out = '<' + el.nodeName;
-  for (const [prefix, uri] of nsSorted) out += ' xmlns:' + prefix + '="' + escapeAttr(uri) + '"';
-  for (const attr of attrs) out += ' ' + attr.name + '="' + escapeAttr(attr.value) + '"';
-  out += '>';
-
-  // 6. Hijos
-  const childVis = { ...visibleNs, ...nsToRender };
-  for (let i = 0; i < el.childNodes.length; i++) {
-    const child = el.childNodes.item(i);
-    if (child.nodeType === 1) out += excC14nElement(child, childVis);
-    else if (child.nodeType === 3 || child.nodeType === 4) out += escapeText(child.data || '');
-  }
-  out += '</' + el.nodeName + '>';
-  return out;
-}
-
-function domExcC14n(xmlStr, ancestorNs) {
-  const doc = parseXml(xmlStr);
-  return excC14nElement(doc.documentElement, ancestorNs || {});
-}
-
 /* ── Extraer cert/key del P12 ───────────────────────────── */
 function extractFromP12(p12Base64, password) {
   if (!p12Base64 || p12Base64 === '[CONFIGURADO]') throw new Error('Certificado digital no configurado.');
   if (!password || password === '[CONFIGURADO]') throw new Error('Contraseña del certificado no configurada.');
 
+  const logger = require('../../config/logger');
   const p12Der  = forge.util.decode64(p12Base64);
   const p12Asn1 = forge.asn1.fromDer(p12Der);
   const p12obj  = forge.pkcs12.pkcs12FromAsn1(p12Asn1, password);
@@ -143,137 +55,121 @@ function extractFromP12(p12Base64, password) {
   const certNit = entityCert.cert.subject.attributes.find(a => a.shortName === 'SERIALNUMBER' || a.type === '2.5.4.5');
   logger.info('[DIAN WSS] Cert: NIT=' + (certNit?.value || 'N/A') + ' vence=' + entityCert.cert.validity.notAfter);
 
-  // CROSS-VERIFY: firma con keyPem, verifica con la clave pública del certBase64
-  // usando Node.js nativo (OpenSSL) — no forge — para detectar extracción incorrecta de clave
+  // Cross-verify: firma con keyPem, verifica con OpenSSL nativo
   try {
     const testMsg = Buffer.from('dian-wss-cross-verify');
     const testSig = crypto.createSign('RSA-SHA256').update(testMsg).sign(keyPem);
-    const certDerBuf2 = Buffer.from(certBase64, 'base64');
-    const x509native = new crypto.X509Certificate(certDerBuf2);
+    const certDerBuf = Buffer.from(certBase64, 'base64');
+    const x509native = new crypto.X509Certificate(certDerBuf);
     const crossOk = crypto.createVerify('RSA-SHA256').update(testMsg).verify(x509native.publicKey, testSig);
-    if (!crossOk) {
-      throw new Error(
-        'CROSS-VERIFY FALLIDO: keyPem NO firma correctamente para certBase64. ' +
-        'node-forge extrajo la clave privada equivocada del P12. ' +
-        'El P12 puede tener múltiples certs o usar cifrado incompatible con node-forge.'
-      );
-    }
-    logger.info('[DIAN WSS] Cross-verify OK: keyPem es correcto para certBase64 (verificado con OpenSSL nativo)');
+    if (!crossOk) throw new Error('keyPem no corresponde al certificado');
+    logger.info('[DIAN WSS] Cross-verify OK');
   } catch (e) {
-    logger.error('[DIAN WSS] Cross-verify FALLIDO: ' + e.message);
     throw new Error('P12 cross-verify fallido: ' + e.message);
   }
 
-  return { certPem, keyPem, privateKey: keyBag.key, certBase64, thumbprintB64 };
-}
-
-/* ── SHA256 base64 ───────────────────────────────────────── */
-function sha256b64(s) { return crypto.createHash('sha256').update(s, 'utf8').digest('base64'); }
-function fmtUtc(d)   { return d.toISOString().replace(/\.\d+Z$/, 'Z'); }
-
-/* ── ds:Reference ────────────────────────────────────────── */
-function buildRef(id, digest) {
-  return (
-    '<ds:Reference URI="#' + id + '">' +
-    '<ds:Transforms><ds:Transform Algorithm="' + NS.EXC_C14N + '"></ds:Transform></ds:Transforms>' +
-    '<ds:DigestMethod Algorithm="' + NS.SHA256 + '"></ds:DigestMethod>' +
-    '<ds:DigestValue>' + digest + '</ds:DigestValue>' +
-    '</ds:Reference>'
-  );
+  return {
+    certPem, keyPem, privateKey: keyBag.key, certBase64, thumbprintB64,
+    notBefore: entityCert.cert.validity.notBefore,
+    notAfter:  entityCert.cert.validity.notAfter,
+    subject:   entityCert.cert.subject.attributes.map(a => `${a.shortName || a.type}=${a.value}`).join(', '),
+    serialHex: entityCert.cert.serialNumber,
+  };
 }
 
 /* ── buildSignedEnvelope ─────────────────────────────────── */
-function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, privateKey, keyPem, thumbprintB64 }) {
-  const bodyId   = 'Body-1', tsId = 'TS-1', tokenId = 'X509Token-1';
-  const actionId = 'Action-1', toId = 'To-1', msgId = 'MsgId-1';
+/**
+ * Construye el envelope SOAP 1.2 firmado para DIAN.
+ * Solo firma el elemento wsa:To con RSA-SHA256 + ExcC14N.
+ */
+function buildSignedEnvelope({ action, endpoint, bodyContent, certBase64, keyPem }) {
+  const tsId    = 'TS-'    + crypto.randomUUID();
+  const x509Id  = 'X509-'  + crypto.randomUUID();
+  const sigId   = 'SIG-'   + crypto.randomUUID();
+  const kiId    = 'KI-'    + crypto.randomUUID();
+  const strId   = 'STR-'   + crypto.randomUUID();
+  const toId    = 'ID-'    + crypto.randomUUID();
 
+  // Timestamp
   const now     = new Date();
-  const expires = new Date(now.getTime() + 5 * 60 * 1000);
-  const created = fmtUtc(now);
-  const exp     = fmtUtc(expires);
+  const expires = new Date(now.getTime() + 60000); // 60 segundos
+  const created = now.toISOString();
+  const exp     = expires.toISOString();
 
-  // Canonicalizar cada referencia con DOM ExcC14N y el contexto de ancestros exacto
-  // wsa:MessageID — firmado igual que Action y To
-  const messageId = 'urn:uuid:' + require('crypto').randomUUID();
-  const canonMsgId = domExcC14n(
-    '<a:MessageID xmlns:a="' + NS.ADDR + '" xmlns:soap="' + NS.SOAP + '" xmlns:wsu="' + NS.WSU + '" wsu:Id="' + msgId + '">' + messageId + '</a:MessageID>',
-    ENVELOPE_NS
-  );
+  // Canonicalizar wsa:To con InclusiveNamespaces PrefixList="soap wcf"
+  const canonicalTo =
+    '<wsa:To' +
+    ' xmlns:soap="' + NS.SOAP + '"' +
+    ' xmlns:wcf="' + NS.WCF + '"' +
+    ' xmlns:wsa="' + NS.ADDR + '"' +
+    ' xmlns:wsu="' + NS.WSU + '"' +
+    ' wsu:Id="' + toId + '"' +
+    '>' + endpoint + '</wsa:To>';
 
-  const canonAction = domExcC14n(
-    '<a:Action xmlns:a="' + NS.ADDR + '" xmlns:soap="' + NS.SOAP + '" xmlns:wsu="' + NS.WSU + '" wsu:Id="' + actionId + '" soap:mustUnderstand="1">' + escapeText(action) + '</a:Action>',
-    ENVELOPE_NS
-  );
-  const canonTo = domExcC14n(
-    '<a:To xmlns:a="' + NS.ADDR + '" xmlns:soap="' + NS.SOAP + '" xmlns:wsu="' + NS.WSU + '" wsu:Id="' + toId + '" soap:mustUnderstand="1">' + escapeText(endpoint) + '</a:To>',
-    ENVELOPE_NS
-  );
-  const canonTS = domExcC14n(
-    '<wsu:Timestamp xmlns:wsu="' + NS.WSU + '" wsu:Id="' + tsId + '"><wsu:Created>' + created + '</wsu:Created><wsu:Expires>' + exp + '</wsu:Expires></wsu:Timestamp>',
-    SECURITY_NS
-  );
-  const canonBody = domExcC14n(
-    '<soap:Body xmlns:soap="' + NS.SOAP + '" xmlns:wsu="' + NS.WSU + '" wsu:Id="' + bodyId + '">' + bodyContent + '</soap:Body>',
-    ENVELOPE_NS
-  );
+  // SHA-256 digest de wsa:To
+  const digestValue = crypto.createHash('sha256').update(canonicalTo, 'utf8').digest('base64');
 
-  logger.info('[DIAN WSS] Digests — msgid=' + sha256b64(canonMsgId).substring(0,12) + ' action=' + sha256b64(canonAction).substring(0,12) + ' to=' + sha256b64(canonTo).substring(0,12) + ' ts=' + sha256b64(canonTS).substring(0,12) + ' body=' + sha256b64(canonBody).substring(0,12));
-
-  const dMsgId  = sha256b64(canonMsgId);
-  const dAction = sha256b64(canonAction);
-  const dTo     = sha256b64(canonTo);
-  const dTS     = sha256b64(canonTS);
-  const dBody   = sha256b64(canonBody);
-
-  // ds:SignedInfo — elementos vacíos expandidos (ExcC14N requiere <tag></tag>)
-  const signedInfoXml =
-    '<ds:SignedInfo>' +
-    '<ds:CanonicalizationMethod Algorithm="' + NS.EXC_C14N + '"></ds:CanonicalizationMethod>' +
+  // SignedInfo canonical con InclusiveNamespaces PrefixList="wsa soap wcf"
+  const canonicalSignedInfo =
+    '<ds:SignedInfo xmlns:ds="' + NS.DS + '" xmlns:soap="' + NS.SOAP + '" xmlns:wcf="' + NS.WCF + '" xmlns:wsa="' + NS.ADDR + '">' +
+    '<ds:CanonicalizationMethod Algorithm="' + NS.EXC_C14N + '">' +
+    '<ec:InclusiveNamespaces xmlns:ec="' + NS.EXC_C14N + '" PrefixList="wsa soap wcf"></ec:InclusiveNamespaces>' +
+    '</ds:CanonicalizationMethod>' +
     '<ds:SignatureMethod Algorithm="' + NS.RSA_SHA256 + '"></ds:SignatureMethod>' +
-    buildRef(msgId,    dMsgId)  +
-    buildRef(actionId, dAction) +
-    buildRef(toId,     dTo)     +
-    buildRef(tsId,     dTS)     +
-    buildRef(bodyId,   dBody)   +
+    '<ds:Reference URI="#' + toId + '">' +
+    '<ds:Transforms>' +
+    '<ds:Transform Algorithm="' + NS.EXC_C14N + '">' +
+    '<ec:InclusiveNamespaces xmlns:ec="' + NS.EXC_C14N + '" PrefixList="soap wcf"></ec:InclusiveNamespaces>' +
+    '</ds:Transform>' +
+    '</ds:Transforms>' +
+    '<ds:DigestMethod Algorithm="' + NS.SHA256 + '"></ds:DigestMethod>' +
+    '<ds:DigestValue>' + digestValue + '</ds:DigestValue>' +
+    '</ds:Reference>' +
     '</ds:SignedInfo>';
 
-  // Canonicalizar SignedInfo: está dentro de ds:Signature que declara xmlns:ds → SIGNATURE_NS
-  const canonSignedInfo = domExcC14n(
-    '<ds:SignedInfo xmlns:ds="' + NS.DS + '">' +
-      signedInfoXml.slice('<ds:SignedInfo>'.length, -'</ds:SignedInfo>'.length) +
-    '</ds:SignedInfo>',
-    SIGNATURE_NS
-  );
-
-  // Firma RSA-SHA256 sobre la forma canónica de ds:SignedInfo
-  const sigB64 = crypto.createSign('RSA-SHA256').update(canonSignedInfo, 'utf8').sign(keyPem, 'base64');
+  // Firma RSA-SHA256
+  const signatureValue = crypto.sign('sha256', Buffer.from(canonicalSignedInfo, 'utf8'), keyPem).toString('base64');
 
   return (
     '<?xml version="1.0" encoding="utf-8"?>' +
-    '<soap:Envelope xmlns:soap="' + NS.SOAP + '" xmlns:a="' + NS.ADDR + '" xmlns:wsu="' + NS.WSU + '">' +
-    '<soap:Header>' +
-    '<a:MessageID wsu:Id="' + msgId + '">' + messageId + '</a:MessageID>' +
-    '<a:Action wsu:Id="' + actionId + '" soap:mustUnderstand="1">' + action + '</a:Action>' +
-    '<a:To wsu:Id="' + toId + '" soap:mustUnderstand="1">' + endpoint + '</a:To>' +
-    '<a:ReplyTo><a:Address>' + NS.ADDR + '/anonymous</a:Address></a:ReplyTo>' +
-    '<wsse:Security xmlns:wsse="' + NS.WSSE + '" soap:mustUnderstand="1">' +
+    '<soap:Envelope xmlns:soap="' + NS.SOAP + '" xmlns:wcf="' + NS.WCF + '">' +
+    '<soap:Header xmlns:wsa="' + NS.ADDR + '">' +
+    '<wsse:Security xmlns:wsse="' + NS.WSSE + '" xmlns:wsu="' + NS.WSU + '">' +
     '<wsu:Timestamp wsu:Id="' + tsId + '">' +
     '<wsu:Created>' + created + '</wsu:Created>' +
     '<wsu:Expires>' + exp + '</wsu:Expires>' +
     '</wsu:Timestamp>' +
-    '<wsse:BinarySecurityToken wsu:Id="' + tokenId + '" EncodingType="' + NS.B64ET + '" ValueType="' + NS.X509VT + '">' + certBase64 + '</wsse:BinarySecurityToken>' +
-    '<ds:Signature xmlns:ds="' + NS.DS + '">' +
-    signedInfoXml +
-    '<ds:SignatureValue>' + sigB64 + '</ds:SignatureValue>' +
-    '<ds:KeyInfo>' +
-    '<wsse:SecurityTokenReference xmlns:wsse="' + NS.WSSE + '">' +
-    '<wsse:Reference URI="#' + tokenId + '" ValueType="' + NS.X509VT + '"/>' +
+    '<wsse:BinarySecurityToken EncodingType="' + NS.B64ET + '" ValueType="' + NS.X509VT + '" wsu:Id="' + x509Id + '">' + certBase64 + '</wsse:BinarySecurityToken>' +
+    '<ds:Signature Id="' + sigId + '" xmlns:ds="' + NS.DS + '">' +
+    '<ds:SignedInfo>' +
+    '<ds:CanonicalizationMethod Algorithm="' + NS.EXC_C14N + '">' +
+    '<ec:InclusiveNamespaces PrefixList="wsa soap wcf" xmlns:ec="' + NS.EXC_C14N + '"></ec:InclusiveNamespaces>' +
+    '</ds:CanonicalizationMethod>' +
+    '<ds:SignatureMethod Algorithm="' + NS.RSA_SHA256 + '"></ds:SignatureMethod>' +
+    '<ds:Reference URI="#' + toId + '">' +
+    '<ds:Transforms>' +
+    '<ds:Transform Algorithm="' + NS.EXC_C14N + '">' +
+    '<ec:InclusiveNamespaces PrefixList="soap wcf" xmlns:ec="' + NS.EXC_C14N + '"></ec:InclusiveNamespaces>' +
+    '</ds:Transform>' +
+    '</ds:Transforms>' +
+    '<ds:DigestMethod Algorithm="' + NS.SHA256 + '"></ds:DigestMethod>' +
+    '<ds:DigestValue>' + digestValue + '</ds:DigestValue>' +
+    '</ds:Reference>' +
+    '</ds:SignedInfo>' +
+    '<ds:SignatureValue>' + signatureValue + '</ds:SignatureValue>' +
+    '<ds:KeyInfo Id="' + kiId + '">' +
+    '<wsse:SecurityTokenReference wsu:Id="' + strId + '">' +
+    '<wsse:Reference URI="#' + x509Id + '" ValueType="' + NS.X509VT + '"></wsse:Reference>' +
     '</wsse:SecurityTokenReference>' +
     '</ds:KeyInfo>' +
     '</ds:Signature>' +
     '</wsse:Security>' +
+    '<wsa:Action>' + action + '</wsa:Action>' +
+    '<wsa:To wsu:Id="' + toId + '" xmlns:wsu="' + NS.WSU + '">' + endpoint + '</wsa:To>' +
     '</soap:Header>' +
-    '<soap:Body wsu:Id="' + bodyId + '">' + bodyContent + '</soap:Body>' +
+    '<soap:Body>' +
+    bodyContent +
+    '</soap:Body>' +
     '</soap:Envelope>'
   );
 }

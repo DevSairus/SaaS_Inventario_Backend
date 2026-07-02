@@ -117,8 +117,9 @@ function extractFromP12(p12Base64, password) {
   }) || certs[0];
 
   const certDer    = forge.asn1.toDer(forge.pki.certificateToAsn1(entityCert.cert));
-  const certBase64 = forge.util.encode64(certDer.getBytes());
-  const certDerBuf = Buffer.from(certDer.getBytes(), 'binary');
+  const certBytes  = certDer.getBytes();
+  const certBase64 = forge.util.encode64(certBytes);
+  const certDerBuf = Buffer.from(certBytes, 'binary');
 
   // Issuer en formato RFC 2253 (igual que C# X509Certificate2.IssuerName)
   // El C# produce: "CN=...,OU=...,O=...,..." — mismo formato que forge

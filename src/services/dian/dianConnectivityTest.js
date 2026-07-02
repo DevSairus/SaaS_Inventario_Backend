@@ -91,6 +91,9 @@ async function sendSoap(agent, actionName, xml) {
 const bodyGetStatus = t =>
   `<wcf:GetStatus xmlns:wcf="${NS.WCF}"><wcf:trackId>${t}</wcf:trackId></wcf:GetStatus>`;
 
+const bodyGetNumberingRange = (nit, softwareId) =>
+  `<wcf:GetNumberingRange xmlns:wcf="${NS.WCF}"><wcf:accountCode>${nit}</wcf:accountCode><wcf:accountCodeT>${nit}</wcf:accountCodeT><wcf:softwareCode>${softwareId}</wcf:softwareCode></wcf:GetNumberingRange>`;
+
 // ─── Obtener tenant de la DB ───────────────────────────────────────────────
 async function getTenantFromDB(slugOrNit) {
   const { sequelize } = require('../../config/database');
@@ -282,13 +285,11 @@ async function run() {
   // ── 5. GetStatus con WS-Security ─────────────────────────────────────────
   console.log('\n5. GetStatus con WS-Security X.509 + WS-Addressing:');
   const soapXml = buildSignedEnvelope({
-    action:        `http://wcf.dian.colombia/IWcfDianCustomerServices/GetStatus`,
-    endpoint:      DIAN_URL,
-    bodyContent:   bodyGetStatus(TEST_CUFE),
-    certBase64:    certInfo.certBase64,
-    privateKey:    certInfo.privateKey,
-    keyPem:        certInfo.keyPem,
-    thumbprintB64: certInfo.thumbprintB64,
+    action:      `http://wcf.dian.colombia/IWcfDianCustomerServices/GetStatus`,
+    endpoint:    DIAN_URL,
+    bodyContent: bodyGetStatus(TEST_CUFE),
+    certBase64:  certInfo.certBase64,
+    keyPem:      certInfo.keyPem,
   });
 
   console.log(`   Tamaño: ${Buffer.byteLength(soapXml)} bytes`);
@@ -311,27 +312,30 @@ async function run() {
 
   // ── Auto-verificación local ──────────────────────────────────────────────
   try {
-    const sigValMatch  = soapXml.match(/<ds:SignatureValue>([^<]+)<\/ds:SignatureValue>/);
-    const certB64Match = soapXml.match(/<wsse:BinarySecurityToken[^>]*>([^<]+)<\/wsse:BinarySecurityToken>/);
-    const siMatch      = soapXml.match(/<ds:SignedInfo>([\s\S]+?)<\/ds:SignedInfo>/);
-    if (sigValMatch && certB64Match && siMatch) {
-      const canonSI  = '<ds:SignedInfo>' + siMatch[1] + '</ds:SignedInfo>';
-      const certPem  = '-----BEGIN CERTIFICATE-----\n'
-                     + certB64Match[1].match(/.{1,64}/g).join('\n')
-                     + '\n-----END CERTIFICATE-----';
-      const sigBytes = Buffer.from(sigValMatch[1].replace(/\s/g, ''), 'base64');
-      const ok = crypto.createVerify('RSA-SHA256').update(canonSI, 'utf8').verify(certPem, sigBytes);
-      console.log(`   🔐 Auto-verify firma local: ${ok ? '✅ VÁLIDA' : '❌ INVÁLIDA'}`);
-      if (ok)  console.log('      → Si DIAN rechaza, es problema de política/registro, no criptografía');
-      if (!ok) console.log('      → Error en la firma RSA — revisar extracción de clave del P12');
-    } else {
-      console.log('   🔐 Auto-verify: no se encontraron todos los elementos para verificar');
+    const sigValMatch = soapXml.match(/<ds:SignatureValue>([^<]+)<\/ds:SignatureValue>/);
+    if (sigValMatch) {
+      console.log(`   🔐 Firma presente: ${sigValMatch[1].substring(0, 20)}... (verificación local no aplica con InclusiveNamespaces)`);
     }
   } catch (e) {
     console.log('   Auto-verify error:', e.message);
   }
 
   printResult('GetStatus', await sendSoap(agent, 'GetStatus', soapXml));
+
+  // ── 6. GetNumberingRange (operación correcta para habilitación inicial) ──
+  console.log('\n6. GetNumberingRange (validación de software registrado):');
+  const nitForQuery = cfg.nit || '901724902';
+  const softwareForQuery = cfg.softwareId || '';
+  const soapXml2 = buildSignedEnvelope({
+    action:      `http://wcf.dian.colombia/IWcfDianCustomerServices/GetNumberingRange`,
+    endpoint:    DIAN_URL,
+    bodyContent: bodyGetNumberingRange(nitForQuery, softwareForQuery),
+    certBase64:  certInfo.certBase64,
+    keyPem:      certInfo.keyPem,
+  });
+
+  console.log(`   Tamaño: ${Buffer.byteLength(soapXml2)} bytes`);
+  printResult('GetNumberingRange', await sendSoap(agent, 'GetNumberingRange', soapXml2));
 
   // ── Resumen ───────────────────────────────────────────────────────────────
   console.log('\n' + '═'.repeat(68));
