@@ -37,8 +37,8 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
     cufe,
   });
 
-  const accepted = dianResponse.isValid || dianResponse.statusCode === '00' || dianResponse.statusCode === '2';
-  const pending = dianResponse.statusCode === 'PENDING';
+  const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+  const pending = dianResponse.statusCode === 'PENDING' || dianResponse.statusCode === '2';
   const status = accepted ? 'accepted' : (pending ? 'sent' : (dianResponse.statusCode ? 'rejected' : 'error'));
 
   logger.info(`[DIAN AutoTest] ← ${docType} ${number} → ${status.toUpperCase()} | code=${dianResponse.statusCode}`);
