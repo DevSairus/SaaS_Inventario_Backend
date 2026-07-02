@@ -328,9 +328,61 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
     documentNumber: invoiceNumber,
   }, sendOptions);
 
-  // No hacer polling — en Vercel serverless no puede correr por más de 10-60s.
-  // El documento fue enviado a DIAN. El estado final se consulta en el portal
-  // o mediante el endpoint /dian/check-status/:saleId.
+  // Para SendTestSetAsync, hacer polling con GetStatusZip hasta resultado final.
+  if (isTest && testSetId && response.trackId) {
+    logger.info(`[DIAN] ZipKey=${response.trackId} — haciendo polling GetStatusZip...`);
+
+    for (let i = 0; i < 60; i++) {
+      await new Promise(r => setTimeout(r, 5000));
+
+      try {
+        const statusResp = await kit.getStatusZip(response.trackId);
+        logger.info(`[DIAN] Poll ${i + 1}: statusCode=${statusResp.statusCode} isValid=${statusResp.isValid}`);
+
+        if (statusResp.isValid === true) {
+          return {
+            isValid: true,
+            statusCode: statusResp.statusCode || '00',
+            statusDescription: statusResp.statusDescription || 'Aceptado',
+            statusMessage: statusResp.statusDescription || 'Aceptado',
+            trackId: response.trackId,
+            errors: statusResp.errors,
+            raw: JSON.stringify(statusResp),
+          };
+        }
+
+        const isProcessing = !statusResp.statusCode || 
+                             statusResp.statusCode === '99' || 
+                             statusResp.statusCode === '0' ||
+                             statusResp.statusCode === '';
+        
+        if (!isProcessing) {
+          return {
+            isValid: statusResp.isValid,
+            statusCode: statusResp.statusCode,
+            statusDescription: statusResp.statusDescription,
+            statusMessage: statusResp.statusDescription,
+            trackId: response.trackId,
+            errors: statusResp.errors,
+            raw: JSON.stringify(statusResp),
+          };
+        }
+      } catch (pollErr) {
+        logger.warn(`[DIAN] Poll ${i + 1} error: ${pollErr.message}`);
+      }
+    }
+
+    logger.warn('[DIAN] Polling timeout después de 60 intentos (5 min)');
+    return {
+      isValid: false,
+      statusCode: '99',
+      statusDescription: 'En proceso de validación — consulte el portal DIAN',
+      statusMessage: 'DIAN tardó más de 5 minutos. Consulte el portal.',
+      trackId: response.trackId,
+      errors: [],
+      raw: JSON.stringify({ timeout: true, trackId: response.trackId }),
+    };
+  }
 
   return {
     isValid: response.isValid,
