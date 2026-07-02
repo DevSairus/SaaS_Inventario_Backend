@@ -343,17 +343,6 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
   };
 }
 
-  return {
-    isValid: response.isValid,
-    statusCode: response.statusCode,
-    statusDescription: response.statusDescription,
-    statusMessage: response.statusDescription,
-    trackId: response.trackId,
-    errors: response.errors,
-    raw: JSON.stringify(response),
-  };
-}
-
 /**
  * Consulta el estado de un documento por CUFE.
  */
