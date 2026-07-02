@@ -66,7 +66,7 @@ async function main() {
         gen_random_uuid(), 'THE CLASSIC MACHINES S.A.S', 'the-classic-machines',
         'THE CLASSIC MACHINES S.A.S', '${tenantNit}', 'aguirre984@gmail.com',
         '3212924595', 'AK 50 NO 39 A 94 SUR',
-        'professional', 'active', 10, 1000, 1000,
+        'premium', 'active', 10, 1000, 1000,
         5, 10000, true, '${JSON.stringify(dianConfig)}'::jsonb,
         NOW(), NOW()
       ) RETURNING id
@@ -162,7 +162,7 @@ async function main() {
         id, tenant_id, customer_type, first_name, business_name, tax_id,
         email, phone, address, city, is_active, created_at, updated_at
       ) VALUES (
-        gen_random_uuid(), '${tenantId}', 'business', 'THE CLASSIC MACHINES',
+        gen_random_uuid(), '${tenantId}', 'company', 'THE CLASSIC MACHINES',
         'THE CLASSIC MACHINES S.A.S', '9017249024',
         'aguirre984@gmail.com', '3212924595', 'AK 50 NO 39 A 94 SUR',
         'Bogota', true, NOW(), NOW()

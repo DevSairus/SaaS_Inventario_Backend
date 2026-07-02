@@ -20,7 +20,7 @@
 
 const { Tenant, Sale, SaleItem, Customer, DianResolution, DianEvent } = require('../../models');
 const dianService = require('../../services/dian/dianService');
-const dianApi = require('../../services/dian/dianApiService');
+const dianKit = require('../../services/dian/dianKitAdapter');
 const logger = require('../../config/logger');
 const { Op } = require('sequelize');
 
@@ -330,31 +330,14 @@ const testConnection = async (req, res) => {
   try {
     const tenant = await Tenant.findByPk(req.tenant_id);
     const cfg = tenant.dian_config || {};
-    const environment = cfg.environment || 'test';
 
     if (!cfg.nit || !cfg.software_id) {
       return fail(res, 'Configure primero NIT y Software ID antes de probar conexión');
     }
 
-    const result = await dianApi.getNumberingRange({
-      nit: cfg.nit,
-      softwareId: cfg.software_id,
-      softwarePin: cfg.software_pin,
-      environment,
-      p12Base64: cfg.certificate_p12_base64,
-      password:  cfg.certificate_password,
-    });
+    const result = await dianKit.getNumberingRange(tenant);
 
-    // La DIAN puede responder con rangos de numeración (lo que indica conexión OK)
-    // incluso si IsValid no viene en el response de GetNumberingRange
-    const hasResponse = result.raw && result.raw.length > 100;
-    const hasNumberingData = result.raw && (
-      result.raw.includes('GetNumberingRangeResult') ||
-      result.raw.includes('ResponseDian') ||
-      result.raw.includes('NumberRange') ||
-      result.raw.includes('ResolutionNumber')
-    );
-    const connectionOk = hasResponse && !result.isFault;
+    const connectionOk = result.raw && result.raw.length > 100 && !result.isFault;
 
     if (result.isFault) {
       return res.status(400).json({
@@ -362,7 +345,7 @@ const testConnection = async (req, res) => {
         message: `Error DIAN: ${result.statusDescription || result.statusMessage}`,
         dian_raw: result.raw || 'Sin respuesta',
         dian_code: result.statusCode,
-        environment,
+        environment: cfg.environment || 'test',
       });
     }
 
@@ -370,13 +353,10 @@ const testConnection = async (req, res) => {
       data: {
         ...result,
         connectionOk,
-        hasNumberingData,
-        environment,
+        environment: cfg.environment || 'test',
       },
       message: connectionOk
-        ? hasNumberingData
-          ? '✅ Conexión exitosa con DIAN — rangos de numeración consultados'
-          : '✅ Conexión establecida con DIAN (sin resoluciones registradas aún)'
+        ? '✅ Conexión exitosa con DIAN'
         : 'Respuesta inesperada del servidor DIAN',
     });
   } catch (e) {

@@ -413,12 +413,34 @@ async function getStatusByCufe(tenant, cufe) {
   };
 }
 
+/**
+ * Consulta rangos de numeración autorizados en DIAN.
+ * Usado para verificar conectividad y configuración.
+ */
+async function getNumberingRange(tenant) {
+  const kit = getKit(tenant);
+  const cfg = tenant.dian_config || {};
+
+  const response = await kit.getNumberingRange();
+
+  return {
+    isValid: response.isValid,
+    statusCode: response.statusCode,
+    statusDescription: response.statusDescription,
+    statusMessage: response.statusDescription,
+    isFault: !response.isValid && !!response.statusCode,
+    raw: JSON.stringify(response),
+    ranges: response.ranges || [],
+  };
+}
+
 module.exports = {
   getKit,
   invalidateKit,
   createInvoice,
   sendToDian,
   getStatusByCufe,
+  getNumberingRange,
   mapLines,
   buildDocumentTaxTotals,
 };
