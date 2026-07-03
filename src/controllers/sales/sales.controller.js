@@ -345,6 +345,10 @@ const create = async (req, res) => {
         discount_amount: item.discount_amount,
         tax_percentage: item.tax_percentage,
         tax_amount: item.tax_amount,
+        inc_rate: item.inc_rate,
+        inc_amount: item.inc_amount,
+        ica_rate: item.ica_rate,
+        ica_amount: item.ica_amount,
         subtotal: item.subtotal,
         total: item.total,
         unit_cost: item.unit_cost,
@@ -474,33 +478,19 @@ const update = async (req, res) => {
           return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
         }
 
-        const itemSubtotal = item.quantity * item.unit_price;
-        const itemDiscount = itemSubtotal * (item.discount_percentage || 0) / 100;
-        const itemTaxBase  = itemSubtotal - itemDiscount;
-        let itemTax = 0, itemTotal = 0, taxPercentage = 0;
+        const taxes = taxService.calculateItemTaxes(item, product, 'sale');
 
-        if (product.has_tax === false) {
-          itemTotal = itemTaxBase;
-        } else {
-          taxPercentage = item.tax_percentage || product.tax_percentage || 19;
-          if (product.price_includes_tax) {
-            itemTax   = (itemTaxBase * taxPercentage) / (100 + taxPercentage);
-            itemTotal = itemTaxBase;
-          } else {
-            itemTax   = itemTaxBase * taxPercentage / 100;
-            itemTotal = itemTaxBase + itemTax;
-          }
-        }
-
-        subtotal += itemSubtotal; discount_amount += itemDiscount; tax_amount += itemTax;
+        subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.total_taxes;
         newItems.push({
           sale_id: id, tenant_id: tenantId,
           item_type: product.product_type === 'service' ? 'service' : 'product',
           product_id: product.id, product_name: product.name, product_sku: product.sku,
           quantity: item.quantity, unit_price: item.unit_price,
-          discount_percentage: item.discount_percentage || 0, discount_amount: itemDiscount,
-          tax_percentage: taxPercentage, tax_amount: itemTax,
-          subtotal: itemSubtotal, total: itemTotal,
+          discount_percentage: item.discount_percentage || 0, discount_amount: item.quantity * item.unit_price - taxes.base,
+          tax_percentage: taxes.iva.rate, tax_amount: taxes.iva.amount,
+          inc_rate: taxes.inc.rate, inc_amount: taxes.inc.amount,
+          ica_rate: taxes.ica.rate, ica_amount: taxes.ica.amount,
+          subtotal: taxes.base, total: taxes.total_line,
           unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
           technician_id: item.technician_id || null,
         });
