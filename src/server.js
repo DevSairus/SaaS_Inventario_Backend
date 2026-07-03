@@ -10,6 +10,7 @@ const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./config/swagger');
 
 const { testConnection } = require('./config/database');
+const { runMigrations } = require('./database/migrator');
 const { authMiddleware } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { generalLimiter, authLimiter } = require('./middleware/rateLimiter');
@@ -248,11 +249,29 @@ if (!isVercel) {
     console.log('Servidor corriendo en puerto ' + PORT);
     const connected = await testConnection();
     console.log(connected ? 'DB conectada OK' : 'ERROR: DB no conectada');
+
+    // Ejecutar migraciones pendientes automáticamente
+    if (connected) {
+      try {
+        await runMigrations();
+      } catch (err) {
+        console.error('[Migrator] Error ejecutando migraciones:', err.message);
+      }
+    }
   });
 } else {
   // Warm-up de conexion en serverless
-  testConnection().then(ok => {
-    if (!ok) console.error('[Vercel] No se pudo conectar a la BD al iniciar');
+  testConnection().then(async (ok) => {
+    if (!ok) {
+      console.error('[Vercel] No se pudo conectar a la BD al iniciar');
+      return;
+    }
+    // Ejecutar migraciones pendientes en serverless
+    try {
+      await runMigrations();
+    } catch (err) {
+      console.error('[Migrator] Error ejecutando migraciones:', err.message);
+    }
   });
 }
 

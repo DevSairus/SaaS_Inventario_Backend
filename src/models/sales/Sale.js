@@ -19,7 +19,7 @@ const Sale = sequelize.define('Sale', {
     allowNull: false,
   },
   document_type: {
-    type: DataTypes.ENUM('remision', 'factura', 'cotizacion'),
+    type: DataTypes.ENUM('remision', 'factura', 'cotizacion', 'nota_credito', 'nota_debito'),
     defaultValue: null,
     allowNull: true,
   },
@@ -148,6 +148,40 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.STRING(255),
     allowNull: true,
     comment: 'Nombre del técnico al momento de la venta (copia desnormalizada)',
+  },
+  // ── DIAN — Facturación Electrónica ─────────────────────────────────
+  dian_status: {
+    type: DataTypes.STRING(30),
+    allowNull: true,
+    defaultValue: 'not_applicable',
+    comment: 'not_applicable | pending | sending | accepted | rejected',
+  },
+  dian_invoice_number: {
+    type: DataTypes.STRING(50),
+    allowNull: true,
+    comment: 'Número de factura DIAN (prefijo + consecutivo)',
+  },
+  cufe: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    comment: 'CUFE/CUDE asignado por la DIAN',
+  },
+  dian_response: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    comment: 'Última respuesta DIAN (raw)',
+  },
+  dian_sent_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  dian_accepted_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  dian_error_message: {
+    type: DataTypes.TEXT,
+    allowNull: true,
   },
   // ─────────────────────────────────────────────────────────────────────
   created_by: {

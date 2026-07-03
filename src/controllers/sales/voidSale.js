@@ -248,8 +248,8 @@ const voidSale = async (req, res) => {
       dian_status = 'pending';
       setImmediate(async () => {
         try {
-          const { dianService } = require('../../services/dian/dianService');
-          const { Tenant }      = require('../../models');
+          const dianService = require('../../services/dian/dianService');
+          const { Tenant }  = require('../../models');
           const tenant          = await Tenant.findByPk(tenant_id);
 
           const creditNotePayload = {
@@ -268,6 +268,11 @@ const voidSale = async (req, res) => {
             discount_amount:  0,
             payment_method:   sale.payment_method,
             notes:            `Nota crédito por devolución ${return_number}. Ref: ${sale.sale_number}`,
+            // Referencia a la factura original (requerida por resolveNoteReference)
+            reference_sale_id:          sale.id,
+            reference_invoice_number:   sale.dian_invoice_number || sale.sale_number,
+            reference_invoice_cufe:     sale.cufe || sale.uuid,
+            reference_invoice_date:     sale.sale_date,
             billing_reference: {
               sale_number: sale.sale_number,
               sale_date:   sale.sale_date,

@@ -20,6 +20,8 @@ router.delete('/resolutions/:id',    ctrl.deactivateResolution);
 router.post('/send/:saleId',             ctrl.sendInvoice);
 router.post('/send-credit-note/:saleId', ctrl.sendCreditNote);
 router.post('/send-debit-note/:saleId',  ctrl.sendDebitNote);
+router.post('/create-credit-note/:saleId', ctrl.createAndSendCreditNote);
+router.post('/create-debit-note/:saleId',  ctrl.createAndSendDebitNote);
 router.post('/check-status/:saleId',     ctrl.checkStatus);
 router.post('/test-set/:saleId',         ctrl.sendToTestSet);
 

@@ -158,7 +158,7 @@ function mapLines(items) {
     id: String(item.id || idx + 1),
     quantity: Number(item.quantity || 1),
     unitCode: item.unit_code || 'EA',
-    description: item.description || item.name || 'Item',
+    description: item.description || item.name || item.product_name || 'Item',
     price: Number(item.unit_price || item.price || 0),
     lineExtensionAmount: Number(item.subtotal || item.lineExtensionAmount || 0),
     taxTotals: buildTaxTotalsForLine(item),
@@ -333,6 +333,7 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe }) {
     sendOptions.testSetId = testSetId;
   }
 
+  const kit = getKit(tenant);
   const response = await kit.send({
     xml: signedXml,
     signedXml,

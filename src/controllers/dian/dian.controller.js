@@ -717,6 +717,388 @@ const diagnoseCert = async (req, res) => {
   }
 };
 
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/create-credit-note/:saleId
+ * Crear nota crédito parcial/total desde una factura y enviar a DIAN
+ *
+ * Body:
+ *   items: [{ sale_item_id, quantity }]  ← devolución por ítems (opcional)
+ *   amount: number                       ← monto fijo a acreditar (opcional)
+ *   reason: string                       ← motivo (requerido)
+ *
+ * Si se envía `items`, se calcula el proporcional de cada ítem.
+ * Si se envía `amount` sin `items`, se distribuye proporcionalmente.
+ * Si no se envía ninguno, se asume devolución total.
+ * ────────────────────────────────────────────────────────── */
+const createAndSendCreditNote = async (req, res) => {
+  const { sequelize: seq } = require('../../config/database');
+  const transaction = await seq.transaction();
+  try {
+    const { saleId } = req.params;
+    const tenantId = req.tenant_id;
+    const { items, amount, reason } = req.body;
+
+    if (!reason) {
+      await transaction.rollback();
+      return fail(res, 'El motivo es obligatorio');
+    }
+
+    // Cargar factura original
+    const original = await Sale.findOne({
+      where: { id: saleId, tenant_id: tenantId, document_type: 'factura' },
+      include: [{ model: SaleItem, as: 'items' }],
+      transaction,
+    });
+    if (!original) { await transaction.rollback(); return fail(res, 'Factura no encontrada', 404); }
+    if (!original.cufe) {
+      await transaction.rollback();
+      return fail(res, 'La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');
+    }
+    if (!original.items?.length) {
+      await transaction.rollback();
+      return fail(res, 'La factura no tiene ítems');
+    }
+
+    // Calcular ítems de la nota crédito
+    const noteItems = [];
+    let noteSubtotal = 0;
+    let noteTax = 0;
+
+    if (items && Array.isArray(items) && items.length > 0) {
+      // ── Modo: por ítems seleccionados ──
+      for (const reqItem of items) {
+        const saleItem = original.items.find(i => i.id === reqItem.sale_item_id);
+        if (!saleItem) { await transaction.rollback(); return fail(res, `Ítem ${reqItem.sale_item_id} no pertenece a esta factura`); }
+
+        const qtyReq = parseFloat(reqItem.quantity);
+        if (!qtyReq || qtyReq <= 0) continue;
+        if (qtyReq > parseFloat(saleItem.quantity)) {
+          await transaction.rollback();
+          return fail(res, `${saleItem.product_name}: máximo ${saleItem.quantity} unidades`);
+        }
+
+        const ratio = qtyReq / parseFloat(saleItem.quantity);
+        const itemSubtot = parseFloat(saleItem.subtotal || 0) * ratio;
+        const itemTax = parseFloat(saleItem.tax_amount || 0) * ratio;
+
+        noteSubtotal += itemSubtot;
+        noteTax += itemTax;
+        noteItems.push({
+          product_name: saleItem.product_name,
+          product_sku: saleItem.product_sku,
+          product_id: saleItem.product_id,
+          quantity: qtyReq,
+          unit_price: parseFloat(saleItem.unit_price),
+          discount_amount: 0,
+          discount_percentage: 0,
+          tax_percentage: parseFloat(saleItem.tax_percentage || 0),
+          tax_amount: itemTax,
+          subtotal: itemSubtot,
+          total: itemSubtot + itemTax,
+        });
+      }
+    } else if (amount && parseFloat(amount) > 0) {
+      // ── Modo: monto fijo — distribuir proporcionalmente ──
+      const targetAmount = Math.min(parseFloat(amount), parseFloat(original.total_amount));
+      const totalRatio = targetAmount / parseFloat(original.total_amount);
+
+      for (const si of original.items) {
+        const itemSubtot = parseFloat(si.subtotal || 0) * totalRatio;
+        const itemTax = parseFloat(si.tax_amount || 0) * totalRatio;
+        const qty = parseFloat(si.quantity) * totalRatio;
+
+        noteSubtotal += itemSubtot;
+        noteTax += itemTax;
+        noteItems.push({
+          product_name: si.product_name,
+          product_sku: si.product_sku,
+          product_id: si.product_id,
+          quantity: Math.round(qty * 100) / 100,
+          unit_price: parseFloat(si.unit_price),
+          discount_amount: 0,
+          discount_percentage: 0,
+          tax_percentage: parseFloat(si.tax_percentage || 0),
+          tax_amount: itemTax,
+          subtotal: itemSubtot,
+          total: itemSubtot + itemTax,
+        });
+      }
+    } else {
+      // ── Modo: devolución total ──
+      for (const si of original.items) {
+        const itemSubtot = parseFloat(si.subtotal || 0);
+        const itemTax = parseFloat(si.tax_amount || 0);
+
+        noteSubtotal += itemSubtot;
+        noteTax += itemTax;
+        noteItems.push({
+          product_name: si.product_name,
+          product_sku: si.product_sku,
+          product_id: si.product_id,
+          quantity: parseFloat(si.quantity),
+          unit_price: parseFloat(si.unit_price),
+          discount_amount: 0,
+          discount_percentage: 0,
+          tax_percentage: parseFloat(si.tax_percentage || 0),
+          tax_amount: itemTax,
+          subtotal: itemSubtot,
+          total: itemSubtot + itemTax,
+        });
+      }
+    }
+
+    if (noteItems.length === 0) {
+      await transaction.rollback();
+      return fail(res, 'No hay ítems válidos para la nota crédito');
+    }
+
+    const noteTotal = noteSubtotal + noteTax;
+    const noteNumber = `NC-${Date.now()}`;
+
+    // Crear Sale como nota crédito
+    const noteSale = await Sale.create({
+      tenant_id: tenantId,
+      sale_number: noteNumber,
+      document_type: 'nota_credito',
+      sale_date: new Date(),
+      customer_id: original.customer_id,
+      customer_name: original.customer_name,
+      customer_tax_id: original.customer_tax_id,
+      customer_email: original.customer_email,
+      customer_phone: original.customer_phone,
+      customer_address: original.customer_address,
+      subtotal: noteSubtotal,
+      tax_amount: noteTax,
+      discount_amount: 0,
+      total_amount: noteTotal,
+      payment_method: original.payment_method,
+      payment_status: 'paid',
+      paid_amount: noteTotal,
+      status: 'completed',
+      notes: `Nota crédito para factura ${original.dian_invoice_number || original.sale_number}. Motivo: ${reason}`,
+      dian_status: 'pending',
+    }, { transaction });
+
+    // Crear ítems de la nota crédito
+    for (const item of noteItems) {
+      await SaleItem.create({
+        sale_id: noteSale.id,
+        tenant_id: tenantId,
+        item_type: 'product',
+        product_id: item.product_id,
+        product_name: item.product_name,
+        product_sku: item.product_sku,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        discount_percentage: 0,
+        discount_amount: 0,
+        tax_percentage: item.tax_percentage,
+        tax_amount: item.tax_amount,
+        subtotal: item.subtotal,
+        total: item.total,
+        unit_cost: 0,
+      }, { transaction });
+    }
+
+    await transaction.commit();
+
+    // Enviar a DIAN (async)
+    const tenant = await Tenant.findByPk(tenantId);
+    setImmediate(async () => {
+      try {
+        await dianService.sendCreditNoteToDian({
+          ...noteSale.toJSON(),
+          items: noteItems,
+          reference_sale_id: original.id,
+          reference_invoice_number: original.dian_invoice_number || original.sale_number,
+          reference_invoice_cufe: original.cufe,
+          reference_invoice_date: original.sale_date,
+        }, tenant);
+        logger.info(`[DIAN] NC ${noteNumber} enviada para factura ${original.sale_number}`);
+      } catch (err) {
+        logger.error(`[DIAN] Error enviando NC ${noteNumber}:`, err.message);
+        await Sale.update({ dian_status: 'rejected', dian_error_message: err.message }, { where: { id: noteSale.id } });
+      }
+    });
+
+    const completeNote = await Sale.findByPk(noteSale.id, {
+      include: [{ model: SaleItem, as: 'items' }],
+    });
+
+    ok(res, {
+      data: completeNote,
+      message: 'Nota crédito creada. Envío a DIAN en proceso.',
+    }, 201);
+  } catch (e) {
+    if (transaction && !transaction.finished) await transaction.rollback();
+    logger.error('Error createAndSendCreditNote:', e);
+    fail(res, e.message || 'Error al crear nota crédito', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/create-debit-note/:saleId
+ * Crear nota débito parcial/total desde una factura y enviar a DIAN
+ *
+ * Body:
+ *   items: [{ description, quantity, unit_price, tax_percentage }]  ← ítems de cargo
+ *   amount: number                                                  ← monto fijo
+ *   reason: string                                                  ← motivo (requerido)
+ * ────────────────────────────────────────────────────────── */
+const createAndSendDebitNote = async (req, res) => {
+  const { sequelize: seq } = require('../../config/database');
+  const transaction = await seq.transaction();
+  try {
+    const { saleId } = req.params;
+    const tenantId = req.tenant_id;
+    const { items, amount, reason } = req.body;
+
+    if (!reason) {
+      await transaction.rollback();
+      return fail(res, 'El motivo es obligatorio');
+    }
+
+    const original = await Sale.findOne({
+      where: { id: saleId, tenant_id: tenantId, document_type: 'factura' },
+      include: [{ model: SaleItem, as: 'items' }],
+      transaction,
+    });
+    if (!original) { await transaction.rollback(); return fail(res, 'Factura no encontrada', 404); }
+    if (!original.cufe) {
+      await transaction.rollback();
+      return fail(res, 'La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');
+    }
+
+    const noteItems = [];
+    let noteSubtotal = 0;
+    let noteTax = 0;
+
+    if (items && Array.isArray(items) && items.length > 0) {
+      for (const item of items) {
+        const qty = parseFloat(item.quantity) || 1;
+        const price = parseFloat(item.unit_price) || 0;
+        const taxPct = parseFloat(item.tax_percentage) || 0;
+        const subtot = qty * price;
+        const tax = subtot * taxPct / 100;
+
+        noteSubtotal += subtot;
+        noteTax += tax;
+        noteItems.push({
+          product_name: item.description || item.product_name || 'Cargo adicional',
+          product_sku: null,
+          product_id: item.product_id || null,
+          quantity: qty,
+          unit_price: price,
+          discount_amount: 0,
+          discount_percentage: 0,
+          tax_percentage: taxPct,
+          tax_amount: tax,
+          subtotal: subtot,
+          total: subtot + tax,
+        });
+      }
+    } else if (amount && parseFloat(amount) > 0) {
+      const amt = parseFloat(amount);
+      noteSubtotal = amt;
+      noteItems.push({
+        product_name: 'Cargo adicional',
+        product_sku: null,
+        product_id: null,
+        quantity: 1,
+        unit_price: amt,
+        discount_amount: 0,
+        discount_percentage: 0,
+        tax_percentage: 0,
+        tax_amount: 0,
+        subtotal: amt,
+        total: amt,
+      });
+    } else {
+      await transaction.rollback();
+      return fail(res, 'Debe especificar ítems o monto para la nota débito');
+    }
+
+    const noteTotal = noteSubtotal + noteTax;
+    const noteNumber = `ND-${Date.now()}`;
+
+    const noteSale = await Sale.create({
+      tenant_id: tenantId,
+      sale_number: noteNumber,
+      document_type: 'nota_debito',
+      sale_date: new Date(),
+      customer_id: original.customer_id,
+      customer_name: original.customer_name,
+      customer_tax_id: original.customer_tax_id,
+      customer_email: original.customer_email,
+      customer_phone: original.customer_phone,
+      customer_address: original.customer_address,
+      subtotal: noteSubtotal,
+      tax_amount: noteTax,
+      discount_amount: 0,
+      total_amount: noteTotal,
+      payment_method: original.payment_method,
+      payment_status: 'pending',
+      paid_amount: 0,
+      status: 'completed',
+      notes: `Nota débito para factura ${original.dian_invoice_number || original.sale_number}. Motivo: ${reason}`,
+      dian_status: 'pending',
+    }, { transaction });
+
+    for (const item of noteItems) {
+      await SaleItem.create({
+        sale_id: noteSale.id,
+        tenant_id: tenantId,
+        item_type: 'product',
+        product_id: item.product_id,
+        product_name: item.product_name,
+        product_sku: item.product_sku,
+        quantity: item.quantity,
+        unit_price: item.unit_price,
+        discount_percentage: 0,
+        discount_amount: 0,
+        tax_percentage: item.tax_percentage,
+        tax_amount: item.tax_amount,
+        subtotal: item.subtotal,
+        total: item.total,
+        unit_cost: 0,
+      }, { transaction });
+    }
+
+    await transaction.commit();
+
+    const tenant = await Tenant.findByPk(tenantId);
+    setImmediate(async () => {
+      try {
+        await dianService.sendDebitNoteToDian({
+          ...noteSale.toJSON(),
+          items: noteItems,
+          reference_sale_id: original.id,
+          reference_invoice_number: original.dian_invoice_number || original.sale_number,
+          reference_invoice_cufe: original.cufe,
+          reference_invoice_date: original.sale_date,
+        }, tenant);
+        logger.info(`[DIAN] ND ${noteNumber} enviada para factura ${original.sale_number}`);
+      } catch (err) {
+        logger.error(`[DIAN] Error enviando ND ${noteNumber}:`, err.message);
+        await Sale.update({ dian_status: 'rejected', dian_error_message: err.message }, { where: { id: noteSale.id } });
+      }
+    });
+
+    const completeNote = await Sale.findByPk(noteSale.id, {
+      include: [{ model: SaleItem, as: 'items' }],
+    });
+
+    ok(res, {
+      data: completeNote,
+      message: 'Nota débito creada. Envío a DIAN en proceso.',
+    }, 201);
+  } catch (e) {
+    if (transaction && !transaction.finished) await transaction.rollback();
+    logger.error('Error createAndSendDebitNote:', e);
+    fail(res, e.message || 'Error al crear nota débito', 500);
+  }
+};
+
 module.exports = {
   getConfig,
   updateConfig,
@@ -726,6 +1108,8 @@ module.exports = {
   sendInvoice,
   sendCreditNote,
   sendDebitNote,
+  createAndSendCreditNote,
+  createAndSendDebitNote,
   checkStatus,
   getEvents,
   testConnection,

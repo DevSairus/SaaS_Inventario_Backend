@@ -217,6 +217,9 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     // Resolver referencia a factura original
     const ref = await resolveNoteReference(note);
 
+    // ID de la venta original para actualizar estado DIAN y registrar evento
+    const saleId = note.reference_sale_id || note.id;
+
     const resolution = await DianResolution.findOne({
       where: { tenant_id: tenant.id, is_active: true, is_test: isTest },
       order: [['created_at', 'DESC']],
@@ -227,10 +230,10 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     const ts = Date.now().toString().slice(-8);
     const noteNumber = `${docLabel}${resolution.prefix}${ts}`;
 
-    if (note.id) {
+    if (saleId) {
       await Sale.update(
         { dian_status: 'sending', dian_invoice_number: noteNumber },
-        { where: { id: note.id }, transaction }
+        { where: { id: saleId }, transaction }
       );
     }
 
@@ -315,7 +318,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
     const dianStatus = accepted ? 'accepted' : 'rejected';
 
-    if (note.id) {
+    if (saleId) {
       await Sale.update({
         dian_invoice_number: noteNumber,
         cufe: result.uuid,
@@ -324,12 +327,12 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
         dian_sent_at: new Date(),
         dian_accepted_at: accepted ? new Date() : null,
         dian_error_message: accepted ? null : (dianResponse.statusMessage || dianResponse.statusDescription),
-      }, { where: { id: note.id }, transaction });
+      }, { where: { id: saleId }, transaction });
     }
 
     await DianEvent.create({
       tenant_id: tenant.id,
-      sale_id: note.id || null,
+      sale_id: saleId || null,
       event_type: isTest ? 'SendTestSetAsync' : 'SendBillSync',
       document_type: isDebit ? 'DebitNote' : 'CreditNote',
       invoice_number: noteNumber,
@@ -348,11 +351,12 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
   } catch (error) {
     await transaction.rollback();
     logger.error(`[DIAN ${docLabel}] Error:`, error.message);
-    if (note.id) {
+    const saleId = note.reference_sale_id || note.id;
+    if (saleId) {
       try {
-        await Sale.update({ dian_status: 'rejected', dian_error_message: error.message }, { where: { id: note.id } });
+        await Sale.update({ dian_status: 'rejected', dian_error_message: error.message }, { where: { id: saleId } });
         await DianEvent.create({
-          tenant_id: tenant.id, sale_id: note.id,
+          tenant_id: tenant.id, sale_id: saleId,
           event_type: 'SendBillSync', document_type: isDebit ? 'DebitNote' : 'CreditNote',
           status: 'error', error_message: error.message,
           is_test: (tenant.dian_config?.environment || 'test') !== 'production',
