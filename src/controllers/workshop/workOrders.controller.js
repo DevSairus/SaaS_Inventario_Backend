@@ -456,7 +456,8 @@ const addItem = async (req, res) => {
       const movement = await InventoryMovement.create({
         tenant_id,
         movement_number,
-        movement_type:   'salida',
+        movement_type:   'sale',
+        direction:       'out',
         movement_reason: 'taller_repuesto',
         reference_type:  'work_order',
         reference_id:    order.id,

@@ -10,10 +10,7 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
   tenant_id: {
     type: DataTypes.UUID,
     allowNull: false,
-    references: {
-      model: 'tenants',
-      key: 'id'
-    }
+    references: { model: 'tenants', key: 'id' }
   },
   movement_number: {
     type: DataTypes.STRING(50),
@@ -21,22 +18,26 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
     comment: 'Número único del movimiento: MOV-2026-00001'
   },
   movement_type: {
-    type: DataTypes.STRING(20),
-    allowNull: false,
-    validate: {
-      isIn: [['entrada', 'salida']]
-    },
-    comment: 'Tipo de movimiento: entrada o salida'
-  },
-  movement_reason: {
     type: DataTypes.STRING(50),
     allowNull: false,
-    comment: 'Razón del movimiento: purchase_receipt, sale, adjustment_in, etc.'
+    comment: 'Tipo: purchase, sale, adjustment_in, adjustment_out, etc.'
+  },
+  direction: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    validate: { isIn: [['in', 'out', 'none']] },
+    comment: 'Dirección: in, out, none'
+  },
+  movement_reason: {
+    type: DataTypes.STRING(100),
+    allowNull: true,
+    field: 'reason',
+    comment: 'Razón del movimiento (texto libre)'
   },
   reference_type: {
     type: DataTypes.STRING(50),
     allowNull: true,
-    comment: 'Tipo de documento relacionado: purchase, sale, adjustment, transfer'
+    comment: 'Tipo de documento: purchase, sale, adjustment, transfer, work_order'
   },
   reference_id: {
     type: DataTypes.UUID,
@@ -46,14 +47,11 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
   product_id: {
     type: DataTypes.UUID,
     allowNull: false,
-    references: {
-      model: 'products',
-      key: 'id'
-    }
+    references: { model: 'products', key: 'id' }
   },
   warehouse_id: {
     type: DataTypes.UUID,
-    allowNull: true,
+    allowNull: false,
     comment: 'Bodega donde ocurre el movimiento'
   },
   quantity: {
@@ -69,25 +67,25 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
   total_cost: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,
-    comment: 'Costo total del movimiento (quantity * unit_cost)'
+    comment: 'Costo total (quantity * unit_cost)'
   },
   previous_stock: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,
+    field: 'stock_before',
     comment: 'Stock antes del movimiento'
   },
   new_stock: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,
+    field: 'stock_after',
     comment: 'Stock después del movimiento'
   },
   user_id: {
     type: DataTypes.UUID,
     allowNull: false,
-    references: {
-      model: 'users',
-      key: 'id'
-    },
+    field: 'created_by',
+    references: { model: 'users', key: 'id' },
     comment: 'Usuario que registró el movimiento'
   },
   movement_date: {
@@ -115,28 +113,13 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
   createdAt: 'created_at',
   updatedAt: 'updated_at',
   indexes: [
-    {
-      unique: true,
-      fields: ['tenant_id', 'movement_number']
-    },
-    {
-      fields: ['tenant_id']
-    },
-    {
-      fields: ['product_id']
-    },
-    {
-      fields: ['movement_date']
-    },
-    {
-      fields: ['movement_type']
-    },
-    {
-      fields: ['reference_type', 'reference_id']
-    },
-    {
-      fields: ['warehouse_id']
-    }
+    { unique: true, fields: ['tenant_id', 'movement_number'] },
+    { fields: ['tenant_id'] },
+    { fields: ['product_id'] },
+    { fields: ['movement_date'] },
+    { fields: ['movement_type'] },
+    { fields: ['reference_type', 'reference_id'] },
+    { fields: ['warehouse_id'] }
   ]
 });
 

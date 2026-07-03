@@ -246,7 +246,7 @@ const create = async (req, res) => {
       // Usar taxService para calcular todos los impuestos
       const taxes = taxService.calculateItemTaxes(item, product, 'sale');
 
-      subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.iva.amount;
+      subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.total_taxes;
       saleItems.push({
         tenant_id: tenantId,
         item_type: product.product_type === 'service' ? 'service' : 'product',
@@ -642,7 +642,7 @@ const confirm = async (req, res) => {
       if (finalDocType !== sale.document_type) {
         updateData.document_type = finalDocType;
         updateData.dian_status   = finalDocType === 'factura' ? 'pending' : 'not_applicable';
-        const newNumber = await generateSaleNumber(tenantId, finalDocType, transaction);
+        const newNumber = await generateSaleNumber(tenantId, finalDocType, transaction, sale.id);
         updateData.sale_number = newNumber;
       } else if (document_type) {
         updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
@@ -973,12 +973,14 @@ const generatePaymentReceipt = async (req, res) => {
 // ─── Función auxiliar para generar número de venta ───────────────────────────
 // FACTURAS: usa el consecutivo de la resolución DIAN activa (prefijo + número)
 // REMISIONES / COTIZACIONES: consecutivo interno REM-YYYY-XXXX / COT-YYYY-XXXX
-async function generateSaleNumber(tenant_id, document_type, transaction) {
+async function generateSaleNumber(tenant_id, document_type, transaction, excludeId = null) {
   // Sin tipo aún (borrador): número provisional BOD-
   if (!document_type || document_type === null) {
     const year = new Date().getFullYear();
+    const where = { tenant_id, sale_number: { [Op.like]: `BOD-${year}-%` } };
+    if (excludeId) where.id = { [Op.ne]: excludeId };
     const lastSale = await Sale.findOne({
-      where: { tenant_id, sale_number: { [Op.like]: `BOD-${year}-%` } },
+      where,
       order: [['sale_number', 'DESC']],
       transaction,
     });
@@ -994,8 +996,10 @@ async function generateSaleNumber(tenant_id, document_type, transaction) {
     // Consecutivo interno (sin cambios respecto al original)
     const prefix = document_type === 'remision' ? 'REM' : 'COT';
     const year = new Date().getFullYear();
+    const where = { tenant_id, sale_number: { [Op.like]: `${prefix}-${year}-%` } };
+    if (excludeId) where.id = { [Op.ne]: excludeId };
     const lastSale = await Sale.findOne({
-      where: { tenant_id, sale_number: { [Op.like]: `${prefix}-${year}-%` } },
+      where,
       order: [['sale_number', 'DESC']],
       transaction,
     });

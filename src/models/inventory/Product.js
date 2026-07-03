@@ -90,6 +90,12 @@ const Product = sequelize.define('Product', {
     allowNull: false,
     defaultValue: false
   },
+  tax_config: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    defaultValue: { iva: { enabled: true, rate: 19 }, inc: { enabled: false, rate: 0 }, ica: { enabled: false, rate: 0 } },
+    comment: 'Configuración de impuestos: { iva, inc, ica }'
+  },
   current_stock: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,

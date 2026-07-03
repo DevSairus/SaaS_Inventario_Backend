@@ -281,8 +281,9 @@ const generateSalePDF = async (res, sale, tenant) => {
     const legalNote    = pdfConfig.legal_note?.trim();
 
     // Calcular alto del bloque (basado en filas de totales)
-    let totRows = isRemision ? 1 : 2; // remision: solo total | factura: subtotal + total
-    if (!isRemision)                        totRows++; // IVA
+    const taxBreakdown = sale.tax_breakdown || [];
+    const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
+    let totRows = isRemision ? 1 : 1 + (allTaxes.length || 1); // subtotal + impuestos (o IVA fallback)
     if ((sale.discount_amount || 0) > 0)   totRows++;
     if (paidAmt > 0)                        totRows++;
     if (balance > 0 && paidAmt > 0)         totRows++;
@@ -319,12 +320,20 @@ const generateSalePDF = async (res, sale, tenant) => {
     };
 
     if (isRemision) {
-      // Remisión: IVA incluido en el total, no se discrimina
+      // Remisión: impuestos incluidos en el total, no se discriminan
       if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
     } else {
-      // Factura / Cotización: desglosar subtotal + IVA + descuento
+      // Factura / Cotización: desglosar subtotal + impuestos + descuento
       drawRow('Subtotal', formatCurrency(sale.subtotal));
-      drawRow('IVA',      formatCurrency(sale.tax_amount));
+      // Mostrar todos los impuestos desde tax_breakdown
+      const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
+      for (const tax of allTaxes) {
+        drawRow(tax.name, formatCurrency(tax.amount));
+      }
+      if (allTaxes.length === 0) {
+        // Fallback: si no hay breakdown, usar tax_amount como IVA
+        drawRow('IVA', formatCurrency(sale.tax_amount));
+      }
       if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
     }
 

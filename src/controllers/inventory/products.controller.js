@@ -14,7 +14,7 @@ const getProductStats = async (req, res) => {
     const tenantFilter = whereClause.tenant_id
       ? 'AND tenant_id = :tenantId'
       : '';
-    const [[agg]] = await sequelize.query(
+    const [agg] = await sequelize.query(
       `SELECT
          COUNT(*)                                                              AS total,
          COUNT(*) FILTER (WHERE is_active)                                    AS active,
@@ -117,11 +117,14 @@ const createProduct = async (req, res) => {
       sku, barcode, name, description, category_id, warehouse_id = null,
       brand, unit_of_measure, average_cost, sale_price, base_price,
       profit_margin_percentage, current_stock = 0, reserved_stock = 0,
-      min_stock = 0, max_stock, product_type = 'product',
+      min_stock = 0, max_stock, product_type = 'simple',
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
       tax_config
     } = req.body;
+
+    const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material'];
+    const safeProductType = VALID_PRODUCT_TYPES.includes(product_type) ? product_type : 'simple';
 
     if (!sku || !name) return res.status(400).json({ success: false, message: 'SKU y nombre son requeridos' });
 
@@ -157,13 +160,13 @@ const createProduct = async (req, res) => {
       sale_price: sale_price || 0,
       base_price: base_price || 0,
       profit_margin_percentage: profit_margin_percentage || 0,
-      product_type,
-      current_stock: product_type === 'service' ? 0 : current_stock,
-      reserved_stock: product_type === 'service' ? 0 : reserved_stock,
-      available_stock: product_type === 'service' ? 0 : available_stock,
-      min_stock: product_type === 'service' ? 0 : min_stock,
-      max_stock: product_type === 'service' ? null : max_stock,
-      track_inventory: product_type === 'service' ? false : track_inventory,
+      product_type: safeProductType,
+      current_stock: safeProductType === 'service' ? 0 : current_stock,
+      reserved_stock: safeProductType === 'service' ? 0 : reserved_stock,
+      available_stock: safeProductType === 'service' ? 0 : available_stock,
+      min_stock: safeProductType === 'service' ? 0 : min_stock,
+      max_stock: safeProductType === 'service' ? null : max_stock,
+      track_inventory: safeProductType === 'service' ? false : track_inventory,
       is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
       tax_config: finalTaxConfig,
     });
@@ -218,6 +221,13 @@ const updateProduct = async (req, res) => {
     });
 
     Object.keys(updateData).forEach(key => { if (updateData[key] === undefined) delete updateData[key]; });
+
+    if (updateData.product_type) {
+      const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material'];
+      if (!VALID_PRODUCT_TYPES.includes(updateData.product_type)) {
+        updateData.product_type = 'simple';
+      }
+    }
 
     await product.update(updateData);
     const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });

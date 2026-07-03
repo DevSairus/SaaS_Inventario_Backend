@@ -289,6 +289,9 @@ const createMovement = async (movementData, transaction) => {
     throw new Error('Producto no encontrado');
   }
 
+  // Usar warehouse_id del producto como fallback si no se proporciona
+  const effectiveWarehouseId = warehouse_id || product.warehouse_id;
+
   const previous_stock = parseFloat(product.current_stock);
   let new_stock;
 
@@ -335,12 +338,13 @@ const createMovement = async (movementData, transaction) => {
   const movement = await InventoryMovement.create({
     tenant_id,
     movement_number,
-    movement_type,
-    movement_reason,
+    movement_type: movement_reason,
+    direction: movement_type === 'entrada' ? 'in' : 'out',
+    movement_reason: notes || movement_reason,
     reference_type,
     reference_id,
     product_id,
-    warehouse_id,
+    warehouse_id: effectiveWarehouseId,
     quantity: parseFloat(quantity),
     unit_cost: parseFloat(unit_cost),
     total_cost,
