@@ -119,7 +119,8 @@ const createProduct = async (req, res) => {
       profit_margin_percentage, current_stock = 0, reserved_stock = 0,
       min_stock = 0, max_stock, product_type = 'product',
       track_inventory = true, is_active = true, is_for_sale = true,
-      is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false
+      is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
+      tax_config
     } = req.body;
 
     if (!sku || !name) return res.status(400).json({ success: false, message: 'SKU y nombre son requeridos' });
@@ -133,6 +134,13 @@ const createProduct = async (req, res) => {
       const existingBarcode = await Product.findOne({ where: { barcode: barcode.trim(), tenant_id: tenantId } });
       if (existingBarcode) return res.status(400).json({ success: false, message: 'Ya existe un producto con ese código de barras' });
     }
+
+    // Construir tax_config si no viene del frontend
+    const finalTaxConfig = tax_config || {
+      iva: { enabled: has_tax && tax_percentage > 0, rate: tax_percentage || 19 },
+      inc: { enabled: false, rate: 0 },
+      ica: { enabled: false, rate: 0 },
+    };
 
     const available_stock = parseFloat(current_stock) - parseFloat(reserved_stock);
     const product = await Product.create({
@@ -156,7 +164,8 @@ const createProduct = async (req, res) => {
       min_stock: product_type === 'service' ? 0 : min_stock,
       max_stock: product_type === 'service' ? null : max_stock,
       track_inventory: product_type === 'service' ? false : track_inventory,
-      is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax
+      is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
+      tax_config: finalTaxConfig,
     });
 
     const newProduct = await Product.findOne({ where: { id: product.id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
