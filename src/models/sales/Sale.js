@@ -183,6 +183,15 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.TEXT,
     allowNull: true,
   },
+  // ── Retenciones ─────────────────────────────────────────────────────
+  retefuente_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  retefuente_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  reteiva_rate:      { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  reteiva_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  reteica_rate:      { type: DataTypes.DECIMAL(5, 4), defaultValue: 0 },
+  reteica_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  total_retentions:  { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  tax_breakdown:     { type: DataTypes.JSONB, defaultValue: [] },
   // ─────────────────────────────────────────────────────────────────────
   created_by: {
     type: DataTypes.UUID,

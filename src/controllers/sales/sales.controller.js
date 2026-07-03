@@ -9,6 +9,7 @@ const whatsappService = require('../../services/whatsappService');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const dianService = require('../../services/dian/dianService');
+const taxService = require('../../services/taxService');
 
 // Obtener todas las ventas
 const getAll = async (req, res) => {
@@ -242,28 +243,10 @@ const create = async (req, res) => {
         return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
       }
 
-      const itemSubtotal = item.quantity * item.unit_price;
-      const itemDiscount = itemSubtotal * (item.discount_percentage || 0) / 100;
-      const itemTaxBase  = itemSubtotal - itemDiscount;
-      let itemTax = 0, itemTotal = 0, itemBaseWithoutTax = 0, taxPercentage = 0;
+      // Usar taxService para calcular todos los impuestos
+      const taxes = taxService.calculateItemTaxes(item, product, 'sale');
 
-      if (product.has_tax === false) {
-        itemTax = 0; itemBaseWithoutTax = itemTaxBase; itemTotal = itemTaxBase;
-      } else {
-        taxPercentage = item.tax_percentage || product.tax_percentage || 19;
-        const priceIncludesTax = product.price_includes_tax || false;
-        if (priceIncludesTax) {
-          itemTax = (itemTaxBase * taxPercentage) / (100 + taxPercentage);
-          itemBaseWithoutTax = itemTaxBase - itemTax;
-          itemTotal = itemTaxBase;
-        } else {
-          itemTax = itemTaxBase * taxPercentage / 100;
-          itemBaseWithoutTax = itemTaxBase;
-          itemTotal = itemTaxBase + itemTax;
-        }
-      }
-
-      subtotal += itemSubtotal; discount_amount += itemDiscount; tax_amount += itemTax;
+      subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.iva.amount;
       saleItems.push({
         tenant_id: tenantId,
         item_type: product.product_type === 'service' ? 'service' : 'product',
@@ -273,17 +256,33 @@ const create = async (req, res) => {
         quantity: item.quantity,
         unit_price: item.unit_price,
         discount_percentage: item.discount_percentage || 0,
-        discount_amount: itemDiscount,
-        tax_percentage: taxPercentage,
-        tax_amount: itemTax,
-        subtotal: itemSubtotal,
-        total: itemTotal,
+        discount_amount: item.quantity * item.unit_price - taxes.base,
+        tax_percentage: taxes.iva.rate,
+        tax_amount: taxes.iva.amount,
+        inc_rate: taxes.inc.rate,
+        inc_amount: taxes.inc.amount,
+        ica_rate: taxes.ica.rate,
+        ica_amount: taxes.ica.amount,
+        subtotal: taxes.base,
+        total: taxes.total_line,
         unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
         technician_id: item.technician_id || null,
       });
     }
 
     const total_amount = saleItems.reduce((sum, i) => sum + i.total, 0);
+
+    // Calcular retenciones si hay cliente configurado
+    let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+    if (finalCustomerId) {
+      const customer = await Customer.findByPk(finalCustomerId, { transaction });
+      const tenant = await Tenant.findByPk(tenantId, { attributes: ['tax_config'], transaction });
+      if (customer && tenant) {
+        retentions = taxService.calculateRetentions(saleItems, tenant.tax_config || {}, customer.retention_config || {});
+      }
+    }
+
+    const tax_breakdown = taxService.buildTaxBreakdown(saleItems, retentions);
 
     const saleData = {
       tenant_id: tenantId,
@@ -304,6 +303,15 @@ const create = async (req, res) => {
       created_by: userId,
       // DIAN: el tipo de documento se asigna al confirmar, no al crear
       dian_status: 'not_applicable',
+      // Retenciones
+      retefuente_rate:   retentions.retefuente.rate,
+      retefuente_amount: retentions.retefuente.amount,
+      reteiva_rate:      retentions.reteiva.rate,
+      reteiva_amount:    retentions.reteiva.amount,
+      reteica_rate:      retentions.reteica.rate,
+      reteica_amount:    retentions.reteica.amount,
+      total_retentions:  retentions.total,
+      tax_breakdown,
     };
 
     // ── Campo vehículo: respetar configuración del tenant ────────────────────

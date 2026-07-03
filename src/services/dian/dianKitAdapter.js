@@ -166,49 +166,93 @@ function mapLines(items) {
 }
 
 function buildTaxTotalsForLine(item) {
-  const taxAmount = Number(item.tax_amount || 0);
   const taxableAmount = Number(item.subtotal || item.lineExtensionAmount || 0);
-  const percent = Number(item.tax_rate || item.tax_percentage || 0);
+  const totals = [];
 
-  if (taxAmount === 0 && percent === 0) {
-    return [{ taxAmount: 0, subtotals: [{ taxableAmount, taxAmount: 0, percent: 0, taxScheme: { code: '01' } }] }];
+  // IVA (01)
+  const ivaAmount = Number(item.tax_amount || 0);
+  const ivaRate = Number(item.tax_rate || item.tax_percentage || 0);
+  totals.push({
+    taxAmount: ivaAmount,
+    subtotals: [{ taxableAmount, taxAmount: ivaAmount, percent: ivaRate, taxScheme: { code: '01' } }],
+  });
+
+  // INC (04) — impoconsumo
+  const incAmount = Number(item.inc_amount || 0);
+  const incRate = Number(item.inc_rate || 0);
+  if (incAmount > 0) {
+    totals.push({
+      taxAmount: incAmount,
+      subtotals: [{ taxableAmount, taxAmount: incAmount, percent: incRate, taxScheme: { code: '04' } }],
+    });
   }
 
-  return [{
-    taxAmount,
-    subtotals: [{
-      taxableAmount,
-      taxAmount,
-      percent,
-      taxScheme: { code: '01' },
-    }],
-  }];
+  // ICA (03)
+  const icaAmount = Number(item.ica_amount || 0);
+  const icaRate = Number(item.ica_rate || 0);
+  if (icaAmount > 0) {
+    totals.push({
+      taxAmount: icaAmount,
+      subtotals: [{ taxableAmount, taxAmount: icaAmount, percent: icaRate, taxScheme: { code: '03' } }],
+    });
+  }
+
+  return totals;
 }
 
 /**
  * Construye los taxTotals a nivel documento.
  */
 function buildDocumentTaxTotals(items) {
-  const groups = {};
+  const ivaGroups = {};
+  let totalInc = 0, totalIncBase = 0;
+  let totalIca = 0, totalIcaBase = 0;
+
   for (const item of items) {
-    const pct = Number(item.tax_rate || item.tax_percentage || 0);
-    const key = `01_${pct}`;
-    if (!groups[key]) {
-      groups[key] = { pct, taxableAmount: 0, taxAmount: 0 };
+    const base = Number(item.subtotal || item.lineExtensionAmount || 0);
+
+    // IVA
+    const ivaPct = Number(item.tax_rate || item.tax_percentage || 0);
+    const ivaKey = `01_${ivaPct}`;
+    if (!ivaGroups[ivaKey]) ivaGroups[ivaKey] = { pct: ivaPct, taxableAmount: 0, taxAmount: 0 };
+    ivaGroups[ivaKey].taxableAmount += base;
+    ivaGroups[ivaKey].taxAmount += Number(item.tax_amount || 0);
+
+    // INC
+    if (Number(item.inc_amount || 0) > 0) {
+      totalInc += Number(item.inc_amount);
+      totalIncBase += base;
     }
-    groups[key].taxableAmount += Number(item.subtotal || item.lineExtensionAmount || 0);
-    groups[key].taxAmount += Number(item.tax_amount || 0);
+
+    // ICA
+    if (Number(item.ica_amount || 0) > 0) {
+      totalIca += Number(item.ica_amount);
+      totalIcaBase += base;
+    }
   }
 
-  return Object.values(groups).map(g => ({
+  const result = Object.values(ivaGroups).map(g => ({
     taxAmount: g.taxAmount,
-    subtotals: [{
-      taxableAmount: g.taxableAmount,
-      taxAmount: g.taxAmount,
-      percent: g.pct,
-      taxScheme: { code: '01' },
-    }],
+    subtotals: [{ taxableAmount: g.taxableAmount, taxAmount: g.taxAmount, percent: g.pct, taxScheme: { code: '01' } }],
   }));
+
+  // INC (04)
+  if (totalInc > 0) {
+    result.push({
+      taxAmount: totalInc,
+      subtotals: [{ taxableAmount: totalIncBase, taxAmount: totalInc, percent: totalInc / totalIncBase * 100, taxScheme: { code: '04' } }],
+    });
+  }
+
+  // ICA (03)
+  if (totalIca > 0) {
+    result.push({
+      taxAmount: totalIca,
+      subtotals: [{ taxableAmount: totalIcaBase, taxAmount: totalIca, percent: totalIca / totalIcaBase * 1000, taxScheme: { code: '03' } }],
+    });
+  }
+
+  return result;
 }
 
 /**

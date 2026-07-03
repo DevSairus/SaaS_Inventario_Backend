@@ -65,6 +65,11 @@ const SaleItem = sequelize.define('SaleItem', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0,
   },
+  // ── Impuestos adicionales ─────────────────────────────────
+  inc_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0, comment: 'Tasa INC (%)' },
+  inc_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0, comment: 'Monto INC' },
+  ica_rate:   { type: DataTypes.DECIMAL(5, 4), defaultValue: 0, comment: 'Tasa ICA (‰)' },
+  ica_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0, comment: 'Monto ICA' },
   subtotal: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,
