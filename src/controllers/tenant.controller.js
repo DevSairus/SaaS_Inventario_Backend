@@ -93,7 +93,8 @@ const updateTenantConfig = async (req, res) => {
       secondary_color,
       pdf_config,
       business_config,
-      features
+      features,
+      tax_config
     } = req.body;
 
     const tenant = await Tenant.findByPk(tenantId);
@@ -119,6 +120,7 @@ const updateTenantConfig = async (req, res) => {
     if (pdf_config !== undefined) updates.pdf_config = pdf_config;
     if (business_config !== undefined) updates.business_config = business_config;
     if (features !== undefined) updates.features = { ...(tenant.features || {}), ...features };
+    if (tax_config !== undefined) updates.tax_config = { ...(tenant.tax_config || {}), ...tax_config };
 
     await tenant.update(updates);
 
