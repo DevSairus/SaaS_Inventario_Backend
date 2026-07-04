@@ -81,6 +81,49 @@ module.exports = {
       console.log('[Migration] Datos migrados a direction');
     } catch (e) { /* ignorar */ }
 
+    // Migrar movement_type de 'entrada'/'salida' a valores nuevos
+    try {
+      await q.query(`
+        UPDATE inventory_movements SET movement_type = CASE
+          WHEN movement_reason = 'sale' THEN 'sale'
+          WHEN movement_reason = 'purchase_receipt' THEN 'purchase'
+          WHEN movement_reason = 'customer_return' THEN 'customer_return'
+          WHEN movement_reason = 'supplier_return' THEN 'supplier_return'
+          WHEN movement_reason = 'adjustment_in' THEN 'adjustment_in'
+          WHEN movement_reason = 'adjustment_out' THEN 'adjustment_out'
+          WHEN movement_reason = 'transfer_send' THEN 'transfer_out'
+          WHEN movement_reason = 'transfer_receive' THEN 'transfer_in'
+          WHEN movement_reason = 'internal_consumption' THEN 'internal_use'
+          WHEN movement_reason = 'taller_repuesto' THEN 'sale'
+          WHEN movement_reason = 'sale_reversal' THEN 'sale'
+          WHEN movement_type = 'entrada' THEN 'purchase'
+          WHEN movement_type = 'salida' THEN 'sale'
+          ELSE 'sale'
+        END
+        WHERE movement_type IN ('entrada', 'salida')
+      `);
+      console.log('[Migration] movement_type migrado a valores nuevos');
+    } catch (e) { /* ignorar */ }
+
+    // Actualizar CHECK constraint de movement_type
+    try {
+      const [constraints] = await q.query(`
+        SELECT conname FROM pg_constraint 
+        WHERE conrelid = 'inventory_movements'::regclass AND contype = 'c' 
+        AND conname LIKE '%movement_type%'
+      `);
+      for (const c of constraints) {
+        await q.query(`ALTER TABLE inventory_movements DROP CONSTRAINT IF EXISTS "${c.conname}"`);
+      }
+      await q.query(`
+        ALTER TABLE inventory_movements ADD CONSTRAINT inventory_movements_movement_type_check 
+        CHECK (movement_type IN ('purchase', 'sale', 'customer_return', 'supplier_return', 'adjustment_in', 'adjustment_out', 'transfer_in', 'transfer_out', 'production', 'internal_use', 'obsolescence', 'sample', 'damage', 'initial_stock'))
+      `);
+      console.log('[Migration] CHECK constraint movement_type actualizado');
+    } catch (e) {
+      console.log('[Migration] CHECK constraint:', e.message);
+    }
+
     console.log('[Migration] inventory_movements actualizado');
   },
 
