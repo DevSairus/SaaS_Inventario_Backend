@@ -32,7 +32,6 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
     type: DataTypes.STRING(100),
     allowNull: false,
     defaultValue: 'movimiento',
-    field: 'reason',
     comment: 'Razón del movimiento (texto libre)'
   },
   reference_type: {
