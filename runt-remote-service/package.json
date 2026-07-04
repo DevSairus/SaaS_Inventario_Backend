@@ -1,0 +1,14 @@
+{
+  "name": "runt-remote-service",
+  "version": "1.0.0",
+  "description": "Proxy remoto para API del RUNT — se ejecuta en Raspberry Pi / VPS con IP colombiana",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.22.1",
+    "axios": "^1.13.6",
+    "cors": "^2.8.6"
+  }
+}

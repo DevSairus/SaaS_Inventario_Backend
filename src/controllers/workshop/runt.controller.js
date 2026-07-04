@@ -1,15 +1,15 @@
 // src/controllers/workshop/runt.controller.js
 //
-// Proxy seguro hacia la API del RUNT (runtproapi.runt.gov.co).
-// Si RUNT_PROXY_URL está configurado, redirige las peticiones a través de un proxy local (ngrok).
-// La foto/imagen del CAPTCHA nunca se almacena — se retransmite en memoria.
+// Proxy hacia la API del RUNT.
+// Si RUNT_SERVICE_URL está configurado, redirige a un servidor remoto (Raspberry Pi / VPS).
+// Si no, intenta conexión directa (funciona en Vercel/localhost).
 
 const axios  = require('axios');
 const logger = require('../../config/logger');
 
 const RUNT_BASE = 'https://runtproapi.runt.gov.co/CYRConsultaVehiculoMS';
-const PROXY_URL = process.env.RUNT_PROXY_URL;  // ej: https://abc123.ngrok.io
-const PROXY_TOKEN = process.env.RUNT_PROXY_TOKEN || 'pitrunt2026';
+const RUNT_SERVICE_URL = process.env.RUNT_SERVICE_URL;  // ej: http://tu-ip:4445
+const RUNT_API_KEY     = process.env.RUNT_API_KEY || 'pitbox-runt-2026';
 
 const runtHeaders = {
   'Content-Type': 'application/json',
@@ -18,43 +18,54 @@ const runtHeaders = {
   'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
 };
 
-// Si hay proxy, las peticiones van al proxy local en vez de al RUNT directo
-function getUrl(path) {
-  return PROXY_URL ? `${PROXY_URL}${path}` : `${RUNT_BASE}${path}`;
-}
+// Llama al servicio RUNT remoto (misma lógica que DIAN)
+async function callRemoteRunt(path, body = null) {
+  const url = `${RUNT_SERVICE_URL}${path}`;
+  logger.info(`[RUNT Proxy] → ${url}`);
 
-function getRequestHeaders(extra = {}) {
-  const headers = { ...runtHeaders, ...extra };
-  if (PROXY_URL) headers['x-proxy-token'] = PROXY_TOKEN;
-  return headers;
+  const opts = {
+    method: body ? 'POST' : 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': RUNT_API_KEY },
+    timeout: 30000,
+  };
+  if (body) opts.body = JSON.stringify(body);
+
+  const response = await fetch(url, opts);
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`RUNT Service ${response.status}: ${err}`);
+  }
+  return response.json();
 }
 
 /* ─── GET /workshop/vehicles/runt/captcha ───────────────────────────────── */
 const getCaptcha = async (req, res) => {
   try {
-    const url = PROXY_URL ? `${PROXY_URL}/captcha` : `${RUNT_BASE}/captcha/libre-captcha/generar`;
-    const response = await axios.get(url, {
-      headers: getRequestHeaders(),
-      timeout: 30000
-    });
+    let data;
 
-    const { id, imagen, error } = response.data;
+    if (RUNT_SERVICE_URL) {
+      // Via servicio remoto (Raspberry Pi / VPS)
+      data = await callRemoteRunt('/api/runt/captcha');
+    } else {
+      // Conexión directa
+      const response = await axios.get(
+        `${RUNT_BASE}/captcha/libre-captcha/generar`,
+        { headers: runtHeaders, timeout: 30000 }
+      );
+      data = response.data;
+    }
 
-    if (error || !id || !imagen) {
+    if (data.error || !data.id || !data.imagen) {
       return res.status(502).json({
         success: false,
         message: 'El RUNT no pudo generar el CAPTCHA. Intenta de nuevo.',
       });
     }
 
-    return res.json({ success: true, id, imagen });
+    return res.json({ success: true, id: data.id, imagen: data.imagen });
 
   } catch (err) {
-    logger.error('RUNT getCaptcha error:', {
-      message: err.message,
-      code: err.code,
-      status: err.response?.status,
-    });
+    logger.error('RUNT getCaptcha error:', { message: err.message, code: err.code });
     return res.status(502).json({
       success: false,
       message: 'No se pudo conectar con el RUNT. Verifica tu conexión.',
@@ -65,16 +76,12 @@ const getCaptcha = async (req, res) => {
 /* ─── POST /workshop/vehicles/runt/consultar ────────────────────────────── */
 const consultarVehiculo = async (req, res) => {
   try {
-    const {
-      placa, documento,
-      tipoDocumento = 'C',
-      captcha, idLibreCaptcha,
-    } = req.body;
+    const { placa, documento, tipoDocumento = 'C', captcha, idLibreCaptcha } = req.body;
 
-    if (!placa)           return res.status(400).json({ success: false, message: 'La placa es requerida' });
-    if (!documento)       return res.status(400).json({ success: false, message: 'El documento es requerido' });
-    if (!captcha)         return res.status(400).json({ success: false, message: 'El captcha es requerido' });
-    if (!idLibreCaptcha)  return res.status(400).json({ success: false, message: 'ID de captcha inválido' });
+    if (!placa)          return res.status(400).json({ success: false, message: 'La placa es requerida' });
+    if (!documento)      return res.status(400).json({ success: false, message: 'El documento es requerido' });
+    if (!captcha)        return res.status(400).json({ success: false, message: 'El captcha es requerido' });
+    if (!idLibreCaptcha) return res.status(400).json({ success: false, message: 'ID de captcha inválido' });
 
     const placaUpper = placa.toUpperCase().trim();
 
@@ -87,18 +94,23 @@ const consultarVehiculo = async (req, res) => {
       configuracion: { tiempoInactividad: '900', tiempoCuentaRegresiva: '10' },
     };
 
-    const authUrl = PROXY_URL ? `${PROXY_URL}/auth` : `${RUNT_BASE}/auth`;
-    const response = await axios.post(authUrl, payload, {
-      headers: getRequestHeaders(),
-      timeout: 30000
-    });
+    let data;
+    let sessionCookie = null;
 
-    const setCookieHeader = response.headers['set-cookie'];
-    const sessionCookie = Array.isArray(setCookieHeader)
-      ? setCookieHeader.map(c => c.split(';')[0]).join('; ')
-      : (setCookieHeader ? setCookieHeader.split(';')[0] : null);
-
-    const data = response.data;
+    if (RUNT_SERVICE_URL) {
+      // Via servicio remoto
+      data = await callRemoteRunt('/api/runt/auth', payload);
+    } else {
+      // Conexión directa
+      const response = await axios.post(`${RUNT_BASE}/auth`, payload, {
+        headers: runtHeaders, timeout: 30000
+      });
+      data = response.data;
+      const setCookieHeader = response.headers['set-cookie'];
+      sessionCookie = Array.isArray(setCookieHeader)
+        ? setCookieHeader.map(c => c.split(';')[0]).join('; ')
+        : (setCookieHeader ? setCookieHeader.split(';')[0] : null);
+    }
 
     if (data.error) {
       return res.status(422).json({
@@ -111,8 +123,7 @@ const consultarVehiculo = async (req, res) => {
     const v = data.infoVehiculo;
     if (!v) {
       return res.status(404).json({
-        success: false,
-        message: 'El RUNT no encontró información para esta placa y documento.',
+        success: false, message: 'El RUNT no encontró información para esta placa y documento.',
       });
     }
 
@@ -122,15 +133,20 @@ const consultarVehiculo = async (req, res) => {
     let soatData = [], rtmData = [];
 
     if (sessionToken) {
-      const secondaryHeaders = getRequestHeaders({
+      const secondaryHeaders = {
+        ...runtHeaders,
         'auth-token': `Bearer ${sessionToken}`,
         'x-funcionalidad': 'SHELL',
-      });
+      };
 
       // SOAT
       try {
-        const soatUrl = PROXY_URL ? `${PROXY_URL}/soat` : `${RUNT_BASE}/soat`;
-        const soatRes = await axios.get(soatUrl, { headers: secondaryHeaders, timeout: 10000 });
+        let soatRes;
+        if (RUNT_SERVICE_URL) {
+          soatRes = { data: await callRemoteRunt('/api/runt/soat', { extraHeaders: secondaryHeaders }) };
+        } else {
+          soatRes = await axios.get(`${RUNT_BASE}/soat`, { headers: secondaryHeaders, timeout: 10000 });
+        }
         soatData = Array.isArray(soatRes.data) ? soatRes.data
                  : Array.isArray(soatRes.data?.soat) ? soatRes.data.soat : [];
       } catch (e) {
@@ -139,12 +155,14 @@ const consultarVehiculo = async (req, res) => {
 
       // RTM
       try {
-        const rtmUrl = PROXY_URL ? `${PROXY_URL}/rtms` : `${RUNT_BASE}/rtms`;
-        const rtmRes = await axios.get(rtmUrl, {
-          headers: secondaryHeaders,
-          params: PROXY_URL ? { tipo: 'N' } : { tipo: 'N' },
-          timeout: 10000
-        });
+        let rtmRes;
+        if (RUNT_SERVICE_URL) {
+          rtmRes = { data: await callRemoteRunt('/api/runt/rtms', { extraHeaders: secondaryHeaders, params: { tipo: 'N' } }) };
+        } else {
+          rtmRes = await axios.get(`${RUNT_BASE}/rtms`, {
+            headers: secondaryHeaders, params: { tipo: 'N' }, timeout: 10000
+          });
+        }
         rtmData = Array.isArray(rtmRes.data) ? rtmRes.data
                 : Array.isArray(rtmRes.data?.revisiones) ? rtmRes.data.revisiones : [];
       } catch (e) {
@@ -176,12 +194,10 @@ const consultarVehiculo = async (req, res) => {
       year: v.modelo ? parseInt(v.modelo) : null, color: toTitle(v.color),
       vin: v.vin || v.numSerie || null, engine_number: v.numMotor || null,
       fuel_type: FUEL_MAP[v.tipoCombustible?.toUpperCase()] || 'gasolina',
-      soat_number, soat_expiry,
-      tecnomecanica_number, tecnomecanica_expiry,
+      soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
       _runt: {
-        clase: v.clase, tipoCarroceria: v.tipoCarroceria,
-        cilindraje: v.cilindraje, numChasis: v.numChasis,
-        numSerie: v.numSerie, estadoAutomotor: v.estadoAutomotor,
+        clase: v.clase, tipoCarroceria: v.tipoCarroceria, cilindraje: v.cilindraje,
+        numChasis: v.numChasis, numSerie: v.numSerie, estadoAutomotor: v.estadoAutomotor,
         organismoTransito: v.organismoTransito, gravamenes: v.gravamenes,
         prendas: v.prendas, numLicencia: v.numLicencia, tipoServicio: v.tipoServicio,
       },
@@ -192,16 +208,11 @@ const consultarVehiculo = async (req, res) => {
   } catch (err) {
     if (err.response) {
       const body = err.response.data;
-      const runtMsg = body?.descripcionRespuesta || body?.message || body?.error
-        || 'CAPTCHA incorrecto o sesión expirada.';
-      return res.status(422).json({
-        success: false, message: `${runtMsg} Solicita un nuevo CAPTCHA.`, runtError: true,
-      });
+      const runtMsg = body?.descripcionRespuesta || body?.message || body?.error || 'CAPTCHA incorrecto o sesión expirada.';
+      return res.status(422).json({ success: false, message: `${runtMsg} Solicita un nuevo CAPTCHA.`, runtError: true });
     }
     logger.error('RUNT consultarVehiculo error:', err.message);
-    return res.status(502).json({
-      success: false, message: 'No se pudo conectar con el RUNT.', runtError: true,
-    });
+    return res.status(502).json({ success: false, message: 'No se pudo conectar con el RUNT.', runtError: true });
   }
 };
 
