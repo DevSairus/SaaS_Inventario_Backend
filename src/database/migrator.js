@@ -11,13 +11,25 @@ const logger = require('../config/logger');
  */
 async function checkCriticalColumns() {
   try {
-    const [cols] = await sequelize.query(
+    const missing = [];
+
+    // Verificar columnas en sales
+    const [salesCols] = await sequelize.query(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'sales' AND column_name IN ('dian_status', 'tax_breakdown')"
     );
-    const colNames = cols.map(c => c.column_name);
-    const missing = [];
-    if (!colNames.includes('dian_status')) missing.push('dian_status');
-    if (!colNames.includes('tax_breakdown')) missing.push('tax_breakdown');
+    const salesColNames = salesCols.map(c => c.column_name);
+    if (!salesColNames.includes('dian_status')) missing.push('sales.dian_status');
+    if (!salesColNames.includes('tax_breakdown')) missing.push('sales.tax_breakdown');
+
+    // Verificar columnas en inventory_movements
+    const [movCols] = await sequelize.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'inventory_movements' AND column_name IN ('direction', 'reason', 'created_by')"
+    );
+    const movColNames = movCols.map(c => c.column_name);
+    if (!movColNames.includes('direction')) missing.push('inventory_movements.direction');
+    if (!movColNames.includes('reason')) missing.push('inventory_movements.reason');
+    if (!movColNames.includes('created_by')) missing.push('inventory_movements.created_by');
+
     return missing;
   } catch {
     return ['unknown'];
