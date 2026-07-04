@@ -21,12 +21,22 @@ async function checkCriticalColumns() {
     if (!salesColNames.includes('tax_breakdown')) missing.push('sales.tax_breakdown');
 
     const [movCols] = await sequelize.query(
-      "SELECT column_name FROM information_schema.columns WHERE table_name = 'inventory_movements' AND column_name IN ('direction', 'reason', 'created_by')"
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'inventory_movements' AND column_name IN ('direction', 'movement_reason', 'created_by')"
     );
     const movColNames = movCols.map(c => c.column_name);
     if (!movColNames.includes('direction')) missing.push('inventory_movements.direction');
-    if (!movColNames.includes('reason')) missing.push('inventory_movements.reason');
+    if (!movColNames.includes('movement_reason')) missing.push('inventory_movements.movement_reason');
     if (!movColNames.includes('created_by')) missing.push('inventory_movements.created_by');
+
+    // Verificar CHECK constraint de movement_type
+    try {
+      const [constraints] = await sequelize.query(
+        "SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'inventory_movements'::regclass AND contype = 'c' AND conname LIKE '%movement_type%'"
+      );
+      if (constraints.length > 0 && constraints[0].def.includes('entrada')) {
+        missing.push('inventory_movements.movement_type_check_obsolete');
+      }
+    } catch { /* ignorar */ }
 
     return missing;
   } catch {
