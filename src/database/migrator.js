@@ -13,7 +13,6 @@ async function checkCriticalColumns() {
   try {
     const missing = [];
 
-    // Verificar columnas en sales
     const [salesCols] = await sequelize.query(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'sales' AND column_name IN ('dian_status', 'tax_breakdown')"
     );
@@ -21,7 +20,6 @@ async function checkCriticalColumns() {
     if (!salesColNames.includes('dian_status')) missing.push('sales.dian_status');
     if (!salesColNames.includes('tax_breakdown')) missing.push('sales.tax_breakdown');
 
-    // Verificar columnas en inventory_movements
     const [movCols] = await sequelize.query(
       "SELECT column_name FROM information_schema.columns WHERE table_name = 'inventory_movements' AND column_name IN ('direction', 'reason', 'created_by')"
     );
@@ -38,7 +36,6 @@ async function checkCriticalColumns() {
 
 /**
  * Ejecuta migraciones pendientes automáticamente al iniciar el servidor.
- * Usa Umzug + SequelizeStorage para rastrear qué migraciones ya se aplicaron.
  */
 async function runMigrations() {
   const migrationsPath = path.join(__dirname, 'migrations', '*.js');
@@ -47,30 +44,31 @@ async function runMigrations() {
   // Verificar si faltan columnas críticas
   const missingCols = await checkCriticalColumns();
   if (missingCols.length > 0) {
-    logger.warn(`[Migrator] Columnas faltantes en 'sales': ${missingCols.join(', ')}. Forzando re-ejecución...`);
-    // Limpiar registro de migraciones para forzar re-ejecución
+    logger.warn(`[Migrator] Columnas faltantes: ${missingCols.join(', ')}. Forzando re-ejecución...`);
     try {
       await sequelize.query("DELETE FROM sequelize_migrations");
-      logger.info('[Migrator] Tabla sequelize_migrations limpiada para re-ejecución');
+      logger.info('[Migrator] Tabla sequelize_migrations limpiada');
     } catch (e) {
       logger.warn('[Migrator] No se pudo limpiar sequelize_migrations:', e.message);
     }
   }
 
+  const queryInterface = sequelize.getQueryInterface();
+  const SequelizeLib = require('sequelize');
+
   const umzug = new Umzug({
     migrations: {
       glob: migrationsPath,
-      resolve: ({ name, path: filePath, context }) => {
-        logger.info(`[Migrator] Cargando migración: ${name}`);
+      resolve: ({ name, path: filePath }) => {
         const migration = require(filePath);
         return {
           name,
-          up: async () => migration.up(context.queryInterface, context.Sequelize),
-          down: async () => migration.down(context.queryInterface, context.Sequelize),
+          up: async () => migration.up(queryInterface, SequelizeLib),
+          down: async () => migration.down(queryInterface, SequelizeLib),
         };
       },
     },
-    context: { queryInterface: sequelize.getQueryInterface(), Sequelize: require('sequelize') },
+    context: queryInterface,
     storage: new SequelizeStorage({ sequelize, tableName: 'sequelize_migrations' }),
     logger: {
       info: (msg) => logger.info(`[Migrator] ${msg.message || msg}`),
