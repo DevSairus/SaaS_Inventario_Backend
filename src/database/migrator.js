@@ -61,6 +61,15 @@ async function runMigrations() {
       glob: migrationsPath,
       resolve: ({ name, path: filePath }) => {
         const migration = require(filePath);
+        // Saltar archivos vacíos o sin función up
+        if (typeof migration.up !== 'function') {
+          logger.warn(`[Migrator] Saltando ${name} (no tiene función up)`);
+          return {
+            name,
+            up: async () => {},
+            down: async () => {},
+          };
+        }
         return {
           name,
           up: async () => migration.up(queryInterface, SequelizeLib),
