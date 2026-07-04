@@ -27,7 +27,7 @@ const getCaptcha = async (req, res) => {
   try {
     const response = await axios.get(
       `${RUNT_BASE}/captcha/libre-captcha/generar`,
-      { headers: runtHeaders, timeout: 10000 }
+      { headers: runtHeaders, timeout: 30000 }
     );
 
     const { id, imagen, error } = response.data;
@@ -43,7 +43,7 @@ const getCaptcha = async (req, res) => {
     return res.json({ success: true, id, imagen });
 
   } catch (err) {
-    logger.error('RUNT getCaptcha error:', err.message);
+    logger.error('RUNT getCaptcha error:', err.message, err.code || '');
     return res.status(502).json({
       success: false,
       message: 'No se pudo conectar con el RUNT. Verifica tu conexión.',
@@ -99,7 +99,7 @@ const consultarVehiculo = async (req, res) => {
     const response = await axios.post(
       `${RUNT_BASE}/auth`,
       payload,
-      { headers: runtHeaders, timeout: 15000 }
+      { headers: runtHeaders, timeout: 30000 }
     );
 
     // Capturar cookies de sesión que el RUNT establece en /auth
