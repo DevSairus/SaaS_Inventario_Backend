@@ -68,10 +68,15 @@ const create = async (req, res) => {
 
     const vehicle = await Vehicle.create({
       tenant_id, plate: plate.toUpperCase().trim(),
-      brand, model, year, color, vin, engine, engine_number, ownership_card,
+      brand, model,
+      year: year ? parseInt(year) || null : null,
+      color, vin, engine, engine_number, ownership_card,
       soat_number, soat_expiry: soat_expiry || null,
       tecnomecanica_number, tecnomecanica_expiry: tecnomecanica_expiry || null,
-      fuel_type, current_mileage, customer_id, notes
+      fuel_type,
+      current_mileage: current_mileage ? parseInt(current_mileage) || null : null,
+      customer_id: customer_id || null,
+      notes
     });
 
     const full = await Vehicle.findByPk(vehicle.id, {
@@ -93,9 +98,17 @@ const update = async (req, res) => {
     const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
             soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
             fuel_type, current_mileage, customer_id, notes, is_active } = req.body;
-    await vehicle.update({ plate: plate?.toUpperCase().trim() || vehicle.plate, brand, model, year, color, vin,
-      engine, engine_number, ownership_card, soat_number, soat_expiry,
-      tecnomecanica_number, tecnomecanica_expiry, fuel_type, current_mileage, customer_id, notes, is_active });
+    await vehicle.update({
+      plate: plate?.toUpperCase().trim() || vehicle.plate,
+      brand, model,
+      year: year ? parseInt(year) || null : null,
+      color, vin, engine, engine_number, ownership_card,
+      soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
+      fuel_type,
+      current_mileage: current_mileage ? parseInt(current_mileage) || null : null,
+      customer_id: customer_id || null,
+      notes, is_active
+    });
 
     // Reload con customer incluido para que el frontend tenga el objeto completo
     await vehicle.reload({
