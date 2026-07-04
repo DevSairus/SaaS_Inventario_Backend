@@ -43,7 +43,12 @@ const getCaptcha = async (req, res) => {
     return res.json({ success: true, id, imagen });
 
   } catch (err) {
-    logger.error('RUNT getCaptcha error:', err.message, err.code || '');
+    logger.error('RUNT getCaptcha error:', {
+      message: err.message,
+      code: err.code,
+      status: err.response?.status,
+      data: JSON.stringify(err.response?.data || '').slice(0, 200),
+    });
     return res.status(502).json({
       success: false,
       message: 'No se pudo conectar con el RUNT. Verifica tu conexión.',
