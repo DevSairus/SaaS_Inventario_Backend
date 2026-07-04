@@ -70,7 +70,7 @@ async function runMigrations() {
         };
       },
     },
-    context: sequelize.getQueryInterface(),
+    context: { queryInterface: sequelize.getQueryInterface(), Sequelize: require('sequelize') },
     storage: new SequelizeStorage({ sequelize, tableName: 'sequelize_migrations' }),
     logger: {
       info: (msg) => logger.info(`[Migrator] ${msg.message || msg}`),

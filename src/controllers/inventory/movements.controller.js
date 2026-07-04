@@ -340,7 +340,7 @@ const createMovement = async (movementData, transaction) => {
     movement_number,
     movement_type: movement_reason,
     direction: movement_type === 'entrada' ? 'in' : 'out',
-    movement_reason: notes || movement_reason,
+    movement_reason: movement_reason || notes || 'movimiento',
     reference_type,
     reference_id,
     product_id,
