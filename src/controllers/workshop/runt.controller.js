@@ -17,6 +17,31 @@ const runtHeaders = {
   'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
 };
 
+// Configuración de proxy (opcional, para entornos cloud que el RUNT bloquea)
+// En Railway, configurar RUNT_PROXY_URL como env var si el RUNT bloquea la IP
+// Ejemplo: socks5://user:pass@proxy.host:port o http://proxy.host:port
+function getAxiosConfig(extra = {}) {
+  const config = { headers: runtHeaders, ...extra };
+  const proxyUrl = process.env.RUNT_PROXY_URL;
+  if (proxyUrl) {
+    if (proxyUrl.startsWith('socks')) {
+      // Para SOCKS proxy, usar https-proxy-agent
+      try {
+        const { SocksProxyAgent } = require('socks-proxy-agent');
+        config.httpsAgent = new SocksProxyAgent(proxyUrl);
+      } catch (e) {
+        logger.warn('socks-proxy-agent no instalado, intentando sin proxy');
+      }
+    } else {
+      // HTTP proxy
+      const [protocol, rest] = proxyUrl.split('://');
+      const [host, port] = rest.split(':');
+      config.proxy = { protocol, host, port: parseInt(port) };
+    }
+  }
+  return config;
+}
+
 /* ─── GET /workshop/vehicles/runt/captcha ─────────────────────────────────
    Obtiene un nuevo CAPTCHA del RUNT.
    Respuesta: { id: string, imagen: "data:image/png;base64,..." }
@@ -27,7 +52,7 @@ const getCaptcha = async (req, res) => {
   try {
     const response = await axios.get(
       `${RUNT_BASE}/captcha/libre-captcha/generar`,
-      { headers: runtHeaders, timeout: 30000 }
+      getAxiosConfig({ timeout: 30000 })
     );
 
     const { id, imagen, error } = response.data;
@@ -104,7 +129,7 @@ const consultarVehiculo = async (req, res) => {
     const response = await axios.post(
       `${RUNT_BASE}/auth`,
       payload,
-      { headers: runtHeaders, timeout: 30000 }
+      getAxiosConfig({ timeout: 30000 })
     );
 
     // Capturar cookies de sesión que el RUNT establece en /auth
@@ -160,7 +185,7 @@ const consultarVehiculo = async (req, res) => {
       try {
         const soatRes = await axios.get(
           `${RUNT_BASE}/soat`,
-          { headers: secondaryHeaders, timeout: 10000 }
+          { ...getAxiosConfig(), headers: secondaryHeaders, timeout: 10000 }
         );
         soatData = Array.isArray(soatRes.data) ? soatRes.data
                  : Array.isArray(soatRes.data?.soat) ? soatRes.data.soat
@@ -173,7 +198,7 @@ const consultarVehiculo = async (req, res) => {
       try {
         const rtmRes = await axios.get(
           `${RUNT_BASE}/rtms`,
-          { headers: secondaryHeaders, params: { tipo: 'N' }, timeout: 10000 }
+          { ...getAxiosConfig(), headers: secondaryHeaders, params: { tipo: 'N' }, timeout: 10000 }
         );
         // El RUNT puede devolver { revisiones: [...] } o directamente el array
         rtmData = Array.isArray(rtmRes.data) ? rtmRes.data
