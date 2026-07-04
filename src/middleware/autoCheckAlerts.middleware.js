@@ -142,25 +142,29 @@ const autoCheckAlerts = async (req, res, next) => {
 
 /**
  * Función helper para marcar productos que necesitan verificación
- * Uso en controladores:
- *   markForAlertCheck(res, product_id, tenant_id);
- *   return res.json({ ... });
+ * Ejecuta la verificación directamente via setImmediate (fuera del request cycle)
  */
 function markForAlertCheck(res, product_id, tenant_id) {
-  res.locals.alertCheck = {
-    product_id,
-    tenant_id
-  };
+  setImmediate(async () => {
+    try {
+      await checkAlertsForProduct(product_id, tenant_id);
+    } catch (err) {
+      console.error('[AlertCheck] Error verificando alertas:', err.message);
+    }
+  });
 }
 
 /**
  * Función helper para marcar múltiples productos
  */
 function markProductsForAlertCheck(res, product_ids, tenant_id) {
-  res.locals.alertCheck = {
-    product_ids,
-    tenant_id
-  };
+  setImmediate(async () => {
+    try {
+      await checkAlertsForProducts(product_ids, tenant_id);
+    } catch (err) {
+      console.error('[AlertCheck] Error verificando alertas:', err.message);
+    }
+  });
 }
 
 module.exports = {
