@@ -58,6 +58,30 @@ router.get('/vehicle-reminders', cronAuth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/cron/stock-alerts
+ * Red de seguridad: re-escanea todos los productos con min_stock configurado
+ * y crea/resuelve alertas de stock bajo/sin stock, por si algún flujo no
+ * disparó la verificación automática (ej. edición directa de producto).
+ * Ejecutado automáticamente por Vercel Cron cada hora.
+ */
+router.get('/stock-alerts', cronAuth, async (req, res) => {
+  try {
+    console.log('🔔 [CRON] Iniciando verificación de alertas de stock...');
+    const { checkAllStockAlerts } = require('../middleware/autoCheckAlerts.middleware');
+    const result = await checkAllStockAlerts();
+    res.json({
+      success: true,
+      message: 'Verificación de alertas de stock completada',
+      result,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ [CRON] Error en stock-alerts:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 
 // ============================================================================
 // TEST ENDPOINT — Solo disponible en desarrollo o con CRON_SECRET

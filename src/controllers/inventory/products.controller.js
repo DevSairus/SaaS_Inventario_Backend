@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { Product, Category } = require('../../models/inventory');
+const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
 const getProductStats = async (req, res) => {
   try {
@@ -172,6 +173,7 @@ const createProduct = async (req, res) => {
     });
 
     const newProduct = await Product.findOne({ where: { id: product.id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
+    if (tenantId) markForAlertCheck(res, product.id, tenantId);
     res.status(201).json({ success: true, message: 'Producto creado exitosamente', data: newProduct });
   } catch (error) {
     console.error('Error en createProduct:', error);
@@ -231,6 +233,9 @@ const updateProduct = async (req, res) => {
 
     await product.update(updateData);
     const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
+    if (updateData.current_stock !== undefined || updateData.min_stock !== undefined || updateData.max_stock !== undefined) {
+      markForAlertCheck(res, id, tenantId);
+    }
     res.json({ success: true, message: 'Producto actualizado exitosamente', data: updatedProduct });
   } catch (error) {
     console.error('Error en updateProduct:', error);

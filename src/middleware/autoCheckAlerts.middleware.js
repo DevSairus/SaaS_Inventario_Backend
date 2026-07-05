@@ -113,6 +113,23 @@ async function checkAlertsForProducts(product_ids, tenant_id) {
 }
 
 /**
+ * Verificar alertas de TODOS los productos (todos los tenants).
+ * Pensado como red de seguridad para un cron job periódico.
+ */
+async function checkAllStockAlerts() {
+  const products = await Product.findAll({
+    where: { min_stock: { [Op.not]: null, [Op.gt]: 0 } },
+    attributes: ['id', 'tenant_id']
+  });
+
+  for (const product of products) {
+    await checkAlertsForProduct(product.id, product.tenant_id);
+  }
+
+  return { products_checked: products.length };
+}
+
+/**
  * Middleware que se ejecuta después de operaciones de inventario
  * Uso: router.post('/ruta', middleware, autoCheckAlerts);
  */
@@ -171,6 +188,7 @@ module.exports = {
   autoCheckAlerts,
   checkAlertsForProduct,
   checkAlertsForProducts,
+  checkAllStockAlerts,
   markForAlertCheck,
   markProductsForAlertCheck
 };
