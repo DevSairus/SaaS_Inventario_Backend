@@ -84,7 +84,7 @@ const getStockAlerts = async (req, res) => {
       model: Product,
       as: 'product',
       required: false, // ✅ LEFT JOIN en lugar de INNER JOIN
-      attributes: ['id', 'name', 'sku', 'barcode', 'current_stock', 'min_stock', 'max_stock'],
+      attributes: ['id', 'name', 'sku', 'barcode', 'current_stock', 'min_stock', 'max_stock', 'track_inventory'],
       include: [
         {
           model: Category,
@@ -179,7 +179,7 @@ const getStockAlertById = async (req, res) => {
         {
           model: Product,
           as: 'product',
-          attributes: ['id', 'name', 'sku', 'barcode', 'current_stock', 'min_stock', 'max_stock'],
+          attributes: ['id', 'name', 'sku', 'barcode', 'current_stock', 'min_stock', 'max_stock', 'track_inventory'],
           include: [
             {
               model: Category,
