@@ -63,13 +63,15 @@ exports.getMovementsByMonth = async (req, res) => {
       ORDER BY month DESC
     `;
 
+    const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+
     const [quantities, values] = await Promise.all([
       sequelize.query(quantityQuery, {
-        replacements: { tenantId },
+        replacements: { tenantId, ...dateReplacements },
         type: QueryTypes.SELECT
       }),
       sequelize.query(valueQuery, {
-        replacements: { tenantId },
+        replacements: { tenantId, ...dateReplacements },
         type: QueryTypes.SELECT
       })
     ]);
@@ -258,8 +260,10 @@ exports.getProfitReport = async (req, res) => {
       LIMIT ${parseInt(limit)}
     `;
 
+    const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+
     const products = await sequelize.query(query, {
-      replacements: { tenantId },
+      replacements: { tenantId, ...dateReplacements },
       type: QueryTypes.SELECT
     });
 
@@ -278,7 +282,7 @@ exports.getProfitReport = async (req, res) => {
         AND s.status IN ('completed', 'pending')
     `;
     const [totalsRow] = await sequelize.query(totalsQuery, {
-      replacements: { tenantId },
+      replacements: { tenantId, ...dateReplacements },
       type: QueryTypes.SELECT
     });
     const totals = {
@@ -389,8 +393,10 @@ exports.getRotationReport = async (req, res) => {
       ORDER BY qty_sold DESC
     `;
 
+    const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+
     const allProducts = await sequelize.query(query, {
-      replacements: { tenantId },
+      replacements: { tenantId, ...dateReplacements },
       type: QueryTypes.SELECT
     });
 
