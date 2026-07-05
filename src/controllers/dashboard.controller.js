@@ -228,24 +228,28 @@ exports.getAlerts = async (req, res) => {
     const alerts = [];
 
     // Alerta 1: Productos con stock bajo
-    const lowStockProducts = await Product.findAll({
-      where: {
-        tenant_id: tenantId,
-        [Op.and]: [
-          literal('current_stock <= min_stock'),
-          { current_stock: { [Op.gt]: 0 } }
-        ],
-        is_active: true
-      },
-      attributes: ['id', 'name', 'sku', 'current_stock', 'min_stock'],
-      limit: 10
-    });
+    const lowStockWhere = {
+      tenant_id: tenantId,
+      [Op.and]: [
+        literal('current_stock <= min_stock'),
+        { current_stock: { [Op.gt]: 0 } }
+      ],
+      is_active: true
+    };
+    const [lowStockProducts, lowStockTotal] = await Promise.all([
+      Product.findAll({
+        where: lowStockWhere,
+        attributes: ['id', 'name', 'sku', 'current_stock', 'min_stock'],
+        limit: 10
+      }),
+      Product.count({ where: lowStockWhere })
+    ]);
 
-    if (lowStockProducts.length > 0) {
+    if (lowStockTotal > 0) {
       alerts.push({
         type: 'warning',
         category: 'inventory',
-        title: `${lowStockProducts.length} productos con stock bajo`,
+        title: `${lowStockTotal} productos con stock bajo`,
         message: 'Productos que necesitan reabastecimiento',
         data: lowStockProducts.map(p => ({
           id: p.id,
@@ -259,21 +263,25 @@ exports.getAlerts = async (req, res) => {
     }
 
     // Alerta 2: Productos sin stock
-    const outOfStockProducts = await Product.findAll({
-      where: {
-        tenant_id: tenantId,
-        current_stock: 0,
-        is_active: true
-      },
-      attributes: ['id', 'name', 'sku'],
-      limit: 10
-    });
+    const outOfStockWhere = {
+      tenant_id: tenantId,
+      current_stock: 0,
+      is_active: true
+    };
+    const [outOfStockProducts, outOfStockTotal] = await Promise.all([
+      Product.findAll({
+        where: outOfStockWhere,
+        attributes: ['id', 'name', 'sku'],
+        limit: 10
+      }),
+      Product.count({ where: outOfStockWhere })
+    ]);
 
-    if (outOfStockProducts.length > 0) {
+    if (outOfStockTotal > 0) {
       alerts.push({
         type: 'error',
         category: 'inventory',
-        title: `${outOfStockProducts.length} productos sin stock`,
+        title: `${outOfStockTotal} productos sin stock`,
         message: 'Productos agotados que no se pueden vender',
         data: outOfStockProducts.map(p => ({
           id: p.id,
