@@ -115,13 +115,14 @@ const importInvoice = async (req, res) => {
     const processedItems = await processInvoiceItems(filteredItems, tenant_id, transaction, profit_margin, margin_multiplier);
     const purchase = await createPurchaseFromInvoice(
       invoiceData,
-      supplier.id,
+      supplier,
       processedItems,
       tenant_id,
       user_id,
       transaction,
       shipping_cost,
-      discount_amount
+      discount_amount,
+      req.branch_id || null
     );
 
     await transaction.commit();
@@ -370,6 +371,7 @@ async function processInvoiceItems(items, tenant_id, transaction, profit_margin 
       product_id: product.id,
       product_name: product.name,
       product_sku: product.sku,
+      unit_of_measure: product.unit_of_measure || 'unit',
       quantity: item.quantity,
       unit_cost: item.unit_price,
       tax_percentage: item.tax_percentage,
@@ -397,19 +399,48 @@ async function generateUniqueSku(productName, tenant_id, transaction) {
   return sku;
 }
 
-async function createPurchaseFromInvoice(invoiceData, supplier_id, items, tenant_id, user_id, transaction, shipping_cost = 0, discount_amount = 0) {
+async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id, user_id, transaction, shipping_cost = 0, discount_amount = 0, branch_id = null) {
   const purchaseNumber = await generatePurchaseNumber(tenant_id, transaction);
 
   const subtotal     = items.reduce((sum, item) => sum + parseFloat(item.subtotal), 0);
   const tax_amount   = items.reduce((sum, item) => sum + parseFloat(item.tax_amount), 0);
   const total_amount = subtotal + tax_amount + shipping_cost - discount_amount;
 
+  // Plazo/fecha de pago, en orden de prioridad:
+  //  1. Fecha de vencimiento que ya trae la propia factura XML (PaymentDueDate)
+  //  2. Calculada a partir del plazo por defecto configurado en el proveedor
+  //  3. Sin plazo conocido → queda pendiente sin fecha (se puede editar a mano)
+  const purchase_date = invoiceData.invoice.date || new Date();
+  let due_date = null;
+  let payment_terms = null;
+
+  if (invoiceData.invoice.due_date) {
+    due_date = invoiceData.invoice.due_date;
+    payment_terms = Math.round((new Date(due_date) - new Date(purchase_date)) / (1000 * 60 * 60 * 24));
+  } else if (supplier.payment_terms !== null && supplier.payment_terms !== undefined) {
+    payment_terms = supplier.payment_terms;
+    if (payment_terms > 0) {
+      const base = new Date(purchase_date);
+      base.setDate(base.getDate() + payment_terms);
+      due_date = base.toISOString().split('T')[0];
+    }
+  }
+
+  // Plazo 0 (o factura ya vencida el mismo día de emisión) = compra de contado:
+  // se marca pagada de inmediato y no debe aparecer en cuentas por pagar.
+  const isCash = payment_terms === 0;
+
   const purchase = await Purchase.create({
     tenant_id,
+    branch_id,
     purchase_number: purchaseNumber,
-    supplier_id,
-    purchase_date: invoiceData.invoice.date || new Date(),
-    expected_date: invoiceData.invoice.due_date || new Date(),
+    supplier_id: supplier.id,
+    purchase_date,
+    expected_delivery_date: invoiceData.invoice.due_date || new Date(),
+    due_date: isCash ? null : due_date,
+    payment_terms,
+    payment_status: isCash ? 'paid' : 'pending',
+    paid_amount: isCash ? total_amount : 0,
     subtotal,
     tax_amount,
     discount_amount,
@@ -421,16 +452,18 @@ async function createPurchaseFromInvoice(invoiceData, supplier_id, items, tenant
     created_by: user_id
   }, { transaction });
 
-  for (const item of items) {
+  for (const [index, item] of items.entries()) {
     await PurchaseItem.create({
       tenant_id,
       purchase_id: purchase.id,
+      line_number: index + 1,
       product_id: item.product_id,
       product_name: item.product_name,
       product_sku: item.product_sku,
+      unit_of_measure: item.unit_of_measure || 'unit',
       quantity: item.quantity,
       unit_cost: item.unit_cost,
-      tax_percentage: item.tax_percentage,
+      tax_rate: item.tax_percentage,
       tax_amount: item.tax_amount,
       subtotal: item.subtotal,
       total: item.total

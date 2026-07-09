@@ -15,6 +15,16 @@ const Warehouse = sequelize.define('Warehouse', {
       key: 'id'
     }
   },
+  branch_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    unique: true,
+    references: {
+      model: 'branches',
+      key: 'id'
+    },
+    comment: 'Sede a la que pertenece esta bodega (1 sede = 1 bodega)'
+  },
   code: {
     type: DataTypes.STRING(50),
     allowNull: false

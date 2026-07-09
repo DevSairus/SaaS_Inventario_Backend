@@ -28,17 +28,21 @@ function extractDianConfig(tenant) {
 /* ──────────────────────────────────────────────────────────
  * Obtiene o incrementa el consecutivo de la resolución
  * ────────────────────────────────────────────────────────── */
-async function getNextConsecutive(tenantId, isTest = false, transaction) {
+async function getNextConsecutive(tenantId, branchId, isTest = false, transaction) {
   const { DianResolution } = require('../../models');
 
+  if (!branchId) {
+    throw new Error('No se puede generar el consecutivo DIAN sin una sede (branch_id) definida.');
+  }
+
   const resolution = await DianResolution.findOne({
-    where: { tenant_id: tenantId, is_active: true, is_test: isTest, document_type: 'invoice' },
+    where: { tenant_id: tenantId, branch_id: branchId, is_active: true, is_test: isTest, document_type: 'invoice' },
     transaction,
     lock: transaction ? transaction.LOCK.UPDATE : undefined,
   });
 
   if (!resolution) {
-    throw new Error(`No existe resolución DIAN ${isTest ? 'de pruebas ' : ''}activa para este tenant.`);
+    throw new Error(`No existe resolución DIAN ${isTest ? 'de pruebas ' : ''}activa para esta sede.`);
   }
 
   if (resolution.current_number > resolution.to_number) {
@@ -79,7 +83,7 @@ async function sendInvoiceToDian(sale, tenant) {
     }
 
     const { consecutive, invoiceNumber, resolution } = await getNextConsecutive(
-      tenant.id, isTest, transaction
+      tenant.id, sale.branch_id, isTest, transaction
     );
 
     await Sale.update(
@@ -221,11 +225,11 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     const saleId = note.reference_sale_id || note.id;
 
     const resolution = await DianResolution.findOne({
-      where: { tenant_id: tenant.id, is_active: true, is_test: isTest },
+      where: { tenant_id: tenant.id, branch_id: note.branch_id, is_active: true, is_test: isTest },
       order: [['created_at', 'DESC']],
       transaction,
     });
-    if (!resolution) throw new Error(`No hay resolución DIAN ${isTest ? 'de pruebas ' : ''}activa.`);
+    if (!resolution) throw new Error(`No hay resolución DIAN ${isTest ? 'de pruebas ' : ''}activa para esta sede.`);
 
     const ts = Date.now().toString().slice(-8);
     const noteNumber = `${docLabel}${resolution.prefix}${ts}`;

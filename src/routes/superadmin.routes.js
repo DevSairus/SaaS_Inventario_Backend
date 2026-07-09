@@ -13,6 +13,8 @@ const TenantSubscription = require('../models/subscriptions/TenantSubscription')
 const SubscriptionPlan = require('../models/subscriptions/SubscriptionPlan');
 const SubscriptionInvoice = require('../models/subscriptions/SubscriptionInvoice');
 const SuperAdminMercadoPagoConfig = require('../models/payments/SuperAdminMercadoPagoConfig');
+const { MODULES_CATALOG } = require('../config/modules.catalog');
+const { invalidateModulesCache, invalidateAllModulesCache, getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 
 // ============================================
 // GESTIÓN DE TENANTS
@@ -151,6 +153,11 @@ router.get(
             limit: 1,
             order: [['created_at', 'DESC']],
           },
+          {
+            model: SubscriptionPlan,
+            as: 'subscriptionPlan',
+            required: false,
+          },
         ],
       });
 
@@ -209,6 +216,13 @@ router.get(
 
           // Suscripción completa
           subscription: subscription || null,
+
+          // Plan efectivo (fuente de verdad de módulos, independiente de la suscripción)
+          plan_id: tenant.plan_id,
+          subscription_plan: tenant.subscriptionPlan || null,
+          modules_enabled: tenant.modules_enabled || [],
+          modules_disabled: tenant.modules_disabled || [],
+          effective_modules: await getEffectiveModulesForTenantId(tenant.id),
         },
         stats: {
           totalUsers,
@@ -239,7 +253,16 @@ router.post(
     const transaction = await Tenant.sequelize.transaction();
 
     try {
-      // 1. Crear tenant
+      // 2. Obtener plan (por plan_id si viene del nuevo selector, o por slug legacy)
+      const plan = req.body.plan_id
+        ? await SubscriptionPlan.findByPk(req.body.plan_id)
+        : await SubscriptionPlan.findOne({ where: { slug: req.body.plan || 'free' } });
+
+      if (!plan) {
+        throw new Error('Plan no encontrado');
+      }
+
+      // 1. Crear tenant (plan_id directo — fuente de verdad de módulos/límites)
       const tenant = await Tenant.create(
         {
           company_name: req.body.company_name,
@@ -250,18 +273,12 @@ router.post(
           phone: req.body.phone,
           address: req.body.address,
           is_active: true,
+          plan_id: plan.id,
+          modules_enabled: req.body.modules_enabled || [],
+          modules_disabled: req.body.modules_disabled || [],
         },
         { transaction }
       );
-
-      // 2. Obtener plan
-      const plan = await SubscriptionPlan.findOne({
-        where: { slug: req.body.plan || 'free' },
-      });
-
-      if (!plan) {
-        throw new Error('Plan no encontrado');
-      }
 
       // 3. Crear suscripción
       const trialDays = 14;
@@ -331,37 +348,45 @@ router.put(
         return res.status(404).json({ error: 'Tenant no encontrado' });
       }
 
-      await tenant.update({
+      const updates = {
         company_name: req.body.company_name,
         business_name: req.body.business_name,
         tax_id: req.body.tax_id,
         email: req.body.email,
         phone: req.body.phone,
         address: req.body.address,
-      });
+      };
+      if (req.body.modules_enabled !== undefined) updates.modules_enabled = req.body.modules_enabled;
+      if (req.body.modules_disabled !== undefined) updates.modules_disabled = req.body.modules_disabled;
 
-      if (req.body.plan) {
-        const plan = await SubscriptionPlan.findOne({
-          where: { slug: req.body.plan },
+      // Plan (por plan_id del selector nuevo, o por slug legacy)
+      const plan = req.body.plan_id
+        ? await SubscriptionPlan.findByPk(req.body.plan_id)
+        : req.body.plan
+          ? await SubscriptionPlan.findOne({ where: { slug: req.body.plan } })
+          : null;
+
+      if (plan) {
+        updates.plan_id = plan.id;
+
+        const subscription = await TenantSubscription.findOne({
+          where: { tenant_id: id },
+          order: [['created_at', 'DESC']],
         });
 
-        if (plan) {
-          const subscription = await TenantSubscription.findOne({
-            where: { tenant_id: id },
-            order: [['created_at', 'DESC']],
+        if (subscription) {
+          await subscription.update({
+            plan_id: plan.id,
+            amount:
+              subscription.billing_cycle === 'monthly'
+                ? plan.monthly_price
+                : plan.yearly_price,
           });
-
-          if (subscription) {
-            await subscription.update({
-              plan_id: plan.id,
-              amount:
-                subscription.billing_cycle === 'monthly'
-                  ? plan.monthly_price
-                  : plan.yearly_price,
-            });
-          }
         }
       }
+
+      await tenant.update(updates);
+      invalidateModulesCache(tenant.id);
 
       res.json({ tenant });
     } catch (error) {
@@ -501,6 +526,16 @@ router.get(
 // GESTIÓN DE PLANES DE SUSCRIPCIÓN
 // ============================================
 
+// GET /modules-catalog - Catálogo de módulos y sus dependencias duras
+router.get(
+  '/modules-catalog',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  (req, res) => {
+    res.json({ modules: MODULES_CATALOG });
+  }
+);
+
 // GET /subscription-plans - Listar todos los planes
 router.get(
   '/subscription-plans',
@@ -534,8 +569,11 @@ router.post(
         yearly_price: req.body.yearly_price || null,
         max_users: req.body.max_users || 3,
         max_clients: req.body.max_clients || 50,
+        max_products: req.body.max_products ?? 100,
+        max_warehouses: req.body.max_warehouses ?? 1,
         max_invoices_per_month: req.body.max_invoices_per_month || 100,
         max_storage_mb: req.body.max_storage_mb || 100,
+        modules: req.body.modules || [],
         features: req.body.features || {},
         is_active: req.body.is_active !== undefined ? req.body.is_active : true,
         is_popular: req.body.is_popular || false,
@@ -570,13 +608,17 @@ router.put(
         yearly_price: req.body.yearly_price !== undefined ? req.body.yearly_price : plan.yearly_price,
         max_users: req.body.max_users !== undefined ? req.body.max_users : plan.max_users,
         max_clients: req.body.max_clients !== undefined ? req.body.max_clients : plan.max_clients,
+        max_products: req.body.max_products !== undefined ? req.body.max_products : plan.max_products,
+        max_warehouses: req.body.max_warehouses !== undefined ? req.body.max_warehouses : plan.max_warehouses,
         max_invoices_per_month: req.body.max_invoices_per_month !== undefined ? req.body.max_invoices_per_month : plan.max_invoices_per_month,
+        modules: req.body.modules !== undefined ? req.body.modules : plan.modules,
         features: req.body.features !== undefined ? req.body.features : plan.features,
         is_active: req.body.is_active !== undefined ? req.body.is_active : plan.is_active,
         is_popular: req.body.is_popular !== undefined ? req.body.is_popular : plan.is_popular,
         sort_order: req.body.sort_order !== undefined ? req.body.sort_order : plan.sort_order,
       });
 
+      invalidateAllModulesCache();
       res.json({ plan });
     } catch (error) {
       console.error('Error updating plan:', error);
@@ -679,13 +721,60 @@ router.get(
   checkPermission('superadmin.view_all'),
   async (req, res) => {
     try {
-      const subscription = await TenantSubscription.findOne({
+      let subscription = await TenantSubscription.findOne({
         where: { tenant_id: req.params.tenantId },
         include: [{ model: SubscriptionPlan, as: 'plan' }],
       });
+
+      // Tenants creados antes de que existiera el sistema de suscripciones
+      // (o fuera del flujo normal de alta) pueden no tener ningún registro
+      // en tenant_subscriptions — sin esto, la pantalla de gestión de
+      // suscripción del superadmin queda en blanco por falta de datos.
+      // Se autoprovisiona una suscripción por defecto usando el plan_id
+      // del tenant (o el plan "free" como último fallback).
+      if (!subscription) {
+        const tenant = await Tenant.findByPk(req.params.tenantId);
+        if (!tenant) {
+          return res.status(404).json({ error: 'Tenant no encontrado' });
+        }
+
+        const plan =
+          (tenant.plan_id && (await SubscriptionPlan.findByPk(tenant.plan_id))) ||
+          (await SubscriptionPlan.findOne({ where: { slug: 'free' } })) ||
+          (await SubscriptionPlan.findOne({ order: [['sort_order', 'ASC']] }));
+
+        if (!plan) {
+          return res.status(404).json({ error: 'No hay planes configurados para autoprovisionar la suscripción' });
+        }
+
+        const trialDays = plan.trial_days || 14;
+        const trialEndsAt = new Date();
+        trialEndsAt.setDate(trialEndsAt.getDate() + trialDays);
+
+        const created = await TenantSubscription.create({
+          tenant_id: tenant.id,
+          plan_id: plan.id,
+          status: tenant.subscription_status || 'trial',
+          billing_cycle: 'monthly',
+          amount: plan.monthly_price,
+          currency: 'COP',
+          starts_at: new Date(),
+          trial_ends_at: trialEndsAt,
+          current_period_start: new Date(),
+          current_period_end: trialEndsAt,
+          next_billing_date: trialEndsAt,
+          auto_renew: true,
+        });
+
+        subscription = await TenantSubscription.findByPk(created.id, {
+          include: [{ model: SubscriptionPlan, as: 'plan' }],
+        });
+      }
+
       res.json({ subscription });
     } catch (error) {
-      res.status(500).json({ error: 'Error al obtener suscripción' });
+      console.error('Error al obtener suscripción:', error);
+      res.status(500).json({ error: 'Error al obtener suscripción', details: error.message });
     }
   }
 );

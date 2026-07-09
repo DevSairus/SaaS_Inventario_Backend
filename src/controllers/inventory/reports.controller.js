@@ -14,7 +14,7 @@ const PurchaseItem = require('../../models/inventory/PurchaseItem');
 
 exports.getMovementsByMonth = async (req, res) => {
   try {
-    const { months, from_date, to_date } = req.query;
+    const { months, from_date, to_date, branch_id } = req.query;
     const tenantId = req.user.tenant_id;
 
     // Validar fechas
@@ -35,17 +35,38 @@ exports.getMovementsByMonth = async (req, res) => {
       ? `im.movement_date BETWEEN :fromDate AND :toDate`
       : `im.movement_date >= NOW() - INTERVAL '${safeM} months'`;
 
+    // inventory_movements no tiene columna branch_id propia (el inventario es
+    // global/compartido entre sedes), pero como 1 sede = 1 bodega (decisión de
+    // diseño de Fase 1), filtrar por sede equivale a filtrar por su bodega.
+    const branchFilter = branch_id ? `AND warehouse_id = :branchWarehouseId` : '';
+    const branchFilterWithAlias = branch_id ? `AND im.warehouse_id = :branchWarehouseId` : '';
+
+    let branchWarehouseId = null;
+    if (branch_id) {
+      const [warehouseRow] = await sequelize.query(
+        `SELECT id FROM warehouses WHERE tenant_id = :tenantId AND branch_id = :branchId LIMIT 1`,
+        { replacements: { tenantId, branchId: branch_id }, type: QueryTypes.SELECT }
+      );
+      // Si la sede no tiene bodega asociada, usamos un id inexistente para
+      // devolver resultados vacíos en lugar de ignorar el filtro.
+      branchWarehouseId = warehouseRow ? warehouseRow.id : '00000000-0000-0000-0000-000000000000';
+    }
+
     // Consulta para cantidades y conteo de movimientos
+    // OJO: se agrupa por "direction" ('in'/'out'), NO por "movement_type" —
+    // ese campo guarda la clasificación de negocio (sale, purchase, etc.),
+    // no 'entrada'/'salida'. Ver nota en movements.controller.js.
     const quantityQuery = `
       SELECT 
         TO_CHAR(movement_date, 'YYYY-MM') as month,
-        movement_type,
+        direction,
         SUM(quantity)::numeric as total_quantity,
         COUNT(*)::integer as total_movements
       FROM inventory_movements
       WHERE tenant_id = :tenantId
         AND ${dateFilter}
-      GROUP BY TO_CHAR(movement_date, 'YYYY-MM'), movement_type
+        ${branchFilter}
+      GROUP BY TO_CHAR(movement_date, 'YYYY-MM'), direction
       ORDER BY month DESC
     `;
 
@@ -53,25 +74,27 @@ exports.getMovementsByMonth = async (req, res) => {
     const valueQuery = `
       SELECT 
         TO_CHAR(im.movement_date, 'YYYY-MM') as month,
-        im.movement_type,
+        im.direction,
         SUM(im.quantity * p.average_cost)::numeric as total_value
       FROM inventory_movements im
       INNER JOIN products p ON im.product_id = p.id
       WHERE im.tenant_id = :tenantId
         AND ${dateFilterWithAlias}
-      GROUP BY TO_CHAR(im.movement_date, 'YYYY-MM'), im.movement_type
+        ${branchFilterWithAlias}
+      GROUP BY TO_CHAR(im.movement_date, 'YYYY-MM'), im.direction
       ORDER BY month DESC
     `;
 
     const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+    const branchReplacements = branch_id ? { branchWarehouseId } : {};
 
     const [quantities, values] = await Promise.all([
       sequelize.query(quantityQuery, {
-        replacements: { tenantId, ...dateReplacements },
+        replacements: { tenantId, ...dateReplacements, ...branchReplacements },
         type: QueryTypes.SELECT
       }),
       sequelize.query(valueQuery, {
-        replacements: { tenantId, ...dateReplacements },
+        replacements: { tenantId, ...dateReplacements, ...branchReplacements },
         type: QueryTypes.SELECT
       })
     ]);
@@ -79,7 +102,7 @@ exports.getMovementsByMonth = async (req, res) => {
     // Crear un mapa de valores
     const valueMap = {};
     values.forEach(v => {
-      const key = `${v.month}-${v.movement_type}`;
+      const key = `${v.month}-${v.direction}`;
       valueMap[key] = parseFloat(v.total_value) || 0;
     });
 
@@ -100,23 +123,21 @@ exports.getMovementsByMonth = async (req, res) => {
 
       const quantity = parseFloat(mov.total_quantity) || 0;
       const movementCount = parseInt(mov.total_movements) || 0;
-      const valueKey = `${mov.month}-${mov.movement_type}`;
+      const valueKey = `${mov.month}-${mov.direction}`;
       const value = valueMap[valueKey] || 0;
 
       const typeKeyMap = {
-        'entrada': 'entradas',
-        'salida': 'salidas',
-        'ajuste_positivo': 'ajuste_positivo',
-        'ajuste_negativo': 'ajuste_negativo'
+        'in': 'entradas',
+        'out': 'salidas'
       };
-      const mappedKey = typeKeyMap[mov.movement_type] || mov.movement_type;
+      const mappedKey = typeKeyMap[mov.direction] || mov.direction;
       monthsMap[mov.month][mappedKey] = quantity;
 
       monthsMap[mov.month].total_movements += movementCount;
 
-      if (mov.movement_type === 'entrada') {
+      if (mov.direction === 'in') {
         monthsMap[mov.month].entradas_valor = value;
-      } else if (mov.movement_type === 'salida') {
+      } else if (mov.direction === 'out') {
         monthsMap[mov.month].salidas_valor = value;
       }
     });
@@ -206,7 +227,7 @@ exports.getValuation = async (req, res) => {
  */
 exports.getProfitReport = async (req, res) => {
   try {
-    const { months, from_date, to_date, limit = 100 } = req.query;
+    const { months, from_date, to_date, limit = 100, branch_id } = req.query;
     const tenantId = req.user.tenant_id;
 
     // ── Validar fechas — prevenir SQL injection ───────────────────────────
@@ -225,6 +246,10 @@ exports.getProfitReport = async (req, res) => {
       const monthsToUse = safeMonths(months || 3);
       dateFilter = `COALESCE(s.sale_date, s.created_at) >= NOW() - INTERVAL '${monthsToUse} months'`;
     }
+
+    // sales.branch_id ya existe (Fase 1/2), a diferencia de inventory_movements
+    // no requiere lookup a warehouses.
+    const branchFilter = branch_id ? `AND s.branch_id = :branchId` : '';
 
     const query = `
       SELECT 
@@ -255,15 +280,17 @@ exports.getProfitReport = async (req, res) => {
         AND s.tenant_id = :tenantId
         AND ${dateFilter}
         AND s.status IN ('completed', 'pending')
+        ${branchFilter}
       GROUP BY p.id, p.name, p.sku, p.product_type, c.name
       ORDER BY profit DESC
       LIMIT ${parseInt(limit)}
     `;
 
     const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+    const branchReplacements = branch_id ? { branchId: branch_id } : {};
 
     const products = await sequelize.query(query, {
-      replacements: { tenantId, ...dateReplacements },
+      replacements: { tenantId, ...dateReplacements, ...branchReplacements },
       type: QueryTypes.SELECT
     });
 
@@ -280,9 +307,10 @@ exports.getProfitReport = async (req, res) => {
         AND s.tenant_id = :tenantId
         AND ${dateFilter}
         AND s.status IN ('completed', 'pending')
+        ${branchFilter}
     `;
     const [totalsRow] = await sequelize.query(totalsQuery, {
-      replacements: { tenantId, ...dateReplacements },
+      replacements: { tenantId, ...dateReplacements, ...branchReplacements },
       type: QueryTypes.SELECT
     });
     const totals = {
@@ -340,7 +368,7 @@ exports.getProfitReport = async (req, res) => {
  */
 exports.getRotationReport = async (req, res) => {
   try {
-    const { months = 3, from_date, to_date } = req.query;
+    const { months = 3, from_date, to_date, branch_id } = req.query;
     const tenantId = req.user.tenant_id;
 
     // ── Validar fechas — prevenir SQL injection ───────────────────────────
@@ -355,6 +383,10 @@ exports.getRotationReport = async (req, res) => {
     const dateFilter = from_date && to_date
       ? `s.sale_date BETWEEN :fromDate AND :toDate`
       : `s.sale_date >= NOW() - INTERVAL '${safeMonths(months)} months'`;
+
+    // sales.branch_id ya existe; el subquery de ventas de la sección de
+    // rotación filtra sobre esa tabla directamente.
+    const branchFilter = branch_id ? `AND branch_id = :branchId` : '';
 
     const query = `
       SELECT 
@@ -385,6 +417,7 @@ exports.getRotationReport = async (req, res) => {
           WHERE tenant_id = :tenantId
             AND status IN ('completed')
             AND ${dateFilter.replace('s.sale_date', 'sale_date')}
+            ${branchFilter}
         )
       LEFT JOIN categories c ON p.category_id = c.id
       WHERE p.tenant_id = :tenantId
@@ -394,9 +427,10 @@ exports.getRotationReport = async (req, res) => {
     `;
 
     const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+    const branchReplacements = branch_id ? { branchId: branch_id } : {};
 
     const allProducts = await sequelize.query(query, {
-      replacements: { tenantId, ...dateReplacements },
+      replacements: { tenantId, ...dateReplacements, ...branchReplacements },
       type: QueryTypes.SELECT
     });
 

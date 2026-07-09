@@ -1,5 +1,6 @@
 // backend/src/middleware/checkLimits.js
 const { Tenant, User } = require('../models');
+const SubscriptionPlan = require('../models/subscriptions/SubscriptionPlan');
 const { Op } = require('sequelize');
 
 // Definición de planes y sus límites
@@ -92,8 +93,24 @@ const checkLimits = (resourceType) => {
         });
       }
 
-      // Obtener configuración del plan — fallback a 'enterprise' (ilimitado) si no se reconoce
-      const plan = PLANS[tenant.plan] || PLANS.enterprise;
+      // Fuente de verdad: subscription_plans (vía tenant.plan_id). Si el tenant
+      // todavía no tiene plan_id asignado (legacy, sin backfill), cae al
+      // objeto PLANS hardcodeado indexado por el string tenant.plan.
+      let plan;
+      if (tenant.plan_id) {
+        const subscriptionPlan = await SubscriptionPlan.findByPk(tenant.plan_id);
+        if (subscriptionPlan) {
+          plan = {
+            name: subscriptionPlan.name,
+            max_users: subscriptionPlan.max_users,
+            max_clients: subscriptionPlan.max_clients,
+            max_products: subscriptionPlan.max_products,
+            max_warehouses: subscriptionPlan.max_warehouses,
+            max_invoices_per_month: subscriptionPlan.max_invoices_per_month,
+          };
+        }
+      }
+      plan = plan || PLANS[tenant.plan] || PLANS.enterprise;
 
       if (!plan) {
         // Esta rama nunca debería alcanzarse gracias al fallback, pero por seguridad:

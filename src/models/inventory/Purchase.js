@@ -15,6 +15,15 @@ const Purchase = sequelize.define('Purchase', {
       key: 'id'
     }
   },
+  branch_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'branches',
+      key: 'id'
+    },
+    comment: 'Sede donde se realizó la compra'
+  },
   purchase_number: {
     type: DataTypes.STRING(50),
     allowNull: false,
@@ -119,6 +128,11 @@ const Purchase = sequelize.define('Purchase', {
   paid_amount: {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0
+  },
+  payment_history: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    comment: 'Historial de abonos a proveedor: [{date, amount, method, user_id, notes}]'
   },
   invoice_number: {
     type: DataTypes.STRING(100),

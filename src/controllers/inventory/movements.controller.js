@@ -1,4 +1,4 @@
-const { InventoryMovement, Product } = require('../../models/inventory');
+const { InventoryMovement, Product, Warehouse } = require('../../models/inventory');
 const { Op } = require('sequelize');
 const { checkAlertsForProduct } = require('../../middleware/autoCheckAlerts.middleware');
 
@@ -10,10 +10,11 @@ const getMovements = async (req, res) => {
     const {
       search = '',
       product_id,
-      movement_type,
+      direction,
       movement_reason,
       reference_type,
       reference_id,
+      branch_id,
       start_date,
       end_date,
       sort_by = 'movement_date',
@@ -32,8 +33,11 @@ const getMovements = async (req, res) => {
       where.product_id = product_id;
     }
 
-    if (movement_type) {
-      where.movement_type = movement_type;
+    // "movement_type" NO es 'entrada'/'salida' — guarda la clasificación de
+    // negocio (sale, purchase, customer_return, etc.). El filtro de
+    // entrada/salida real va contra "direction" ('in' | 'out').
+    if (direction) {
+      where.direction = direction;
     }
 
     if (movement_reason) {
@@ -46,6 +50,20 @@ const getMovements = async (req, res) => {
 
     if (reference_id) {
       where.reference_id = reference_id;
+    }
+
+    // InventoryMovement no tiene columna branch_id propia (el inventario es
+    // global/compartido entre sedes), pero como 1 sede = 1 bodega (decisión
+    // de diseño de Fase 1), filtrar por sede equivale a filtrar por la
+    // bodega asociada a esa sede.
+    if (branch_id) {
+      const warehouse = await Warehouse.findOne({
+        where: { tenant_id, branch_id },
+        attributes: ['id']
+      });
+      // Si la sede no tiene bodega asociada, forzamos un resultado vacío
+      // en lugar de ignorar el filtro silenciosamente.
+      where.warehouse_id = warehouse ? warehouse.id : null;
     }
 
     if (start_date) {
@@ -140,13 +158,17 @@ const getProductKardex = async (req, res) => {
     // Totales sobre TODO el rango (sin paginar)
     const allMovements = await InventoryMovement.findAll({
       where,
-      attributes: ['movement_type', 'quantity', 'total_cost', 'new_stock'],
+      attributes: ['movement_type', 'direction', 'quantity', 'total_cost', 'new_stock'],
       order: [['movement_date', 'ASC'], ['created_at', 'ASC']],
       raw: true
     });
 
-    const entradas = allMovements.filter(m => m.movement_type === 'entrada');
-    const salidas  = allMovements.filter(m => m.movement_type === 'salida');
+    // OJO: "movement_type" NO es 'entrada'/'salida' — guarda la clasificación de
+    // negocio (sale, purchase, customer_return, etc.) porque el CHECK constraint
+    // de la tabla no permite esos literales. El campo confiable para in/out es
+    // "direction" ('in' | 'out'), que sí se setea siempre en createMovement().
+    const entradas = allMovements.filter(m => m.direction === 'in');
+    const salidas  = allMovements.filter(m => m.direction === 'out');
     const totalEntradas      = entradas.reduce((s, m) => s + parseFloat(m.quantity), 0);
     const totalSalidas       = salidas.reduce((s, m) => s + parseFloat(m.quantity), 0);
     const totalCostoEntradas = entradas.reduce((s, m) => s + parseFloat(m.total_cost), 0);

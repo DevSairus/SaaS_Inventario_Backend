@@ -3,6 +3,8 @@ const { sequelize } = require('../config/database');
 // Autenticación
 const Tenant = require('./auth/Tenant');
 const User = require('./auth/User');
+const Branch = require('./Branch');
+const UserBranch = require('./UserBranch');
 const Permission = require('./auth/Permission');
 const RolePermission = require('./auth/RolePermission');
 
@@ -57,6 +59,10 @@ const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSet
 // DIAN - Facturación Electrónica
 const DianResolution = require('./dian/DianResolution');
 const DianEvent = require('./dian/DianEvent');
+
+// ✅ NUEVO - Tesorería
+const Expense = require('./finance/Expense');
+const CashSession = require('./finance/CashSession');
 // ============= RELACIONES EXISTENTES =============
 // Las asociaciones de Purchase, PurchaseItem, Supplier, Product e inventario base
 // están definidas en ./inventory/index.js. Se requiere aquí para garantizar que
@@ -65,8 +71,52 @@ require('./inventory');
 Tenant.hasMany(User, { foreignKey: 'tenant_id', as: 'users' });
 User.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
+// ============= RELACIONES - MULTI-SEDE (Fase 1/2) =============
+
+// Branch ↔ Tenant
+Branch.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(Branch, { foreignKey: 'tenant_id', as: 'branches' });
+
+// Branch ↔ Warehouse (1 sede = 1 bodega, decisión de diseño confirmada)
+Branch.hasOne(Warehouse, { foreignKey: 'branch_id', as: 'warehouse' });
+Warehouse.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+
+// Branch ↔ User (N:M vía UserBranch)
+Branch.belongsToMany(User, { through: UserBranch, foreignKey: 'branch_id', otherKey: 'user_id', as: 'users' });
+User.belongsToMany(Branch, { through: UserBranch, foreignKey: 'user_id', otherKey: 'branch_id', as: 'branches' });
+
+// UserBranch ↔ User / Branch (acceso directo a la tabla intermedia, usado por branchMiddleware)
+UserBranch.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+User.hasMany(UserBranch, { foreignKey: 'user_id', as: 'branch_assignments' });
+UserBranch.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Branch.hasMany(UserBranch, { foreignKey: 'branch_id', as: 'user_assignments' });
+
+// Branch ↔ Sale / Purchase (historial independiente por sede)
+Branch.hasMany(Sale, { foreignKey: 'branch_id', as: 'sales' });
+Sale.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Branch.hasMany(Purchase, { foreignKey: 'branch_id', as: 'purchases' });
+Purchase.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+
 Purchase.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(Purchase, { foreignKey: 'user_id', as: 'purchases' });
+
+// Expense ↔ Tenant / Branch / Supplier / User (Tesorería)
+Tenant.hasMany(Expense, { foreignKey: 'tenant_id', as: 'expenses' });
+Expense.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(Expense, { foreignKey: 'branch_id', as: 'expenses' });
+Expense.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Supplier.hasMany(Expense, { foreignKey: 'supplier_id', as: 'expenses' });
+Expense.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+Expense.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
+// CashSession ↔ Tenant / Branch / User (Aperturas y cierres de caja)
+Tenant.hasMany(CashSession, { foreignKey: 'tenant_id', as: 'cash_sessions' });
+CashSession.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(CashSession, { foreignKey: 'branch_id', as: 'cash_sessions' });
+CashSession.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+CashSession.belongsTo(User, { foreignKey: 'opened_by', as: 'opener' });
+CashSession.belongsTo(User, { foreignKey: 'closed_by', as: 'closer' });
+User.hasMany(Expense, { foreignKey: 'created_by', as: 'created_expenses' });
 
 InventoryMovement.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(InventoryMovement, { foreignKey: 'user_id', as: 'movements' });
@@ -89,6 +139,10 @@ TenantSubscription.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
 SubscriptionPlan.hasMany(TenantSubscription, { foreignKey: 'plan_id', as: 'subscriptions' });
 TenantSubscription.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'plan' });
+
+// Plan efectivo del tenant (independiente del estado de la suscripción)
+Tenant.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'subscriptionPlan' });
+SubscriptionPlan.hasMany(Tenant, { foreignKey: 'plan_id', as: 'tenants' });
 
 TenantSubscription.hasMany(SubscriptionInvoice, { foreignKey: 'subscription_id', as: 'invoices' });
 SubscriptionInvoice.belongsTo(TenantSubscription, { foreignKey: 'subscription_id', as: 'subscription' });
@@ -315,6 +369,8 @@ module.exports = {
   sequelize,
   Tenant,
   User,
+  Branch,
+  UserBranch,
   Permission,
   RolePermission,
   Category,
@@ -356,4 +412,6 @@ module.exports = {
   ProductCommissionSettlementItem,
   DianResolution,
   DianEvent,
+  Expense,
+  CashSession,
 };

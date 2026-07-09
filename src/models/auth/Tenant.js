@@ -68,6 +68,21 @@ const Tenant = sequelize.define('Tenant', {
       isIn: [['free', 'basic', 'premium', 'enterprise']]
     }
   },
+  plan_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'FK directa a subscription_plans — fuente de verdad de módulos/límites, independiente del estado de la suscripción'
+  },
+  modules_enabled: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    comment: 'Módulos agregados a este tenant por fuera de su plan (add-ons)'
+  },
+  modules_disabled: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    comment: 'Módulos que trae el plan pero se le quitan a este tenant puntualmente'
+  },
   subscription_status: {
     type: DataTypes.STRING,
     defaultValue: 'trial',

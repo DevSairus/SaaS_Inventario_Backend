@@ -131,6 +131,22 @@ const WorkOrder = sequelize.define('WorkOrder', {
     onDelete: 'SET NULL',
     comment: 'Remisión generada al entregar'
   },
+  // Abonos / pagos parciales recibidos antes de la remisión final
+  paid_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    defaultValue: 0,
+    comment: 'Suma de abonos recibidos sobre esta OT'
+  },
+  payment_status: {
+    type: DataTypes.ENUM('pending', 'partial', 'paid'),
+    defaultValue: 'pending',
+    comment: 'Estado de pago de la OT en función de paid_amount vs total_amount'
+  },
+  payment_history: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    comment: 'Historial de abonos: [{date, amount, method, user_id, notes, receipt_number}]'
+  },
   notes: {
     type: DataTypes.TEXT,
     allowNull: true

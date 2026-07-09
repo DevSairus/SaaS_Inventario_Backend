@@ -1,5 +1,6 @@
 const { Purchase, PurchaseItem, Product, Supplier } = require('../../models/inventory');
 const ProductSupplier = require('../../models/inventory/ProductSupplier');
+const { Branch, Warehouse } = require('../../models');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { createMovement } = require('./movements.controller');
@@ -42,6 +43,7 @@ const getPurchases = async (req, res) => {
       status,
       start_date,
       end_date,
+      branch_id,
       sort_by = 'purchase_date',
       sort_order = 'DESC',
       page = 1,
@@ -53,6 +55,9 @@ const getPurchases = async (req, res) => {
 
     // Construir condiciones de búsqueda
     const where = { tenant_id };
+
+    // Filtro explícito por sede (opcional; sin él se listan todas las sedes del tenant)
+    if (branch_id) where.branch_id = branch_id;
 
     if (search) {
       where[Op.or] = [
@@ -172,6 +177,8 @@ const createPurchase = async (req, res) => {
       supplier_id,
       purchase_date,
       expected_delivery_date,
+      due_date,
+      payment_terms,
       items,
       discount_amount = 0,
       shipping_cost = 0,
@@ -197,6 +204,28 @@ const createPurchase = async (req, res) => {
     if (!supplier) {
       throw new Error('Proveedor no encontrado');
     }
+
+    // Resolver plazo de pago: el que venga explícito en el body, si no, el
+    // plazo por defecto configurado en el proveedor (en días).
+    const parsedPaymentTerms = payment_terms !== undefined && payment_terms !== null && payment_terms !== ''
+      ? parseInt(payment_terms)
+      : null;
+    const effectivePaymentTerms = (parsedPaymentTerms !== null && !isNaN(parsedPaymentTerms))
+      ? parsedPaymentTerms
+      : (supplier.payment_terms ?? null);
+
+    // Resolver fecha de vencimiento: la que venga explícita, o calculada a
+    // partir de la fecha de compra + plazo de pago (en días).
+    let effectiveDueDate = due_date || null;
+    if (!effectiveDueDate && effectivePaymentTerms) {
+      const base = purchase_date ? new Date(purchase_date) : new Date();
+      base.setDate(base.getDate() + effectivePaymentTerms);
+      effectiveDueDate = base.toISOString().split('T')[0];
+    }
+
+    // Plazo 0 = compra de contado: se marca pagada de inmediato y no debe
+    // aparecer en cuentas por pagar (mismo criterio que en la importación de facturas).
+    const isCash = effectivePaymentTerms === 0;
 
     // Calcular totales
     let subtotal = 0;
@@ -232,6 +261,9 @@ const createPurchase = async (req, res) => {
 
       itemsToCreate.push({
         product_id: item.product_id,
+        product_name: product.name,
+        product_sku: product.sku,
+        unit_of_measure: product.unit_of_measure || 'unit',
         quantity,
         received_quantity: 0,
         unit_cost,
@@ -255,11 +287,14 @@ const createPurchase = async (req, res) => {
       try {
         purchase = await Purchase.create({
           tenant_id,
+          branch_id: req.branch_id || null,
           purchase_number,
           supplier_id,
           user_id,
           purchase_date: purchase_date || new Date(),
           expected_delivery_date,
+          due_date: isCash ? null : effectiveDueDate,
+          payment_terms: effectivePaymentTerms,
           status: 'draft',
           subtotal,
           tax_amount,
@@ -267,7 +302,8 @@ const createPurchase = async (req, res) => {
           shipping_cost: parseFloat(shipping_cost),
           total_amount,
           payment_method,
-          payment_status: 'pending',
+          payment_status: isCash ? 'paid' : 'pending',
+          paid_amount: isCash ? total_amount : 0,
           invoice_number,
           reference,
           notes,
@@ -288,9 +324,11 @@ const createPurchase = async (req, res) => {
     }
 
     // Crear los items
-    for (const itemData of itemsToCreate) {
+    for (const [index, itemData] of itemsToCreate.entries()) {
       await PurchaseItem.create({
+        tenant_id,
         purchase_id: purchase.id,
+        line_number: index + 1,
         ...itemData
       }, { transaction: t });
     }
@@ -372,6 +410,8 @@ const updatePurchase = async (req, res) => {
       supplier_id,
       purchase_date,
       expected_delivery_date,
+      due_date,
+      payment_terms,
       items,
       discount_amount,
       shipping_cost,
@@ -395,7 +435,15 @@ const updatePurchase = async (req, res) => {
       let tax_amount = 0;
 
       // Crear nuevos items
-      for (const item of items) {
+      for (const [index, item] of items.entries()) {
+        const product = await Product.findOne({
+          where: { id: item.product_id, tenant_id },
+          transaction: t
+        });
+        if (!product) {
+          throw new Error(`Producto ${item.product_id} no encontrado`);
+        }
+
         const quantity = parseFloat(item.quantity);
         const unit_cost = parseFloat(item.unit_cost);
         const tax_rate = parseFloat(item.tax_rate || 0);
@@ -411,8 +459,13 @@ const updatePurchase = async (req, res) => {
         tax_amount += item_tax;
 
         await PurchaseItem.create({
+          tenant_id,
           purchase_id: id,
+          line_number: index + 1,
           product_id: item.product_id,
+          product_name: product.name,
+          product_sku: product.sku,
+          unit_of_measure: product.unit_of_measure || 'unit',
           quantity,
           received_quantity: 0,
           unit_cost,
@@ -434,6 +487,8 @@ const updatePurchase = async (req, res) => {
         supplier_id:              supplier_id              ?? purchase.supplier_id,
         purchase_date:            purchase_date            ?? purchase.purchase_date,
         expected_delivery_date:   expected_delivery_date   !== undefined ? expected_delivery_date : purchase.expected_delivery_date,
+        due_date:                 due_date                 !== undefined ? due_date : purchase.due_date,
+        payment_terms:            payment_terms            !== undefined ? parseInt(payment_terms) : purchase.payment_terms,
         subtotal,
         tax_amount,
         discount_amount:          parseFloat(discount_amount || 0),
@@ -452,6 +507,8 @@ const updatePurchase = async (req, res) => {
         supplier_id:            supplier_id            ?? purchase.supplier_id,
         purchase_date:          purchase_date          ?? purchase.purchase_date,
         expected_delivery_date: expected_delivery_date !== undefined ? expected_delivery_date : purchase.expected_delivery_date,
+        due_date:               due_date               !== undefined ? due_date : purchase.due_date,
+        payment_terms:          payment_terms          !== undefined ? parseInt(payment_terms) : purchase.payment_terms,
         discount_amount:        discount_amount        !== undefined ? parseFloat(discount_amount) : purchase.discount_amount,
         shipping_cost:          shipping_cost          !== undefined ? parseFloat(shipping_cost)   : purchase.shipping_cost,
         payment_method:         payment_method         !== undefined ? (payment_method  || null) : purchase.payment_method,
@@ -562,6 +619,25 @@ const receivePurchase = async (req, res) => {
       throw new Error('No se puede recibir una compra cancelada');
     }
 
+    // Resolver la bodega destino: prioridad a la bodega explícita de la compra;
+    // si no tiene (ej. compras importadas desde factura electrónica), usar la
+    // bodega de la sede (branch) de la compra; si tampoco, la sede activa del request.
+    let resolvedWarehouseId = purchase.warehouse_id || null;
+    if (!resolvedWarehouseId) {
+      const branchId = purchase.branch_id || req.branch_id;
+      if (branchId) {
+        const branch = await Branch.findOne({
+          where: { id: branchId, tenant_id },
+          include: [{ model: Warehouse, as: 'warehouse' }],
+          transaction: t
+        });
+        resolvedWarehouseId = branch?.warehouse?.id || null;
+      }
+    }
+    if (!resolvedWarehouseId) {
+      throw new Error('No se pudo determinar la bodega destino: la compra no tiene bodega ni sede con bodega asociada. Asigna una bodega o sede a esta compra antes de recibirla.');
+    }
+
     // Actualizar cantidades recibidas y crear movimientos de inventario
     for (const receivedItem of received_items || []) {
       const purchaseItem = purchase.items.find(item => item.id === receivedItem.item_id);
@@ -592,7 +668,7 @@ const receivePurchase = async (req, res) => {
         reference_type: 'purchase',
         reference_id: purchase.id,
         product_id: purchaseItem.product_id,
-        warehouse_id: purchase.warehouse_id || null,
+        warehouse_id: resolvedWarehouseId,
         quantity: received_quantity,
         unit_cost: purchaseItem.unit_cost,
         user_id: req.user.id,

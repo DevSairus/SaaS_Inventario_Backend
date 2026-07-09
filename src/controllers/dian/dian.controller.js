@@ -18,7 +18,7 @@
  *   POST   /api/dian/auto-test                 → Enviar documentos de prueba (solo facturas)
  */
 
-const { Tenant, Sale, SaleItem, Customer, DianResolution, DianEvent } = require('../../models');
+const { Tenant, Branch, Sale, SaleItem, Customer, DianResolution, DianEvent } = require('../../models');
 const dianService = require('../../services/dian/dianService');
 const dianKit = require('../../services/dian/dianKitAdapter');
 const logger = require('../../config/logger');
@@ -117,8 +117,11 @@ const updateConfig = async (req, res) => {
  * ────────────────────────────────────────────────────────── */
 const getResolutions = async (req, res) => {
   try {
+    const where = { tenant_id: req.tenant_id };
+    if (req.query.branch_id) where.branch_id = req.query.branch_id;
+
     const resolutions = await DianResolution.findAll({
-      where: { tenant_id: req.tenant_id },
+      where,
       order: [['is_active', 'DESC'], ['created_at', 'DESC']],
     });
     ok(res, { data: resolutions });
@@ -134,23 +137,32 @@ const getResolutions = async (req, res) => {
 const createResolution = async (req, res) => {
   try {
     const {
+      branch_id,
       resolution_number, resolution_date, prefix,
       from_number, to_number, valid_from, valid_to,
       document_type = 'invoice', is_test = true, notes,
     } = req.body;
 
+    if (!branch_id) {
+      return fail(res, 'branch_id es obligatorio: cada resolución pertenece a una sede');
+    }
+
     if (!resolution_number || !resolution_date || !prefix || !from_number || !to_number || !valid_from || !valid_to) {
       return fail(res, 'Faltan campos obligatorios de la resolución');
     }
 
-    // Desactivar resoluciones anteriores del mismo tipo/pruebas si se crea una nueva activa
+    const branch = await Branch.findOne({ where: { id: branch_id, tenant_id: req.tenant_id } });
+    if (!branch) return fail(res, 'Sede no encontrada', 404);
+
+    // Desactivar resoluciones anteriores del mismo tipo/pruebas EN ESA SEDE si se crea una nueva activa
     await DianResolution.update(
       { is_active: false },
-      { where: { tenant_id: req.tenant_id, document_type, is_test, is_active: true } }
+      { where: { tenant_id: req.tenant_id, branch_id, document_type, is_test, is_active: true } }
     );
 
     const resolution = await DianResolution.create({
       tenant_id: req.tenant_id,
+      branch_id,
       resolution_number,
       resolution_date,
       prefix,

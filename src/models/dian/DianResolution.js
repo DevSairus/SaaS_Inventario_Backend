@@ -14,6 +14,13 @@ const DianResolution = sequelize.define('DianResolution', {
     references: { model: 'tenants', key: 'id' },
     onDelete: 'CASCADE',
   },
+  branch_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'branches', key: 'id' },
+    onDelete: 'RESTRICT',
+    comment: 'Sede a la que pertenece esta resolución (cada sede maneja su propio consecutivo)',
+  },
   resolution_number: {
     type: DataTypes.STRING(50),
     allowNull: false,

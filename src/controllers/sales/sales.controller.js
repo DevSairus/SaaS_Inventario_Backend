@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -15,12 +15,16 @@ const taxService = require('../../services/taxService');
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, limit = 50, offset = 0 } = req.query;
+    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, branch_id, limit = 50, offset = 0 } = req.query;
     // Cap de seguridad — evita requests que traigan miles de ventas en memoria
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
     const safeOffset = Math.max(0, parseInt(offset) || 0);
 
     const where = { tenant_id: tenantId };
+
+    // Filtro explícito por sede (ej: admin viendo el historial de una sede específica
+    // distinta a la activa). Si no se envía, se listan todas las sedes del tenant.
+    if (branch_id) where.branch_id = branch_id;
 
     if (status) where.status = status;
     if (customer_id) where.customer_id = customer_id;
@@ -64,6 +68,11 @@ const getAll = async (req, res) => {
           attributes: ['id', 'first_name', 'last_name', 'tax_id', 'email', 'phone']
         },
         {
+          model: Branch,
+          as: 'branch',
+          attributes: ['id', 'name', 'code']
+        },
+        {
           model: SaleItem,
           as: 'items',
           include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }]
@@ -102,6 +111,7 @@ const getById = async (req, res) => {
       where: { id, tenant_id: tenantId },
       include: [
         { model: Customer, as: 'customer' },
+        { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'], required: false },
         {
           model: SaleItem,
           as: 'items',
@@ -123,7 +133,12 @@ const getById = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     }
 
-    res.json({ success: true, data: sale });
+    const saleData = sale.toJSON();
+    saleData.created_by_name = saleData.creator
+      ? [saleData.creator.first_name, saleData.creator.last_name].filter(Boolean).join(' ')
+      : null;
+
+    res.json({ success: true, data: saleData });
   } catch (error) {
     logger.error('Error al obtener venta:', error);
     res.status(500).json({ success: false, message: 'Error al obtener venta' });
@@ -148,10 +163,13 @@ const create = async (req, res) => {
       mileage,
       document_type = null,
       sale_date,
+      due_date,
+      payment_terms,
     } = req.body;
 
     let finalCustomerId = customer_id;
     let customerInfo = {};
+    let customerPaymentTerms = null;
 
     if (customer_id) {
       const customer = await Customer.findOne({ where: { id: customer_id, tenant_id: tenantId } });
@@ -159,6 +177,7 @@ const create = async (req, res) => {
         await transaction.rollback();
         return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
       }
+      customerPaymentTerms = customer.payment_terms || null;
       customerInfo = {
         customer_name: [customer.first_name, customer.last_name].filter(Boolean).join(' '),
         customer_tax_id: customer.tax_id,
@@ -284,11 +303,27 @@ const create = async (req, res) => {
 
     const tax_breakdown = taxService.buildTaxBreakdown(saleItems, retentions);
 
+    // Resolver plazo de pago: el que venga explícito en el body, si no, el
+    // plazo por defecto configurado en el cliente (en días).
+    const effectivePaymentTerms = payment_terms !== undefined && payment_terms !== null
+      ? parseInt(payment_terms)
+      : customerPaymentTerms;
+
+    let effectiveDueDate = due_date || null;
+    if (!effectiveDueDate && effectivePaymentTerms) {
+      const base = sale_date ? new Date(sale_date) : new Date();
+      base.setDate(base.getDate() + effectivePaymentTerms);
+      effectiveDueDate = base.toISOString().split('T')[0];
+    }
+
     const saleData = {
       tenant_id: tenantId,
+      branch_id: req.branch_id || null,
       sale_number: saleNumber,
       // document_type: null — se asigna al confirmar, no al crear
       sale_date: sale_date || new Date(),
+      due_date: effectiveDueDate,
+      payment_terms: effectivePaymentTerms,
       customer_id: finalCustomerId,
       ...customerInfo,
       warehouse_id: (warehouse_id && uuidRegex.test(warehouse_id)) ? warehouse_id : null,
@@ -581,12 +616,14 @@ const confirm = async (req, res) => {
 
     const transaction = await sequelize.transaction();
     try {
-      // Pre-validar stock
+      // Pre-validar stock (y cachear los productos consultados para no repetir la query abajo)
       const stockErrors = [];
+      const productCache = {};
       for (const item of sale.items) {
         if (item.item_type === 'service' || item.item_type === 'free_line') continue;
         if (!item.product_id) continue;
         const prodCheck = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
+        productCache[item.product_id] = prodCheck;
         if (prodCheck && prodCheck.track_inventory && !prodCheck.allow_negative_stock) {
           const disponible = parseFloat(prodCheck.current_stock);
           const solicitado = parseFloat(item.quantity);
@@ -600,11 +637,24 @@ const confirm = async (req, res) => {
         return res.status(400).json({ success: false, message: `Stock insuficiente: ${stockErrors.join(', ')}` });
       }
 
+      // Si hay ítems que descuentan inventario (track_inventory), la venta
+      // necesita una bodega asignada. Sin esto, InventoryMovement.warehouse_id
+      // (NOT NULL) revienta la transacción completa con un 500 y la venta se
+      // queda en borrador sin poder confirmarse.
+      const needsWarehouse = Object.values(productCache).some(p => p && p.track_inventory);
+      if (needsWarehouse && !sale.warehouse_id) {
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: 'Esta venta tiene productos que descuentan inventario. Selecciona una bodega antes de confirmarla.'
+        });
+      }
+
       // Crear movimientos de salida
       for (const item of sale.items) {
         if (item.item_type === 'service' || item.item_type === 'free_line') continue;
         if (item.product_id) {
-          const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
+          const product = productCache[item.product_id] || await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
           if (product && product.track_inventory) {
             await createMovement({
               tenant_id: tenantId, movement_type: 'salida', movement_reason: 'sale',
@@ -625,6 +675,20 @@ const confirm = async (req, res) => {
       else if (amountPaid > 0) updateData.payment_status = 'partial';
       else updateData.payment_status = 'pending';
 
+      // Registrar el pago inicial en payment_history para que Flujo de Caja
+      // (que solo lee payment_history) refleje el ingreso, igual que registerPayment.
+      if (amountPaid > 0) {
+        const payment_history = [...(sale.payment_history || [])];
+        payment_history.push({
+          date: sale.sale_date || new Date(),
+          amount: amountPaid,
+          method: payment_method,
+          user_id: userId,
+          notes: 'Pago registrado al confirmar la venta'
+        });
+        updateData.payment_history = payment_history;
+      }
+
       // ── Asignar tipo de documento al confirmar ───────────────────────────────
       // El tipo siempre se elige en este momento. Si llega document_type lo aplicamos;
       // si no viene, usar remision como fallback solo si ya tenía tipo previo.
@@ -632,7 +696,7 @@ const confirm = async (req, res) => {
       if (finalDocType !== sale.document_type) {
         updateData.document_type = finalDocType;
         updateData.dian_status   = finalDocType === 'factura' ? 'pending' : 'not_applicable';
-        const newNumber = await generateSaleNumber(tenantId, finalDocType, transaction, sale.id);
+        const newNumber = await generateSaleNumber(tenantId, finalDocType, transaction, sale.id, sale.branch_id);
         updateData.sale_number = newNumber;
       } else if (document_type) {
         updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
@@ -806,7 +870,7 @@ const registerPayment = async (req, res) => {
     if (paid_amount >= total) payment_status = 'paid';
     else if (paid_amount > 0) payment_status = 'partial';
 
-    const payment_history = sale.payment_history || [];
+    const payment_history = [...(sale.payment_history || [])];
     payment_history.push({
       date: payment_date || new Date(),
       amount: effectiveAmount,
@@ -963,7 +1027,7 @@ const generatePaymentReceipt = async (req, res) => {
 // ─── Función auxiliar para generar número de venta ───────────────────────────
 // FACTURAS: usa el consecutivo de la resolución DIAN activa (prefijo + número)
 // REMISIONES / COTIZACIONES: consecutivo interno REM-YYYY-XXXX / COT-YYYY-XXXX
-async function generateSaleNumber(tenant_id, document_type, transaction, excludeId = null) {
+async function generateSaleNumber(tenant_id, document_type, transaction, excludeId = null, branch_id = null) {
   // Sin tipo aún (borrador): número provisional BOD-
   if (!document_type || document_type === null) {
     const year = new Date().getFullYear();
@@ -1004,7 +1068,7 @@ async function generateSaleNumber(tenant_id, document_type, transaction, exclude
   // ── FACTURA: buscar resolución DIAN activa y obtener consecutivo ──────────
   // Se intenta con resolución de producción primero, luego pruebas
   const resolution = await DianResolution.findOne({
-    where: { tenant_id, is_active: true, document_type: 'invoice' },
+    where: { tenant_id, branch_id, is_active: true, document_type: 'invoice' },
     order: [['is_test', 'ASC']], // producción (false) primero
     transaction,
   });

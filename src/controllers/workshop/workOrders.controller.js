@@ -17,7 +17,7 @@ const WO_SAFE_ATTRS = [
   'warehouse_id','status','mileage_in','mileage_out','problem_description',
   'diagnosis','work_performed','photos_in','photos_out','received_at',
   'promised_at','completed_at','delivered_at','subtotal','tax_amount',
-  'discount_amount','total_amount','paid_amount','sale_id','notes','internal_notes',
+  'discount_amount','total_amount','paid_amount','payment_status','sale_id','notes','internal_notes',
   'created_by','created_at','updated_at','share_token',
 ];
 
@@ -578,7 +578,7 @@ const generateSale = async (req, res) => {
       // Usar resolución DIAN activa del tenant
       const { DianResolution } = require('../../models');
       const resolution = await DianResolution.findOne({
-        where: { tenant_id, is_active: true, document_type: 'invoice' },
+        where: { tenant_id, branch_id: req.branch_id || null, is_active: true, document_type: 'invoice' },
         order: [['created_at', 'DESC']],
         transaction,
       });
@@ -608,6 +608,7 @@ const generateSale = async (req, res) => {
 
     const sale = await Sale.create({
       tenant_id,
+      branch_id: req.branch_id || null,
       sale_number,
       document_type,
       customer_id:      order.customer_id,
@@ -866,6 +867,139 @@ const productivity = async (req, res) => {
   }
 };
 
+
+// ── PAGOS / ABONOS ───────────────────────────────────────────────────────────
+
+// Registrar un abono/pago parcial sobre la OT (antes de generar la remisión final)
+const registerPayment = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { id } = req.params;
+    const tenant_id = req.user.tenant_id;
+    const userId = req.user.id;
+    const { amount, payment_method, payment_date, notes } = req.body;
+
+    if (!amount || parseFloat(amount) <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
+    }
+
+    // SELECT FOR UPDATE: evita que dos pagos concurrentes lean el mismo paid_amount
+    const order = await WorkOrder.findOne({
+      where: { id, tenant_id },
+      lock: transaction.LOCK.UPDATE,
+      transaction,
+    });
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    }
+    if (order.status === 'cancelado') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se puede registrar un pago en una OT cancelada' });
+    }
+
+    const total = parseFloat(order.total_amount || 0);
+    const alreadyPaid = parseFloat(order.paid_amount || 0);
+    const remaining = total - alreadyPaid;
+
+    if (total > 0 && remaining <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Esta orden ya está pagada en su totalidad' });
+    }
+
+    // Si aún no hay total_amount definido (OT sin ítems cerrados), se acepta el abono tal cual;
+    // si sí hay total, se limita el monto al saldo pendiente para evitar sobrepagos.
+    const effectiveAmount = total > 0 ? Math.min(parseFloat(amount), remaining) : parseFloat(amount);
+    const paid_amount = alreadyPaid + effectiveAmount;
+
+    let payment_status = 'pending';
+    if (total > 0 && paid_amount >= total) payment_status = 'paid';
+    else if (paid_amount > 0) payment_status = 'partial';
+
+    const receipt_number = `REC-${Date.now().toString().slice(-6)}`;
+    const payment_history = [...(order.payment_history || [])];
+    payment_history.push({
+      date: payment_date || new Date(),
+      amount: effectiveAmount,
+      method: payment_method || 'cash',
+      user_id: userId,
+      notes: notes || null,
+      receipt_number,
+    });
+
+    await order.update(
+      { paid_amount, payment_status, payment_history },
+      { transaction }
+    );
+
+    await transaction.commit();
+
+    const updatedOrder = await WorkOrder.findOne({
+      where: { id, tenant_id },
+      attributes: WO_SAFE_ATTRS,
+      include: [
+        { model: Vehicle,  as: 'vehicle',    attributes: ['id', 'plate', 'brand', 'model', 'year', 'color'] },
+        { model: Customer, as: 'customer',   attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone'] },
+      ],
+    });
+
+    res.json({
+      success: true,
+      message: 'Pago registrado exitosamente',
+      data: { order: updatedOrder, receipt_number, amount_applied: effectiveAmount, balance: total - paid_amount },
+    });
+  } catch (error) {
+    if (transaction && !transaction.finished) await transaction.rollback();
+    logger.error('Error registrando pago de OT:', error);
+    res.status(500).json({ success: false, message: 'Error registrando el pago' });
+  }
+};
+
+// Historial de abonos de una OT
+const getPaymentHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenant_id = req.user.tenant_id;
+
+    const order = await WorkOrder.findOne({
+      where: { id, tenant_id },
+      attributes: ['id', 'order_number', 'total_amount', 'paid_amount', 'payment_status', 'payment_history'],
+    });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    const balance = parseFloat(order.total_amount || 0) - parseFloat(order.paid_amount || 0);
+    const paymentHistory = order.payment_history || [];
+
+    // Enriquecer historial con nombre de usuario (una sola query)
+    const userIds = [...new Set(paymentHistory.map(p => p.user_id).filter(Boolean))];
+    const users = userIds.length > 0
+      ? await User.findAll({ where: { id: userIds }, attributes: ['id', 'first_name', 'last_name'] })
+      : [];
+    const usersMap = Object.fromEntries(users.map(u => [u.id, u]));
+
+    const enrichedHistory = paymentHistory.map((payment) => {
+      const user = payment.user_id ? usersMap[payment.user_id] : null;
+      const userName = user ? `${user.first_name} ${user.last_name}`.trim() : 'Usuario desconocido';
+      return { ...payment, user_name: userName };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        order_number: order.order_number,
+        total_amount: parseFloat(order.total_amount || 0),
+        paid_amount: parseFloat(order.paid_amount || 0),
+        payment_status: order.payment_status,
+        balance,
+        payment_history: enrichedHistory,
+      },
+    });
+  } catch (error) {
+    logger.error('Error obteniendo historial de pagos de OT:', error);
+    res.status(500).json({ success: false, message: 'Error obteniendo historial de pagos' });
+  }
+};
 
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
 const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrderPDFBuffer } = require('../../services/workshopPdfService');
@@ -1275,4 +1409,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory };

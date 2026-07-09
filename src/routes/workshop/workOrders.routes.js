@@ -29,6 +29,10 @@ router.delete('/:id/items/:itemId', ctrl.removeItem);
 // Generar remisión
 router.post('/:id/generate-sale', ctrl.generateSale);
 
+// Pagos / abonos
+router.get('/:id/payments', ctrl.getPaymentHistory);
+router.post('/:id/payments', ctrl.registerPayment);
+
 // Fotos
 router.post('/:id/photos/:phase', upload.array('photos', 10), ctrl.uploadPhotos);
 router.delete('/:id/photos/:phase/:photoIndex', ctrl.deletePhoto);

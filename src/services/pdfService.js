@@ -581,4 +581,195 @@ const generatePaymentReceiptPDF = async (res, sale, tenant, payment) => {
 const generatePaymentReceiptPDFBuffer = (sale, tenant, payment) =>
   generatePaymentReceiptPDF(null, sale, tenant, payment);
 
-module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer };
+/* ══════════════════════════════════════════════════════════════
+   CUADRE DE CAJA / FLUJO DE CAJA (LETTER portrait)
+   cashFlow = { summary: {total_in, total_out, net, total_transactions},
+                by_day: [...], transactions: [...] } — misma forma que
+   devuelve GET /api/cashflow.
+   ══════════════════════════════════════════════════════════════ */
+const SOURCE_LABELS = { sale: 'Venta', purchase: 'Compra', expense: 'Gasto' };
+
+// Los valores ya vienen como 'YYYY-MM-DD' (fecha de negocio, sin hora) —
+// se formatean por texto, sin pasar por Date(), para no reintroducir
+// corrimientos de zona horaria.
+function formatDateStr(isoDateStr) {
+  if (!isoDateStr) return '—';
+  const [y, m, d] = isoDateStr.split('-');
+  if (!y || !m || !d) return isoDateStr;
+  return `${d}/${m}/${y}`;
+}
+
+const generateCashFlowPDF = async (res, cashFlow, tenant, filters = {}, generatedByName = '') => {
+  const bufferMode = !res;
+  let bufferPromise = null;
+
+  try {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
+
+    if (!bufferMode) {
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="Cuadre-de-Caja-${filters.from_date || ''}_${filters.to_date || ''}.pdf"`);
+      doc.pipe(res);
+    } else {
+      const chunks = [];
+      bufferPromise = new Promise((resolve, reject) => {
+        doc.on('data', c => chunks.push(c));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+      });
+    }
+
+    /* ── PALETA (misma que el resto de los PDF) ─────────────── */
+    const red      = '#8b0000';
+    const gray     = '#6b7280';
+    const darkGray = '#374151';
+    const softGray = '#f9fafb';
+    const border   = '#e5e7eb';
+    const borderMd = '#d1d5db';
+    const black    = '#111827';
+    const green    = '#059669';
+    const redAmt   = '#dc2626';
+    const white    = '#ffffff';
+
+    const PAGE_W  = doc.page.width;
+    const MARGIN  = 40;
+    const INNER_W = PAGE_W - MARGIN * 2;
+
+    const drawTopBar = () => doc.rect(0, 0, PAGE_W, 5).fill(red);
+    drawTopBar();
+
+    /* ── ENCABEZADO ──────────────────────────────────────────── */
+    let y = 20;
+
+    if (tenant.logo_url && tenant.logo_url.startsWith('http')) {
+      try {
+        const src = await downloadImage(tenant.logo_url);
+        doc.image(src, MARGIN, y, { fit: [70, 36], align: 'left', valign: 'center' });
+      } catch (e) { /* sin logo */ }
+    }
+
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(darkGray)
+      .text(tenant.company_name || 'Empresa', MARGIN + 80, y, { width: INNER_W - 240 });
+    doc.font('Helvetica').fontSize(7.5).fillColor(gray)
+      .text(tenant.tax_id ? `NIT: ${tenant.tax_id}` : '', MARGIN + 80, y + 13, { width: INNER_W - 240 });
+
+    doc.font('Helvetica-Bold').fontSize(16).fillColor(red)
+      .text('CUADRE DE CAJA', MARGIN, y, { width: INNER_W, align: 'right' });
+    doc.font('Helvetica').fontSize(8.5).fillColor(gray)
+      .text(`Periodo: ${formatDateStr(filters.from_date) || 'inicio'} — ${formatDateStr(filters.to_date) || 'hoy'}`,
+        MARGIN, y + 18, { width: INNER_W, align: 'right' });
+    doc.font('Helvetica').fontSize(7.5).fillColor(gray)
+      .text(`Generado: ${new Date().toLocaleString('es-CO')}${generatedByName ? ' · ' + generatedByName : ''}`,
+        MARGIN, y + 30, { width: INNER_W, align: 'right' });
+
+    y += 55;
+    doc.moveTo(MARGIN, y).lineTo(MARGIN + INNER_W, y).strokeColor(border).lineWidth(0.5).stroke();
+    y += 16;
+
+    /* ── TARJETAS DE RESUMEN ─────────────────────────────────── */
+    const summary = cashFlow.summary || { total_in: 0, total_out: 0, net: 0, total_transactions: 0 };
+    const cardW = (INNER_W - 20) / 3;
+    const cards = [
+      { label: 'ENTRADAS', value: summary.total_in, color: green },
+      { label: 'SALIDAS',  value: summary.total_out, color: redAmt },
+      { label: 'NETO DEL PERIODO', value: summary.net, color: summary.net >= 0 ? darkGray : redAmt },
+    ];
+    cards.forEach((card, i) => {
+      const cx = MARGIN + i * (cardW + 10);
+      doc.roundedRect(cx, y, cardW, 46, 5).fillAndStroke(softGray, borderMd);
+      doc.font('Helvetica').fontSize(7.5).fillColor(gray).text(card.label, cx + 10, y + 8);
+      doc.font('Helvetica-Bold').fontSize(13).fillColor(card.color).text(formatCurrency(card.value), cx + 10, y + 21);
+    });
+    y += 62;
+
+    /* ── DESGLOSE POR ORIGEN ─────────────────────────────────── */
+    const bySource = { sale: 0, purchase: 0, expense: 0 };
+    (cashFlow.transactions || []).forEach(t => { bySource[t.source] = (bySource[t.source] || 0) + t.amount; });
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(darkGray).text('DESGLOSE POR ORIGEN', MARGIN, y);
+    y += 13;
+    doc.font('Helvetica').fontSize(8).fillColor(black)
+      .text(`Ventas (entradas): ${formatCurrency(bySource.sale)}    ·    Compras (salidas): ${formatCurrency(bySource.purchase)}    ·    Gastos (salidas): ${formatCurrency(bySource.expense)}`,
+        MARGIN, y, { width: INNER_W });
+    y += 22;
+
+    /* ── TABLA DE MOVIMIENTOS ────────────────────────────────── */
+    const COLS = { date: MARGIN, type: MARGIN + 60, source: MARGIN + 120, ref: MARGIN + 185, detail: MARGIN + 280, method: MARGIN + 410, amount: MARGIN + INNER_W - 80 };
+
+    const drawTableHeader = () => {
+      doc.roundedRect(MARGIN, y, INNER_W, 18, 3).fill(darkGray);
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(white)
+        .text('FECHA', COLS.date + 6, y + 5)
+        .text('TIPO', COLS.type + 6, y + 5)
+        .text('ORIGEN', COLS.source + 6, y + 5)
+        .text('REFERENCIA', COLS.ref + 6, y + 5)
+        .text('DETALLE', COLS.detail + 6, y + 5)
+        .text('MÉTODO', COLS.method + 6, y + 5)
+        .text('MONTO', COLS.amount, y + 5, { width: MARGIN + INNER_W - COLS.amount - 6, align: 'right' });
+      y += 22;
+    };
+
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(darkGray).text(`MOVIMIENTOS (${cashFlow.transactions?.length || 0})`, MARGIN, y);
+    y += 14;
+    drawTableHeader();
+
+    const transactions = [...(cashFlow.transactions || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+    if (transactions.length === 0) {
+      doc.font('Helvetica').fontSize(8.5).fillColor(gray).text('Sin movimientos en el periodo seleccionado.', MARGIN, y);
+      y += 16;
+    }
+
+    transactions.forEach((t, idx) => {
+      if (y > 730) {
+        doc.addPage();
+        drawTopBar();
+        y = 40;
+        drawTableHeader();
+      }
+      const rowColor = t.direction === 'in' ? green : redAmt;
+      doc.font('Helvetica').fontSize(7.8).fillColor(black)
+        .text(formatDateStr(t.date), COLS.date + 6, y, { width: COLS.type - COLS.date - 8 })
+        .text(t.direction === 'in' ? 'Entrada' : 'Salida', COLS.type + 6, y, { width: COLS.source - COLS.type - 8 })
+        .text(SOURCE_LABELS[t.source] || t.source || '—', COLS.source + 6, y, { width: COLS.ref - COLS.source - 8 })
+        .text(t.reference || '—', COLS.ref + 6, y, { width: COLS.detail - COLS.ref - 8, ellipsis: true })
+        .text(t.detail || '—', COLS.detail + 6, y, { width: COLS.method - COLS.detail - 8, ellipsis: true })
+        .text(t.method || '—', COLS.method + 6, y, { width: COLS.amount - COLS.method - 12, ellipsis: true });
+      doc.font('Helvetica-Bold').fontSize(7.8).fillColor(rowColor)
+        .text(`${t.direction === 'in' ? '+' : '-'}${formatCurrency(t.amount)}`, COLS.amount, y, { width: MARGIN + INNER_W - COLS.amount - 6, align: 'right' });
+      y += 13;
+      if (idx < transactions.length - 1) {
+        doc.moveTo(MARGIN, y).lineTo(MARGIN + INNER_W, y).strokeColor(border).lineWidth(0.3).stroke();
+        y += 4;
+      }
+    });
+
+    /* ── LÍNEA TOTAL ─────────────────────────────────────────── */
+    y += 10;
+    if (y > 740) { doc.addPage(); drawTopBar(); y = 40; }
+    doc.moveTo(MARGIN, y).lineTo(MARGIN + INNER_W, y).strokeColor(borderMd).lineWidth(0.8).stroke();
+    y += 10;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(darkGray)
+      .text('NETO DEL PERIODO:', COLS.detail, y)
+      .fillColor(summary.net >= 0 ? green : redAmt)
+      .text(formatCurrency(summary.net), COLS.amount, y, { width: MARGIN + INNER_W - COLS.amount - 6, align: 'right' });
+
+    /* ── PIE DE PÁGINA CON NUMERACIÓN ────────────────────────── */
+    const pageRange = doc.bufferedPageRange();
+    for (let i = 0; i < pageRange.count; i++) {
+      doc.switchToPage(i);
+      doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(red);
+      doc.font('Helvetica').fontSize(7).fillColor(gray)
+        .text(`Página ${i + 1} de ${pageRange.count}`, MARGIN, doc.page.height - 24, { width: INNER_W, align: 'center' });
+    }
+
+    doc.end();
+    if (bufferMode) return await bufferPromise;
+
+  } catch (error) {
+    console.error(error);
+    if (!bufferMode && !res.headersSent) res.status(500).json({ message: 'Error generando cuadre de caja' });
+    if (bufferMode) throw error;
+  }
+};
+
+module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer, generateCashFlowPDF };

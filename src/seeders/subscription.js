@@ -29,8 +29,11 @@ async function seedData() {
         yearly_price: 0,
         max_users: 2,
         max_clients: 20,
+        max_products: 50,
+        max_warehouses: 1,
         max_invoices_per_month: 10,
         max_storage_mb: 50,
+        modules: ['sales', 'inventory'],
         features: { basic_reports: true, advanced_reports: false, barcode_scanner: false, multi_warehouse: false, api_access: false },
         is_active: true,
         is_popular: false,
@@ -45,8 +48,11 @@ async function seedData() {
         yearly_price: 990000,
         max_users: 5,
         max_clients: 100,
+        max_products: 500,
+        max_warehouses: 2,
         max_invoices_per_month: 100,
         max_storage_mb: 500,
+        modules: ['sales', 'inventory', 'workshop', 'receivables'],
         features: { basic_reports: true, advanced_reports: false, barcode_scanner: true, multi_warehouse: false, api_access: false },
         is_active: true,
         is_popular: false,
@@ -61,8 +67,11 @@ async function seedData() {
         yearly_price: 2490000,
         max_users: 15,
         max_clients: 500,
+        max_products: 2000,
+        max_warehouses: 5,
         max_invoices_per_month: 500,
         max_storage_mb: 2000,
+        modules: ['sales', 'inventory', 'workshop', 'receivables', 'treasury'],
         features: { basic_reports: true, advanced_reports: true, barcode_scanner: true, multi_warehouse: true, api_access: false },
         is_active: true,
         is_popular: true,
@@ -77,8 +86,11 @@ async function seedData() {
         yearly_price: 5990000,
         max_users: 100,
         max_clients: 5000,
+        max_products: -1,
+        max_warehouses: -1,
         max_invoices_per_month: 2000,
         max_storage_mb: 10000,
+        modules: ['sales', 'inventory', 'workshop', 'receivables', 'treasury'],
         features: { basic_reports: true, advanced_reports: true, barcode_scanner: true, multi_warehouse: true, api_access: true },
         is_active: true,
         is_popular: false,
@@ -98,20 +110,23 @@ async function seedData() {
         const [result] = await sequelize.query(`
           INSERT INTO subscription_plans (
             name, slug, description, monthly_price, yearly_price,
-            max_users, max_clients, max_invoices_per_month, max_storage_mb,
-            features, is_active, is_popular, sort_order, trial_days,
+            max_users, max_clients, max_products, max_warehouses,
+            max_invoices_per_month, max_storage_mb,
+            modules, features, is_active, is_popular, sort_order, trial_days,
             created_at, updated_at
           )
           VALUES (
             :name, :slug, :description, :monthly_price, :yearly_price,
-            :max_users, :max_clients, :max_invoices_per_month, :max_storage_mb,
-            :features, :is_active, :is_popular, :sort_order, :trial_days,
+            :max_users, :max_clients, :max_products, :max_warehouses,
+            :max_invoices_per_month, :max_storage_mb,
+            :modules, :features, :is_active, :is_popular, :sort_order, :trial_days,
             NOW(), NOW()
           )
           RETURNING id
         `, {
           replacements: {
             ...plan,
+            modules: JSON.stringify(plan.modules),
             features: JSON.stringify(plan.features)
           }
         });

@@ -14,6 +14,13 @@ const Sale = sequelize.define('Sale', {
     references: { model: 'tenants', key: 'id' },
     onDelete: 'CASCADE',
   },
+  branch_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'branches', key: 'id' },
+    onDelete: 'RESTRICT',
+    comment: 'Sede donde se realizó la venta',
+  },
   sale_number: {
     type: DataTypes.STRING(50),
     allowNull: false,
@@ -118,6 +125,11 @@ const Sale = sequelize.define('Sale', {
     allowNull: true,
     defaultValue: null,
     comment: 'Fecha límite de pago = sale_date + credit_days.',
+  },
+  payment_terms: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
+    comment: 'Plazo de pago en días (credit_days). Si no se especifica, se toma del cliente.',
   },
   payment_method:  { type: DataTypes.STRING(50) },
   payment_status: {

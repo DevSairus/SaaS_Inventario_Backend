@@ -7,6 +7,7 @@
     "dev": "nodemon src/server.js"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "@dian-kit/core": "^1.0.1",
     "@dian-kit/sdk-node": "^1.0.1",
     "@wppconnect-team/wppconnect": "^1.41.0",

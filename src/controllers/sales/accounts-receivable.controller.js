@@ -43,6 +43,7 @@ const getAccountsReceivableSummary = async (req, res) => {
         'id',
         'sale_number',
         'sale_date',
+        'due_date',
         'customer_id',
         'customer_name',
         'total_amount',
@@ -58,12 +59,17 @@ const getAccountsReceivableSummary = async (req, res) => {
     let totalReceivable = 0;
     let totalOverdue = 0;
     const today = new Date();
-    const thirtyDaysAgo = new Date(today.getTime() - 30 * 24 * 60 * 60 * 1000);
 
     const invoicesWithDetails = pendingInvoices.map(invoice => {
       const balance = parseFloat(invoice.total_amount) - parseFloat(invoice.paid_amount || 0);
-      const daysOverdue = Math.floor((today - new Date(invoice.sale_date)) / (1000 * 60 * 60 * 24));
-      const isOverdue = daysOverdue > 30;
+      // Si hay due_date se usa esa fecha para vencimiento; si no, se cae al
+      // criterio anterior de 30 días desde la venta (compatibilidad con
+      // ventas históricas sin plazo asignado).
+      const referenceDate = invoice.due_date ? new Date(invoice.due_date) : new Date(invoice.sale_date);
+      const daysOverdue = invoice.due_date
+        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
+        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      const isOverdue = daysOverdue > 0;
 
       totalReceivable += balance;
       if (isOverdue) {
@@ -74,6 +80,7 @@ const getAccountsReceivableSummary = async (req, res) => {
         id: invoice.id,
         sale_number: invoice.sale_number,
         sale_date: invoice.sale_date,
+        due_date: invoice.due_date,
         customer_id: invoice.customer_id,
         customer_name: invoice.customer_name,
         customer: invoice.customer,
@@ -82,7 +89,7 @@ const getAccountsReceivableSummary = async (req, res) => {
         balance,
         payment_status: invoice.payment_status,
         payment_method: invoice.payment_method,
-        days_overdue: daysOverdue,
+        days_overdue: Math.max(daysOverdue, 0),
         is_overdue: isOverdue,
         payment_history: invoice.payment_history || [],
         document_type: invoice.document_type // ✅ AGREGADO: Incluir tipo de documento
@@ -180,8 +187,11 @@ const getCustomerAccountsReceivable = async (req, res) => {
 
     const invoicesWithDetails = invoices.map(invoice => {
       const balance = parseFloat(invoice.total_amount) - parseFloat(invoice.paid_amount || 0);
-      const daysOverdue = Math.floor((today - new Date(invoice.sale_date)) / (1000 * 60 * 60 * 24));
-      const isOverdue = daysOverdue > 30;
+      const referenceDate = invoice.due_date ? new Date(invoice.due_date) : new Date(invoice.sale_date);
+      const daysOverdue = invoice.due_date
+        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
+        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      const isOverdue = daysOverdue > 0;
 
       totalBalance += balance;
       if (isOverdue) {
@@ -191,7 +201,7 @@ const getCustomerAccountsReceivable = async (req, res) => {
       return {
         ...invoice.toJSON(),
         balance,
-        days_overdue: daysOverdue,
+        days_overdue: Math.max(daysOverdue, 0),
         is_overdue: isOverdue
       };
     });
@@ -334,19 +344,23 @@ const getAgingReport = async (req, res) => {
 
     invoices.forEach(invoice => {
       const balance = parseFloat(invoice.total_amount) - parseFloat(invoice.paid_amount || 0);
-      const daysOverdue = Math.floor((today - new Date(invoice.sale_date)) / (1000 * 60 * 60 * 24));
+      const referenceDate = invoice.due_date ? new Date(invoice.due_date) : new Date(invoice.sale_date);
+      const daysOverdue = invoice.due_date
+        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
+        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
 
       const invoiceData = {
         id: invoice.id,
         sale_number: invoice.sale_number,
         sale_date: invoice.sale_date,
+        due_date: invoice.due_date,
         customer_id: invoice.customer_id,
         customer_name: invoice.customer_name,
         customer: invoice.customer,
         total_amount: parseFloat(invoice.total_amount),
         paid_amount: parseFloat(invoice.paid_amount || 0),
         balance,
-        days_overdue: daysOverdue,
+        days_overdue: Math.max(daysOverdue, 0),
         document_type: invoice.document_type // ✅ AGREGADO: Incluir tipo de documento
       };
 

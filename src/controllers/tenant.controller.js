@@ -2,6 +2,7 @@
 const { Tenant } = require('../models');
 const path = require('path');
 const fs = require('fs');
+const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 
 // Cloudinary — siempre requerido (Vercel es stateless, sin disco persistente)
 const { v2: cloudinary } = require('cloudinary');
@@ -42,7 +43,8 @@ const getTenantConfig = async (req, res) => {
         'secondary_color',
         'pdf_config',
         'business_config',
-        'features'
+        'features',
+        'plan_id'
       ]
     });
 
@@ -53,9 +55,14 @@ const getTenantConfig = async (req, res) => {
       });
     }
 
+    const effectiveModules = await getEffectiveModulesForTenantId(tenantId);
+
     res.json({
       success: true,
-      data: tenant
+      data: {
+        ...tenant.toJSON(),
+        effective_modules: effectiveModules
+      }
     });
   } catch (error) {
     console.error('Error obteniendo configuración:', error);
