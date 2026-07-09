@@ -198,15 +198,35 @@ module.exports = {
           );
       `, { transaction });
 
-      // Bodegas restantes sin sede (multi-bodega previo sin sede definida) quedan
-      // vinculadas también a la Sede Principal por defecto, para no dejar huérfanas.
+      // Bodegas restantes sin sede (multi-bodega previo a este feature) NO pueden
+      // compartir la Sede Principal: más abajo hay un UNIQUE(branch_id) en
+      // warehouses (1 sede = 1 bodega). Cada una recibe su propia sede nueva,
+      // heredando los datos de contacto de la bodega.
       await queryInterface.sequelize.query(`
+        WITH new_branches AS (
+          INSERT INTO branches (id, tenant_id, code, name, address, city, phone, is_main, is_active, created_at, updated_at)
+          SELECT
+            gen_random_uuid(),
+            w.tenant_id,
+            'W-' || substr(w.id::text, 1, 8),
+            COALESCE(w.name, 'Sede ' || substr(w.id::text, 1, 8)),
+            w.address,
+            w.city,
+            w.phone,
+            false,
+            true,
+            NOW(),
+            NOW()
+          FROM warehouses w
+          WHERE w.branch_id IS NULL
+          RETURNING id, tenant_id, code
+        )
         UPDATE warehouses w
-        SET branch_id = b.id
-        FROM branches b
-        WHERE b.tenant_id = w.tenant_id
-          AND b.code = 'PPAL'
-          AND w.branch_id IS NULL;
+        SET branch_id = nb.id
+        FROM new_branches nb
+        WHERE w.branch_id IS NULL
+          AND w.tenant_id = nb.tenant_id
+          AND nb.code = 'W-' || substr(w.id::text, 1, 8);
       `, { transaction });
 
       // Vincula resoluciones DIAN existentes a la Sede Principal de su tenant.
