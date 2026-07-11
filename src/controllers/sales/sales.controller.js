@@ -706,6 +706,17 @@ const confirm = async (req, res) => {
       await sale.update(updateData, { transaction });
       await transaction.commit();
 
+      // Asiento contable en borrador (no bloqueante: si falla, solo se loguea)
+      setImmediate(async () => {
+        try {
+          const { generateSaleEntry } = require('../../services/accounting/autoEntries.service');
+          const finalSaleForAccounting = await Sale.findByPk(id, { include: [{ model: SaleItem, as: 'items' }] });
+          await generateSaleEntry(finalSaleForAccounting, finalSaleForAccounting.items, tenantId, userId);
+        } catch (err) {
+          logger.warn(`[accounting] Error generando asiento de venta ${id}: ${err.message}`);
+        }
+      });
+
       // ── Disparar envío DIAN si quedó como factura ───────────────────────────
       if (finalDocType === 'factura') {
         const finalSale = await Sale.findByPk(id, { include: [{ model: SaleItem, as: 'items' }] });

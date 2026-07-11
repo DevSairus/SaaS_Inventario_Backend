@@ -8,6 +8,13 @@ const UserBranch = require('./UserBranch');
 const Permission = require('./auth/Permission');
 const RolePermission = require('./auth/RolePermission');
 
+// Contabilidad
+const ChartOfAccount = require('./accounting/ChartOfAccount');
+const FiscalPeriod = require('./accounting/FiscalPeriod');
+const JournalEntry = require('./accounting/JournalEntry');
+const JournalEntryLine = require('./accounting/JournalEntryLine');
+const AccountMapping = require('./accounting/AccountMapping');
+
 // Inventario
 const Category = require('./inventory/Category');
 const Product = require('./inventory/Product');
@@ -63,6 +70,11 @@ const DianEvent = require('./dian/DianEvent');
 // ✅ NUEVO - Tesorería
 const Expense = require('./finance/Expense');
 const CashSession = require('./finance/CashSession');
+
+// ✅ NUEVO - Asistente de IA (Fase 1 solo lectura + Fase 2 propuestas)
+const AiConversation = require('./ai/AiConversation');
+const AiMessage = require('./ai/AiMessage');
+const AiProposal = require('./ai/AiProposal');
 // ============= RELACIONES EXISTENTES =============
 // Las asociaciones de Purchase, PurchaseItem, Supplier, Product e inventario base
 // están definidas en ./inventory/index.js. Se requiere aquí para garantizar que
@@ -137,12 +149,37 @@ Tenant.hasMany(StockAlert, { foreignKey: 'tenant_id', as: 'stock_alerts' });
 Tenant.hasMany(TenantSubscription, { foreignKey: 'tenant_id', as: 'subscriptions' });
 TenantSubscription.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
-SubscriptionPlan.hasMany(TenantSubscription, { foreignKey: 'plan_id', as: 'subscriptions' });
-TenantSubscription.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'plan' });
-
-// Plan efectivo del tenant (independiente del estado de la suscripción)
+// Plan efectivo del tenant (fuente de verdad de límites y módulos,
+// independiente del estado de la suscripción de facturación)
 Tenant.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'subscriptionPlan' });
 SubscriptionPlan.hasMany(Tenant, { foreignKey: 'plan_id', as: 'tenants' });
+
+// ── Contabilidad ──────────────────────────────────────────────────
+Tenant.hasMany(ChartOfAccount, { foreignKey: 'tenant_id', as: 'chart_of_accounts' });
+ChartOfAccount.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+ChartOfAccount.belongsTo(ChartOfAccount, { foreignKey: 'parent_id', as: 'parent' });
+ChartOfAccount.hasMany(ChartOfAccount, { foreignKey: 'parent_id', as: 'children' });
+
+Tenant.hasMany(FiscalPeriod, { foreignKey: 'tenant_id', as: 'fiscal_periods' });
+FiscalPeriod.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+Tenant.hasMany(JournalEntry, { foreignKey: 'tenant_id', as: 'journal_entries' });
+JournalEntry.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+JournalEntry.belongsTo(FiscalPeriod, { foreignKey: 'period_id', as: 'period' });
+FiscalPeriod.hasMany(JournalEntry, { foreignKey: 'period_id', as: 'entries' });
+
+JournalEntry.hasMany(JournalEntryLine, { foreignKey: 'entry_id', as: 'lines' });
+JournalEntryLine.belongsTo(JournalEntry, { foreignKey: 'entry_id', as: 'entry' });
+JournalEntryLine.belongsTo(ChartOfAccount, { foreignKey: 'account_id', as: 'account' });
+ChartOfAccount.hasMany(JournalEntryLine, { foreignKey: 'account_id', as: 'lines' });
+
+Tenant.hasMany(AccountMapping, { foreignKey: 'tenant_id', as: 'account_mappings' });
+AccountMapping.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+AccountMapping.belongsTo(ChartOfAccount, { foreignKey: 'account_id', as: 'account' });
+
+SubscriptionPlan.hasMany(TenantSubscription, { foreignKey: 'plan_id', as: 'subscriptions' });
+TenantSubscription.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'plan' });
 
 TenantSubscription.hasMany(SubscriptionInvoice, { foreignKey: 'subscription_id', as: 'invoices' });
 SubscriptionInvoice.belongsTo(TenantSubscription, { foreignKey: 'subscription_id', as: 'subscription' });
@@ -365,6 +402,19 @@ Tenant.hasMany(DianEvent, { foreignKey: 'tenant_id', as: 'dian_events' });
 DianEvent.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 Sale.hasMany(DianEvent, { foreignKey: 'sale_id', as: 'dian_events' });
 
+// Asistente de IA
+AiConversation.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+AiConversation.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+AiConversation.hasMany(AiMessage, { foreignKey: 'conversation_id', as: 'messages' });
+AiMessage.belongsTo(AiConversation, { foreignKey: 'conversation_id', as: 'conversation' });
+
+// Asistente de IA — propuestas (Fase 2)
+AiConversation.hasMany(AiProposal, { foreignKey: 'conversation_id', as: 'proposals' });
+AiProposal.belongsTo(AiConversation, { foreignKey: 'conversation_id', as: 'conversation' });
+AiProposal.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+AiProposal.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+AiProposal.belongsTo(User, { foreignKey: 'reviewed_by', as: 'reviewer' });
+
 module.exports = {
   sequelize,
   Tenant,
@@ -414,4 +464,12 @@ module.exports = {
   DianEvent,
   Expense,
   CashSession,
+  ChartOfAccount,
+  FiscalPeriod,
+  JournalEntry,
+  JournalEntryLine,
+  AccountMapping,
+  AiConversation,
+  AiMessage,
+  AiProposal,
 };

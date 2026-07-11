@@ -192,6 +192,16 @@ const createExpense = async (req, res) => {
 
     await transaction.commit();
 
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea)
+    setImmediate(async () => {
+      try {
+        const { generateExpenseEntry } = require('../../services/accounting/autoEntries.service');
+        await generateExpenseEntry(expense, tenant_id, req.user.id);
+      } catch (err) {
+        require('../../config/logger').warn(`[accounting] Error generando asiento de gasto ${expense.id}: ${err.message}`);
+      }
+    });
+
     const created = await Expense.findByPk(expense.id, {
       include: [{ model: Supplier, as: 'supplier' }, { model: Branch, as: 'branch' }]
     });

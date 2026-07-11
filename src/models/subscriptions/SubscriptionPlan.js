@@ -54,14 +54,6 @@ const SubscriptionPlan = sequelize.define(
       comment: 'Características incluidas en el plan',
     },
 
-    // Módulos incluidos (ver backend/src/config/modules.catalog.js)
-    modules: {
-      type: DataTypes.JSONB,
-      allowNull: false,
-      defaultValue: [],
-      comment: 'Módulos que trae el plan por defecto, ej: ["workshop","sales","inventory"]',
-    },
-
     // Límites
     max_users: {
       type: DataTypes.INTEGER,
@@ -75,18 +67,6 @@ const SubscriptionPlan = sequelize.define(
       defaultValue: 50,
       comment: 'Número máximo de clientes finales',
     },
-    max_products: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      defaultValue: 100,
-      comment: 'Número máximo de productos (-1 = ilimitado)',
-    },
-    max_warehouses: {
-      type: DataTypes.INTEGER,
-      allowNull: false,
-      defaultValue: 1,
-      comment: 'Número máximo de bodegas (-1 = ilimitado)',
-    },
     max_invoices_per_month: {
       type: DataTypes.INTEGER,
       allowNull: false,
@@ -98,6 +78,26 @@ const SubscriptionPlan = sequelize.define(
       allowNull: false,
       defaultValue: 100,
       comment: 'Almacenamiento máximo en MB',
+    },
+    max_products: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 100,
+      comment: 'Número máximo de productos activos. -1 = ilimitado',
+    },
+    max_warehouses: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 1,
+      comment: 'Número máximo de bodegas activas. -1 = ilimitado',
+    },
+
+    // Módulos incluidos
+    modules: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+      comment: 'Lista de slugs de módulos habilitados para este plan (ej: ["workshop","sales","inventory"])',
     },
 
     // Estado y configuración

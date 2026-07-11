@@ -1,0 +1,44 @@
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../../config/database');
+
+const JournalEntry = sequelize.define(
+  'JournalEntry',
+  {
+    id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+    tenant_id: { type: DataTypes.UUID, allowNull: false },
+    branch_id: { type: DataTypes.UUID, allowNull: true },
+    entry_number: { type: DataTypes.STRING(50), allowNull: false },
+    entry_date: { type: DataTypes.DATEONLY, allowNull: false },
+    period_id: { type: DataTypes.UUID, allowNull: true },
+    source_type: {
+      type: DataTypes.STRING(20),
+      allowNull: false,
+      defaultValue: 'manual',
+      validate: { isIn: [['sale', 'purchase', 'expense', 'cash_session', 'manual', 'adjustment']] },
+    },
+    source_id: { type: DataTypes.UUID, allowNull: true },
+    description: { type: DataTypes.STRING(500), allowNull: true },
+    status: {
+      type: DataTypes.STRING(10),
+      allowNull: false,
+      defaultValue: 'draft',
+      validate: { isIn: [['draft', 'posted', 'voided']] },
+    },
+    total_debit: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+    total_credit: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+    created_by: { type: DataTypes.UUID, allowNull: true },
+    posted_by: { type: DataTypes.UUID, allowNull: true },
+    posted_at: { type: DataTypes.DATE, allowNull: true },
+    voided_by: { type: DataTypes.UUID, allowNull: true },
+    voided_at: { type: DataTypes.DATE, allowNull: true },
+    void_reason: { type: DataTypes.TEXT, allowNull: true },
+  },
+  {
+    tableName: 'journal_entries',
+    timestamps: true,
+    underscored: true,
+    indexes: [{ unique: true, fields: ['tenant_id', 'entry_number'] }],
+  }
+);
+
+module.exports = JournalEntry;

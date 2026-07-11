@@ -728,6 +728,16 @@ const receivePurchase = async (req, res) => {
 
     await t.commit();
 
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea)
+    setImmediate(async () => {
+      try {
+        const { generatePurchaseEntry } = require('../../services/accounting/autoEntries.service');
+        await generatePurchaseEntry(purchase, tenant_id, req.user.id);
+      } catch (err) {
+        require('../../config/logger').warn(`[accounting] Error generando asiento de compra ${purchase.id}: ${err.message}`);
+      }
+    });
+
     // Obtener compra actualizada
     const updatedPurchase = await Purchase.findByPk(id, {
       include: [

@@ -174,6 +174,17 @@ const closeSession = async (req, res) => {
       closed_at: new Date(),
     });
 
+    // Asiento contable en borrador si hubo sobrante/faltante (no bloqueante:
+    // si falla, solo se loguea — el cierre de caja ya quedó guardado igual)
+    setImmediate(async () => {
+      try {
+        const { generateCashSessionEntry } = require('../../services/accounting/autoEntries.service');
+        await generateCashSessionEntry(session, tenant_id, user_id);
+      } catch (err) {
+        require('../../config/logger').warn(`[accounting] Error generando asiento de cierre de caja ${session.id}: ${err.message}`);
+      }
+    });
+
     res.json({ success: true, data: session });
   } catch (error) {
     console.error('Error cerrando caja:', error);

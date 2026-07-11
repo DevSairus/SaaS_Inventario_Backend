@@ -1,10 +1,13 @@
 // backend/src/middleware/checkLimits.js
-const { Tenant, User } = require('../models');
-const SubscriptionPlan = require('../models/subscriptions/SubscriptionPlan');
+const { Tenant, User, SubscriptionPlan } = require('../models');
 const { Op } = require('sequelize');
+const logger = require('../config/logger');
 
-// Definición de planes y sus límites
-// IMPORTANTE: incluye alias para 'basic' y 'premium' que usa el modelo Tenant
+// ⚠️ LEGACY: este objeto ya NO es la fuente de verdad de límites.
+// Se mantiene únicamente como fallback de seguridad para tenants que por
+// algún motivo no tengan `plan_id` asignado (no debería pasar tras la
+// migración 2026070902, pero evita romper el acceso si ocurre).
+// La fuente de verdad real es `tenant.plan_id -> SubscriptionPlan`.
 const PLANS = {
   free: {
     name: 'Free',
@@ -83,8 +86,10 @@ const checkLimits = (resourceType) => {
         });
       }
 
-      // Obtener información del tenant
-      const tenant = await Tenant.findByPk(tenantId);
+      // Obtener información del tenant + su plan real (fuente de verdad: plan_id)
+      const tenant = await Tenant.findByPk(tenantId, {
+        include: [{ model: SubscriptionPlan, as: 'subscriptionPlan' }],
+      });
 
       if (!tenant) {
         return res.status(404).json({
@@ -93,29 +98,22 @@ const checkLimits = (resourceType) => {
         });
       }
 
-      // Fuente de verdad: subscription_plans (vía tenant.plan_id). Si el tenant
-      // todavía no tiene plan_id asignado (legacy, sin backfill), cae al
-      // objeto PLANS hardcodeado indexado por el string tenant.plan.
+      // Fuente de verdad: tenant.plan_id -> subscription_plans.
+      // Fallback legacy (PLANS hardcodeado) solo si el tenant no tiene plan_id
+      // asignado, para no romper acceso mientras se corrige ese dato puntual.
       let plan;
-      if (tenant.plan_id) {
-        const subscriptionPlan = await SubscriptionPlan.findByPk(tenant.plan_id);
-        if (subscriptionPlan) {
-          plan = {
-            name: subscriptionPlan.name,
-            max_users: subscriptionPlan.max_users,
-            max_clients: subscriptionPlan.max_clients,
-            max_products: subscriptionPlan.max_products,
-            max_warehouses: subscriptionPlan.max_warehouses,
-            max_invoices_per_month: subscriptionPlan.max_invoices_per_month,
-          };
-        }
-      }
-      plan = plan || PLANS[tenant.plan] || PLANS.enterprise;
-
-      if (!plan) {
-        // Esta rama nunca debería alcanzarse gracias al fallback, pero por seguridad:
-        console.warn(`[checkLimits] Plan desconocido "${tenant.plan}", permitiendo acceso.`);
-        return next();
+      if (tenant.subscriptionPlan) {
+        plan = {
+          name: tenant.subscriptionPlan.name,
+          max_users: tenant.subscriptionPlan.max_users,
+          max_clients: tenant.subscriptionPlan.max_clients,
+          max_products: tenant.subscriptionPlan.max_products,
+          max_warehouses: tenant.subscriptionPlan.max_warehouses,
+          max_invoices_per_month: tenant.subscriptionPlan.max_invoices_per_month,
+        };
+      } else {
+        logger.warn(`[checkLimits] Tenant ${tenantId} sin plan_id asignado, usando fallback legacy "${tenant.plan}"`);
+        plan = PLANS[tenant.plan] || PLANS.enterprise;
       }
 
       // Verificar límite según el tipo de recurso

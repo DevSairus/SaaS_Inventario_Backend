@@ -244,6 +244,42 @@ router.get(
   }
 );
 
+// POST /run-migrations
+// Ejecuta manualmente las migraciones pendientes y ESPERA a que terminen
+// antes de responder. Existe porque en Vercel (serverless) el auto-run de
+// migraciones al boot (server.js) es un `.then()` sin await sobre
+// `module.exports = app` — el runtime puede congelar la función en cuanto
+// se responde la petición que disparó el cold start, cortando a la mitad
+// cualquier migración que tarde (ej. backfills que iteran todos los
+// tenants). Este endpoint ata la ejecución al ciclo de vida del request
+// HTTP: Vercel no congela la función hasta que se envía la respuesta, así
+// que awaitear aquí garantiza que si el proceso responde, la migración
+// terminó (o falló con el error visible, no en silencio).
+router.post(
+  '/run-migrations',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { runMigrations } = require('../database/migrator');
+      const executed = await runMigrations();
+      res.json({
+        success: true,
+        message: executed.length > 0
+          ? `${executed.length} migración(es) ejecutada(s)`
+          : 'No había migraciones pendientes',
+        executed: executed.map((m) => m.name),
+      });
+    } catch (error) {
+      res.status(500).json({
+        success: false,
+        message: 'Error ejecutando migraciones',
+        error: error.message,
+      });
+    }
+  }
+);
+
 // POST /tenants - Crear tenant CON suscripción
 router.post(
   '/tenants',
@@ -302,6 +338,10 @@ router.post(
         },
         { transaction }
       );
+
+      // 3b. Plan de cuentas PUC estándar + mapeos contables por defecto
+      const { seedChartOfAccountsForTenant } = require('../services/accounting/accountingSeed.service');
+      await seedChartOfAccountsForTenant(tenant.id, transaction);
 
       // 4. Crear admin
       if (req.body.admin_email && req.body.admin_password) {

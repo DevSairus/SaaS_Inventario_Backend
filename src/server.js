@@ -133,6 +133,8 @@ const tenantRoutes                  = require('./routes/tenant.routes');
 const reportsRoutes                 = require('./routes/reports.routes');
 const dashboardRoutes               = require('./routes/dashboard.routes');
 const invoiceImportRoutes           = require('./routes/invoiceImport.routes');
+const accountingRoutes              = require('./routes/accounting/accounting.routes');
+const aiAssistantRoutes              = require('./routes/ai/aiAssistant.routes');
 const permissionsRoutes             = require('./routes/permissions.routes');
 const vehiclesRoutes                = require('./routes/workshop/vehicles.routes');
 const workOrdersRoutes              = require('./routes/workshop/workOrders.routes');
@@ -185,51 +187,48 @@ app.use('/api/announcements', authMiddleware, announcementsRoutes);
 // ── Permisos (sin tenant) ──
 app.use('/api/permissions', authMiddleware, permissionsRoutes);
 
-// ── Taller (módulo: workshop) ──
-app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware, requireModule('workshop'), runtRoutes);
-app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware, requireModule('workshop'), vehiclesRoutes);
-app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, requireModule('workshop'), branchMiddleware, workOrdersRoutes);
-app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, requireModule('workshop'), commissionSettlementsRoutes);
+// ── Taller ──
+app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware, runtRoutes);
+app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware, vehiclesRoutes);
+app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, branchMiddleware, workOrdersRoutes);
+app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
 
-// ── Inventario (módulo: inventory) ──
-app.use('/api/products',                       authMiddleware, tenantMiddleware, requireModule('inventory'), productsRoutes);
-app.use('/api/categories',                     authMiddleware, tenantMiddleware, requireModule('inventory'), categoriesRoutes);
-app.use('/api/inventory/suppliers',            authMiddleware, tenantMiddleware, requireModule('inventory'), suppliersRoutes);
-app.use('/api/inventory/purchases',            authMiddleware, tenantMiddleware, requireModule('inventory'), branchMiddleware, purchasesRoutes);
-app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, requireModule('inventory'), movementsRoutes);
-app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, requireModule('inventory'), adjustmentsRoutes);
-app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, requireModule('inventory'), warehousesRoutes);
-// Sedes: infraestructura transversal usada por varios módulos — sin gating.
+// ── Inventario ──
+app.use('/api/products',                       authMiddleware, tenantMiddleware, productsRoutes);
+app.use('/api/categories',                     authMiddleware, tenantMiddleware, categoriesRoutes);
+app.use('/api/inventory/suppliers',            authMiddleware, tenantMiddleware, suppliersRoutes);
+app.use('/api/inventory/purchases',            authMiddleware, tenantMiddleware, branchMiddleware, purchasesRoutes);
+app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, movementsRoutes);
+app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, adjustmentsRoutes);
+app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
-app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, requireModule('inventory'), stockAlertsRoutes);
+app.use('/api/stock-alerts',                   authMiddleware, stockAlertsRoutes);
 app.use('/api/dashboard',                      authMiddleware, tenantMiddleware, dashboardRoutes);
 
 // Estas rutas específicas ANTES de /api/sales para evitar conflicto con /:id
-app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware, requireModule('sales'), branchMiddleware, customerReturnsRoutes);
-app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, requireModule('inventory'), branchMiddleware, supplierReturnsRoutes);
-app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, requireModule('inventory'), transfersRoutes);
-app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, requireModule('inventory'), branchMiddleware, internalConsumptionsRoutes);
+app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware, branchMiddleware, customerReturnsRoutes);
+app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, branchMiddleware, supplierReturnsRoutes);
+app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, transfersRoutes);
+app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, branchMiddleware, internalConsumptionsRoutes);
 
-// ── Ventas (módulo: sales — genéricas, después de las específicas) ──
-app.use('/api/sales',                          authMiddleware, tenantMiddleware, requireModule('sales'), branchMiddleware, salesRoutes);
-app.use('/api/customers',                      authMiddleware, tenantMiddleware, requireModule('sales'), customersRoutes);
-// ── Cartera (módulo: receivables) ──
-app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, requireModule('receivables'), accountsReceivableRoutes);
-// ── Tesorería (módulo: treasury) ──
-app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, requireModule('treasury'), branchMiddleware, accountsPayableRoutes);
-app.use('/api/expenses',                       authMiddleware, tenantMiddleware, requireModule('treasury'), branchMiddleware, expensesRoutes);
-app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, requireModule('treasury'), branchMiddleware, cashflowRoutes);
-app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, requireModule('treasury'), branchMiddleware, cashSessionsRoutes);
-// Núcleo — sin gating de módulo.
+// ── Ventas (genéricas — después de las específicas) ──
+app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, salesRoutes);
+app.use('/api/customers',                      authMiddleware, tenantMiddleware, customersRoutes);
+app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
+app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, accountsPayableRoutes);
+app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, expensesRoutes);
+app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, cashflowRoutes);
+app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, cashSessionsRoutes);
 app.use('/api/tenant',                         authMiddleware, tenantMiddleware, tenantRoutes);
-app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, requireModule('inventory'), reportsRoutes);
-app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware, requireModule('inventory'), branchMiddleware, invoiceImportRoutes);
+app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, reportsRoutes);
+app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware, branchMiddleware, invoiceImportRoutes);
 app.use('/api/users',                          authMiddleware, tenantMiddleware, userRoutes);
 
-// ✅ DIAN — Facturación Electrónica: vive dentro de Ventas, siempre incluida
-// en el plan base. Se gatea con el módulo "sales", no con uno propio.
+// ✅ DIAN — Facturación Electrónica (con tenant)
 app.use('/api/whatsapp',                      authMiddleware, whatsappRoutes);
-app.use('/api/dian',                           authMiddleware, tenantMiddleware, requireModule('sales'), branchMiddleware, dianRoutes);
+app.use('/api/dian',                           authMiddleware, tenantMiddleware, branchMiddleware, dianRoutes);
+app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, accountingRoutes);
+app.use('/api/ai-assistant',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ai_assistant'), aiAssistantRoutes);
 
 const path = require('path');
 // /uploads/logos eliminado — logos ahora en Cloudinary (Vercel stateless)

@@ -236,6 +236,38 @@ const notificationLimiter = rateLimit({
 });
 
 /**
+ * Rate limiter para el chat de NEXA (asistente de IA)
+ * 25 mensajes / 10 min por usuario (no por IP — varios usuarios de la misma
+ * oficina comparten IP). Cada mensaje puede disparar varias llamadas a Groq
+ * + hasta MAX_TOOL_ITERATIONS consultas a la base de datos, por lo que
+ * generalLimiter (pensado para CRUD normal) no alcanza a frenar el costo.
+ */
+const aiChatLimiter = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 25,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.user?.id?.toString() || ipKeyGenerator(req),
+  message: {
+    success: false,
+    error: 'Demasiados mensajes a NEXA. Espera unos minutos antes de continuar',
+  },
+
+  handler: (req, res) => {
+    logger.warn('AI chat rate limit exceeded', {
+      ip: req.ip,
+      user: req.user?.id,
+    });
+
+    res.status(429).json({
+      success: false,
+      message: 'Demasiados mensajes a NEXA en poco tiempo. Espera unos minutos antes de continuar',
+      retryAfter: 10,
+    });
+  },
+});
+
+/**
  * Rate limiter flexible basado en rol del usuario
  * Los admin tienen límites más altos
  */
@@ -265,4 +297,5 @@ module.exports = {
   importLimiter,
   notificationLimiter,
   createRoleBasedLimiter,
+  aiChatLimiter,
 };

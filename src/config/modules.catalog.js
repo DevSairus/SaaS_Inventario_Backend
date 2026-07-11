@@ -9,8 +9,8 @@ const MODULES_CATALOG = [
   { key: 'inventory', label: 'Inventario', dependsOn: [], reserved: false },
   { key: 'receivables', label: 'Cartera', dependsOn: ['sales'], reserved: false },
   { key: 'treasury', label: 'Tesorería', dependsOn: ['sales', 'inventory'], reserved: false },
-  { key: 'accounting', label: 'Contabilidad', dependsOn: ['treasury', 'sales', 'inventory'], reserved: true },
-  { key: 'ai_assistant', label: 'Asistente IA', dependsOn: [], reserved: true },
+  { key: 'accounting', label: 'Contabilidad', dependsOn: ['treasury', 'sales', 'inventory'], reserved: false },
+  { key: 'ai_assistant', label: 'NEXA (Asistente IA)', dependsOn: [], reserved: false },
 ];
 
 const MODULES_BY_KEY = MODULES_CATALOG.reduce((acc, m) => {
