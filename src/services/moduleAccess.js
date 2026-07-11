@@ -32,8 +32,25 @@ function closeDependencies(moduleKeys) {
 function getEffectiveModules(tenant, plan) {
   const base = new Set(plan?.modules || []);
   (tenant?.modules_enabled || []).forEach((m) => base.add(m));
-  (tenant?.modules_disabled || []).forEach((m) => base.delete(m));
-  return [...closeDependencies(base)];
+  const result = closeDependencies(base);
+
+  // Quitar los módulos deshabilitados y, en cascada, cualquier módulo que
+  // dependa de uno deshabilitado (si no, closeDependencies los volvería a
+  // agregar por ser dependencia de otro módulo que sigue activo).
+  const disabled = new Set(tenant?.modules_disabled || []);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const key of [...result]) {
+      const deps = MODULES_BY_KEY[key]?.dependsOn || [];
+      if (disabled.has(key) || deps.some((dep) => !result.has(dep))) {
+        result.delete(key);
+        changed = true;
+      }
+    }
+  }
+
+  return [...result];
 }
 
 async function getEffectiveModulesForTenantId(tenantId) {
