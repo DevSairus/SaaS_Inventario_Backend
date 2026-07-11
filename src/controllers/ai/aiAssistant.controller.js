@@ -8,14 +8,41 @@ const logger = require('../../config/logger');
 const ALLOWED_ROLES = ['admin', 'manager', 'accountant'];
 exports.ALLOWED_ROLES = ALLOWED_ROLES;
 
+// Límite de tamaño del mensaje del usuario — evita que pegar un texto muy
+// largo (una tabla, un email completo) infle el prompt sin control.
+const MAX_MESSAGE_CHARS = 4000;
+
+// Presupuesto de historial en caracteres (~4 chars/token, no es tokenización
+// exacta pero acota el prompt sin depender de una librería de tokenizer).
+// Se toma desde el mensaje más reciente hacia atrás para no cortar contexto
+// a la mitad de un intercambio importante.
+const MAX_HISTORY_CHARS = 12000;
+
+function trimHistoryByBudget(messages, maxChars) {
+  const kept = [];
+  let used = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const len = messages[i].content?.length || 0;
+    if (used + len > maxChars && kept.length > 0) break;
+    kept.unshift(messages[i]);
+    used += len;
+  }
+  return kept;
+}
+
 // POST /api/ai-assistant/chat
 // body: { conversation_id?: uuid, message: string }
 exports.chat = async (req, res) => {
   try {
-    const { conversation_id, message } = req.body;
+    const { conversation_id } = req.body;
+    let message = req.body.message;
 
     if (!message || !message.trim()) {
       return res.status(400).json({ success: false, message: 'El mensaje no puede estar vacío' });
+    }
+
+    if (message.length > MAX_MESSAGE_CHARS) {
+      message = message.slice(0, MAX_MESSAGE_CHARS);
     }
 
     if (!ALLOWED_ROLES.includes(req.user.role) && req.user.role !== 'super_admin') {
@@ -43,17 +70,22 @@ exports.chat = async (req, res) => {
       });
     }
 
-    // Historial reciente para darle contexto al modelo (últimos 20 mensajes,
-    // suficiente para una conversación de consulta sin disparar el costo de tokens).
+    // Historial reciente para darle contexto al modelo. Se trae una ventana
+    // amplia por cantidad (40 mensajes) y luego se acota por presupuesto de
+    // caracteres (MAX_HISTORY_CHARS) tomando desde el más reciente hacia
+    // atrás — un límite fijo de mensajes no protege si algunos son muy largos.
     const previousMessages = await AiMessage.findAll({
       where: { conversation_id: conversation.id },
       order: [['created_at', 'ASC']],
-      limit: 20,
+      limit: 40,
     });
 
-    const history = previousMessages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .map((m) => ({ role: m.role, content: m.content }));
+    const history = trimHistoryByBudget(
+      previousMessages
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .map((m) => ({ role: m.role, content: m.content })),
+      MAX_HISTORY_CHARS
+    );
 
     await AiMessage.create({
       conversation_id: conversation.id,
