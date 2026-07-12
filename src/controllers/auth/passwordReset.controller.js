@@ -74,7 +74,7 @@ const forgotPassword = async (req, res) => {
       });
 
       if (emailResult?.mode === 'log') {
-        logger.warn(`forgotPassword: correo NO enviado (GMAIL_USER/GMAIL_APP_PASSWORD no configurados) para usuario ${user.id}`);
+        logger.warn(`forgotPassword: correo NO enviado (MAILGUN_SMTP_USER/MAILGUN_SMTP_PASSWORD no configurados) para usuario ${user.id}`);
       } else {
         logger.info(`forgotPassword: correo de recuperación enviado a usuario ${user.id}`);
       }

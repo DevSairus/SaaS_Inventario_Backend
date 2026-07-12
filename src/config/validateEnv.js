@@ -6,8 +6,8 @@ const REQUIRED_VARS = [
   { key: 'JWT_SECRET',        description: 'Clave secreta para firmar JWT' },
   { key: 'DATABASE_URL',      description: 'URL de conexión a PostgreSQL',
     alternatives: ['POSTGRES_URL', 'POSTGRES_HOST'] },
-  { key: 'GMAIL_USER',        description: 'Usuario Gmail para envío de emails' },
-  { key: 'GMAIL_APP_PASSWORD', description: 'App password de Gmail' },
+  { key: 'MAILGUN_SMTP_USER',     description: 'Usuario SMTP de Mailgun para envío de emails' },
+  { key: 'MAILGUN_SMTP_PASSWORD', description: 'Contraseña SMTP de Mailgun' },
 ];
 
 function validateEnv() {

@@ -2,30 +2,34 @@
 const nodemailer = require('nodemailer');
 const logger = require('../config/logger');
 
-// Configurar transporter con Gmail
+// Configurar transporter con Mailgun (SMTP)
+const isEmailConfigured = () => Boolean(process.env.MAILGUN_SMTP_USER && process.env.MAILGUN_SMTP_PASSWORD);
+
 const createTransporter = () => {
   return nodemailer.createTransport({
-    service: 'gmail',
+    host: process.env.MAILGUN_SMTP_HOST || 'smtp.mailgun.org',
+    port: parseInt(process.env.MAILGUN_SMTP_PORT, 10) || 587,
+    secure: false, // STARTTLS sobre puerto 587
     auth: {
-      user: process.env.GMAIL_USER,
-      pass: process.env.GMAIL_APP_PASSWORD, // App Password de Google (16 caracteres)
+      user: process.env.MAILGUN_SMTP_USER,
+      pass: process.env.MAILGUN_SMTP_PASSWORD,
     },
   });
 };
 
 // Verificar configuración
 const verifyEmailConfig = async () => {
-  if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    logger.warn('[EMAIL] GMAIL_USER o GMAIL_APP_PASSWORD no configurados');
+  if (!isEmailConfigured()) {
+    logger.warn('[EMAIL] MAILGUN_SMTP_USER o MAILGUN_SMTP_PASSWORD no configurados');
     return false;
   }
   try {
     const transporter = createTransporter();
     await transporter.verify();
-    logger.info('[EMAIL] Conexión Gmail verificada');
+    logger.info('[EMAIL] Conexión Mailgun verificada');
     return true;
   } catch (error) {
-    logger.error('[EMAIL] Error verificando Gmail:', error.message);
+    logger.error('[EMAIL] Error verificando Mailgun:', error.message);
     return false;
   }
 };
@@ -35,15 +39,16 @@ const verifyEmailConfig = async () => {
 // ─────────────────────────────────────────
 const sendEmail = async ({ to, subject, html, text }) => {
   try {
-    if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-      logger.warn(`[EMAIL] Gmail no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
+    if (!isEmailConfigured()) {
+      logger.warn(`[EMAIL] Mailgun no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
       return { success: true, mode: 'log' };
     }
 
     const transporter = createTransporter();
+    const fromAddress = process.env.EMAIL_FROM_ADDRESS || process.env.MAILGUN_SMTP_USER;
 
     const info = await transporter.sendMail({
-      from: `"${process.env.EMAIL_FROM_NAME || 'Control de Inventario'}" <${process.env.GMAIL_USER}>`,
+      from: `"${process.env.EMAIL_FROM_NAME || 'Control de Inventario'}" <${fromAddress}>`,
       to: Array.isArray(to) ? to.join(', ') : to,
       subject,
       html,

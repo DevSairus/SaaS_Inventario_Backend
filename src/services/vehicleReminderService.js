@@ -1,7 +1,7 @@
 // backend/src/services/vehicleReminderService.js
 //
 // Recordatorios de vencimiento de SOAT y Tecnomecánica.
-// Canal único: Email (Gmail).
+// Canal único: Email (Mailgun).
 // Se ejecuta vía cron diario desde /api/cron/vehicle-reminders.
 // Días de anticipación: 15, 7 y 3 días antes del vencimiento.
 
