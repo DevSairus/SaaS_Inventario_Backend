@@ -287,6 +287,37 @@ const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
   });
 };
 
+/**
+ * Rate limiter para la respuesta pública a una cotización de OT
+ * (POST /public/work-orders/:token/quote-requests/:id/respond).
+ * Es un endpoint sin autenticación — protege contra intentos de adivinar
+ * tokens o de spamear/reintentar la respuesta. 20 intentos por hora por IP
+ * es generoso para un cliente real (una sola respuesta legítima) pero corta
+ * el abuso automatizado.
+ */
+const quoteResponseLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: ipKey,
+  message: {
+    success: false,
+    error: 'Demasiados intentos. Intenta de nuevo más tarde',
+  },
+
+  handler: (req, res) => {
+    logger.warn('Quote response rate limit exceeded', {
+      ip: req.ip,
+      path: req.path,
+    });
+
+    res.status(429).json({
+      success: false,
+      message: 'Demasiados intentos. Intenta de nuevo en un rato, o contacta al taller directamente',
+      retryAfter: 60,
+    });
+  },
+});
+
 module.exports = {
   generalLimiter,
   authLimiter,
@@ -298,4 +329,5 @@ module.exports = {
   notificationLimiter,
   createRoleBasedLimiter,
   aiChatLimiter,
+  quoteResponseLimiter,
 };

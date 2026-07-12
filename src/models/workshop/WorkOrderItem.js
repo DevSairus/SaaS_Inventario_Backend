@@ -81,6 +81,27 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
     type: DataTypes.UUID,
     allowNull: true,
     comment: 'Referencia al movimiento de inventario generado'
+  },
+  // Cotización con aprobación del cliente — por defecto 'aprobado' para que
+  // los ítems agregados de la forma normal (sin requires_approval) se
+  // comporten exactamente igual que antes de esta funcionalidad.
+  approval_status: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    defaultValue: 'aprobado',
+    validate: { isIn: [['pendiente', 'aprobado', 'rechazado']] },
+  },
+  rejection_reason: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+  },
+  // Ronda de cotización a la que pertenece este ítem (NULL mientras está
+  // pendiente de enviar). Ver models/workshop/WorkOrderQuoteRequest.js
+  quote_request_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'work_order_quote_requests', key: 'id' },
+    onDelete: 'SET NULL',
   }
 }, {
   tableName: 'work_order_items',

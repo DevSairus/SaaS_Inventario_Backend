@@ -26,6 +26,10 @@ router.patch('/:id/checklist', ctrl.updateChecklist);
 router.post('/:id/items', ctrl.addItem);
 router.delete('/:id/items/:itemId', ctrl.removeItem);
 
+// Cotización con aprobación del cliente
+router.post('/:id/quote-requests', ctrl.sendQuoteRequest);
+router.post('/:id/quote-requests/:quoteRequestId/apply', ctrl.applyApprovedItems);
+
 // Generar remisión
 router.post('/:id/generate-sale', ctrl.generateSale);
 

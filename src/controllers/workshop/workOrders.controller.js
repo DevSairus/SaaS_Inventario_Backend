@@ -2,7 +2,7 @@
 const logger = require('../../config/logger');
 const { sequelize } = require('../../config/database');
 const {
-  WorkOrder, WorkOrderItem, Vehicle, Customer, User,
+  WorkOrder, WorkOrderItem, WorkOrderQuoteRequest, Vehicle, Customer, User,
   Warehouse, Product, InventoryMovement, Sale, SaleItem,
 } = require('../../models');
 const { Op } = require('sequelize');
@@ -51,10 +51,65 @@ async function generateMovementNumber(tenant_id, transaction) {
   return `MOV-${year}-${String(seq).padStart(5, '0')}`;
 }
 
+// Solo los ítems 'aprobado' (default para los que no usan cotización) cuentan
+// en los totales de la OT — un ítem 'pendiente' todavía no tiene luz verde
+// del cliente y uno 'rechazado' no se va a cobrar, así que ninguno de los
+// dos debe inflar lo que se factura.
 function calcTotals(items) {
-  const subtotal   = items.reduce((s, i) => s + parseFloat(i.subtotal   || 0), 0);
-  const tax_amount = items.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
+  const billable    = items.filter(i => (i.approval_status || 'aprobado') === 'aprobado');
+  const subtotal   = billable.reduce((s, i) => s + parseFloat(i.subtotal   || 0), 0);
+  const tax_amount = billable.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
   return { subtotal, tax_amount, total_amount: subtotal + tax_amount };
+}
+
+/**
+ * Descuenta inventario por un ítem tipo 'repuesto' con track_inventory y
+ * registra el InventoryMovement correspondiente. Extraído de addItem() para
+ * poder reutilizarlo también cuando el cliente aprueba una cotización y el
+ * taller aplica esos ítems (ver applyApprovedItems) — en ese caso el
+ * descuento sucede recién en ese momento, no cuando se agregó el ítem.
+ * Lanza error si la OT no tiene bodega asignada; el llamador decide cómo
+ * responder (rollback + mensaje al usuario).
+ */
+async function applyItemStockMovement(item, order, product, tenant_id, user_id, transaction) {
+  if (!order.warehouse_id) {
+    throw new Error('La OT debe tener una bodega asignada para descontar repuestos');
+  }
+
+  const qty = parseFloat(item.quantity);
+  const previous_stock = parseFloat(product.current_stock) || 0;
+  const new_stock      = previous_stock - qty;
+  const unit_cost_val  =
+    parseFloat(product.average_cost) ||
+    parseFloat(product.purchase_price) ||
+    parseFloat(item.unit_price);
+
+  const movement_number = await generateMovementNumber(tenant_id, transaction);
+
+  await product.update({ current_stock: new_stock }, { transaction });
+
+  const movement = await InventoryMovement.create({
+    tenant_id,
+    movement_number,
+    movement_type:   'sale',
+    direction:       'out',
+    movement_reason: 'taller_repuesto',
+    reference_type:  'work_order',
+    reference_id:    order.id,
+    product_id:      product.id,
+    warehouse_id:    order.warehouse_id,
+    quantity:        qty,
+    unit_cost:       unit_cost_val,
+    total_cost:      qty * unit_cost_val,
+    previous_stock,
+    new_stock,
+    user_id,
+    movement_date:   new Date(),
+    notes:           `Repuesto OT ${order.order_number}: ${product.name}`,
+  }, { transaction });
+
+  await item.update({ inventory_movement_id: movement.id }, { transaction });
+  return movement;
 }
 
 // ── LIST ─────────────────────────────────────────────────────────────────────
@@ -124,6 +179,11 @@ const getById = async (req, res) => {
             { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] },
             ITEM_TECHNICIAN_INCLUDE,
           ],
+        },
+        {
+          model: WorkOrderQuoteRequest, as: 'quote_requests',
+          separate: true,
+          order: [['sent_at', 'DESC']],
         },
       ],
     });
@@ -363,7 +423,7 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT cerrada' });
     }
 
-    const { product_id, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId } = req.body;
+    const { product_id, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId, requires_approval } = req.body;
     if (!product_id || !item_type || !quantity) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
@@ -381,9 +441,14 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Un producto de tipo servicio no puede ser "repuesto"' });
     }
 
+    // Cotización con aprobación del cliente: no descuenta inventario todavía,
+    // así que tampoco tiene sentido bloquear por stock insuficiente ahora
+    // mismo — puede llegar a reponerse antes de que el cliente apruebe.
+    const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
+
     // Validar stock si es repuesto físico
     const qty = parseFloat(quantity);
-    if (item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
+    if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: `Stock insuficiente. Disponible: ${product.current_stock}` });
     }
@@ -433,47 +498,20 @@ const addItem = async (req, res) => {
       subtotal,
       total,
       technician_id: itemTechnicianId || null,
+      approval_status: requiresApproval ? 'pendiente' : 'aprobado',
     }, { transaction });
 
-    // Descontar inventario si es repuesto físico con track_inventory
-    if (item_type === 'repuesto' && product.track_inventory) {
-      if (!order.warehouse_id) {
+    // Descontar inventario si es repuesto físico con track_inventory —
+    // salvo que requiera aprobación del cliente: en ese caso queda
+    // 'pendiente' sin tocar inventario hasta que se apruebe (ver
+    // applyApprovedItems), sea cual sea el momento de la OT en que se agregó.
+    if (!requiresApproval && item_type === 'repuesto' && product.track_inventory) {
+      try {
+        await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
+      } catch (stockError) {
         await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'La OT debe tener una bodega asignada para descontar repuestos' });
+        return res.status(400).json({ success: false, message: stockError.message });
       }
-
-      const previous_stock = parseFloat(product.current_stock) || 0;
-      const new_stock      = previous_stock - qty;
-      const unit_cost_val  =
-        parseFloat(product.average_cost) ||
-        parseFloat(product.purchase_price) ||
-        price;
-
-      const movement_number = await generateMovementNumber(tenant_id, transaction);
-
-      await product.update({ current_stock: new_stock }, { transaction });
-
-      const movement = await InventoryMovement.create({
-        tenant_id,
-        movement_number,
-        movement_type:   'sale',
-        direction:       'out',
-        movement_reason: 'taller_repuesto',
-        reference_type:  'work_order',
-        reference_id:    order.id,
-        product_id,
-        warehouse_id:    order.warehouse_id,
-        quantity:        qty,
-        unit_cost:       unit_cost_val,
-        total_cost:      qty * unit_cost_val,
-        previous_stock,
-        new_stock,
-        user_id:         req.user.id,
-        movement_date:   new Date(),
-        notes:           `Repuesto OT ${order.order_number}: ${product.name}`,
-      }, { transaction });
-
-      await item.update({ inventory_movement_id: movement.id }, { transaction });
     }
 
     // Recalcular totales de la OT
@@ -533,6 +571,222 @@ const removeItem = async (req, res) => {
     await transaction.rollback();
     logger.error('Error eliminando ítem OT:', error);
     res.status(500).json({ success: false, message: 'Error al eliminar ítem' });
+  }
+};
+
+// ── COTIZACIÓN CON APROBACIÓN DEL CLIENTE ───────────────────────────────────
+// Ítems agregados con requires_approval:true quedan 'pendiente' sueltos
+// (quote_request_id NULL) hasta que el taller decide mandarlos a aprobar —
+// ese envío es lo que agrupa una "ronda" (WorkOrderQuoteRequest).
+
+/**
+ * POST /work-orders/:id/quote-requests
+ * Agrupa los ítems 'pendiente' sueltos de la OT en una ronda nueva y arma
+ * el enlace de WhatsApp para enviarla — mismo patrón que sendWhatsApp/
+ * generateShareToken (reusa share_token, wa.me).
+ */
+const sendQuoteRequest = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    }
+
+    const pendingItems = await WorkOrderItem.findAll({
+      where: { work_order_id: order.id, approval_status: 'pendiente', quote_request_id: null },
+      transaction,
+    });
+    if (pendingItems.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay ítems pendientes de enviar a cotizar' });
+    }
+
+    const quoteRequest = await WorkOrderQuoteRequest.create({
+      tenant_id,
+      work_order_id: order.id,
+      status: 'enviada',
+    }, { transaction });
+
+    await WorkOrderItem.update(
+      { quote_request_id: quoteRequest.id },
+      { where: { id: pendingItems.map(i => i.id) }, transaction }
+    );
+
+    // Reusar/crear share_token de la OT (mismo patrón que generateShareToken/sendWhatsApp)
+    const rows = await sequelize.query(
+      'SELECT share_token FROM work_orders WHERE id = :id',
+      { replacements: { id: order.id }, type: sequelize.QueryTypes.SELECT, transaction }
+    );
+    let token = rows[0]?.share_token;
+    if (!token) {
+      token = require('crypto').randomUUID();
+      await sequelize.query(
+        'UPDATE work_orders SET share_token = :token WHERE id = :id',
+        { replacements: { token, id: order.id }, type: sequelize.QueryTypes.UPDATE, transaction }
+      );
+    }
+
+    const customer = await Customer.findOne({ where: { id: order.customer_id }, transaction });
+    const phone = customer?.mobile || customer?.phone || '';
+    const cleanPhone = phone.replace(/\D/g, '');
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
+    const shareUrl = `${frontendUrl}/ot/${token}`;
+    const itemsSummary = pendingItems.map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
+    const whatsappText = encodeURIComponent(
+      `Hola! Tenemos una cotización pendiente de tu aprobación para la orden ${order.order_number}:\n${itemsSummary}\n\nRevísala y apruébala aquí:\n${shareUrl}`
+    );
+    const whatsappUrl = cleanPhone
+      ? `https://wa.me/${cleanPhone}?text=${whatsappText}`
+      : `https://wa.me/?text=${whatsappText}`;
+
+    await transaction.commit();
+
+    res.status(201).json({
+      success: true,
+      message: 'Cotización enviada',
+      data: { quote_request_id: quoteRequest.id, share_url: shareUrl, whatsapp_url: whatsappUrl, items_count: pendingItems.length },
+    });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error enviando cotización:', error);
+    res.status(500).json({ success: false, message: 'Error al enviar la cotización' });
+  }
+};
+
+/**
+ * POST /work-orders/:id/quote-requests/:quoteRequestId/apply
+ * Descuenta inventario de los ítems 'aprobado' de esa ronda que todavía no
+ * se hayan aplicado — recién en este momento se toca inventario, nunca
+ * antes (ver applyItemStockMovement / diseño en addItem).
+ */
+const applyApprovedItems = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    }
+
+    const quoteRequest = await WorkOrderQuoteRequest.findOne({
+      where: { id: req.params.quoteRequestId, work_order_id: order.id },
+      transaction,
+    });
+    if (!quoteRequest) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
+
+    const items = await WorkOrderItem.findAll({
+      where: { quote_request_id: quoteRequest.id, approval_status: 'aprobado', inventory_movement_id: null },
+      transaction,
+    });
+
+    let applied = 0;
+    for (const item of items) {
+      if (item.item_type !== 'repuesto') continue; // servicio/mano_obra no descuenta inventario
+      const product = await Product.findByPk(item.product_id, { transaction });
+      if (!product || !product.track_inventory) continue;
+      await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
+      applied += 1;
+    }
+
+    await transaction.commit();
+    res.json({ success: true, message: `${applied} ítem(s) aplicado(s) — inventario descontado`, data: { applied } });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error aplicando ítems aprobados:', error);
+    res.status(500).json({ success: false, message: error.message || 'Error al aplicar los ítems aprobados' });
+  }
+};
+
+/**
+ * POST /public/work-orders/:token/quote-requests/:quoteRequestId/respond
+ * Endpoint PÚBLICO (sin autenticación) — el cliente aprueba/rechaza los
+ * ítems de la ronda activa. Bloqueo total: si la ronda ya no está en
+ * 'enviada', se rechaza con 409 sin tocar nada (protege contra doble envío,
+ * reintento, o reabrir un link viejo).
+ */
+const respondQuoteRequest = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { token, quoteRequestId } = req.params;
+    const { approvals, approved_by_name, approved_by_document } = req.body;
+
+    if (!approved_by_name || !approved_by_document) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Nombre y documento son requeridos para responder' });
+    }
+    if (!Array.isArray(approvals) || approvals.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión' });
+    }
+
+    const rows = await sequelize.query(
+      'SELECT id FROM work_orders WHERE share_token = :token LIMIT 1',
+      { replacements: { token }, type: sequelize.QueryTypes.SELECT, transaction }
+    );
+    const order = rows[0];
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
+    }
+
+    // Bloqueo total: si la ronda ya fue respondida, no se acepta un segundo envío.
+    const quoteRequest = await WorkOrderQuoteRequest.findOne({
+      where: { id: quoteRequestId, work_order_id: order.id },
+      transaction,
+    });
+    if (!quoteRequest || quoteRequest.status !== 'enviada') {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
+    }
+
+    for (const a of approvals) {
+      await WorkOrderItem.update(
+        {
+          approval_status: a.approved ? 'aprobado' : 'rechazado',
+          rejection_reason: a.approved ? null : (a.rejection_reason || null),
+        },
+        { where: { id: a.item_id, work_order_id: order.id, quote_request_id: quoteRequestId }, transaction }
+      );
+    }
+
+    await quoteRequest.update(
+      {
+        status: 'respondida',
+        responded_at: new Date(),
+        approved_by_name,
+        approved_by_document,
+        approved_ip: req.ip,
+      },
+      { transaction }
+    );
+
+    // Recalcular totales de la OT — los ítems recién aprobados ahora sí
+    // cuentan en lo que se factura (ver calcTotals).
+    const fullOrder = await WorkOrder.findByPk(order.id, { transaction });
+    const allItems = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
+    const { subtotal, tax_amount } = calcTotals(allItems);
+    const disc = parseFloat(fullOrder.discount_amount) || 0;
+    await fullOrder.update({ subtotal, tax_amount, total_amount: subtotal + tax_amount - disc }, { transaction });
+
+    await transaction.commit();
+
+    // TODO: notificar al taller (wa.me / mismo mecanismo que accountsPayable
+    // / stockAlerts) — pendiente definir si es inmediato o basta con que el
+    // taller lo vea la próxima vez que entra a Pitbox.
+
+    res.json({ success: true, message: 'Respuesta registrada correctamente' });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error en respondQuoteRequest:', error);
+    res.status(500).json({ success: false, message: 'Error al procesar la respuesta' });
   }
 };
 
@@ -1297,7 +1551,7 @@ const getPublicOrder = async (req, res) => {
         {
           model: WorkOrderItem,
           as: 'items',
-          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'total'],
+          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'total', 'approval_status'],
         },
       ],
     });
@@ -1305,6 +1559,22 @@ const getPublicOrder = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
     }
+
+    // Rondas de cotización de esta OT — la más reciente 'enviada' (si existe)
+    // es la que el cliente puede responder; las 'respondida' se muestran
+    // como historial de solo-lectura.
+    const quoteRequests = await WorkOrderQuoteRequest.findAll({
+      where: { work_order_id: orderId },
+      order: [['sent_at', 'DESC']],
+      include: [{
+        model: WorkOrderItem,
+        as: 'items',
+        attributes: ['id', 'product_name', 'product_sku', 'quantity', 'unit_price', 'total', 'item_type', 'approval_status', 'rejection_reason'],
+      }],
+    });
+
+    const activeQuoteRequest = quoteRequests.find(q => q.status === 'enviada');
+    const respondedQuoteRequests = quoteRequests.filter(q => q.status === 'respondida');
 
     // Buscar datos del taller (tenant) para mostrar nombre y contacto
     const tenant = await Tenant.findByPk(order.tenant_id, {
@@ -1334,13 +1604,43 @@ const getPublicOrder = async (req, res) => {
         name: order.customer.business_name || `${order.customer.first_name} ${order.customer.last_name || ''}`.trim(),
       } : null,
       technician: order.technician ? `${order.technician.first_name} ${order.technician.last_name}` : null,
-      items: (order.items || []).map(i => ({
-        item_type: i.item_type,
-        product_name: i.product_name,
-        product_sku: i.product_sku,
-        quantity: parseFloat(i.quantity),
-        unit_price: parseFloat(i.unit_price),
-        total: parseFloat(i.total),
+      // Solo los ítems ya confirmados (aprobado) — los pendientes de cotizar
+      // se muestran aparte en active_quote_request, no acá.
+      items: (order.items || [])
+        .filter(i => (i.approval_status || 'aprobado') === 'aprobado')
+        .map(i => ({
+          item_type: i.item_type,
+          product_name: i.product_name,
+          product_sku: i.product_sku,
+          quantity: parseFloat(i.quantity),
+          unit_price: parseFloat(i.unit_price),
+          total: parseFloat(i.total),
+        })),
+      active_quote_request: activeQuoteRequest ? {
+        id: activeQuoteRequest.id,
+        sent_at: activeQuoteRequest.sent_at,
+        items: (activeQuoteRequest.items || []).map(i => ({
+          id: i.id,
+          item_type: i.item_type,
+          product_name: i.product_name,
+          product_sku: i.product_sku,
+          quantity: parseFloat(i.quantity),
+          unit_price: parseFloat(i.unit_price),
+          total: parseFloat(i.total),
+        })),
+      } : null,
+      quote_history: respondedQuoteRequests.map(q => ({
+        id: q.id,
+        sent_at: q.sent_at,
+        responded_at: q.responded_at,
+        approved_by_name: q.approved_by_name,
+        items: (q.items || []).map(i => ({
+          product_name: i.product_name,
+          quantity: parseFloat(i.quantity),
+          total: parseFloat(i.total),
+          approval_status: i.approval_status,
+          rejection_reason: i.rejection_reason,
+        })),
       })),
       workshop: tenant ? {
         name: tenant.company_name,
@@ -1409,4 +1709,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest };

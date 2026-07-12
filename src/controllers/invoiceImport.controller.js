@@ -1,7 +1,7 @@
 // backend/src/controllers/invoiceImport.controller.js
 const AdmZip = require('adm-zip');
 const { parseInvoiceXML, validateParsedData } = require('../services/invoiceXmlParser');
-const { Purchase, PurchaseItem, Product, Supplier } = require('../models/inventory');
+const { Purchase, PurchaseItem, Product, Supplier, ProductSupplier } = require('../models/inventory');
 const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
 
@@ -22,6 +22,12 @@ const importInvoice = async (req, res) => {
     const discount_amount = parseFloat(req.body.discount_amount) || 0;
     // Override de IVA por ítem: { "0": 19, "1": 0, "2": 5 } (índice original → porcentaje)
     const items_tax_overrides = JSON.parse(req.body.items_tax_overrides || '{}');
+    // Decisiones del usuario en el modal para ítems sin mapeo exacto por código:
+    // { "0": "<product_id>", "2": "CREATE_NEW" } (índice original → decisión).
+    // Es la única vía por la que se guarda un mapeo código-proveedor nuevo (ver
+    // processInvoiceItems) — un match automático por SKU interno o por nombre
+    // aproximado nunca guarda el mapeo por sí solo.
+    const manual_links = JSON.parse(req.body.manual_links || '{}');
 
     if (!req.file) {
       return res.status(400).json({
@@ -99,6 +105,7 @@ const importInvoice = async (req, res) => {
     const filteredItems = invoiceData.items
       .map((item, originalIdx) => ({
         ...item,
+        original_index: originalIdx, // para resolver manual_links[idx] tras el filtro
         // Si hay override de IVA para este índice original, aplicarlo
         tax_percentage: items_tax_overrides[originalIdx] !== undefined
           ? parseFloat(items_tax_overrides[originalIdx])
@@ -112,7 +119,7 @@ const importInvoice = async (req, res) => {
       item.total = item.subtotal + item.tax_amount;
     });
 
-    const processedItems = await processInvoiceItems(filteredItems, tenant_id, transaction, profit_margin, margin_multiplier);
+    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, margin_multiplier, manual_links);
     const purchase = await createPurchaseFromInvoice(
       invoiceData,
       supplier,
@@ -215,6 +222,21 @@ const previewInvoice = async (req, res) => {
       };
     }
 
+    // Proveedor candidato de solo lectura (por tax_id, o por nombre aproximado si
+    // no trae NIT) — en el preview puede que ese proveedor todavía no exista como
+    // registro (puede ser su primera factura), así que NUNCA se crea aquí.
+    const supplierCandidate = await findSupplierCandidate(invoiceData.supplier, tenant_id);
+
+    // Por cada ítem, correr la misma cadena de búsqueda que processInvoiceItems()
+    // (código exacto → SKU interno → nombre aproximado) pero sin crear ni guardar
+    // nada — solo para sugerirle al frontend con qué producto vincularlo.
+    const itemsWithSuggestions = await Promise.all(
+      invoiceData.items.map(async (item, idx) => ({
+        ...item,
+        suggestion: await buildItemSuggestion(item, tenant_id, supplierCandidate?.id),
+      }))
+    );
+
     res.json({
       success: true,
       data: {
@@ -222,7 +244,7 @@ const previewInvoice = async (req, res) => {
         errors: validation.errors,
         invoice: invoiceData.invoice,
         supplier: invoiceData.supplier,
-        items: invoiceData.items,
+        items: itemsWithSuggestions,
         totals: invoiceData.totals,
         hasPdf: !!zipData.pdf,
         isDuplicate: isDuplicate,
@@ -266,6 +288,58 @@ async function extractZipContent(buffer) {
   } catch (error) {
     throw new Error(`Error extrayendo ZIP: ${error.message}`);
   }
+}
+
+// Versión de solo lectura de findOrCreateSupplier, para el preview — en ese
+// punto puede que el proveedor todavía no exista (primera factura de ese
+// proveedor) y el preview NUNCA debe crear registros.
+async function findSupplierCandidate(supplierData, tenant_id) {
+  if (supplierData.tax_id) {
+    const s = await Supplier.findOne({ where: { tenant_id, tax_id: supplierData.tax_id } });
+    if (s) return s;
+  }
+  if (supplierData.name) {
+    const s = await Supplier.findOne({
+      where: { tenant_id, name: { [Op.iLike]: `%${supplierData.name}%` } },
+    });
+    if (s) return s;
+  }
+  return null;
+}
+
+// Misma cadena de búsqueda que processInvoiceItems() (código exacto → SKU
+// interno → nombre aproximado), pero de solo lectura — arma la "suggestion"
+// que el modal de importación usa para pre-cargar el selector de cada ítem.
+async function buildItemSuggestion(item, tenant_id, supplierId) {
+  const hasSupplierCode = item.sku && !item.sku.startsWith('TEMP-');
+
+  if (hasSupplierCode && supplierId) {
+    const mapping = await ProductSupplier.findOne({
+      where: { tenant_id, supplier_id: supplierId, supplier_code: item.sku },
+    });
+    if (mapping) {
+      const product = await Product.findByPk(mapping.product_id);
+      if (product) {
+        return { product_id: product.id, product_name: product.name, match_type: 'code_exact' };
+      }
+    }
+  }
+
+  if (hasSupplierCode) {
+    const bySku = await Product.findOne({ where: { tenant_id, sku: item.sku } });
+    if (bySku) {
+      return { product_id: bySku.id, product_name: bySku.name, match_type: 'sku_internal' };
+    }
+  }
+
+  const byName = await Product.findOne({
+    where: { tenant_id, name: { [Op.iLike]: `%${item.name}%` } },
+  });
+  if (byName) {
+    return { product_id: byName.id, product_name: byName.name, match_type: 'name_fuzzy' };
+  }
+
+  return null;
 }
 
 async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
@@ -316,30 +390,59 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
   return supplier;
 }
 
-async function processInvoiceItems(items, tenant_id, transaction, profit_margin = 30, margin_multiplier = 1.3) {
+async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = 30, margin_multiplier = 1.3, manualLinks = {}) {
   const processedItems = [];
 
   for (const item of items) {
     let product = null;
     let isNew = false;
+    let matchType = null;
 
-    if (item.sku && !item.sku.startsWith('TEMP-')) {
-      product = await Product.findOne({
-        where: { tenant_id, sku: item.sku },
-        transaction
+    const hasSupplierCode = item.sku && !item.sku.startsWith('TEMP-');
+    // manual_links llega con claves string ("0", "1"...) porque viene de JSON.parse
+    // sobre un objeto armado en el frontend con índices originales del array.
+    const manualLink = manualLinks[String(item.original_index)];
+
+    // 1) ¿Ya existe un mapeo tenant+proveedor+código_proveedor? Es la ÚNICA vía
+    //    que se aplica sola, sin pasar por el usuario — el mapeo ya fue
+    //    confirmado en una importación anterior.
+    if (hasSupplierCode) {
+      const mapping = await ProductSupplier.findOne({
+        where: { tenant_id, supplier_id, supplier_code: item.sku },
+        transaction,
       });
+      if (mapping) {
+        product = await Product.findByPk(mapping.product_id, { transaction });
+        if (product) matchType = 'code_exact';
+      }
     }
 
-    if (!product) {
-      product = await Product.findOne({
-        where: {
-          tenant_id,
-          name: { [Op.iLike]: `%${item.name}%` }
-        },
-        transaction
-      });
+    // 2) Decisión del usuario en el modal de importación (aceptó una sugerencia,
+    //    la cambió, o pidió crear un producto nuevo) — es la otra vía válida
+    //    para terminar vinculando el ítem, y la única que se guarda como mapeo.
+    if (!product && manualLink && manualLink !== 'CREATE_NEW') {
+      product = await Product.findByPk(manualLink, { transaction });
+      if (product) matchType = 'manual';
     }
 
+    // 3) Fallback automático heredado (llamadas directas al endpoint sin pasar
+    //    por el modal, o sin decisión para este ítem): SKU interno igual al código.
+    if (!product && !manualLink && hasSupplierCode) {
+      product = await Product.findOne({ where: { tenant_id, sku: item.sku }, transaction });
+      if (product) matchType = 'sku_internal';
+    }
+
+    // 4) Fallback automático heredado: nombre aproximado.
+    if (!product && !manualLink) {
+      product = await Product.findOne({
+        where: { tenant_id, name: { [Op.iLike]: `%${item.name}%` } },
+        transaction
+      });
+      if (product) matchType = 'name_fuzzy';
+    }
+
+    // 5) Crear producto nuevo — comportamiento actual, disparado tanto por
+    //    "no se encontró nada" como por la decisión explícita CREATE_NEW.
     if (!product) {
       const newSku = item.sku && !item.sku.startsWith('TEMP-')
         ? item.sku 
@@ -365,6 +468,16 @@ async function processInvoiceItems(items, tenant_id, transaction, profit_margin 
       }, { transaction });
 
       isNew = true;
+      matchType = manualLink === 'CREATE_NEW' ? 'new_confirmed' : 'new';
+    }
+
+    // 6) Guardar/actualizar el mapeo código-proveedor → producto SOLO cuando la
+    //    decisión vino confirmada explícitamente por el usuario (manual_links).
+    //    Un match automático por SKU interno o por nombre (pasos 3 y 4) NUNCA
+    //    guarda el mapeo por sí solo — así, si el match automático estaba
+    //    equivocado, no queda "grabado" para las próximas importaciones.
+    if (hasSupplierCode && manualLink !== undefined) {
+      await saveSupplierMapping(tenant_id, supplier_id, product.id, item.sku, item.name, transaction);
     }
 
     processedItems.push({
@@ -378,11 +491,42 @@ async function processInvoiceItems(items, tenant_id, transaction, profit_margin 
       tax_amount: item.tax_amount,
       subtotal: item.subtotal,
       total: item.total,
-      isNew: isNew
+      isNew: isNew,
+      match_type: matchType
     });
   }
 
   return processedItems;
+}
+
+// Crea o actualiza la fila de product_suppliers con el código del proveedor.
+// Reutiliza la fila si ya existe (por ejemplo, creada antes al confirmar una
+// compra — ver purchases.controller.js) para no pisar last_price/last_purchase_date.
+async function saveSupplierMapping(tenant_id, supplier_id, product_id, supplier_code, supplier_description, transaction) {
+  try {
+    const existing = await ProductSupplier.findOne({
+      where: { tenant_id, supplier_id, product_id },
+      transaction,
+    });
+
+    if (existing) {
+      await existing.update({ supplier_code, supplier_description }, { transaction });
+    } else {
+      await ProductSupplier.create({
+        tenant_id, supplier_id, product_id, supplier_code, supplier_description,
+      }, { transaction });
+    }
+  } catch (error) {
+    // Índice único parcial (tenant_id, supplier_id, supplier_code): salta si ese
+    // código de proveedor ya está vinculado a OTRO producto. No interrumpe la
+    // importación — el ítem ya quedó vinculado al producto correcto, solo no
+    // se pudo "recordar" el código para la próxima vez.
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      console.warn(`⚠️  No se pudo guardar el mapeo de código "${supplier_code}": ya está vinculado a otro producto.`);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function generateUniqueSku(productName, tenant_id, transaction) {

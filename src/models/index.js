@@ -58,6 +58,7 @@ const AuditLog = require('../models/AuditLog');
 const Vehicle = require('./workshop/Vehicle');
 const WorkOrder = require('./workshop/WorkOrder');
 const WorkOrderItem = require('./workshop/WorkOrderItem');
+const WorkOrderQuoteRequest = require('./workshop/WorkOrderQuoteRequest');
 const CommissionSettlement = require('./workshop/CommissionSettlement');
 const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
 const ProductCommissionSettlement = require('./workshop/ProductCommissionSettlement');
@@ -332,6 +333,12 @@ Sale.hasOne(WorkOrder, { foreignKey: 'sale_id', as: 'work_order' });
 WorkOrderItem.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
 WorkOrder.hasMany(WorkOrderItem, { foreignKey: 'work_order_id', as: 'items' });
 
+// WorkOrderQuoteRequest ↔ WorkOrder / WorkOrderItem
+WorkOrderQuoteRequest.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+WorkOrder.hasMany(WorkOrderQuoteRequest, { foreignKey: 'work_order_id', as: 'quote_requests' });
+WorkOrderItem.belongsTo(WorkOrderQuoteRequest, { foreignKey: 'quote_request_id', as: 'quote_request' });
+WorkOrderQuoteRequest.hasMany(WorkOrderItem, { foreignKey: 'quote_request_id', as: 'items' });
+
 // WorkOrderItem ↔ Product
 WorkOrderItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(WorkOrderItem, { foreignKey: 'product_id', as: 'work_order_items' });
@@ -456,6 +463,7 @@ module.exports = {
   Vehicle,
   WorkOrder,
   WorkOrderItem,
+  WorkOrderQuoteRequest,
   CommissionSettlement,
   CommissionSettlementItem,
   ProductCommissionSettlement,
