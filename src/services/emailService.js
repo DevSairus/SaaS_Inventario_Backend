@@ -14,6 +14,9 @@ const createTransporter = () => {
       user: process.env.MAILGUN_SMTP_USER,
       pass: process.env.MAILGUN_SMTP_PASSWORD,
     },
+    connectionTimeout: 10000, // 10s para establecer la conexión TCP
+    greetingTimeout: 10000,   // 10s para el saludo SMTP inicial
+    socketTimeout: 15000,     // 15s de inactividad máxima en el socket
   });
 };
 
