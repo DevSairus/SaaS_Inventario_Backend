@@ -1,4 +1,5 @@
 const { ChartOfAccount, JournalEntryLine } = require('../../models');
+const logger = require('../../config/logger');
 
 // GET /api/accounting/chart-of-accounts
 exports.list = async (req, res) => {
@@ -9,7 +10,8 @@ exports.list = async (req, res) => {
     });
     res.json({ success: true, data: accounts });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al listar plan de cuentas', error: error.message });
+    logger.error('Error en chartOfAccounts.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al listar plan de cuentas', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -43,7 +45,8 @@ exports.create = async (req, res) => {
     if (error.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ success: false, message: 'Ya existe una cuenta con ese código' });
     }
-    res.status(500).json({ success: false, message: 'Error al crear cuenta', error: error.message });
+    logger.error('Error en chartOfAccounts.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al crear cuenta', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -62,7 +65,8 @@ exports.update = async (req, res) => {
 
     res.json({ success: true, data: account });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al actualizar cuenta', error: error.message });
+    logger.error('Error en chartOfAccounts.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar cuenta', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -85,6 +89,7 @@ exports.remove = async (req, res) => {
     await account.destroy();
     res.json({ success: true, message: 'Cuenta eliminada' });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al eliminar cuenta', error: error.message });
+    logger.error('Error en chartOfAccounts.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al eliminar cuenta', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };

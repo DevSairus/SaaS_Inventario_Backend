@@ -5,6 +5,7 @@
 // ya tenía los tres chequeos completos, pero solo los podía consultar NEXA
 // (el asistente de IA) — no existía ningún endpoint REST ni pantalla que
 // los mostrara. Este controlador solo expone lo que ya existe.
+const logger = require('../../config/logger');
 
 const {
   findMissingJournalEntries,
@@ -78,10 +79,11 @@ exports.generateMissingEntry = async (req, res) => {
     }
     res.json({ success: true, data: entry, message: `Asiento ${entry.entry_number} generado en borrador` });
   } catch (error) {
+    logger.error('Error en accountingHealth.controller.js:', error);
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : `No se pudo generar el asiento: ${error.message}`,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -121,7 +123,8 @@ exports.generateAllMissingEntries = async (req, res) => {
       message: `${results.generated.length} generados, ${results.skipped.length} sin cambios, ${results.failed.length} con error`,
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error generando los asientos en lote', error: error.message });
+    logger.error('Error en accountingHealth.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error generando los asientos en lote', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -156,6 +159,7 @@ exports.summary = async (req, res) => {
       },
     });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al calcular la salud contable', error: error.message });
+    logger.error('Error en accountingHealth.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al calcular la salud contable', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };

@@ -67,7 +67,7 @@ const getAllUsers = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener usuarios',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -117,7 +117,7 @@ const getUserById = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -145,7 +145,7 @@ const getProfile = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener perfil',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -184,7 +184,7 @@ const updateProfile = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar perfil',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -231,7 +231,7 @@ const changePassword = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al cambiar contraseña',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -300,7 +300,7 @@ const createUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al crear usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -377,7 +377,7 @@ const createClient = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al crear cliente',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -445,7 +445,7 @@ const updateUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -496,7 +496,7 @@ const toggleUserStatus = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al cambiar estado del usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -542,7 +542,7 @@ const updateAutoInvoiceConfig = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar configuración',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -592,7 +592,7 @@ const deleteUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al eliminar usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -717,7 +717,7 @@ const getLimitsStatus = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener límites',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };

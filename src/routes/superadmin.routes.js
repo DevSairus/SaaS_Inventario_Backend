@@ -274,7 +274,7 @@ router.post(
       res.status(500).json({
         success: false,
         message: 'Error ejecutando migraciones',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }
@@ -1731,7 +1731,7 @@ router.put(
       res.json({ success: true, message: 'Usuario actualizado exitosamente', data: { user: userResponse } });
     } catch (error) {
       console.error('Error actualizando usuario:', error);
-      res.status(500).json({ success: false, message: 'Error al actualizar usuario', error: error.message });
+      res.status(500).json({ success: false, message: 'Error al actualizar usuario', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
     }
   }
 );
@@ -1764,7 +1764,7 @@ router.delete(
       res.json({ success: true, message: 'Usuario eliminado exitosamente' });
     } catch (error) {
       console.error('Error eliminando usuario:', error);
-      res.status(500).json({ success: false, message: 'Error al eliminar usuario', error: error.message });
+      res.status(500).json({ success: false, message: 'Error al eliminar usuario', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
     }
   }
 );
@@ -1805,7 +1805,7 @@ router.put(
       res.json({ success: true, message: 'Rol actualizado exitosamente', data: { user } });
     } catch (error) {
       console.error('Error cambiando rol:', error);
-      res.status(500).json({ success: false, message: 'Error al cambiar rol', error: error.message });
+      res.status(500).json({ success: false, message: 'Error al cambiar rol', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
     }
   }
 );
@@ -1847,7 +1847,7 @@ router.put(
       res.json({ success: true, message: 'Contraseña reseteada exitosamente' });
     } catch (error) {
       console.error('Error reseteando contraseña:', error);
-      res.status(500).json({ success: false, message: 'Error al resetear contraseña', error: error.message });
+      res.status(500).json({ success: false, message: 'Error al resetear contraseña', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
     }
   }
 );

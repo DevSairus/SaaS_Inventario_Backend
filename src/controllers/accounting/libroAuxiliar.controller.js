@@ -153,7 +153,7 @@ exports.libroAuxiliar = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar libro auxiliar',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -179,7 +179,7 @@ exports.libroAuxiliarExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar libro auxiliar',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }

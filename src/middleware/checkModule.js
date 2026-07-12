@@ -37,7 +37,7 @@ const requireModule = (moduleKey) => {
       res.status(500).json({
         success: false,
         message: 'Error al verificar módulos habilitados',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   };

@@ -141,7 +141,7 @@ const getAccountsReceivableSummary = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error obteniendo cartera',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -229,7 +229,7 @@ const getCustomerAccountsReceivable = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error obteniendo cartera del cliente',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -299,7 +299,7 @@ const getPaymentHistory = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error obteniendo historial de pagos',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -394,7 +394,7 @@ const getAgingReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error obteniendo reporte de antigüedad',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };

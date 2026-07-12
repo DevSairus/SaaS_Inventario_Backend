@@ -118,7 +118,7 @@ exports.withholding = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar reporte de retenciones',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -147,7 +147,7 @@ exports.withholdingExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar reporte de retenciones',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }

@@ -152,7 +152,7 @@ exports.getMovementsByMonth = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener reporte de movimientos',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -217,7 +217,7 @@ exports.getValuation = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener valorización',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -358,7 +358,7 @@ exports.getProfitReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener reporte de ganancias',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -475,7 +475,7 @@ exports.getRotationReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener reporte de rotación',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };

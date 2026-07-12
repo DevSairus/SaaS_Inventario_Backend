@@ -17,7 +17,11 @@ const createEmailTransporter = (config) => {
       pass: config.smtp_password,
     },
     tls: {
-      rejectUnauthorized: false, // Para desarrollo
+      // Antes: rejectUnauthorized: false (deshabilitaba validación de certificado
+      // incluso en producción). Los proveedores SMTP soportados (Gmail, Outlook,
+      // Office365, Yahoo) tienen certificados válidos — se valida siempre salvo
+      // que se declare explícitamente lo contrario para un servidor SMTP propio.
+      rejectUnauthorized: process.env.SMTP_ALLOW_SELF_SIGNED === 'true' ? false : true,
     },
   });
 };

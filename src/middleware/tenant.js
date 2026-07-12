@@ -79,7 +79,7 @@ const tenantMiddleware = async (req, res, next) => {
     res.status(500).json({
       success: false,
       message: 'Error al validar la empresa',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };

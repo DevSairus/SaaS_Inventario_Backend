@@ -186,7 +186,7 @@ exports.aging = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar reporte de antigüedad de saldos',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -213,7 +213,7 @@ exports.agingExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar reporte de antigüedad',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }

@@ -36,7 +36,7 @@ const list = async (req, res) => {
     res.json({ success: true, data: branches });
   } catch (error) {
     console.error('Error al listar sedes:', error);
-    res.status(500).json({ success: false, message: 'Error al listar sedes', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al listar sedes', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -54,7 +54,7 @@ const getById = async (req, res) => {
     res.json({ success: true, data: branch });
   } catch (error) {
     console.error('Error al obtener sede:', error);
-    res.status(500).json({ success: false, message: 'Error al obtener sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al obtener sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -110,7 +110,7 @@ const create = async (req, res) => {
     if (error.name === 'SequelizeUniqueConstraintError') {
       return res.status(409).json({ success: false, message: 'Ya existe una sede con ese código' });
     }
-    res.status(500).json({ success: false, message: 'Error al crear sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al crear sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -141,7 +141,7 @@ const update = async (req, res) => {
     res.json({ success: true, message: 'Sede actualizada exitosamente', data: branch });
   } catch (error) {
     console.error('Error al actualizar sede:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al actualizar sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -159,7 +159,7 @@ const deactivate = async (req, res) => {
     res.json({ success: true, message: 'Sede desactivada exitosamente' });
   } catch (error) {
     console.error('Error al desactivar sede:', error);
-    res.status(500).json({ success: false, message: 'Error al desactivar sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al desactivar sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -179,7 +179,7 @@ const listUsers = async (req, res) => {
     res.json({ success: true, data: assignments });
   } catch (error) {
     console.error('Error al listar usuarios de la sede:', error);
-    res.status(500).json({ success: false, message: 'Error al listar usuarios de la sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al listar usuarios de la sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -216,7 +216,7 @@ const assignUser = async (req, res) => {
     });
   } catch (error) {
     console.error('Error al asignar usuario a sede:', error);
-    res.status(500).json({ success: false, message: 'Error al asignar usuario a sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al asignar usuario a sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -235,7 +235,7 @@ const removeUser = async (req, res) => {
     res.json({ success: true, message: 'Usuario removido de la sede' });
   } catch (error) {
     console.error('Error al remover usuario de sede:', error);
-    res.status(500).json({ success: false, message: 'Error al remover usuario de sede', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al remover usuario de sede', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 

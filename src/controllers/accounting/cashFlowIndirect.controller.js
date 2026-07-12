@@ -162,7 +162,7 @@ exports.cashFlowIndirect = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar el estado de flujo de efectivo',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -188,7 +188,7 @@ exports.cashFlowIndirectExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar flujo de efectivo indirecto',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }

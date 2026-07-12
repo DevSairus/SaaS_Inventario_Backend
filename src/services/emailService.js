@@ -1,5 +1,6 @@
 /* eslint-disable indent */
 const nodemailer = require('nodemailer');
+const logger = require('../config/logger');
 
 // Configurar transporter con Gmail
 const createTransporter = () => {
@@ -15,16 +16,16 @@ const createTransporter = () => {
 // Verificar configuración
 const verifyEmailConfig = async () => {
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-    console.warn('⚠️ [EMAIL] GMAIL_USER o GMAIL_APP_PASSWORD no configurados');
+    logger.warn('[EMAIL] GMAIL_USER o GMAIL_APP_PASSWORD no configurados');
     return false;
   }
   try {
     const transporter = createTransporter();
     await transporter.verify();
-    console.log('✅ [EMAIL] Conexión Gmail verificada');
+    logger.info('[EMAIL] Conexión Gmail verificada');
     return true;
   } catch (error) {
-    console.error('❌ [EMAIL] Error verificando Gmail:', error.message);
+    logger.error('[EMAIL] Error verificando Gmail:', error.message);
     return false;
   }
 };
@@ -35,8 +36,7 @@ const verifyEmailConfig = async () => {
 const sendEmail = async ({ to, subject, html, text }) => {
   try {
     if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD) {
-      console.log('⚠️ [EMAIL] Gmail no configurado, omitiendo envío');
-      console.log(`   → Para: ${to} | Asunto: ${subject}`);
+      logger.warn(`[EMAIL] Gmail no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
       return { success: true, mode: 'log' };
     }
 
@@ -50,11 +50,11 @@ const sendEmail = async ({ to, subject, html, text }) => {
       text: text || html.replace(/<[^>]*>/g, ''),
     });
 
-    console.log(`✅ [EMAIL] Enviado a: ${to} | ID: ${info.messageId}`);
+    logger.info(`[EMAIL] Enviado a: ${to} | ID: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
 
   } catch (error) {
-    console.error('❌ [EMAIL] Error enviando email:', error.message);
+    logger.error(`[EMAIL] Error enviando email a ${to}: ${error.message}`);
     throw error;
   }
 };

@@ -199,7 +199,7 @@ async function run() {
       const p12Buf  = fs.readFileSync(ALT_P12_FILE);
       cfg.p12Base64 = p12Buf.toString('base64');
       cfg.password  = ALT_P12_PASS || cfg.password || '';
-      console.log(`   ✅ Cargado (${Math.round(p12Buf.length / 1024)} KB), contraseña: "${cfg.password}"`);
+      console.log(`   ✅ Cargado (${Math.round(p12Buf.length / 1024)} KB), contraseña: ${cfg.password ? '[definida, oculta]' : '[vacía]'}`);
     } catch (e) {
       console.log(`   ❌ No se pudo leer: ${e.message}`);
       process.exit(1);

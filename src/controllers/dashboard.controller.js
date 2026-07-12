@@ -214,7 +214,7 @@ exports.getKPIs = async (req, res) => {
     logger.error('Error al obtener KPIs:', error);
     res.status(500).json({
       message: 'Error al obtener KPIs del dashboard',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -298,7 +298,7 @@ exports.getAlerts = async (req, res) => {
     logger.error('Error al obtener alertas:', error);
     res.status(500).json({
       message: 'Error al obtener alertas',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };

@@ -44,7 +44,7 @@ const sendSMS = async (tenantId, options) => {
     console.error('❌ [SMS] Error enviando SMS:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -87,7 +87,7 @@ const sendBulkSMS = async (tenantId, recipients) => {
     console.error('❌ [SMS] Error en envío masivo:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -123,7 +123,7 @@ const sendInvoiceReminderSMS = async (tenantId, invoice) => {
     console.error('❌ [SMS] Error en recordatorio:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -157,7 +157,7 @@ const sendOverdueSMS = async (tenantId, invoice) => {
     console.error('❌ [SMS] Error en SMS vencido:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -195,7 +195,7 @@ const sendPaymentConfirmationSMS = async (tenantId, payment) => {
     console.error('❌ [SMS] Error en confirmación de pago:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -225,7 +225,7 @@ const sendPQRSCreatedSMS = async (tenantId, pqrs) => {
     console.error('❌ [SMS] Error en SMS PQRS:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -255,7 +255,7 @@ const sendPQRSUpdatedSMS = async (tenantId, pqrs) => {
     console.error('❌ [SMS] Error en SMS actualización PQRS:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };
@@ -300,7 +300,7 @@ const sendTwilioSMS = async (tenantId, options) => {
     console.error('❌ [TWILIO] Error:', error);
     return {
       success: false,
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     };
   }
 };

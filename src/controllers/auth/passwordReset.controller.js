@@ -50,7 +50,7 @@ const forgotPassword = async (req, res) => {
 
       const resetLink = `${FRONTEND_URL}/reset-password?token=${token}`;
 
-      await sendEmail({
+      const emailResult = await sendEmail({
         to: user.email,
         subject: 'Restablecer contraseña',
         html: `
@@ -72,6 +72,12 @@ const forgotPassword = async (req, res) => {
           </div>
         `,
       });
+
+      if (emailResult?.mode === 'log') {
+        logger.warn(`forgotPassword: correo NO enviado (GMAIL_USER/GMAIL_APP_PASSWORD no configurados) para usuario ${user.id}`);
+      } else {
+        logger.info(`forgotPassword: correo de recuperación enviado a usuario ${user.id}`);
+      }
     }
 
     // Always return 200 to avoid user enumeration

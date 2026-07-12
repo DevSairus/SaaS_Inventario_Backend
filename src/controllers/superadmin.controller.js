@@ -179,7 +179,7 @@ const getDashboard = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener dashboard',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -253,7 +253,7 @@ const getAllTenants = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener tenants',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -309,7 +309,7 @@ const getTenantById = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener tenant',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -420,7 +420,7 @@ const createTenant = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al crear tenant',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -478,7 +478,7 @@ const updateTenant = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar tenant',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -511,7 +511,7 @@ const toggleTenantStatus = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al cambiar estado del tenant',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -545,7 +545,7 @@ const deleteTenant = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al eliminar tenant',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -580,7 +580,7 @@ const getTenantUsers = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener usuarios',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -647,7 +647,7 @@ const updateSubscription = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar suscripción',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -753,7 +753,7 @@ const getAnalyticsOverview = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener analytics',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -817,7 +817,7 @@ const getTenantsAnalytics = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener analytics',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -886,7 +886,7 @@ const getUsersFromTenant = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener usuarios',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -937,7 +937,7 @@ const updateTrialDate = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar fecha de trial',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -981,7 +981,7 @@ const extendTrial = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al extender trial',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -1032,7 +1032,7 @@ const updateSubscriptionStatus = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar estado',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -1070,7 +1070,7 @@ const getExpiringTrials = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener trials',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -1134,7 +1134,7 @@ const updateTenantUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -1173,7 +1173,7 @@ const deleteTenantUser = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al eliminar usuario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -1220,7 +1220,7 @@ const changeTenantUserRole = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al cambiar rol',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -1268,7 +1268,7 @@ const resetTenantUserPassword = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al resetear contraseña',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };

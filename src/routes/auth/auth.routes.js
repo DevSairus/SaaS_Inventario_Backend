@@ -14,6 +14,6 @@ router.get('/verify', authMiddleware, verifyToken);
 
 // Password reset
 router.post('/forgot-password', authLimiter, forgotPassword);
-router.post('/reset-password', resetPassword);
+router.post('/reset-password', authLimiter, resetPassword);
 
 module.exports = router;

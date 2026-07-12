@@ -32,7 +32,7 @@ router.get('/', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener bodegas',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 });
@@ -67,7 +67,7 @@ router.get('/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener bodega',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 });
@@ -109,7 +109,7 @@ router.post('/', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al crear bodega',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 });
@@ -165,7 +165,7 @@ router.put('/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar bodega',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 });
@@ -218,7 +218,7 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al eliminar bodega',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 });

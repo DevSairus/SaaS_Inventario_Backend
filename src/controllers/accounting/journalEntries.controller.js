@@ -1,5 +1,6 @@
 const { JournalEntry, JournalEntryLine, ChartOfAccount } = require('../../models');
 const { createDraftEntry, postEntry, voidEntry, reverseEntry } = require('../../services/accounting/journalEntry.service');
+const logger = require('../../config/logger');
 
 // GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=
 exports.list = async (req, res) => {
@@ -26,7 +27,8 @@ exports.list = async (req, res) => {
 
     res.json({ success: true, data: entries });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al listar asientos', error: error.message });
+    logger.error('Error en journalEntries.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al listar asientos', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -40,7 +42,8 @@ exports.getById = async (req, res) => {
     if (!entry) return res.status(404).json({ success: false, message: 'Asiento no encontrado' });
     res.json({ success: true, data: entry });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al obtener asiento', error: error.message });
+    logger.error('Error en journalEntries.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener asiento', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -73,6 +76,7 @@ exports.create = async (req, res) => {
     res.status(201).json({ success: true, data: entry });
   } catch (error) {
     await t.rollback();
+    logger.error('Error en journalEntries.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -83,6 +87,7 @@ exports.post = async (req, res) => {
     const entry = await postEntry(req.params.id, req.tenant_id, req.user?.id);
     res.json({ success: true, data: entry });
   } catch (error) {
+    logger.error('Error en journalEntries.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -93,6 +98,7 @@ exports.void = async (req, res) => {
     const entry = await voidEntry(req.params.id, req.tenant_id, req.user?.id, req.body?.reason);
     res.json({ success: true, data: entry });
   } catch (error) {
+    logger.error('Error en journalEntries.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -112,6 +118,7 @@ exports.reverse = async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     await t.rollback();
+    logger.error('Error en journalEntries.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };

@@ -69,7 +69,7 @@ exports.getPendingAnnouncements = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener anuncios',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -112,7 +112,7 @@ exports.markAsViewed = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al marcar anuncio como visto',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -154,7 +154,7 @@ exports.dismissAnnouncement = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al descartar anuncio',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -222,7 +222,7 @@ exports.getAllAnnouncements = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener anuncios',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -268,7 +268,7 @@ exports.createAnnouncement = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al crear anuncio',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -301,7 +301,7 @@ exports.updateAnnouncement = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar anuncio',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -332,7 +332,7 @@ exports.deleteAnnouncement = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al eliminar anuncio',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -386,7 +386,7 @@ exports.getAnnouncementStats = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener estadísticas',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };

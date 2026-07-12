@@ -1,4 +1,5 @@
 const { AccountMapping, ChartOfAccount, AccountMappingAudit } = require('../../models');
+const logger = require('../../config/logger');
 
 // GET /api/accounting/account-mappings
 exports.list = async (req, res) => {
@@ -10,7 +11,8 @@ exports.list = async (req, res) => {
     });
     res.json({ success: true, data: mappings });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al listar mapeos', error: error.message });
+    logger.error('Error en accountMappings.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al listar mapeos', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -57,7 +59,8 @@ exports.upsert = async (req, res) => {
 
     res.json({ success: true, data: mapping });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al actualizar mapeo', error: error.message });
+    logger.error('Error en accountMappings.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar mapeo', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -105,7 +108,8 @@ exports.create = async (req, res) => {
 
     res.status(201).json({ success: true, data: mapping });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al crear el tipo de mapeo', error: error.message });
+    logger.error('Error en accountMappings.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al crear el tipo de mapeo', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -122,7 +126,8 @@ exports.remove = async (req, res) => {
     await mapping.destroy();
     res.json({ success: true, message: 'Tipo de mapeo eliminado' });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al eliminar el tipo de mapeo', error: error.message });
+    logger.error('Error en accountMappings.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al eliminar el tipo de mapeo', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -142,6 +147,7 @@ exports.auditHistory = async (req, res) => {
     });
     res.json({ success: true, data: history });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al consultar historial de mapeo', error: error.message });
+    logger.error('Error en accountMappings.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al consultar historial de mapeo', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };

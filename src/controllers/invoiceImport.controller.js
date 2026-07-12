@@ -168,7 +168,7 @@ const importInvoice = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al importar factura',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -257,7 +257,7 @@ const previewInvoice = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al procesar factura',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };

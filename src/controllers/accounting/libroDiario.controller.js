@@ -123,7 +123,7 @@ exports.libroDiario = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar libro diario',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -149,7 +149,7 @@ exports.libroDiarioExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar libro diario',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }

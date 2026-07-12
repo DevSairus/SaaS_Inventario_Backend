@@ -54,7 +54,7 @@ const getAllCategories = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener categorías', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -116,7 +116,7 @@ const getCategoryById = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener categoría', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -198,7 +198,7 @@ const createCategory = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al crear categoría', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -300,7 +300,7 @@ const updateCategory = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al actualizar categoría', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -353,7 +353,7 @@ const deactivateCategory = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al desactivar categoría', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -430,7 +430,7 @@ const deleteCategoryPermanently = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al eliminar categoría', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };

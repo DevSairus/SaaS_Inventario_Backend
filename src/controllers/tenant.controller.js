@@ -69,7 +69,7 @@ const getTenantConfig = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error obteniendo configuración',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -141,7 +141,7 @@ const updateTenantConfig = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error actualizando configuración',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };
@@ -242,7 +242,7 @@ const uploadLogo = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error subiendo logo',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
@@ -302,7 +302,7 @@ const deleteLogo = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error eliminando logo',
-      error: error.message
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }
 };

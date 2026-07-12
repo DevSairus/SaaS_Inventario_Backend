@@ -44,7 +44,7 @@ router.delete('/:id/photos/:phase/:photoIndex', ctrl.deletePhoto);
 // Compartir por WhatsApp (link público)
 router.post('/:id/share-token', ctrl.generateShareToken);
 
-// Enviar enlace OT por WhatsApp (WPPConnect)
+// Enviar enlace OT por WhatsApp (wa.me)
 router.post('/:id/send-whatsapp', ctrl.sendWhatsApp);
 
 module.exports = router;

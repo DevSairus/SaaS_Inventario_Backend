@@ -69,7 +69,7 @@ exports.trialBalance = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar balance de comprobación',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -147,7 +147,7 @@ exports.balanceGeneral = async (req, res) => {
     const data = await fetchBalanceGeneral(req);
     res.json({ success: true, data });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al generar balance general', error: error.message });
+    res.status(500).json({ success: false, message: 'Error al generar balance general', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -213,7 +213,7 @@ exports.incomeStatement = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar estado de resultados',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -310,7 +310,7 @@ exports.trialBalanceComparative = async (req, res) => {
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.statusCode ? error.message : 'Error al generar balance comparativo',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -339,7 +339,7 @@ exports.trialBalanceComparativeExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar balance comparativo',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }
@@ -373,7 +373,7 @@ exports.trialBalanceExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar balance de comprobación',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }
@@ -397,7 +397,7 @@ exports.balanceGeneralExport = async (req, res) => {
   } catch (error) {
     console.error('Error exportando balance general:', error);
     if (!res.headersSent) {
-      res.status(500).json({ success: false, message: 'Error al exportar balance general', error: error.message });
+      res.status(500).json({ success: false, message: 'Error al exportar balance general', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
     }
   }
 };
@@ -423,7 +423,7 @@ exports.incomeStatementExport = async (req, res) => {
       res.status(error.statusCode || 500).json({
         success: false,
         message: error.statusCode ? error.message : 'Error al exportar estado de resultados',
-        error: error.message,
+        error: process.env.NODE_ENV === 'production' ? undefined : error.message,
       });
     }
   }

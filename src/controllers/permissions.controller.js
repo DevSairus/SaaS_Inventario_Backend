@@ -36,7 +36,7 @@ const getAllPermissions = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener permisos',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -116,7 +116,7 @@ const getRolePermissions = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener permisos del rol',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -180,7 +180,7 @@ const updateRolePermissions = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al actualizar permisos',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -244,7 +244,7 @@ const addPermissionToRole = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al agregar permiso',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -295,7 +295,7 @@ const removePermissionFromRole = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al remover permiso',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };
@@ -351,7 +351,7 @@ const getMyPermissions = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener permisos',
-      error: error.message,
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
   }
 };

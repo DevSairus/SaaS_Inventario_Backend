@@ -1,5 +1,6 @@
 // backend/src/controllers/accounting/fiscalPeriods.controller.js
 const { closePeriod, reopenPeriod, listPeriods, closeFiscalYear } = require('../../services/accounting/fiscalPeriod.service');
+const logger = require('../../config/logger');
 
 // GET /api/accounting/fiscal-periods?year=
 exports.list = async (req, res) => {
@@ -8,7 +9,8 @@ exports.list = async (req, res) => {
     const periods = await listPeriods(req.tenant_id, { year: year ? Number(year) : undefined });
     res.json({ success: true, data: periods });
   } catch (error) {
-    res.status(500).json({ success: false, message: 'Error al listar períodos fiscales', error: error.message });
+    logger.error('Error en fiscalPeriods.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al listar períodos fiscales', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
 
@@ -18,6 +20,7 @@ exports.close = async (req, res) => {
     const period = await closePeriod(req.params.id, req.tenant_id, req.user?.id);
     res.json({ success: true, data: period });
   } catch (error) {
+    logger.error('Error en fiscalPeriods.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -28,6 +31,7 @@ exports.reopen = async (req, res) => {
     const period = await reopenPeriod(req.params.id, req.tenant_id, req.user?.id, req.body?.reason);
     res.json({ success: true, data: period });
   } catch (error) {
+    logger.error('Error en fiscalPeriods.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };
@@ -48,6 +52,7 @@ exports.closeYear = async (req, res) => {
       data: result,
     });
   } catch (error) {
+    logger.error('Error en fiscalPeriods.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
   }
 };

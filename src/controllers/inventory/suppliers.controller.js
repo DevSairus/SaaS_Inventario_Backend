@@ -74,7 +74,7 @@ const getSuppliers = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener proveedores', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -124,7 +124,7 @@ const getSupplierById = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener proveedor', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -231,7 +231,7 @@ const createSupplier = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al crear proveedor', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -380,7 +380,7 @@ const deactivateSupplier = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al desactivar proveedor', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -432,7 +432,7 @@ const activateSupplier = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al activar proveedor', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -497,7 +497,7 @@ const deleteSupplier = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al eliminar proveedor', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
@@ -550,7 +550,7 @@ const getSupplierStats = async (req, res) => {
     res.status(500).json({ 
       success: false, 
       message: 'Error al obtener estadísticas', 
-      error: error.message 
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message 
     });
   }
 };
