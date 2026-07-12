@@ -1,38 +1,28 @@
 /* eslint-disable indent */
-const nodemailer = require('nodemailer');
+const axios = require('axios');
 const logger = require('../config/logger');
 
-// Configurar transporter con Mailgun (SMTP)
-const isEmailConfigured = () => Boolean(process.env.MAILGUN_SMTP_USER && process.env.MAILGUN_SMTP_PASSWORD);
+// Envío vía API HTTP de Brevo (no SMTP) — evita el bloqueo de puertos
+// salientes SMTP que aplican plataformas como Railway.
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.MAILGUN_SMTP_HOST || 'smtp.mailgun.org',
-    port: parseInt(process.env.MAILGUN_SMTP_PORT, 10) || 587,
-    secure: false, // STARTTLS sobre puerto 587
-    auth: {
-      user: process.env.MAILGUN_SMTP_USER,
-      pass: process.env.MAILGUN_SMTP_PASSWORD,
-    },
-    connectionTimeout: 10000, // 10s para establecer la conexión TCP
-    greetingTimeout: 10000,   // 10s para el saludo SMTP inicial
-    socketTimeout: 15000,     // 15s de inactividad máxima en el socket
-  });
-};
+const isEmailConfigured = () => Boolean(process.env.BREVO_API_KEY && process.env.EMAIL_FROM_ADDRESS);
 
 // Verificar configuración
 const verifyEmailConfig = async () => {
   if (!isEmailConfigured()) {
-    logger.warn('[EMAIL] MAILGUN_SMTP_USER o MAILGUN_SMTP_PASSWORD no configurados');
+    logger.warn('[EMAIL] BREVO_API_KEY o EMAIL_FROM_ADDRESS no configurados');
     return false;
   }
   try {
-    const transporter = createTransporter();
-    await transporter.verify();
-    logger.info('[EMAIL] Conexión Mailgun verificada');
+    await axios.get('https://api.brevo.com/v3/account', {
+      headers: { 'api-key': process.env.BREVO_API_KEY },
+      timeout: 10000,
+    });
+    logger.info('[EMAIL] Conexión Brevo verificada');
     return true;
   } catch (error) {
-    logger.error('[EMAIL] Error verificando Mailgun:', error.message);
+    logger.error(`[EMAIL] Error verificando Brevo: ${error.message}`);
     return false;
   }
 };
@@ -43,26 +33,32 @@ const verifyEmailConfig = async () => {
 const sendEmail = async ({ to, subject, html, text }) => {
   try {
     if (!isEmailConfigured()) {
-      logger.warn(`[EMAIL] Mailgun no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
+      logger.warn(`[EMAIL] Brevo no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
       return { success: true, mode: 'log' };
     }
 
-    const transporter = createTransporter();
-    const fromAddress = process.env.EMAIL_FROM_ADDRESS || process.env.MAILGUN_SMTP_USER;
+    const recipients = (Array.isArray(to) ? to : [to]).map((email) => ({ email }));
 
-    const info = await transporter.sendMail({
-      from: `"${process.env.EMAIL_FROM_NAME || 'Control de Inventario'}" <${fromAddress}>`,
-      to: Array.isArray(to) ? to.join(', ') : to,
+    const response = await axios.post(BREVO_API_URL, {
+      sender: {
+        name: process.env.EMAIL_FROM_NAME || 'Control de Inventario',
+        email: process.env.EMAIL_FROM_ADDRESS,
+      },
+      to: recipients,
       subject,
-      html,
-      text: text || html.replace(/<[^>]*>/g, ''),
+      htmlContent: html,
+      textContent: text || html.replace(/<[^>]*>/g, ''),
+    }, {
+      headers: { 'api-key': process.env.BREVO_API_KEY },
+      timeout: 15000,
     });
 
-    logger.info(`[EMAIL] Enviado a: ${to} | ID: ${info.messageId}`);
-    return { success: true, messageId: info.messageId };
+    logger.info(`[EMAIL] Enviado a: ${to} | ID: ${response.data.messageId}`);
+    return { success: true, messageId: response.data.messageId };
 
   } catch (error) {
-    logger.error(`[EMAIL] Error enviando email a ${to}: ${error.message}`);
+    const detail = error.response?.data?.message || error.message;
+    logger.error(`[EMAIL] Error enviando email a ${to}: ${detail}`);
     throw error;
   }
 };

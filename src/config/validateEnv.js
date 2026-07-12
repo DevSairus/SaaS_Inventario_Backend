@@ -6,8 +6,8 @@ const REQUIRED_VARS = [
   { key: 'JWT_SECRET',        description: 'Clave secreta para firmar JWT' },
   { key: 'DATABASE_URL',      description: 'URL de conexión a PostgreSQL',
     alternatives: ['POSTGRES_URL', 'POSTGRES_HOST'] },
-  { key: 'MAILGUN_SMTP_USER',     description: 'Usuario SMTP de Mailgun para envío de emails' },
-  { key: 'MAILGUN_SMTP_PASSWORD', description: 'Contraseña SMTP de Mailgun' },
+  { key: 'BREVO_API_KEY',      description: 'API Key de Brevo para envío de emails' },
+  { key: 'EMAIL_FROM_ADDRESS', description: 'Dirección remitente verificada en Brevo' },
 ];
 
 function validateEnv() {
