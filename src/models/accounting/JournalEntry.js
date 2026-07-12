@@ -32,7 +32,12 @@ const JournalEntry = sequelize.define(
     voided_by: { type: DataTypes.UUID, allowNull: true },
     voided_at: { type: DataTypes.DATE, allowNull: true },
     void_reason: { type: DataTypes.TEXT, allowNull: true },
+    // Si ESTE asiento es una reversión, apunta al asiento original que contrarresta.
+    reversal_of_entry_id: { type: DataTypes.UUID, allowNull: true },
+    // Si ESTE asiento YA FUE reversado, apunta al asiento de reversión que lo contrarresta.
+    reversed_by_entry_id: { type: DataTypes.UUID, allowNull: true },
   },
+
   {
     tableName: 'journal_entries',
     timestamps: true,

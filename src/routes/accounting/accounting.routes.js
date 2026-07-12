@@ -9,6 +9,11 @@ const libroDiarioCtrl = require('../../controllers/accounting/libroDiario.contro
 const libroMayorCtrl = require('../../controllers/accounting/libroMayor.controller');
 const libroAuxiliarCtrl = require('../../controllers/accounting/libroAuxiliar.controller');
 const libroIvaCtrl = require('../../controllers/accounting/libroIva.controller');
+const fiscalPeriodsCtrl = require('../../controllers/accounting/fiscalPeriods.controller');
+const accountingHealthCtrl = require('../../controllers/accounting/accountingHealth.controller');
+const agingReportCtrl = require('../../controllers/accounting/agingReport.controller');
+const withholdingReportCtrl = require('../../controllers/accounting/withholdingReport.controller');
+const cashFlowIndirectCtrl = require('../../controllers/accounting/cashFlowIndirect.controller');
 
 // Plan de cuentas
 router.get('/chart-of-accounts', chartOfAccountsCtrl.list);
@@ -22,10 +27,22 @@ router.get('/journal-entries/:id', journalEntriesCtrl.getById);
 router.post('/journal-entries', journalEntriesCtrl.create);
 router.patch('/journal-entries/:id/post', journalEntriesCtrl.post);
 router.patch('/journal-entries/:id/void', journalEntriesCtrl.void);
+router.patch('/journal-entries/:id/reverse', journalEntriesCtrl.reverse);
 
 // Mapeo de eventos -> cuentas
 router.get('/account-mappings', accountMappingsCtrl.list);
+router.post('/account-mappings', accountMappingsCtrl.create);
 router.put('/account-mappings/:event_type', accountMappingsCtrl.upsert);
+router.delete('/account-mappings/:event_type', accountMappingsCtrl.remove);
+router.get('/account-mappings/:event_type/audit', accountMappingsCtrl.auditHistory);
+
+// Períodos fiscales (cierre/reapertura)
+router.get('/fiscal-periods', fiscalPeriodsCtrl.list);
+router.patch('/fiscal-periods/:id/close', fiscalPeriodsCtrl.close);
+router.patch('/fiscal-periods/:id/reopen', fiscalPeriodsCtrl.reopen);
+
+// Cierre de ejercicio (año completo, traslada resultado a patrimonio)
+router.patch('/fiscal-years/:year/close', fiscalPeriodsCtrl.closeYear);
 
 // Reportes financieros
 router.get('/reports/trial-balance', reportsCtrl.trialBalance);
@@ -50,5 +67,29 @@ router.get('/reports/libro-auxiliar', libroAuxiliarCtrl.libroAuxiliar);
 router.get('/reports/libro-auxiliar/export', libroAuxiliarCtrl.libroAuxiliarExport);
 router.get('/reports/libro-iva', libroIvaCtrl.libroIva);
 router.get('/reports/libro-iva/export', libroIvaCtrl.libroIvaExport);
+
+// ── Fase 5 del plan de informes contables (sección 4.2 del análisis) ──
+
+// Salud Contable: expone journalIntegrity.service.js (huecos, borradores
+// pendientes, consistencia) que antes solo consultaba el asistente de IA.
+router.get('/health', accountingHealthCtrl.summary);
+router.post('/health/missing-entries/generate-all', accountingHealthCtrl.generateAllMissingEntries);
+router.post('/health/missing-entries/:source_type/:source_id/generate', accountingHealthCtrl.generateMissingEntry);
+
+// Antigüedad de cartera (clientes) y cuentas por pagar (proveedores).
+router.get('/reports/aging', agingReportCtrl.aging);
+router.get('/reports/aging/export', agingReportCtrl.agingExport);
+
+// Balance de comprobación comparativo (período actual vs. anterior).
+router.get('/reports/trial-balance-comparativo', reportsCtrl.trialBalanceComparative);
+router.get('/reports/trial-balance-comparativo/export', reportsCtrl.trialBalanceComparativeExport);
+
+// Certificado / reporte de retenciones (ReteFuente, ReteICA) practicadas por clientes.
+router.get('/reports/retenciones', withholdingReportCtrl.withholding);
+router.get('/reports/retenciones/export', withholdingReportCtrl.withholdingExport);
+
+// Estado de Flujo de Efectivo — método indirecto, derivado de los asientos.
+router.get('/reports/cashflow-indirecto', cashFlowIndirectCtrl.cashFlowIndirect);
+router.get('/reports/cashflow-indirecto/export', cashFlowIndirectCtrl.cashFlowIndirectExport);
 
 module.exports = router;

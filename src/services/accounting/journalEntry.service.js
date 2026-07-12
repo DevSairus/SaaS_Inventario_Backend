@@ -147,16 +147,92 @@ async function voidEntry(entryId, tenantId, userId, reason) {
 }
 
 /**
+ * Reversa el asiento contable de un movimiento que dejó de ser válido
+ * (ej. una venta cancelada, una devolución de cliente/proveedor).
+ *
+ * Comportamiento según el estado del asiento original:
+ *  - 'draft'  → nadie lo revisó ni afectó reportes todavía: simplemente se
+ *               anula (voidEntry), no hace falta contrapartida.
+ *  - 'posted' → ya afectó reportes (y puede estar en un período que hoy está
+ *               cerrado). No se edita ni se anula el original — eso rompería
+ *               inmutabilidad/trazabilidad. En su lugar se crea un asiento
+ *               NUEVO con débito/crédito invertidos, fechado el día de la
+ *               reversión (no el día del asiento original), y se enlazan
+ *               entre sí. El asiento de reversión se postea de inmediato:
+ *               es una corrección automática del sistema, no un movimiento
+ *               nuevo que necesite revisión manual.
+ *  - 'voided' → error, no se puede reversar algo que ya está anulado.
+ *  - ya tiene reversed_by_entry_id → error, ya fue reversado antes (evita
+ *    duplicar la contrapartida si dos flujos intentan reversar lo mismo).
+ *
+ * @returns {Promise<{ action: 'voided'|'reversed', entry: object, reversalEntry?: object }>}
+ */
+async function reverseEntry(originalEntryId, tenantId, userId, reason, transaction) {
+  const { JournalEntry, JournalEntryLine } = require('../../models');
+
+  const original = await JournalEntry.findOne({
+    where: { id: originalEntryId, tenant_id: tenantId },
+    include: [{ model: JournalEntryLine, as: 'lines' }],
+    transaction,
+  });
+  if (!original) throw new Error('Asiento original no encontrado');
+  if (original.status === 'voided') throw new Error('El asiento ya está anulado, no se puede reversar');
+  if (original.reversed_by_entry_id) throw new Error('El asiento ya fue reversado anteriormente');
+
+  if (original.status === 'draft') {
+    const voided = await voidEntry(originalEntryId, tenantId, userId, reason || 'Reversado: origen cancelado');
+    return { action: 'voided', entry: voided };
+  }
+
+  // status === 'posted' → asiento de reversión con líneas invertidas
+  const reversalLines = original.lines.map((l) => ({
+    account_id: l.account_id,
+    debit: Number(l.credit || 0),
+    credit: Number(l.debit || 0),
+    description: `Reversión — ${l.description || ''}`.trim(),
+    third_party_id: l.third_party_id || null,
+  }));
+
+  const reversalEntry = await createDraftEntry(
+    tenantId,
+    {
+      branchId: original.branch_id,
+      entryDate: new Date().toISOString().slice(0, 10),
+      sourceType: 'adjustment',
+      sourceId: original.source_id,
+      description: `Reversión de ${original.entry_number} — ${reason || 'origen cancelado/devuelto'}`,
+      lines: reversalLines,
+      createdBy: userId,
+    },
+    transaction
+  );
+
+  await reversalEntry.update(
+    { status: 'posted', posted_by: userId || null, posted_at: new Date(), reversal_of_entry_id: original.id },
+    { transaction }
+  );
+  await original.update({ reversed_by_entry_id: reversalEntry.id }, { transaction });
+
+  return { action: 'reversed', entry: original, reversalEntry };
+}
+
+/**
  * Envoltorio "silencioso" para generadores automáticos: si falla, se
  * registra en el log pero NUNCA rompe el flujo del módulo origen (venta,
  * compra, gasto). La contabilidad es fase draft/revisión, no puede tumbar
  * una venta por un problema de mapeo contable.
  */
-async function safeAutoGenerate(fn, context) {
+// `rethrow`: por defecto false (comportamiento original, fire-and-forget:
+// loguea y devuelve null). En true, además de loguear, relanza el error —
+// lo usa la generación MANUAL desde la pantalla de Salud Contable, donde sí
+// queremos mostrarle al usuario por qué falló (ej. "falta mapear la cuenta
+// de IVA descontable") en vez de tragarnos el error silenciosamente.
+async function safeAutoGenerate(fn, context, { rethrow = false } = {}) {
   try {
     return await fn();
   } catch (error) {
     logger.warn(`[accounting] No se pudo generar asiento automático (${context}): ${error.message}`);
+    if (rethrow) throw error;
     return null;
   }
 }
@@ -168,5 +244,6 @@ module.exports = {
   createDraftEntry,
   postEntry,
   voidEntry,
+  reverseEntry,
   safeAutoGenerate,
 };

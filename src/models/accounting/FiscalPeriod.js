@@ -16,6 +16,9 @@ const FiscalPeriod = sequelize.define(
     },
     closed_at: { type: DataTypes.DATE, allowNull: true },
     closed_by: { type: DataTypes.UUID, allowNull: true },
+    reopened_at: { type: DataTypes.DATE, allowNull: true },
+    reopened_by: { type: DataTypes.UUID, allowNull: true },
+    reopen_reason: { type: DataTypes.TEXT, allowNull: true },
   },
   {
     tableName: 'fiscal_periods',

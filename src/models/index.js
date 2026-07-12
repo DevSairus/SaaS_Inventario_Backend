@@ -14,6 +14,7 @@ const FiscalPeriod = require('./accounting/FiscalPeriod');
 const JournalEntry = require('./accounting/JournalEntry');
 const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
+const AccountMappingAudit = require('./accounting/AccountMappingAudit');
 
 // Inventario
 const Category = require('./inventory/Category');
@@ -170,6 +171,8 @@ JournalEntry.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 JournalEntry.belongsTo(FiscalPeriod, { foreignKey: 'period_id', as: 'period' });
 FiscalPeriod.hasMany(JournalEntry, { foreignKey: 'period_id', as: 'entries' });
 
+JournalEntry.belongsTo(JournalEntry, { foreignKey: 'reversal_of_entry_id', as: 'reversalOf' });
+JournalEntry.belongsTo(JournalEntry, { foreignKey: 'reversed_by_entry_id', as: 'reversedBy' });
 JournalEntry.hasMany(JournalEntryLine, { foreignKey: 'entry_id', as: 'lines' });
 JournalEntryLine.belongsTo(JournalEntry, { foreignKey: 'entry_id', as: 'entry' });
 JournalEntryLine.belongsTo(ChartOfAccount, { foreignKey: 'account_id', as: 'account' });
@@ -178,6 +181,12 @@ ChartOfAccount.hasMany(JournalEntryLine, { foreignKey: 'account_id', as: 'lines'
 Tenant.hasMany(AccountMapping, { foreignKey: 'tenant_id', as: 'account_mappings' });
 AccountMapping.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 AccountMapping.belongsTo(ChartOfAccount, { foreignKey: 'account_id', as: 'account' });
+
+Tenant.hasMany(AccountMappingAudit, { foreignKey: 'tenant_id', as: 'account_mapping_audits' });
+AccountMappingAudit.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+AccountMappingAudit.belongsTo(ChartOfAccount, { foreignKey: 'previous_account_id', as: 'previous_account' });
+AccountMappingAudit.belongsTo(ChartOfAccount, { foreignKey: 'new_account_id', as: 'new_account' });
+AccountMappingAudit.belongsTo(User, { foreignKey: 'changed_by', as: 'changed_by_user' });
 
 SubscriptionPlan.hasMany(TenantSubscription, { foreignKey: 'plan_id', as: 'subscriptions' });
 TenantSubscription.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'plan' });
@@ -477,6 +486,7 @@ module.exports = {
   JournalEntry,
   JournalEntryLine,
   AccountMapping,
+  AccountMappingAudit,
   AiConversation,
   AiMessage,
   AiProposal,

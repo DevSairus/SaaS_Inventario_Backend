@@ -151,8 +151,10 @@ exports.balanceGeneral = async (req, res) => {
   }
 };
 
-async function fetchIncomeStatement(req) {
-    const { from, to, branch_id } = req.query;
+// Núcleo reutilizable de fetchIncomeStatement, sin depender de `req` — lo
+// usa también cashFlowIndirect.controller.js para obtener la utilidad neta
+// del período sin duplicar la consulta SQL.
+async function fetchIncomeStatementForRange(tenantId, { from, to, branchId } = {}) {
     if (!from || !to) {
       const err = new Error('from y to son obligatorios (YYYY-MM-DD)');
       err.statusCode = 400;
@@ -173,7 +175,7 @@ async function fetchIncomeStatement(req) {
          AND a.account_type IN ('ingreso', 'gasto', 'costo')
        GROUP BY a.id, a.code, a.name, a.account_type
        ORDER BY a.code ASC`,
-      { replacements: { tenantId: req.tenant_id, from, to, branchId: branch_id || null }, type: QueryTypes.SELECT }
+      { replacements: { tenantId, from, to, branchId: branchId || null }, type: QueryTypes.SELECT }
     );
 
     const ingresos = rows.filter((r) => r.account_type === 'ingreso').map((r) => ({ ...r, total: Number(r.net_credit) }));
@@ -187,20 +189,17 @@ async function fetchIncomeStatement(req) {
     const utilidadNeta = utilidadBruta - totalGastos;
 
     return {
-      from,
-      to,
-      branch_id: branch_id || null,
-      ingresos,
-      costos,
-      gastos,
-      totales: {
-        total_ingresos: totalIngresos,
-        total_costos: totalCostos,
-        utilidad_bruta: utilidadBruta,
-        total_gastos: totalGastos,
-        utilidad_neta: utilidadNeta,
-      },
+      from, to, branch_id: branchId || null,
+      ingresos, costos, gastos,
+      totales: { total_ingresos: totalIngresos, total_costos: totalCostos, utilidad_bruta: utilidadBruta, total_gastos: totalGastos, utilidad_neta: utilidadNeta },
+      utilidad_neta: utilidadNeta,
     };
+}
+exports.fetchIncomeStatementForRange = fetchIncomeStatementForRange;
+
+async function fetchIncomeStatement(req) {
+    const { from, to, branch_id } = req.query;
+    return fetchIncomeStatementForRange(req.tenant_id, { from, to, branchId: branch_id });
 }
 
 // GET /api/accounting/reports/income-statement?from=&to=&branch_id=
@@ -216,6 +215,133 @@ exports.incomeStatement = async (req, res) => {
       message: error.statusCode ? error.message : 'Error al generar estado de resultados',
       error: error.message,
     });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   BALANCE DE COMPROBACIÓN COMPARATIVO — 4.2 del análisis contable.
+   Los reportes existentes son "de un período"; este junta dos rangos
+   (el pedido + uno anterior, explícito o auto-calculado como el rango
+   inmediatamente anterior de igual duración) y calcula la variación
+   cuenta por cuenta. Reutiliza fetchTrialBalance para no duplicar la
+   consulta base.
+   ══════════════════════════════════════════════════════════════════ */
+
+function previousPeriod(from, to) {
+  const fromDate = new Date(`${from}T00:00:00Z`);
+  const toDate = new Date(`${to}T00:00:00Z`);
+  const spanDays = Math.round((toDate - fromDate) / 86400000) + 1; // inclusivo
+  const prevTo = new Date(fromDate.getTime() - 86400000);
+  const prevFrom = new Date(prevTo.getTime() - (spanDays - 1) * 86400000);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  return { from: iso(prevFrom), to: iso(prevTo) };
+}
+
+async function fetchTrialBalanceComparative(req) {
+  const { from, to, branch_id } = req.query;
+  if (!from || !to) {
+    const err = new Error('from y to son obligatorios (YYYY-MM-DD)');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const compareFrom = req.query.compare_from;
+  const compareTo = req.query.compare_to;
+  const previous = compareFrom && compareTo ? { from: compareFrom, to: compareTo } : previousPeriod(from, to);
+
+  const [current, prior] = await Promise.all([
+    fetchTrialBalance({ tenant_id: req.tenant_id, query: { from, to, branch_id } }),
+    fetchTrialBalance({ tenant_id: req.tenant_id, query: { from: previous.from, to: previous.to, branch_id } }),
+  ]);
+
+  const priorByAccount = new Map(prior.accounts.map((a) => [a.id, a]));
+  const currentIds = new Set(current.accounts.map((a) => a.id));
+
+  const balanceOf = (r) => Number(r.total_debit) - Number(r.total_credit); // signo crudo débito-crédito, igual para todas las cuentas (no se ajusta por naturaleza aquí: es un balance de comprobación, no un balance general)
+
+  const accounts = current.accounts.map((a) => {
+    const p = priorByAccount.get(a.id);
+    const currentBalance = balanceOf(a);
+    const priorBalance = p ? balanceOf(p) : 0;
+    const variance = currentBalance - priorBalance;
+    return {
+      id: a.id, code: a.code, name: a.name, account_type: a.account_type,
+      current_debit: Number(a.total_debit), current_credit: Number(a.total_credit),
+      prior_debit: p ? Number(p.total_debit) : 0, prior_credit: p ? Number(p.total_credit) : 0,
+      current_balance: currentBalance, prior_balance: priorBalance,
+      variance, variance_pct: priorBalance !== 0 ? (variance / Math.abs(priorBalance)) * 100 : null,
+    };
+  });
+
+  // Cuentas que sí tuvieron movimiento en el período anterior pero no en el actual —
+  // deben aparecer igual (con current en cero) para no esconder que el saldo desapareció.
+  for (const p of prior.accounts) {
+    if (!currentIds.has(p.id)) {
+      const priorBalance = balanceOf(p);
+      accounts.push({
+        id: p.id, code: p.code, name: p.name, account_type: p.account_type,
+        current_debit: 0, current_credit: 0,
+        prior_debit: Number(p.total_debit), prior_credit: Number(p.total_credit),
+        current_balance: 0, prior_balance: priorBalance,
+        variance: -priorBalance, variance_pct: priorBalance !== 0 ? -100 : null,
+      });
+    }
+  }
+
+  accounts.sort((a, b) => a.code.localeCompare(b.code));
+
+  return {
+    from, to, branch_id: branch_id || null,
+    compare_from: previous.from, compare_to: previous.to,
+    accounts,
+    totals: {
+      current: current.totals,
+      prior: prior.totals,
+    },
+  };
+}
+
+// GET /api/accounting/reports/trial-balance-comparativo?from=&to=&compare_from=&compare_to=&branch_id=
+exports.trialBalanceComparative = async (req, res) => {
+  try {
+    const data = await fetchTrialBalanceComparative(req);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.statusCode ? error.message : 'Error al generar balance comparativo',
+      error: error.message,
+    });
+  }
+};
+
+// GET /api/accounting/reports/trial-balance-comparativo/export?format=excel|pdf
+exports.trialBalanceComparativeExport = async (req, res) => {
+  try {
+    const format = req.query.format === 'pdf' ? 'pdf' : 'excel';
+    const data = await fetchTrialBalanceComparative(req);
+    const name = generatedByName(req);
+
+    const { generateTrialBalanceComparativeExcel } = require('../../services/accounting/reportsExcel.service');
+    const { generateTrialBalanceComparativePDF } = require('../../services/accounting/reportsPdf.service');
+
+    if (format === 'excel') {
+      const buffer = await generateTrialBalanceComparativeExcel(data, req.tenant, {}, name);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="Balance-Comparativo-${data.from}_${data.to}.xlsx"`);
+      return res.send(Buffer.from(buffer));
+    }
+
+    return generateTrialBalanceComparativePDF(res, data, req.tenant, {}, name);
+  } catch (error) {
+    console.error('Error exportando balance comparativo:', error);
+    if (!res.headersSent) {
+      res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.statusCode ? error.message : 'Error al exportar balance comparativo',
+        error: error.message,
+      });
+    }
   }
 };
 

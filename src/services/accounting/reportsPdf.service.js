@@ -653,6 +653,247 @@ const generateLibroIvaPDF = async (res, data, tenant, filters = {}, generatedByN
   }
 };
 
+/* ══════════════════════════════════════════════════════════════════
+   8) ANTIGÜEDAD DE CARTERA / CUENTAS POR PAGAR (aging)
+   ══════════════════════════════════════════════════════════════════ */
+const generateAgingPDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
+  try {
+    const label = data.type === 'customer' ? 'Cartera (Clientes)' : 'Cuentas por Pagar (Proveedores)';
+    const ctx = await startReportDoc(res, {
+      title: `ANTIGÜEDAD DE SALDOS`,
+      subtitle: `${label} · Corte al: ${fmtDate(data.as_of)}`,
+      filenamePrefix: `Antiguedad-${data.type}-${data.as_of || ''}`,
+      tenant,
+      generatedByName,
+    });
+    const { doc, MARGIN, INNER_W } = ctx;
+
+    const bucketW = (INNER_W - 150) / 5;
+    const COLS = { name: MARGIN, b0: MARGIN + 150, b1: MARGIN + 150 + bucketW, b2: MARGIN + 150 + bucketW * 2, b3: MARGIN + 150 + bucketW * 3, b4: MARGIN + 150 + bucketW * 4 };
+
+    const drawTableHeader = () => {
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(gray)
+        .text('TERCERO', COLS.name, ctx.y)
+        .text('SIN VENCER', COLS.b0, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text('1-30', COLS.b1, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text('31-60', COLS.b2, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text('61-90', COLS.b3, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text('+90 / TOTAL', COLS.b4, ctx.y, { width: bucketW - 4, align: 'right' });
+      ctx.y += 12;
+    };
+
+    drawTableHeader();
+    if (data.third_parties.length === 0) {
+      doc.font('Helvetica').fontSize(8).fillColor(gray).text('Sin saldos abiertos a la fecha de corte.', MARGIN, ctx.y);
+      ctx.y += 14;
+    }
+    data.third_parties.forEach((tp) => {
+      ensureSpace(ctx, 14, drawTableHeader);
+      doc.font('Helvetica').fontSize(7.8).fillColor(black)
+        .text(tp.name, COLS.name, ctx.y, { width: COLS.b0 - COLS.name - 4, ellipsis: true })
+        .text(formatCurrency(tp.buckets.current), COLS.b0, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text(formatCurrency(tp.buckets.d1_30), COLS.b1, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text(formatCurrency(tp.buckets.d31_60), COLS.b2, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text(formatCurrency(tp.buckets.d61_90), COLS.b3, ctx.y, { width: bucketW - 4, align: 'right' })
+        .text(formatCurrency(tp.buckets.d90_plus), COLS.b4, ctx.y, { width: bucketW - 4, align: 'right' });
+      ctx.y += 11;
+      doc.font('Helvetica-Bold').fontSize(7.8).fillColor(darkGray)
+        .text(`Total ${formatCurrency(tp.total)}`, COLS.b4, ctx.y, { width: bucketW - 4, align: 'right' });
+      ctx.y += 12;
+    });
+
+    ensureSpace(ctx, 20);
+    doc.moveTo(MARGIN, ctx.y).lineTo(MARGIN + INNER_W, ctx.y).strokeColor(borderMd).lineWidth(0.5).stroke();
+    ctx.y += 6;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(darkGray).text(`TOTAL GENERAL: ${formatCurrency(data.grand_total)}`, MARGIN, ctx.y, { width: INNER_W, align: 'right' });
+    ctx.y += 16;
+
+    return finishReportDoc(ctx);
+  } catch (error) {
+    console.error(error);
+    if (res && !res.headersSent) res.status(500).json({ message: 'Error generando reporte de antigüedad' });
+    if (!res) throw error;
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   9) BALANCE DE COMPROBACIÓN COMPARATIVO
+   ══════════════════════════════════════════════════════════════════ */
+const generateTrialBalanceComparativePDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
+  try {
+    const ctx = await startReportDoc(res, {
+      title: 'BALANCE COMPARATIVO',
+      subtitle: `Actual: ${fmtDate(data.from)}—${fmtDate(data.to)}  ·  Anterior: ${fmtDate(data.compare_from)}—${fmtDate(data.compare_to)}`,
+      filenamePrefix: `Balance-Comparativo-${data.from || ''}_${data.to || ''}`,
+      tenant,
+      generatedByName,
+    });
+    const { doc, MARGIN, INNER_W } = ctx;
+
+    const COLS = { code: MARGIN, name: MARGIN + 45, current: MARGIN + 220, prior: MARGIN + 300, variance: MARGIN + 380, pct: MARGIN + INNER_W - 45 };
+
+    const drawTableHeader = () => {
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(gray)
+        .text('CÓDIGO', COLS.code, ctx.y)
+        .text('CUENTA', COLS.name, ctx.y)
+        .text('ACTUAL', COLS.current, ctx.y, { width: 75, align: 'right' })
+        .text('ANTERIOR', COLS.prior, ctx.y, { width: 75, align: 'right' })
+        .text('VARIACIÓN', COLS.variance, ctx.y, { width: 75, align: 'right' })
+        .text('VAR %', COLS.pct, ctx.y, { width: 45, align: 'right' });
+      ctx.y += 12;
+    };
+
+    drawTableHeader();
+    data.accounts.forEach((a) => {
+      ensureSpace(ctx, 13, drawTableHeader);
+      const varianceColor = a.variance < 0 ? redAmt : a.variance > 0 ? green : black;
+      doc.font('Helvetica').fontSize(7.5).fillColor(black)
+        .text(a.code, COLS.code, ctx.y, { width: 40 })
+        .text(a.name, COLS.name, ctx.y, { width: COLS.current - COLS.name - 4, ellipsis: true })
+        .text(formatCurrency(a.current_balance), COLS.current, ctx.y, { width: 75, align: 'right' })
+        .text(formatCurrency(a.prior_balance), COLS.prior, ctx.y, { width: 75, align: 'right' });
+      doc.fillColor(varianceColor)
+        .text(formatCurrency(a.variance), COLS.variance, ctx.y, { width: 75, align: 'right' })
+        .text(a.variance_pct === null ? '—' : `${a.variance_pct.toFixed(1)}%`, COLS.pct, ctx.y, { width: 45, align: 'right' });
+      ctx.y += 12;
+    });
+
+    return finishReportDoc(ctx);
+  } catch (error) {
+    console.error(error);
+    if (res && !res.headersSent) res.status(500).json({ message: 'Error generando balance comparativo' });
+    if (!res) throw error;
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   10) CERTIFICADO / REPORTE DE RETENCIONES
+   ══════════════════════════════════════════════════════════════════ */
+const generateWithholdingPDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
+  try {
+    const single = data.customer_id && data.customers.length === 1;
+    const ctx = await startReportDoc(res, {
+      title: single ? 'CERTIFICADO DE RETENCIONES' : 'REPORTE DE RETENCIONES',
+      subtitle: `${single ? data.customers[0].customer_name + ' · ' : ''}Periodo: ${fmtDate(data.from)} — ${fmtDate(data.to)}`,
+      filenamePrefix: `Retenciones-${data.from || ''}_${data.to || ''}`,
+      tenant,
+      generatedByName,
+    });
+    const { doc, MARGIN, INNER_W } = ctx;
+
+    const COLS = { date: MARGIN, number: MARGIN + 55, customer: MARGIN + 120, base: MARGIN + INNER_W - 220, retefuente: MARGIN + INNER_W - 145, reteica: MARGIN + INNER_W - 70 };
+
+    const drawTableHeader = () => {
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(gray)
+        .text('FECHA', COLS.date, ctx.y)
+        .text('N° VENTA', COLS.number, ctx.y)
+        .text(single ? '' : 'CLIENTE', COLS.customer, ctx.y)
+        .text('BASE', COLS.base, ctx.y, { width: 70, align: 'right' })
+        .text('RETEFUENTE', COLS.retefuente, ctx.y, { width: 70, align: 'right' })
+        .text('RETEICA', COLS.reteica, ctx.y, { width: MARGIN + INNER_W - COLS.reteica, align: 'right' });
+      ctx.y += 12;
+    };
+
+    drawTableHeader();
+    if (data.sales.length === 0) {
+      doc.font('Helvetica').fontSize(8).fillColor(gray).text('Sin ventas con retención en el periodo seleccionado.', MARGIN, ctx.y);
+      ctx.y += 14;
+    }
+    data.sales.forEach((s) => {
+      ensureSpace(ctx, 13, drawTableHeader);
+      doc.font('Helvetica').fontSize(7.5).fillColor(black)
+        .text(fmtDate(s.sale_date), COLS.date, ctx.y, { width: 50 })
+        .text(s.sale_number || '', COLS.number, ctx.y, { width: COLS.customer - COLS.number - 4, ellipsis: true })
+        .text(single ? '' : s.customer_name, COLS.customer, ctx.y, { width: COLS.base - COLS.customer - 4, ellipsis: true })
+        .text(formatCurrency(s.subtotal), COLS.base, ctx.y, { width: 70, align: 'right' })
+        .text(formatCurrency(s.retefuente_amount), COLS.retefuente, ctx.y, { width: 70, align: 'right' })
+        .text(formatCurrency(s.reteica_amount), COLS.reteica, ctx.y, { width: MARGIN + INNER_W - COLS.reteica, align: 'right' });
+      ctx.y += 12;
+    });
+
+    ensureSpace(ctx, 22);
+    doc.moveTo(MARGIN, ctx.y).lineTo(MARGIN + INNER_W, ctx.y).strokeColor(borderMd).lineWidth(0.5).stroke();
+    ctx.y += 6;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(darkGray)
+      .text(`Base: ${formatCurrency(data.totals.base)}   ·   ReteFuente: ${formatCurrency(data.totals.retefuente)}   ·   ReteICA: ${formatCurrency(data.totals.reteica)}`,
+        MARGIN, ctx.y, { width: INNER_W, align: 'right' });
+    ctx.y += 20;
+
+    return finishReportDoc(ctx);
+  } catch (error) {
+    console.error(error);
+    if (res && !res.headersSent) res.status(500).json({ message: 'Error generando reporte de retenciones' });
+    if (!res) throw error;
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   11) ESTADO DE FLUJO DE EFECTIVO — MÉTODO INDIRECTO
+   ══════════════════════════════════════════════════════════════════ */
+const generateCashFlowIndirectPDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
+  try {
+    const ctx = await startReportDoc(res, {
+      title: 'FLUJO DE EFECTIVO (INDIRECTO)',
+      subtitle: `Periodo: ${fmtDate(data.from)} — ${fmtDate(data.to)}`,
+      filenamePrefix: `Flujo-Efectivo-Indirecto-${data.from || ''}_${data.to || ''}`,
+      tenant,
+      generatedByName,
+    });
+    const { doc, MARGIN, INNER_W } = ctx;
+
+    const sectionHeader = (label) => {
+      ensureSpace(ctx, 20);
+      doc.roundedRect(MARGIN, ctx.y, INNER_W, 16, 2).fill(darkGray);
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(white).text(label, MARGIN + 6, ctx.y + 4);
+      ctx.y += 20;
+    };
+    const line = (label, value, bold = false) => {
+      ensureSpace(ctx, 12);
+      doc.font(bold ? 'Helvetica-Bold' : 'Helvetica').fontSize(bold ? 9 : 8).fillColor(bold ? darkGray : black)
+        .text(label, MARGIN, ctx.y, { width: INNER_W - 100 })
+        .text(formatCurrency(value), MARGIN, ctx.y, { width: INNER_W, align: 'right' });
+      ctx.y += bold ? 14 : 12;
+    };
+
+    sectionHeader('ACTIVIDADES DE OPERACIÓN');
+    line('Utilidad neta del período', data.net_income);
+    data.operating.changes.forEach((c) => line(`  Δ ${c.code} - ${c.name}`, c.cash_impact));
+    line('Efectivo neto de operación', data.operating.total, true);
+
+    sectionHeader('ACTIVIDADES DE INVERSIÓN');
+    if (data.investing.changes.length === 0) line('Sin movimientos', 0);
+    data.investing.changes.forEach((c) => line(`  Δ ${c.code} - ${c.name}`, c.cash_impact));
+    line('Efectivo neto de inversión', data.investing.total, true);
+
+    sectionHeader('ACTIVIDADES DE FINANCIACIÓN');
+    if (data.financing.changes.length === 0) line('Sin movimientos', 0);
+    data.financing.changes.forEach((c) => line(`  Δ ${c.code} - ${c.name}`, c.cash_impact));
+    line('Efectivo neto de financiación', data.financing.total, true);
+
+    ensureSpace(ctx, 30);
+    doc.moveTo(MARGIN, ctx.y).lineTo(MARGIN + INNER_W, ctx.y).strokeColor(borderMd).lineWidth(0.5).stroke();
+    ctx.y += 6;
+    line('FLUJO DE EFECTIVO NETO DEL PERÍODO', data.net_cash_flow, true);
+    line('Efectivo al inicio', data.cash.opening);
+    line('Efectivo al final', data.cash.closing);
+
+    ensureSpace(ctx, 24);
+    doc.roundedRect(MARGIN, ctx.y, INNER_W, 18, 3).fill(data.cash.matches ? '#ecfdf5' : '#fef2f2');
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(data.cash.matches ? green : redAmt)
+      .text(data.cash.matches ? 'Cuadra con la variación real de caja' : `Diferencia sin explicar: ${formatCurrency(data.cash.difference)}`,
+        MARGIN + 8, ctx.y + 5);
+    ctx.y += 24;
+
+    doc.font('Helvetica-Oblique').fontSize(6.5).fillColor(gray).text(data.methodology_note, MARGIN, ctx.y, { width: INNER_W });
+
+    return finishReportDoc(ctx);
+  } catch (error) {
+    console.error(error);
+    if (res && !res.headersSent) res.status(500).json({ message: 'Error generando flujo de efectivo indirecto' });
+    if (!res) throw error;
+  }
+};
+
 module.exports = {
   generateTrialBalancePDF,
   generateBalanceGeneralPDF,
@@ -661,4 +902,8 @@ module.exports = {
   generateLibroMayorPDF,
   generateLibroAuxiliarPDF,
   generateLibroIvaPDF,
+  generateAgingPDF,
+  generateTrialBalanceComparativePDF,
+  generateWithholdingPDF,
+  generateCashFlowIndirectPDF,
 };

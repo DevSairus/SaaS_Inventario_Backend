@@ -360,7 +360,10 @@ const approveSupplierReturn = async (req, res) => {
 
     const supplierReturn = await SupplierReturn.findOne({
       where: { id, tenant_id },
-      include: [{ model: SupplierReturnItem, as: 'items', include: [{ model: Product, as: 'product' }] }]
+      include: [
+        { model: SupplierReturnItem, as: 'items', include: [{ model: Product, as: 'product' }] },
+        { model: Purchase, as: 'purchase', attributes: ['id', 'purchase_number', 'branch_id', 'supplier_id', 'payment_status'] }
+      ]
     });
 
     if (!supplierReturn) {
@@ -410,6 +413,16 @@ const approveSupplierReturn = async (req, res) => {
     }, { transaction });
 
     await transaction.commit();
+
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    setImmediate(async () => {
+      try {
+        const { generateSupplierReturnEntry } = require('../../services/accounting/autoEntries.service');
+        await generateSupplierReturnEntry(supplierReturn, supplierReturn.items, supplierReturn.purchase, tenant_id, req.user.id);
+      } catch (err) {
+        console.error(`[accounting] Error generando asiento de devolución a proveedor ${supplierReturn.id}:`, err.message);
+      }
+    });
 
     const product_ids = supplierReturn.items.map(item => item.product_id);
     markProductsForAlertCheck(res, product_ids, tenant_id);

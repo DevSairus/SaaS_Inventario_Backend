@@ -1,6 +1,57 @@
 // backend/src/services/accounting/autoEntries.service.js
 const { sequelize } = require('../../config/database');
-const { createDraftEntry, getMappedAccountId, safeAutoGenerate } = require('./journalEntry.service');
+const { createDraftEntry, getMappedAccountId, safeAutoGenerate, reverseEntry } = require('./journalEntry.service');
+
+/**
+ * Busca el (los) JournalEntry vigentes de un movimiento origen (venta, compra,
+ * gasto, cierre de caja) y los reversa. "Vigente" = no voided y sin
+ * reversed_by_entry_id todavía (evita reversar dos veces si se llama más de
+ * una vez por error, ej. doble clic en cancelar).
+ *
+ * Es el contrapunto de generateSaleEntry/generatePurchaseEntry/etc.: se debe
+ * llamar cuando el movimiento origen deja de ser válido (venta cancelada,
+ * devolución de cliente/proveedor). Igual que los generadores, es
+ * fire-and-forget seguro — un problema acá no debe bloquear la cancelación
+ * ni la devolución real.
+ *
+ * @param {string} sourceType 'sale' | 'purchase' | 'expense' | 'cash_session'
+ * @param {string} sourceId
+ * @param {string} tenantId
+ * @param {string} userId
+ * @param {string} reason
+ */
+async function reverseSourceEntries(sourceType, sourceId, tenantId, userId, reason) {
+  return safeAutoGenerate(async () => {
+    const { JournalEntry } = require('../../models');
+    const { Op } = require('sequelize');
+
+    const entries = await JournalEntry.findAll({
+      where: {
+        tenant_id: tenantId,
+        source_type: sourceType,
+        source_id: sourceId,
+        status: { [Op.ne]: 'voided' },
+        reversed_by_entry_id: null,
+      },
+    });
+
+    if (entries.length === 0) return null; // nunca tuvo asiento (mapeo no configurado) — nada que reversar
+
+    const results = [];
+    for (const entry of entries) {
+      const t = await sequelize.transaction();
+      try {
+        const result = await reverseEntry(entry.id, tenantId, userId, reason, t);
+        await t.commit();
+        results.push(result);
+      } catch (error) {
+        await t.rollback();
+        throw error;
+      }
+    }
+    return results;
+  }, `reversión ${sourceType} ${sourceId}`);
+}
 
 /**
  * Genera el asiento en borrador de una venta completada.
@@ -11,7 +62,7 @@ const { createDraftEntry, getMappedAccountId, safeAutoGenerate } = require('./jo
  * para algún evento, el asiento no se genera (se loguea el warning) — no
  * bloquea la venta. Revisar logs periódicamente mientras se afina el mapeo.
  */
-async function generateSaleEntry(sale, items, tenantId, userId) {
+async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
@@ -84,13 +135,13 @@ async function generateSaleEntry(sale, items, tenantId, userId) {
       await t.rollback();
       throw error;
     }
-  }, `venta ${sale.id}`);
+  }, `venta ${sale.id}`, options);
 }
 
 /**
  * Genera el asiento en borrador de una compra recibida.
  */
-async function generatePurchaseEntry(purchase, tenantId, userId) {
+async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
@@ -142,13 +193,13 @@ async function generatePurchaseEntry(purchase, tenantId, userId) {
       await t.rollback();
       throw error;
     }
-  }, `compra ${purchase.id}`);
+  }, `compra ${purchase.id}`, options);
 }
 
 /**
  * Genera el asiento en borrador de un gasto.
  */
-async function generateExpenseEntry(expense, tenantId, userId) {
+async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
@@ -189,7 +240,7 @@ async function generateExpenseEntry(expense, tenantId, userId) {
       await t.rollback();
       throw error;
     }
-  }, `gasto ${expense.id}`);
+  }, `gasto ${expense.id}`, options);
 }
 
 /**
@@ -203,7 +254,7 @@ async function generateExpenseEntry(expense, tenantId, userId) {
  * así que el saldo contable de "caja"/"bancos" queda consistente con lo que
  * físicamente se contó al cerrar.
  */
-async function generateCashSessionEntry(session, tenantId, userId) {
+async function generateCashSessionEntry(session, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const differences = session.differences || {};
     const nonZero = Object.entries(differences).filter(([, v]) => Math.abs(Number(v || 0)) > 0.01);
@@ -252,7 +303,198 @@ async function generateCashSessionEntry(session, tenantId, userId) {
       await t.rollback();
       throw error;
     }
-  }, `cierre de caja ${session.id}`);
+  }, `cierre de caja ${session.id}`, options);
 }
 
-module.exports = { generateSaleEntry, generatePurchaseEntry, generateExpenseEntry, generateCashSessionEntry };
+/**
+ * Genera el asiento en borrador de una devolución de cliente (nota crédito),
+ * aprobada parcial o totalmente sobre una venta ya contabilizada.
+ *
+ * Es el contrapunto de generateSaleEntry, pero NO es una reversión total del
+ * asiento de la venta (reverseSourceEntries) porque una devolución casi
+ * siempre es parcial (algunos ítems, no toda la venta). En cambio, genera un
+ * asiento nuevo con las mismas cuentas que usó la venta original, en la
+ * proporción de lo devuelto:
+ *
+ *  - Debe: ingreso por producto/servicio devuelto + IVA devuelto (reversan
+ *    ingreso e impuesto generado).
+ *  - Haber: efectivo/bancos (si la venta ya estaba cobrada) y/o cartera (si
+ *    aún tenía saldo pendiente), repartido en la MISMA proporción pagado/
+ *    pendiente que tenía la venta original — evita asumir que la devolución
+ *    siempre se paga en efectivo o siempre se descuenta de cartera.
+ *  - Si el producto vuelve a inventario vendible (mismo criterio que ya usa
+ *    el controller para el movimiento físico: track_inventory + destino
+ *    'inventory'), se revierte también el costo de venta (COGS) de esos
+ *    ítems específicos.
+ *
+ * @param {object} customerReturn - instancia de CustomerReturn
+ * @param {Array} items - CustomerReturnItem[] con `product` y `saleItem` (item_type) incluidos
+ * @param {object} sale - venta original (para conocer payment_method, paid_amount, total_amount, customer_id, branch_id)
+ */
+async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId, userId) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const productRevenue = (items || [])
+        .filter((i) => (i.saleItem?.item_type || 'product') !== 'service')
+        .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      const serviceRevenue = (items || [])
+        .filter((i) => i.saleItem?.item_type === 'service')
+        .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      const totalTax = Number(customerReturn.tax || 0);
+      const totalReturned = Number(customerReturn.total_amount || 0);
+
+      // COGS solo de ítems que sí vuelven a inventario vendible — mismo
+      // criterio que ya usa approveCustomerReturn para el movimiento físico.
+      const cogsReturned = (items || [])
+        .filter((i) => i.product?.track_inventory && i.destination === 'inventory')
+        .reduce((s, i) => s + Number(i.quantity || 0) * Number(i.unit_cost || 0), 0);
+
+      // Reparto pagado/pendiente en la misma proporción que tenía la venta
+      // original — una devolución no siempre implica devolver efectivo.
+      const saleTotal = Number(sale.total_amount || 0);
+      const salePaid = Math.min(Number(sale.paid_amount || 0), saleTotal);
+      const paidRatio = saleTotal > 0 ? salePaid / saleTotal : 0;
+      const moneyBackPaid = Math.round(totalReturned * paidRatio * 100) / 100;
+      const moneyBackPending = Math.round((totalReturned - moneyBackPaid) * 100) / 100;
+
+      const lines = [];
+
+      // Debe: reversa de ingreso e IVA
+      if (productRevenue > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
+        lines.push({ account_id, debit: productRevenue, credit: 0, description: 'Reversión de ingreso por devolución de mercancía' });
+      }
+      if (serviceRevenue > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
+        lines.push({ account_id, debit: serviceRevenue, credit: 0, description: 'Reversión de ingreso por devolución de servicio' });
+      }
+      if (totalTax > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
+        lines.push({ account_id, debit: totalTax, credit: 0, description: 'Reversión de IVA generado por devolución' });
+      }
+
+      // Haber: sale efectivo/bancos (reintegro) y/o se reduce cartera
+      if (moneyBackPaid > 0) {
+        const pm = (sale.payment_method || '').toLowerCase();
+        const isCash = pm.includes('efectivo') || pm.includes('cash');
+        const account_id = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+        lines.push({ account_id, debit: 0, credit: moneyBackPaid, description: 'Reintegro por devolución (parte ya cobrada)' });
+      }
+      if (moneyBackPending > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_receivable', t);
+        lines.push({ account_id, debit: 0, credit: moneyBackPending, description: 'Reducción de cartera por devolución', third_party_id: sale.customer_id || null });
+      }
+
+      // Reversión de costo de venta / inventario, solo lo que vuelve a stock
+      if (cogsReturned > 0) {
+        const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
+        const cogsAccount = await getMappedAccountId(tenantId, 'sale_cogs_product', t);
+        lines.push({ account_id: inventoryAccount, debit: cogsReturned, credit: 0, description: 'Reingreso a inventario por devolución' });
+        lines.push({ account_id: cogsAccount, debit: 0, credit: cogsReturned, description: 'Reversión de costo de venta por devolución' });
+      }
+
+      if (lines.length === 0) return null; // nada que contabilizar (devolución de $0, caso raro pero posible)
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: sale.branch_id,
+          entryDate: customerReturn.return_date || new Date(),
+          sourceType: 'customer_return',
+          sourceId: customerReturn.id,
+          description: `Devolución de cliente ${customerReturn.return_number} — venta ${sale.sale_number || sale.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `devolución de cliente ${customerReturn.id}`);
+}
+
+/**
+ * Genera el asiento en borrador de una devolución a proveedor (nota crédito
+ * recibida), simétrico-invertido de generatePurchaseEntry.
+ *
+ * A diferencia de la venta, la compra no distingue pagado/pendiente en
+ * proporción — generatePurchaseEntry usa un booleano (`payment_status ===
+ * 'paid'`), así que acá se replica esa misma simplificación: si la compra
+ * original quedó pagada, el dinero "vuelve" a caja/bancos; si no, se reduce
+ * la cuenta por pagar al proveedor.
+ *
+ * @param {object} supplierReturn - instancia de SupplierReturn
+ * @param {Array} items - SupplierReturnItem[]
+ * @param {object} purchase - compra original (para payment_status, branch_id, supplier_id)
+ */
+async function generateSupplierReturnEntry(supplierReturn, items, purchase, tenantId, userId) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const totalReturned = Number(supplierReturn.total_amount || 0);
+      const taxReturned = Number(supplierReturn.tax || 0);
+      const inventoryReturned = totalReturned - taxReturned; // mismo criterio que generatePurchaseEntry: todo lo no-IVA es inventario
+
+      const lines = [];
+
+      // Haber: sale de inventario (activo baja) y se revierte el IVA descontable ya tomado
+      if (inventoryReturned > 0) {
+        const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
+        lines.push({ account_id: inventoryAccount, debit: 0, credit: inventoryReturned, description: 'Salida de inventario por devolución a proveedor' });
+      }
+      if (taxReturned > 0) {
+        const ivaAccount = await getMappedAccountId(tenantId, 'purchase_iva_descontable', t);
+        lines.push({ account_id: ivaAccount, debit: 0, credit: taxReturned, description: 'Reversión de IVA descontable por devolución' });
+      }
+
+      // Debe: reintegro de dinero (si ya se había pagado) o reducción de cuenta por pagar
+      const isCash = purchase.payment_status === 'paid';
+      const debitAccount = await getMappedAccountId(tenantId, isCash ? 'purchase_cash_account' : 'purchase_payable', t);
+      lines.push({
+        account_id: debitAccount,
+        debit: totalReturned,
+        credit: 0,
+        description: isCash ? 'Reintegro por devolución a proveedor' : 'Reducción de cuenta por pagar por devolución',
+        third_party_id: isCash ? null : (purchase.supplier_id || null),
+      });
+
+      if (lines.length === 0) return null;
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: purchase.branch_id,
+          entryDate: supplierReturn.return_date || new Date(),
+          sourceType: 'supplier_return',
+          sourceId: supplierReturn.id,
+          description: `Devolución a proveedor ${supplierReturn.return_number} — compra ${purchase.purchase_number || purchase.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `devolución a proveedor ${supplierReturn.id}`);
+}
+
+module.exports = {
+  generateSaleEntry,
+  generatePurchaseEntry,
+  generateExpenseEntry,
+  generateCashSessionEntry,
+  generateCustomerReturnEntry,
+  generateSupplierReturnEntry,
+  reverseSourceEntries,
+};

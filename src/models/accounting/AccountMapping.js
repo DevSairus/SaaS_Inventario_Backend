@@ -8,6 +8,9 @@ const AccountMapping = sequelize.define(
     tenant_id: { type: DataTypes.UUID, allowNull: false },
     event_type: { type: DataTypes.STRING(60), allowNull: false },
     account_id: { type: DataTypes.UUID, allowNull: false },
+    label: { type: DataTypes.STRING(150), allowNull: true },
+    category: { type: DataTypes.STRING(60), allowNull: true },
+    is_custom: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   },
   {
     tableName: 'account_mappings',

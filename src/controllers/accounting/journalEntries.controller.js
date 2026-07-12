@@ -1,5 +1,5 @@
 const { JournalEntry, JournalEntryLine, ChartOfAccount } = require('../../models');
-const { createDraftEntry, postEntry, voidEntry } = require('../../services/accounting/journalEntry.service');
+const { createDraftEntry, postEntry, voidEntry, reverseEntry } = require('../../services/accounting/journalEntry.service');
 
 // GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=
 exports.list = async (req, res) => {
@@ -93,6 +93,25 @@ exports.void = async (req, res) => {
     const entry = await voidEntry(req.params.id, req.tenant_id, req.user?.id, req.body?.reason);
     res.json({ success: true, data: entry });
   } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// PATCH /api/accounting/journal-entries/:id/reverse
+// Corrige un asiento ya posteado sin editarlo ni anularlo: si está en draft
+// simplemente se anula (nadie lo revisó, no afectó reportes); si ya está
+// posted se crea un asiento nuevo con débito/crédito invertidos y se enlazan
+// entre sí. Útil para correcciones manuales de asientos manuales o
+// automáticos que ya no reflejan la realidad del negocio.
+exports.reverse = async (req, res) => {
+  const { sequelize } = require('../../config/database');
+  const t = await sequelize.transaction();
+  try {
+    const result = await reverseEntry(req.params.id, req.tenant_id, req.user?.id, req.body?.reason, t);
+    await t.commit();
+    res.json({ success: true, data: result });
+  } catch (error) {
+    await t.rollback();
     res.status(400).json({ success: false, message: error.message });
   }
 };

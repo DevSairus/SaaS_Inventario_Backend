@@ -384,12 +384,15 @@ const approveCustomerReturn = async (req, res) => {
         {
           model: CustomerReturnItem,
           as: 'items',
-          include: [{ model: Product, as: 'product' }]
+          include: [
+            { model: Product, as: 'product' },
+            { model: SaleItem, as: 'saleItem', attributes: ['id', 'item_type'] },
+          ]
         },
         {
           model: Sale,
           as: 'sale',
-          attributes: ['id', 'sale_number', 'warehouse_id']
+          attributes: ['id', 'sale_number', 'warehouse_id', 'branch_id', 'customer_id', 'payment_method', 'paid_amount', 'total_amount']
         }
       ]
     });
@@ -449,6 +452,17 @@ const approveCustomerReturn = async (req, res) => {
     }, { transaction });
 
     await transaction.commit();
+
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    // Mismo patrón que sales.controller.js#update para generateSaleEntry.
+    setImmediate(async () => {
+      try {
+        const { generateCustomerReturnEntry } = require('../../services/accounting/autoEntries.service');
+        await generateCustomerReturnEntry(customerReturn, customerReturn.items, customerReturn.sale, tenant_id, req.user.id);
+      } catch (err) {
+        console.error(`[accounting] Error generando asiento de devolución de cliente ${customerReturn.id}:`, err.message);
+      }
+    });
 
     // FIX: era supplierReturn.items y tenantId (variables inexistentes)
     const product_ids = customerReturn.items.map(item => item.product_id);

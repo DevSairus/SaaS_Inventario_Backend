@@ -11,7 +11,7 @@ const swaggerSpec = require('./config/swagger');
 
 const { testConnection } = require('./config/database');
 const { runMigrations } = require('./database/migrator');
-const { authMiddleware } = require('./middleware/auth');
+const { authMiddleware, checkRole } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { branchMiddleware } = require('./middleware/branch');
 const { requireModule } = require('./middleware/checkModule');
@@ -227,7 +227,16 @@ app.use('/api/users',                          authMiddleware, tenantMiddleware,
 // ✅ DIAN — Facturación Electrónica (con tenant)
 app.use('/api/whatsapp',                      authMiddleware, whatsappRoutes);
 app.use('/api/dian',                           authMiddleware, tenantMiddleware, branchMiddleware, dianRoutes);
-app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, accountingRoutes);
+// Contabilidad: mismo mecanismo que ya usa el resto de la app (checkRole).
+// Roles reales del sistema (ver User.js): super_admin, admin, manager,
+// seller, warehouse_keeper, user, viewer, technician — de esos, solo
+// admin/manager/super_admin tienen sentido para tocar libros contables.
+// ('accountant' aparece referenciado en cashSessions.routes.js pero NO es
+// un rol válido en User.js — no se reutiliza acá por ser un valor muerto).
+// Sin esta línea, cualquier usuario autenticado del tenant (un vendedor, un
+// bodeguero) podía postear, anular o reversar asientos, o cambiar el mapeo
+// de cuentas — no había segregación de funciones.
+app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, checkRole('admin', 'super_admin', 'manager'), accountingRoutes);
 app.use('/api/ai-assistant',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ai_assistant'), aiAssistantRoutes);
 
 const path = require('path');

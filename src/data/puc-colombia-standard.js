@@ -140,6 +140,11 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   'expense_category:seguros': '513005',
   'expense_category:honorarios': '511005',
   'expense_category:otro': '519599',
+
+  // Cierre de ejercicio (3.3 del análisis contable): traslada el resultado
+  // del año (ingresos - costos - gastos) a patrimonio.
+  year_end_result: '360505',        // Utilidad del Ejercicio (año que se está cerrando)
+  year_end_accumulated: '370505',   // Utilidades Acumuladas (años anteriores ya cerrados)
 };
 
 module.exports = { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS };

@@ -797,6 +797,19 @@ const cancel = async (req, res) => {
       throw err;
     }
 
+    // Reversión del asiento contable de la venta (no bloqueante: si falla,
+    // solo se loguea — igual que la generación original del asiento).
+    // Sin esto, el balance/estado de resultados seguía mostrando el ingreso,
+    // el IVA y el costo de una venta que ya no existe para el negocio.
+    setImmediate(async () => {
+      try {
+        const { reverseSourceEntries } = require('../../services/accounting/autoEntries.service');
+        await reverseSourceEntries('sale', sale.id, tenantId, userId, `Venta ${sale.sale_number || sale.id} cancelada${reason ? ' — ' + reason : ''}`);
+      } catch (err) {
+        logger.warn(`[accounting] Error reversando asiento de venta cancelada ${id}: ${err.message}`);
+      }
+    });
+
     const updatedSale = await Sale.findByPk(id, {
       include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });

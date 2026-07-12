@@ -9,6 +9,11 @@ const { Sale, Purchase, Expense, Supplier, Tenant } = require('../../models');
 const { Op } = require('sequelize');
 const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
+const { getAccountingCashFlow } = require('../../services/accounting/cashReconciliation.service');
+
+// Tolerancia para considerar que Tesorería y Contabilidad "coinciden" —
+// 1 peso de redondeo no es una alerta real.
+const RECONCILIATION_TOLERANCE = 1;
 
 const toDateOnly = (value) => {
   if (!value) return null;
@@ -196,4 +201,66 @@ const getCashFlowExcel = async (req, res) => {
   }
 };
 
-module.exports = { getCashFlow, getCashFlowPDF, getCashFlowExcel, buildCashFlow };
+// GET /api/cashflow/reconciliation
+// Conecta la vista de Tesorería (payment_history) con la vista de
+// Contabilidad (asientos posteados en Caja/Bancos) para el hallazgo 3.5:
+// hoy son dos fuentes de verdad separadas y nada avisa si divergen. Este
+// endpoint las calcula juntas, con los mismos filtros, y expone si
+// coinciden o no — total y día por día — en vez de dejarlo para una
+// auditoría manual.
+const getCashFlowReconciliation = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { from_date, to_date, branch_id } = req.query;
+
+    const [treasury, accounting] = await Promise.all([
+      buildCashFlow(tenant_id, { from_date, to_date, branch_id }),
+      getAccountingCashFlow(tenant_id, { from_date, to_date, branch_id }),
+    ]);
+
+    const diff_in = Math.round((treasury.summary.total_in - accounting.summary.total_in) * 100) / 100;
+    const diff_out = Math.round((treasury.summary.total_out - accounting.summary.total_out) * 100) / 100;
+    const diff_net = Math.round((treasury.summary.net - accounting.summary.net) * 100) / 100;
+    const matches = Math.abs(diff_in) <= RECONCILIATION_TOLERANCE && Math.abs(diff_out) <= RECONCILIATION_TOLERANCE;
+
+    // Une los días de ambas vistas (aunque uno de los dos no tenga movimiento
+    // ese día) para poder señalar EN QUÉ día específico aparece la diferencia,
+    // no solo el total del rango.
+    const dayMap = {};
+    treasury.by_day.forEach((d) => {
+      dayMap[d.date] = { date: d.date, treasury_in: d.in, treasury_out: d.out, accounting_in: 0, accounting_out: 0 };
+    });
+    accounting.by_day.forEach((d) => {
+      if (!dayMap[d.date]) dayMap[d.date] = { date: d.date, treasury_in: 0, treasury_out: 0, accounting_in: 0, accounting_out: 0 };
+      dayMap[d.date].accounting_in = d.in;
+      dayMap[d.date].accounting_out = d.out;
+    });
+
+    const by_day = Object.values(dayMap)
+      .map((d) => ({
+        ...d,
+        diff_in: Math.round((d.treasury_in - d.accounting_in) * 100) / 100,
+        diff_out: Math.round((d.treasury_out - d.accounting_out) * 100) / 100,
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .filter((d) => Math.abs(d.diff_in) > RECONCILIATION_TOLERANCE || Math.abs(d.diff_out) > RECONCILIATION_TOLERANCE);
+
+    res.json({
+      success: true,
+      data: {
+        treasury: treasury.summary,
+        accounting: accounting.summary,
+        pending_draft: accounting.pending_draft,
+        accounts_used: accounting.accounts_used,
+        difference: { in: diff_in, out: diff_out, net: diff_net },
+        matches,
+        days_with_difference: by_day,
+      },
+    });
+  } catch (error) {
+    console.error('Error generando conciliación de flujo de caja:', error);
+    res.status(500).json({ success: false, message: 'Error generando conciliación de flujo de caja' });
+  }
+};
+
+module.exports = { getCashFlow, getCashFlowPDF, getCashFlowExcel, getCashFlowReconciliation, buildCashFlow };

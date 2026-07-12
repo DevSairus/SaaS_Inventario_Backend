@@ -637,6 +637,242 @@ const generateLibroIvaExcel = async (data, tenant, filters = {}, generatedByName
   return workbook.xlsx.writeBuffer();
 };
 
+/* ══════════════════════════════════════════════════════════════════
+   8) ANTIGÜEDAD DE CARTERA / CUENTAS POR PAGAR (aging)
+   ══════════════════════════════════════════════════════════════════ */
+const generateAgingExcel = async (data, tenant, filters = {}, generatedByName = '') => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = tenant?.company_name || 'Pitbox';
+  workbook.created = new Date();
+
+  const label = data.type === 'customer' ? 'Cartera (Clientes)' : 'Cuentas por Pagar (Proveedores)';
+  const sheet = workbook.addWorksheet('Antigüedad de Saldos');
+
+  sheet.columns = [
+    { key: 'name', width: 32 },
+    { key: 'current', width: 15 },
+    { key: 'd1_30', width: 15 },
+    { key: 'd31_60', width: 15 },
+    { key: 'd61_90', width: 15 },
+    { key: 'd90_plus', width: 15 },
+    { key: 'total', width: 16 },
+  ];
+
+  addHeader(sheet, {
+    title: `ANTIGÜEDAD DE SALDOS — ${label.toUpperCase()}`,
+    tenant,
+    subtitle: `Corte al: ${fmtDate(data.as_of)}`,
+    generatedByName,
+    mergeCols: 'G',
+  });
+
+  let r = 6;
+  const headerRow = sheet.getRow(r);
+  headerRow.values = ['Tercero', 'Sin vencer', '1-30 días', '31-60 días', '61-90 días', 'Más de 90', 'Total'];
+  styleHeaderRow(headerRow);
+  r += 1;
+
+  if (data.third_parties.length === 0) {
+    sheet.mergeCells(`A${r}:G${r}`);
+    sheet.getCell(`A${r}`).value = 'Sin saldos abiertos a la fecha de corte.';
+    r += 1;
+  } else {
+    data.third_parties.forEach((tp, idx) => {
+      const row = sheet.getRow(r);
+      row.values = [
+        tp.name,
+        Number(tp.buckets.current || 0),
+        Number(tp.buckets.d1_30 || 0),
+        Number(tp.buckets.d31_60 || 0),
+        Number(tp.buckets.d61_90 || 0),
+        Number(tp.buckets.d90_plus || 0),
+        Number(tp.total),
+      ];
+      for (let c = 2; c <= 7; c += 1) row.getCell(c).numFmt = '$#,##0';
+      zebraStripe(row, idx);
+      r += 1;
+    });
+  }
+
+  const totalRow = sheet.getRow(r);
+  const bucketTotal = (key) => data.buckets.find((b) => b.key === key)?.total || 0;
+  totalRow.values = ['TOTAL', bucketTotal('current'), bucketTotal('d1_30'), bucketTotal('d31_60'), bucketTotal('d61_90'), bucketTotal('d90_plus'), data.grand_total];
+  totalRow.eachCell((cell) => { cell.font = { bold: true }; cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } }; });
+  for (let c = 2; c <= 7; c += 1) totalRow.getCell(c).numFmt = '$#,##0';
+
+  return workbook.xlsx.writeBuffer();
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   9) BALANCE DE COMPROBACIÓN COMPARATIVO
+   ══════════════════════════════════════════════════════════════════ */
+const generateTrialBalanceComparativeExcel = async (data, tenant, filters = {}, generatedByName = '') => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = tenant?.company_name || 'Pitbox';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Balance Comparativo', { views: [{ state: 'frozen', ySplit: 6 }] });
+
+  sheet.columns = [
+    { key: 'code', width: 12 },
+    { key: 'name', width: 34 },
+    { key: 'current', width: 16 },
+    { key: 'prior', width: 16 },
+    { key: 'variance', width: 16 },
+    { key: 'pct', width: 12 },
+  ];
+
+  addHeader(sheet, {
+    title: 'BALANCE DE COMPROBACIÓN COMPARATIVO',
+    tenant,
+    subtitle: `Actual: ${fmtDate(data.from)} a ${fmtDate(data.to)}  ·  Anterior: ${fmtDate(data.compare_from)} a ${fmtDate(data.compare_to)}`,
+    generatedByName,
+    mergeCols: 'F',
+  });
+
+  let r = 6;
+  const headerRow = sheet.getRow(r);
+  headerRow.values = ['Código', 'Cuenta', 'Periodo Actual', 'Periodo Anterior', 'Variación', 'Var. %'];
+  styleHeaderRow(headerRow);
+  r += 1;
+
+  data.accounts.forEach((a, idx) => {
+    const row = sheet.getRow(r);
+    row.values = [a.code, a.name, a.current_balance, a.prior_balance, a.variance, a.variance_pct === null ? '' : a.variance_pct / 100];
+    row.getCell(3).numFmt = '$#,##0';
+    row.getCell(4).numFmt = '$#,##0';
+    row.getCell(5).numFmt = '$#,##0';
+    row.getCell(6).numFmt = '0.0%';
+    if (a.variance < 0) row.getCell(5).font = { color: { argb: REDAMT } };
+    else if (a.variance > 0) row.getCell(5).font = { color: { argb: GREEN } };
+    zebraStripe(row, idx);
+    r += 1;
+  });
+
+  return workbook.xlsx.writeBuffer();
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   10) CERTIFICADO / REPORTE DE RETENCIONES (ReteFuente, ReteICA)
+   ══════════════════════════════════════════════════════════════════ */
+const generateWithholdingExcel = async (data, tenant, filters = {}, generatedByName = '') => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = tenant?.company_name || 'Pitbox';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Retenciones');
+  sheet.columns = [
+    { key: 'date', width: 12 },
+    { key: 'number', width: 14 },
+    { key: 'customer', width: 30 },
+    { key: 'base', width: 16 },
+    { key: 'retefuente', width: 16 },
+    { key: 'reteica', width: 16 },
+  ];
+
+  addHeader(sheet, {
+    title: 'CERTIFICADO DE RETENCIONES',
+    tenant,
+    subtitle: `Periodo: ${fmtDate(data.from)} a ${fmtDate(data.to)}`,
+    generatedByName,
+    mergeCols: 'F',
+  });
+
+  let r = 6;
+  const headerRow = sheet.getRow(r);
+  headerRow.values = ['Fecha', 'N° Venta', 'Cliente', 'Base', 'ReteFuente', 'ReteICA'];
+  styleHeaderRow(headerRow);
+  r += 1;
+
+  data.sales.forEach((s, idx) => {
+    const row = sheet.getRow(r);
+    row.values = [toExcelDate(s.sale_date), s.sale_number, s.customer_name, s.subtotal, s.retefuente_amount, s.reteica_amount];
+    row.getCell(1).numFmt = 'dd/mm/yyyy';
+    row.getCell(4).numFmt = '$#,##0';
+    row.getCell(5).numFmt = '$#,##0';
+    row.getCell(6).numFmt = '$#,##0';
+    zebraStripe(row, idx);
+    r += 1;
+  });
+
+  const totalRow = sheet.getRow(r);
+  totalRow.values = ['', '', 'TOTAL', data.totals.base, data.totals.retefuente, data.totals.reteica];
+  totalRow.eachCell((cell) => { cell.font = { bold: true }; cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } }; });
+  totalRow.getCell(4).numFmt = '$#,##0';
+  totalRow.getCell(5).numFmt = '$#,##0';
+  totalRow.getCell(6).numFmt = '$#,##0';
+
+  return workbook.xlsx.writeBuffer();
+};
+
+/* ══════════════════════════════════════════════════════════════════
+   11) ESTADO DE FLUJO DE EFECTIVO — MÉTODO INDIRECTO
+   ══════════════════════════════════════════════════════════════════ */
+const generateCashFlowIndirectExcel = async (data, tenant, filters = {}, generatedByName = '') => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = tenant?.company_name || 'Pitbox';
+  workbook.created = new Date();
+
+  const sheet = workbook.addWorksheet('Flujo de Efectivo');
+  sheet.columns = [{ key: 'label', width: 42 }, { key: 'value', width: 18 }];
+
+  addHeader(sheet, {
+    title: 'ESTADO DE FLUJO DE EFECTIVO (MÉTODO INDIRECTO)',
+    tenant,
+    subtitle: `Periodo: ${fmtDate(data.from)} a ${fmtDate(data.to)}`,
+    generatedByName,
+    mergeCols: 'B',
+  });
+
+  let r = 6;
+  const section = (label) => {
+    sheet.mergeCells(`A${r}:B${r}`);
+    const cell = sheet.getCell(`A${r}`);
+    cell.value = label;
+    cell.font = { bold: true, color: { argb: WHITE } };
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK } };
+    r += 1;
+  };
+  const line = (label, value, bold = false) => {
+    const row = sheet.getRow(r);
+    row.values = [label, Number(value)];
+    row.getCell(2).numFmt = '$#,##0';
+    if (bold) { row.getCell(1).font = { bold: true }; row.getCell(2).font = { bold: true }; }
+    r += 1;
+  };
+
+  section('ACTIVIDADES DE OPERACIÓN');
+  line('Utilidad neta del período', data.net_income);
+  data.operating.changes.forEach((c) => line(`  Δ ${c.code} - ${c.name}`, c.cash_impact));
+  line('Efectivo neto de operación', data.operating.total, true);
+  r += 1;
+
+  section('ACTIVIDADES DE INVERSIÓN');
+  if (data.investing.changes.length === 0) line('Sin movimientos', 0);
+  data.investing.changes.forEach((c) => line(`  Δ ${c.code} - ${c.name}`, c.cash_impact));
+  line('Efectivo neto de inversión', data.investing.total, true);
+  r += 1;
+
+  section('ACTIVIDADES DE FINANCIACIÓN');
+  if (data.financing.changes.length === 0) line('Sin movimientos', 0);
+  data.financing.changes.forEach((c) => line(`  Δ ${c.code} - ${c.name}`, c.cash_impact));
+  line('Efectivo neto de financiación', data.financing.total, true);
+  r += 1;
+
+  line('FLUJO DE EFECTIVO NETO DEL PERÍODO', data.net_cash_flow, true);
+  line('Efectivo al inicio', data.cash.opening);
+  line('Efectivo al final', data.cash.closing);
+  r += 1;
+  line(data.cash.matches ? 'Cuadre: coincide con la variación real de caja' : 'Diferencia sin explicar (revisar cuentas)', data.cash.difference);
+
+  sheet.getCell(`A${r}`).value = data.methodology_note;
+  sheet.mergeCells(`A${r}:B${r}`);
+  sheet.getCell(`A${r}`).font = { italic: true, size: 8, color: { argb: 'FF6B7280' } };
+  sheet.getCell(`A${r}`).alignment = { wrapText: true };
+
+  return workbook.xlsx.writeBuffer();
+};
+
 module.exports = {
   generateTrialBalanceExcel,
   generateBalanceGeneralExcel,
@@ -645,4 +881,8 @@ module.exports = {
   generateLibroMayorExcel,
   generateLibroAuxiliarExcel,
   generateLibroIvaExcel,
+  generateAgingExcel,
+  generateTrialBalanceComparativeExcel,
+  generateWithholdingExcel,
+  generateCashFlowIndirectExcel,
 };
