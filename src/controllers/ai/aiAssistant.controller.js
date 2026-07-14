@@ -16,7 +16,12 @@ const MAX_MESSAGE_CHARS = 4000;
 // exacta pero acota el prompt sin depender de una librería de tokenizer).
 // Se toma desde el mensaje más reciente hacia atrás para no cortar contexto
 // a la mitad de un intercambio importante.
-const MAX_HISTORY_CHARS = 12000;
+// Bajado de 12000 a 6000: este historial se reenvía completo en cada mensaje
+// nuevo (y de nuevo en cada iteración del loop de tools dentro del mismo
+// turno), así que es de lo que más rápido infla el consumo en una
+// conversación larga. ~6000 chars siguen dando varios intercambios de
+// contexto reciente sin duplicar tokens innecesariamente.
+const MAX_HISTORY_CHARS = 6000;
 
 function trimHistoryByBudget(messages, maxChars) {
   const kept = [];

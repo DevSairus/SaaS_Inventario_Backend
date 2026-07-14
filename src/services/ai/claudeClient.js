@@ -8,12 +8,16 @@
 //
 // Variables de entorno requeridas:
 //   ANTHROPIC_API_KEY → API key de https://console.anthropic.com
-//   CLAUDE_MODEL       → opcional, default 'claude-opus-4-8'
+//   CLAUDE_MODEL       → opcional, default 'claude-sonnet-5'
+//
+// Claude es solo un fallback (Groq es el proveedor principal) — se usa
+// Sonnet en vez de Opus a propósito: mismo tool-calling y calidad de
+// respuesta suficiente para este asistente a una fracción del costo.
 
 const Anthropic = require('@anthropic-ai/sdk');
 const logger = require('../../config/logger');
 
-const DEFAULT_MODEL = process.env.CLAUDE_MODEL || 'claude-opus-4-8';
+const DEFAULT_MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-5';
 const MAX_TOKENS = 1500; // mismo tope que groqClient, para respuestas de tamaño consistente
 
 // Igual que groqClient: reintentamos una vez ante errores transitorios del
