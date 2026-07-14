@@ -20,13 +20,13 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
   },
   // Tipo de ítem
   item_type: {
-    type: DataTypes.ENUM('repuesto', 'servicio', 'mano_obra'),
+    type: DataTypes.ENUM('repuesto', 'servicio', 'mano_obra', 'free_line'),
     allowNull: false,
-    comment: 'repuesto = descuenta inventario, servicio/mano_obra = product_type service'
+    comment: 'repuesto = descuenta inventario, servicio/mano_obra = product_type service, free_line = línea libre ad-hoc sin producto de catálogo'
   },
   product_id: {
     type: DataTypes.UUID,
-    allowNull: false,
+    allowNull: true, // null para free_line
     references: { model: 'products', key: 'id' }
   },
   // Snapshot del producto al momento de agregar

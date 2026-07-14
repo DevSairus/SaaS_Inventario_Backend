@@ -58,6 +58,13 @@ async function reverseSourceEntries(sourceType, sourceId, tenantId, userId, reas
  * Separa ingreso/costo de producto vs servicio (taller) usando SaleItem.item_type,
  * y el medio de pago (caja/bancos/cartera) usando Sale.payment_method y paid_amount.
  *
+ * Las líneas libres ('free_line') se agrupan con 'service': no tienen
+ * producto de catálogo ni costo asociado (unit_cost siempre 0), así que su
+ * naturaleza contable es la misma que un servicio — ingreso puro, sin COGS.
+ * Antes se quedaban fuera de ambos grupos y su ingreso nunca se registraba
+ * en el Haber, dejando el asiento desbalanceado frente al Debe (que sí toma
+ * el total completo de la venta vía sale.total_amount).
+ *
  * Limitación conocida: si el mapeo contable del tenant no está configurado
  * para algún evento, el asiento no se genera (se loguea el warning) — no
  * bloquea la venta. Revisar logs periódicamente mientras se afina el mapeo.
@@ -67,7 +74,7 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
     const t = await sequelize.transaction();
     try {
       const productItems = (items || []).filter((i) => i.item_type === 'product');
-      const serviceItems = (items || []).filter((i) => i.item_type === 'service');
+      const serviceItems = (items || []).filter((i) => i.item_type === 'service' || i.item_type === 'free_line');
 
       const productRevenue = productItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
       const serviceRevenue = serviceItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
@@ -335,11 +342,13 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
+      // free_line se agrupa con 'service' — mismo criterio que generateSaleEntry
+      // (sin producto de catálogo ni costo, es ingreso puro igual que un servicio).
       const productRevenue = (items || [])
-        .filter((i) => (i.saleItem?.item_type || 'product') !== 'service')
+        .filter((i) => (i.saleItem?.item_type || 'product') === 'product')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
       const serviceRevenue = (items || [])
-        .filter((i) => i.saleItem?.item_type === 'service')
+        .filter((i) => i.saleItem?.item_type === 'service' || i.saleItem?.item_type === 'free_line')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
       const totalTax = Number(customerReturn.tax || 0);
       const totalReturned = Number(customerReturn.total_amount || 0);

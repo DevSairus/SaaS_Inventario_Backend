@@ -62,6 +62,16 @@ function calcTotals(items) {
   return { subtotal, tax_amount, total_amount: subtotal + tax_amount };
 }
 
+// WorkOrderItem.item_type ('repuesto'/'servicio'/'mano_obra'/'free_line') no
+// comparte vocabulario con SaleItem.item_type ('product'/'service'/'free_line')
+// — al generar la remisión/factura desde la OT hay que traducir uno al otro
+// para que autoEntries.service.js reconozca correctamente el ingreso.
+function mapWorkOrderItemTypeToSale(workOrderItemType) {
+  if (workOrderItemType === 'repuesto') return 'product';
+  if (workOrderItemType === 'free_line') return 'free_line';
+  return 'service'; // 'servicio' | 'mano_obra'
+}
+
 /**
  * Descuenta inventario por un ítem tipo 'repuesto' con track_inventory y
  * registra el InventoryMovement correspondiente. Extraído de addItem() para
@@ -423,8 +433,64 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT cerrada' });
     }
 
-    const { product_id, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId, requires_approval } = req.body;
-    if (!product_id || !item_type || !quantity) {
+    const {
+      product_id, item_type, quantity, unit_price, tax_percentage,
+      technician_id: itemTechnicianId, requires_approval,
+      product_name: freeLineName,
+    } = req.body;
+
+    if (!item_type || !quantity) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Tipo y cantidad son requeridos' });
+    }
+
+    // Cotización con aprobación del cliente: no descuenta inventario todavía,
+    // así que tampoco tiene sentido bloquear por stock insuficiente ahora
+    // mismo — puede llegar a reponerse antes de que el cliente apruebe.
+    const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
+    const qty = parseFloat(quantity);
+
+    // ── Línea libre: ad-hoc, sin producto de catálogo — mismo criterio que
+    // sales.controller.js. No busca producto, no valida ni descuenta stock.
+    if (item_type === 'free_line') {
+      if (!freeLineName || !freeLineName.trim()) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'La descripción de la línea libre es requerida' });
+      }
+
+      const price  = parseFloat(unit_price) || 0;
+      const taxPct = parseFloat(tax_percentage ?? 19);
+      const subtotal   = qty * price;
+      const tax_amount = taxPct > 0 ? Math.round(subtotal * (taxPct / 100)) : 0;
+      const total = subtotal + tax_amount;
+
+      const item = await WorkOrderItem.create({
+        tenant_id,
+        work_order_id: order.id,
+        item_type: 'free_line',
+        product_id: null,
+        product_name: freeLineName.trim(),
+        product_sku: null,
+        quantity: qty,
+        unit_price: price,
+        tax_percentage: taxPct,
+        tax_amount,
+        subtotal,
+        total,
+        technician_id: itemTechnicianId || null,
+        approval_status: requiresApproval ? 'pendiente' : 'aprobado',
+      }, { transaction });
+
+      const allItemsFL = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
+      const { subtotal: sFL, tax_amount: tFL } = calcTotals(allItemsFL);
+      const discFL = parseFloat(order.discount_amount) || 0;
+      await order.update({ subtotal: sFL, tax_amount: tFL, total_amount: sFL + tFL - discFL }, { transaction });
+
+      await transaction.commit();
+      return res.status(201).json({ success: true, message: 'Ítem agregado', data: item });
+    }
+
+    if (!product_id) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
     }
@@ -441,13 +507,7 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Un producto de tipo servicio no puede ser "repuesto"' });
     }
 
-    // Cotización con aprobación del cliente: no descuenta inventario todavía,
-    // así que tampoco tiene sentido bloquear por stock insuficiente ahora
-    // mismo — puede llegar a reponerse antes de que el cliente apruebe.
-    const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
-
     // Validar stock si es repuesto físico
-    const qty = parseFloat(quantity);
     if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: `Stock insuficiente. Disponible: ${product.current_stock}` });
@@ -900,6 +960,7 @@ const generateSale = async (req, res) => {
       await SaleItem.create({
         tenant_id,
         sale_id:          sale.id,
+        item_type:        mapWorkOrderItemTypeToSale(item.item_type),
         product_id:       item.product_id,
         product_name:     item.product_name,
         product_sku:      item.product_sku,
