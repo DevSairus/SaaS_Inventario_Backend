@@ -51,6 +51,25 @@ async function generateMovementNumber(tenant_id, transaction) {
   return `MOV-${year}-${String(seq).padStart(5, '0')}`;
 }
 
+// Soporte de detección de conflictos para la cola de sincronización offline
+// de la PWA "Taller" (frontend/src/pwa/offlineQueue/syncManager.js): el
+// cliente manda `expected_updated_at` = el `updated_at` que conocía cuando
+// editó sin conexión. Si no coincide con el actual, alguien más modificó el
+// registro mientras tanto → 409, sin aplicar el cambio (el frontend decide:
+// descartar o forzar sobrescritura). Si no viene el campo (llamadas normales
+// sin offline), no se bloquea nada — mismo comportamiento de siempre.
+function popExpectedVersion(body) {
+  const { expected_updated_at, ...rest } = body || {};
+  return { expectedVersion: expected_updated_at, rest };
+}
+
+function hasVersionConflict(record, expectedVersion) {
+  if (!expectedVersion) return false;
+  const current  = new Date(record.updated_at).getTime();
+  const expected = new Date(expectedVersion).getTime();
+  return !isNaN(current) && !isNaN(expected) && current !== expected;
+}
+
 // Solo los ítems 'aprobado' (default para los que no usan cotización) cuentan
 // en los totales de la OT — un ítem 'pendiente' todavía no tiene luz verde
 // del cliente y uno 'rechazado' no se va a cobrar, así que ninguno de los
@@ -287,11 +306,20 @@ const update = async (req, res) => {
     if (['entregado', 'cancelado'].includes(order.status))
       return res.status(400).json({ success: false, message: 'No se puede editar una OT cerrada' });
 
+    const { expectedVersion, rest } = popExpectedVersion(req.body);
+    if (hasVersionConflict(order, expectedVersion)) {
+      return res.status(409).json({
+        success: false,
+        message: 'La orden fue modificada por otro usuario mientras estabas sin conexión',
+        data: order,
+      });
+    }
+
     const {
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
       notes, mileage_in, mileage_out, discount_amount,
-    } = req.body;
+    } = rest;
 
     await order.update({
       technician_id, warehouse_id, promised_at,
@@ -317,7 +345,8 @@ const update = async (req, res) => {
 const changeStatus = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { status, mileage_out } = req.body;
+    const { expectedVersion, rest } = popExpectedVersion(req.body);
+    const { status, mileage_out } = rest;
     const validStatuses = ['recibido', 'en_proceso', 'en_espera', 'listo', 'entregado', 'cancelado'];
     if (!validStatuses.includes(status)) {
       await transaction.rollback();
@@ -331,6 +360,15 @@ const changeStatus = async (req, res) => {
     if (!order) {
       await transaction.rollback();
       return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    }
+
+    if (hasVersionConflict(order, expectedVersion)) {
+      await transaction.rollback();
+      return res.status(409).json({
+        success: false,
+        message: 'La orden fue modificada por otro usuario mientras estabas sin conexión',
+        data: order,
+      });
     }
 
     if (['entregado', 'cancelado'].includes(order.status)) {
@@ -1407,12 +1445,21 @@ const updateChecklist = async (req, res) => {
     const order = await WorkOrder.findOne({ where: { id, tenant_id } });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
+    const { expectedVersion, rest: checklistData } = popExpectedVersion(req.body);
+    if (hasVersionConflict(order, expectedVersion)) {
+      return res.status(409).json({
+        success: false,
+        message: 'La orden fue modificada por otro usuario mientras estabas sin conexión',
+        data: order,
+      });
+    }
+
     // Raw SQL para evitar problemas de Sequelize con JSONB
     await sequelize.query(
       `UPDATE work_orders SET checklist_in = :data::jsonb WHERE id = :id AND tenant_id = :tenant_id`,
       {
         replacements: {
-          data: JSON.stringify(req.body),
+          data: JSON.stringify(checklistData),
           id,
           tenant_id,
         },
@@ -1420,7 +1467,7 @@ const updateChecklist = async (req, res) => {
       }
     );
 
-    res.json({ success: true, data: req.body });
+    res.json({ success: true, data: checklistData });
   } catch (error) {
     logger.error('Error actualizando checklist:', error);
     res.status(500).json({ success: false, message: 'Error al actualizar checklist' });
