@@ -159,6 +159,13 @@ async function chatCompletion(messages, tools = []) {
     max_tokens: MAX_TOKENS,
     system,
     messages: anthropicMessages,
+    // Explícito a propósito: en modelos Sonnet/Opus 4.6+ omitir `thinking`
+    // NO significa "sin pensar" en todos los casos — en Sonnet 5 omitirlo
+    // corre en modo adaptativo (thinking ON) por defecto, a diferencia de
+    // Opus 4.8/4.7 donde se omite = sin pensar. Como este es solo un
+    // fallback de tool-calling corto, lo desactivamos explícitamente para
+    // no pagar tokens de razonamiento de más cada vez que se use.
+    thinking: { type: 'disabled' },
     ...(tools.length > 0 ? { tools: toAnthropicTools(tools), tool_choice: { type: 'auto' } } : {}),
   };
 
@@ -166,6 +173,11 @@ async function chatCompletion(messages, tools = []) {
   for (let attempt = 0; attempt <= 1; attempt++) {
     try {
       const response = await anthropic.messages.create(payload);
+      if (response.usage) {
+        logger.info(
+          `[claudeClient] tokens: input=${response.usage.input_tokens} output=${response.usage.output_tokens} cache_read=${response.usage.cache_read_input_tokens || 0} cache_write=${response.usage.cache_creation_input_tokens || 0}`,
+        );
+      }
       return toOpenAiMessage(response);
     } catch (error) {
       lastError = error;

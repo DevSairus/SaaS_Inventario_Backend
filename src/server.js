@@ -47,7 +47,7 @@ app.use(helmet({
 app.set('etag', false);
 
 const allowedOrigins = [
-  'http://localhost:5173',
+  'http://localhost:5172',
   'http://localhost:3000',
   'https://saa-s-inventario-frontend.vercel.app',
   'https://pitbox.esc-datacore.com',
@@ -82,7 +82,15 @@ const corsOptions = {
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(morgan('dev'));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({
+  limit: '2mb',
+  verify: (req, res, buf) => {
+    // Se guarda el body crudo para poder validar firmas HMAC de webhooks
+    // entrantes (ej. NCF) sin depender de reserializar el JSON parseado,
+    // que podría no coincidir byte a byte con lo que se firmó del otro lado.
+    req.rawBody = buf;
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // ================= SWAGGER =================
@@ -165,6 +173,7 @@ const cronRoutes                    = require('./routes/cron.routes');
 // ✅ DIAN — Facturación Electrónica
 const whatsappRoutes  = require('./routes/whatsapp.routes');
 const publicPdfRoutes = require('./routes/publicPdf.routes');
+const ncfWebhookRoutes = require('./routes/ncfWebhook.routes');
 const dianRoutes                    = require('./routes/dian.routes');
 
 // Rate limiting global
@@ -180,6 +189,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/public/pdf', publicPdfRoutes);
 
 app.use('/api/superadmin', authMiddleware, superadminRoutes);
+app.use('/api/webhooks/ncf', ncfWebhookRoutes);
 
 // ── Anuncios (sin tenant) ──
 app.use('/api/announcements', authMiddleware, announcementsRoutes);

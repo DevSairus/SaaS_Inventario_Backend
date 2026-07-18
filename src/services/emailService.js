@@ -118,6 +118,36 @@ const emailTemplates = {
     text: `Hola ${user.first_name}, pago de $${payment.amount} para factura #${invoice.invoice_number} confirmado.`,
   }),
 
+  // ── Suscripción Pitbox (facturada vía el Núcleo NCF de ESC DataCore) ──
+  // No confundir con `invoiceIssued` de arriba -- ese es para la factura
+  // que ESTE tenant le emite a SUS PROPIOS clientes. Esto es la factura
+  // que ESC DataCore le emite a este tenant por su plan de Pitbox.
+  subscriptionPaymentLinkGenerated: (user, data) => ({
+    subject: 'Pago pendiente de tu suscripción a Pitbox',
+    html: `
+      <h2>Hola ${user.first_name},</h2>
+      <p>Tienes un pago pendiente por tu suscripción a Pitbox.</p>
+      <p><strong>Monto:</strong> $${parseFloat(data.total).toLocaleString('es-CO')} ${data.moneda || 'COP'}</p>
+      ${data.fecha_limite_pago ? `<p><strong>Fecha límite:</strong> ${new Date(data.fecha_limite_pago).toLocaleDateString('es-CO')}</p>` : ''}
+      <p><a href="${data.payment_link_url}" style="display:inline-block;padding:10px 20px;background:#146B4C;color:#fff;border-radius:4px;text-decoration:none;">Pagar ahora</a></p>
+      <hr><p><small>ESC DataCore Solutions -- Facturación de suscripciones Pitbox</small></p>
+    `,
+    text: `Hola ${user.first_name}, tienes un pago pendiente de $${data.total} por tu suscripción a Pitbox: ${data.payment_link_url}`,
+  }),
+
+  subscriptionInvoiceIssued: (user, data) => ({
+    subject: `Factura de tu suscripción a Pitbox emitida${data.full_invoice_number ? ` -- ${data.full_invoice_number}` : ''}`,
+    html: `
+      <h2>Hola ${user.first_name},</h2>
+      <p>Se emitió la factura electrónica de tu suscripción a Pitbox.</p>
+      ${data.full_invoice_number ? `<p><strong>Número de factura:</strong> ${data.full_invoice_number}</p>` : ''}
+      ${data.cufe ? `<p><strong>CUFE:</strong> <small>${data.cufe}</small></p>` : ''}
+      ${data.pdf_url ? `<p><a href="${data.pdf_url}">Descargar PDF de la factura</a></p>` : ''}
+      <hr><p><small>ESC DataCore Solutions -- Facturación de suscripciones Pitbox</small></p>
+    `,
+    text: `Hola ${user.first_name}, se emitió la factura ${data.full_invoice_number || ''} de tu suscripción a Pitbox.${data.pdf_url ? ` PDF: ${data.pdf_url}` : ''}`,
+  }),
+
   pqrsUpdate: (user, pqrs) => ({
     subject: `Actualización PQRS #${pqrs.ticket_number}`,
     html: `
@@ -258,6 +288,39 @@ const sendPQRSCreatedEmail = async (tenantId, pqrs) => {
 
 const sendPQRSUpdatedEmail = (tenantId, pqrs) => sendPQRSEmail(tenantId, pqrs);
 
+// ── Notificaciones de suscripción (facturación NCF) ────────────
+// A diferencia de las demás funciones de este archivo (que reciben el
+// usuario ya resuelto), estas reciben el tenant_id y buscan ellas mismas
+// a los administradores de ESE tenant -- porque el webhook del Núcleo NCF
+// solo trae el tenant_id, no un usuario específico.
+const notifySubscriptionAdmins = async (tenantId, templateFn, data) => {
+  const User = require('../models/User');
+  const admins = await User.findAll({
+    where: { tenant_id: tenantId, role: 'admin', is_active: true },
+    attributes: ['id', 'first_name', 'email'],
+  });
+
+  if (admins.length === 0) {
+    logger.warn(`[EMAIL] Tenant ${tenantId} sin usuarios admin activos -- no se notifica la suscripción`);
+    return { success: false, reason: 'no_admin_users' };
+  }
+
+  const results = await Promise.allSettled(
+    admins.map((admin) => {
+      const t = templateFn(admin, data);
+      return sendEmail({ to: admin.email, subject: t.subject, html: t.html, text: t.text });
+    })
+  );
+
+  return { success: true, sent: results.filter((r) => r.status === 'fulfilled').length, total: admins.length };
+};
+
+const sendSubscriptionPaymentLinkEmail = (tenantId, data) =>
+  notifySubscriptionAdmins(tenantId, emailTemplates.subscriptionPaymentLinkGenerated, data);
+
+const sendSubscriptionInvoiceIssuedEmail = (tenantId, data) =>
+  notifySubscriptionAdmins(tenantId, emailTemplates.subscriptionInvoiceIssued, data);
+
 module.exports = {
   sendEmail,
   verifyEmailConfig,
@@ -271,4 +334,6 @@ module.exports = {
   sendPaymentConfirmationEmail,
   sendPQRSCreatedEmail,
   sendPQRSUpdatedEmail,
+  sendSubscriptionPaymentLinkEmail,
+  sendSubscriptionInvoiceIssuedEmail,
 };

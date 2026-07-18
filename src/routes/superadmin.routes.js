@@ -1120,10 +1120,29 @@ router.get(
         raw: true,
       });
 
-      const revenueByMonth = tenantsByMonth.map((item) => ({
+      const revenueByMonthEstimado = tenantsByMonth.map((item) => ({
         month: item.month,
         total: parseInt(item.count) * 50000,
       }));
+
+      // Si la conexión NCF está activa, usar plata REAL facturada en vez
+      // del estimado (nuevos_tenants * $50.000) que se usaba antes -- ese
+      // número nunca fue ingreso real, era un placeholder.
+      let revenueByMonth = revenueByMonthEstimado;
+      let revenueIsEstimate = true;
+      try {
+        const ncfClient = require('../services/ncf/ncfClient');
+        const config = await ncfClient.getConfig();
+        if (config?.is_active) {
+          const real = await ncfClient.obtenerFacturacionMensual(24);
+          if (real) {
+            revenueByMonth = real.map((r) => ({ month: r.mes, total: r.total }));
+            revenueIsEstimate = false;
+          }
+        }
+      } catch (ncfErr) {
+        console.warn('No se pudo obtener facturación real del Núcleo, usando estimado:', ncfErr.message);
+      }
 
       // ✅ ESTRUCTURA CORRECTA
       res.json({
@@ -1133,6 +1152,7 @@ router.get(
             count: item.count,
           })),
           revenueByMonth,
+          revenueIsEstimate,
         },
       });
     } catch (error) {
@@ -1363,7 +1383,7 @@ router.get(
     try {
       const { tenantId } = req.params;
 
-      const TenantMercadoPagoConfig = require('../models/TenantMercadoPagoConfig');
+      const TenantMercadoPagoConfig = require('../models/payments/TenantMercadoPagoConfig');
 
       const config = await TenantMercadoPagoConfig.findOne({
         where: { tenant_id: tenantId },
@@ -1398,7 +1418,7 @@ router.post(
         return res.status(400).json({ error: 'Faltan datos requeridos' });
       }
 
-      const TenantMercadoPagoConfig = require('../models/TenantMercadoPagoConfig');
+      const TenantMercadoPagoConfig = require('../models/payments/TenantMercadoPagoConfig');
 
       // Buscar configuración existente
       let config = await TenantMercadoPagoConfig.findOne({
@@ -1447,7 +1467,7 @@ router.delete(
     try {
       const { tenantId } = req.params;
 
-      const TenantMercadoPagoConfig = require('../models/TenantMercadoPagoConfig');
+      const TenantMercadoPagoConfig = require('../models/payments/TenantMercadoPagoConfig');
 
       const deleted = await TenantMercadoPagoConfig.destroy({
         where: { tenant_id: tenantId },
@@ -1591,6 +1611,220 @@ router.delete(
     } catch (error) {
       console.error('Error deleting config:', error);
       res.status(500).json({ error: 'Error al eliminar configuración' });
+    }
+  }
+);
+
+// ============================================
+// CONFIGURACIÓN NCF -- NÚCLEO CENTRAL DE FACTURACIÓN (ESC DATACORE)
+// ============================================
+// Mismo patrón que la configuración de MercadoPago de arriba: un registro
+// global (la credencial de Pitbox como SistemaOrigen frente al Núcleo) y
+// un registro por tenant (los datos fiscales para poder facturarle su
+// suscripción). Ver src/services/ncf/ncfClient.js.
+
+/**
+ * GET /api/v1/superadmin/ncf-config
+ * Configuración global de la conexión con el Núcleo (un solo registro)
+ */
+router.get(
+  '/ncf-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const NcfConfig = require('../models/payments/NcfConfig');
+
+      let config = await NcfConfig.findOne();
+      if (!config) {
+        config = await NcfConfig.create({});
+      }
+
+      res.json({
+        success: true,
+        config: {
+          id: config.id,
+          ncf_base_url: config.ncf_base_url || null,
+          has_api_key: !!config.ncf_api_key,
+          has_webhook_secret: !!config.ncf_webhook_secret,
+          is_active: config.is_active,
+          last_test_at: config.last_test_at,
+          last_test_ok: config.last_test_ok,
+          last_test_message: config.last_test_message,
+          webhook_url_a_configurar_en_el_nucleo: `${process.env.BACKEND_PUBLIC_URL || 'https://TU-DOMINIO-PITBOX'}/api/webhooks/ncf`,
+        },
+      });
+    } catch (error) {
+      console.error('Error fetching NCF config:', error);
+      res.status(500).json({ error: 'Error al obtener configuración NCF' });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/ncf-config
+ * Guardar/Actualizar la configuración global de conexión con el Núcleo
+ */
+router.post(
+  '/ncf-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { ncf_base_url, ncf_api_key, ncf_webhook_secret, is_active } = req.body;
+
+      if (!ncf_base_url) {
+        return res.status(400).json({ error: 'ncf_base_url es requerido' });
+      }
+
+      const NcfConfig = require('../models/payments/NcfConfig');
+      let config = await NcfConfig.findOne();
+
+      const updates = { ncf_base_url };
+      // Los secretos solo se sobreescriben si vienen en el body -- así el
+      // formulario del frontend puede guardar cambios sin tener que
+      // re-pegar la API key cada vez (nunca se la devolvemos en el GET).
+      if (ncf_api_key) updates.ncf_api_key = ncf_api_key;
+      if (ncf_webhook_secret) updates.ncf_webhook_secret = ncf_webhook_secret;
+      if (is_active !== undefined) updates.is_active = is_active;
+
+      if (config) {
+        await config.update(updates);
+      } else {
+        config = await NcfConfig.create(updates);
+      }
+
+      res.json({
+        success: true,
+        message: 'Configuración NCF guardada correctamente',
+        config: {
+          id: config.id,
+          ncf_base_url: config.ncf_base_url,
+          has_api_key: !!config.ncf_api_key,
+          has_webhook_secret: !!config.ncf_webhook_secret,
+          is_active: config.is_active,
+        },
+      });
+    } catch (error) {
+      console.error('Error saving NCF config:', error);
+      res.status(500).json({ error: 'Error al guardar configuración NCF', details: error.message });
+    }
+  }
+);
+
+/**
+ * DELETE /api/v1/superadmin/ncf-config
+ * Limpia las credenciales (no borra el registro, mismo patrón que MercadoPago)
+ */
+router.delete(
+  '/ncf-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const NcfConfig = require('../models/payments/NcfConfig');
+      const config = await NcfConfig.findOne();
+
+      if (!config) {
+        return res.status(404).json({ error: 'Configuración no encontrada' });
+      }
+
+      await config.update({
+        ncf_api_key: null,
+        ncf_webhook_secret: null,
+        is_active: false,
+      });
+
+      res.json({ success: true, message: 'Credenciales NCF eliminadas correctamente' });
+    } catch (error) {
+      console.error('Error deleting NCF config:', error);
+      res.status(500).json({ error: 'Error al eliminar configuración NCF' });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/ncf-config/probar-conexion
+ * Valida que ncf_base_url + ncf_api_key funcionan de verdad contra el
+ * Núcleo (no solo que se guardaron) -- responde a la pregunta "¿cómo los
+ * valido?" sin tener que ir a probar manualmente con curl.
+ */
+router.post(
+  '/ncf-config/probar-conexion',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const ncfClient = require('../services/ncf/ncfClient');
+      const result = await ncfClient.probarConexion();
+      res.json({ success: result.ok, ...result });
+    } catch (error) {
+      console.error('Error probando conexión NCF:', error);
+      res.status(500).json({ error: 'Error al probar la conexión', details: error.message });
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/ncf-config/tenants
+ * Estado de sincronización NCF de TODOS los tenants (por sistema completo,
+ * no hay pantalla por tenant). Lee directo de public.tenants.
+ */
+router.get(
+  '/ncf-config/tenants',
+  authMiddleware,
+  checkPermission('superadmin.view_all'),
+  async (req, res) => {
+    try {
+      const Tenant = require('../models/Tenant');
+      const tenants = await Tenant.findAll({
+        where: { is_active: true },
+        attributes: [
+          'id', 'company_name', 'business_name', 'tax_id', 'email',
+          'subscription_status', 'ncf_ciudad', 'ncf_regimen_code',
+          'ncf_external_ref', 'ncf_last_sync_at', 'ncf_last_status',
+          'ncf_payment_link_url', 'ncf_last_error',
+        ],
+        order: [['business_name', 'ASC']],
+      });
+
+      res.json({ success: true, tenants });
+    } catch (error) {
+      console.error('Error listing tenants NCF status:', error);
+      res.status(500).json({ error: 'Error al listar el estado NCF de los tenants' });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/ncf-config/sincronizar-tenants
+ * Sincronización POR SISTEMA COMPLETO: recorre los tenants activos cuya
+ * fecha de corte cae dentro de la ventana de anticipación (NCF_ANTICIPATION_DAYS,
+ * 7 días por defecto) y envía/actualiza su prefactura en el Núcleo, en una
+ * sola pasada. No hay activación por tenant -- el único interruptor es
+ * NcfConfig.is_active. Es la misma función que corre sola todos los días
+ * (ver /api/cron/ncf-sync) -- este botón solo la dispara manualmente.
+ *
+ * Body opcional: { forzar: true } -- ignora la ventana de anticipación y el
+ * chequeo de "ya sincronizado este ciclo" (para pruebas o reenvíos puntuales).
+ */
+router.post(
+  '/ncf-config/sincronizar-tenants',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const ncfSyncService = require('../services/ncf/ncfSyncService');
+      const resultados = await ncfSyncService.sincronizarTodosLosTenants({ forzar: !!req.body?.forzar });
+
+      res.json({
+        success: true,
+        message: `Sincronización completa: ${resultados.length} tenants evaluados`,
+        resultados,
+      });
+    } catch (error) {
+      console.error('Error sincronizando tenants con NCF:', error);
+      res.status(500).json({ error: error.message || 'Error al sincronizar con el Núcleo' });
     }
   }
 );

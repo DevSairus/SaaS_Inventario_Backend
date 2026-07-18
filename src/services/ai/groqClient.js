@@ -66,6 +66,13 @@ async function chatCompletion(messages, tools = []) {
         logger.warn('[groqClient] Respuesta cortada por max_tokens (finish_reason=length)');
       }
 
+      const usage = response.data.usage;
+      if (usage) {
+        logger.info(
+          `[groqClient] tokens: prompt=${usage.prompt_tokens} completion=${usage.completion_tokens} total=${usage.total_tokens}`,
+        );
+      }
+
       return choice.message;
     } catch (error) {
       lastError = error;

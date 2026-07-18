@@ -59,6 +59,32 @@ router.get('/vehicle-reminders', cronAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/cron/ncf-sync
+ * Sincronización de facturación centralizada con el Núcleo NCF (ESC DataCore).
+ * Genera la prefactura de cada tenant con NCF_ANTICIPATION_DAYS (7 por
+ * defecto) de anticipación a su next_billing_date, para que alcance a
+ * pagar antes del vencimiento. Es la misma función que usa el botón
+ * "Sincronizar tenants ahora" del panel -- acá corre sola.
+ * Ejecutado automáticamente por Vercel Cron todos los días a las 7am COT (12:00 UTC).
+ */
+router.get('/ncf-sync', cronAuth, async (req, res) => {
+  try {
+    console.log('🔔 [CRON] Iniciando sincronización NCF...');
+    const { sincronizarTodosLosTenants } = require('../services/ncf/ncfSyncService');
+    const resultados = await sincronizarTodosLosTenants();
+    res.json({
+      success: true,
+      message: `Sincronización NCF completada -- ${resultados.length} tenants evaluados`,
+      resultados,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ [CRON] Error en ncf-sync:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
  * GET /api/cron/stock-alerts
  * Red de seguridad: re-escanea todos los productos con min_stock configurado
  * y crea/resuelve alertas de stock bajo/sin stock, por si algún flujo no

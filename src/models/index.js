@@ -50,6 +50,7 @@ const TenantSubscription = require('./subscriptions/TenantSubscription');
 const SubscriptionInvoice = require('./subscriptions/SubscriptionInvoice');
 const SuperAdminMercadoPagoConfig = require('./payments/SuperAdminMercadoPagoConfig');
 const TenantMercadoPagoConfig = require('./payments/TenantMercadoPagoConfig');
+const NcfConfig = require('./payments/NcfConfig');
 
 // ✅ NUEVO - Sistema de Anuncios
 const Announcement = require('./Announcement');
@@ -455,6 +456,7 @@ module.exports = {
   SubscriptionInvoice,
   SuperAdminMercadoPagoConfig,
   TenantMercadoPagoConfig,
+  NcfConfig,
   Customer,
   Sale,
   SaleItem,

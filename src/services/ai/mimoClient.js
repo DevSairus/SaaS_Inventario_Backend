@@ -51,6 +51,14 @@ async function chatCompletion(messages, tools = []) {
     model: DEFAULT_MODEL,
     messages,
     ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
+    // mimo-v2.5-pro corre en "deep thinking" por defecto: genera una cadena
+    // de razonamiento (reasoning_content) antes de cada respuesta y esos
+    // tokens se facturan como completion_tokens. Xiaomi recomienda
+    // explícitamente desactivarlo cuando se usa tool calling — es nuestro
+    // caso siempre — y además con thinking activo el modelo ignora
+    // temperature/top_p (los fuerza a 1.0/0.95), así que desactivarlo
+    // también hace que temperature: 0.2 abajo sí tenga efecto.
+    thinking: { type: 'disabled' },
     temperature: 0.2, // mismo criterio que groqClient: consistencia sobre creatividad para datos contables
     max_completion_tokens: 1500,
   };
@@ -73,6 +81,19 @@ async function chatCompletion(messages, tools = []) {
 
       if (choice.finish_reason === 'length') {
         logger.warn('[mimoClient] Respuesta cortada por max_completion_tokens (finish_reason=length)');
+      }
+
+      const usage = response.data.usage;
+      if (usage) {
+        const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens || 0;
+        logger.info(
+          `[mimoClient] tokens: prompt=${usage.prompt_tokens} completion=${usage.completion_tokens} (reasoning=${reasoningTokens}) total=${usage.total_tokens}`,
+        );
+        if (reasoningTokens > 0) {
+          logger.warn(
+            `[mimoClient] reasoning_tokens=${reasoningTokens} > 0 pese a thinking:disabled — revisar respuesta cruda de MiMo`,
+          );
+        }
       }
 
       return choice.message;

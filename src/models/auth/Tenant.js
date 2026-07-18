@@ -165,6 +165,40 @@ const Tenant = sequelize.define('Tenant', {
     comment: 'Configuración DIAN: NIT, software_id, certificado, resoluciones, etc.'
   },
 
+  // Facturación centralizada vía el Núcleo Central de Facturación (NCF) de
+  // ESC DataCore. No hay tabla aparte -- la sincronización es por sistema
+  // completo (ver ncfSyncService.js), esto es solo el estado de la última
+  // prefactura enviada para este tenant.
+  ncf_ciudad: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  ncf_regimen_code: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    defaultValue: 'O-47',
+  },
+  ncf_external_ref: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  ncf_last_sync_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  ncf_last_status: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  ncf_payment_link_url: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+  ncf_last_error: {
+    type: DataTypes.STRING,
+    allowNull: true,
+  },
+
   created_at: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW
