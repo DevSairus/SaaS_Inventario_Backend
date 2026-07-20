@@ -8,6 +8,7 @@ const Tenant = require('../../models/auth/Tenant');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h'; // Configurable via env, default 24h
+const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
 
 const login = async (req, res) => {
   try {
@@ -243,10 +244,20 @@ const refreshToken = async (req, res) => {
       return res.status(401).json({ success: false, message: 'Usuario no válido' });
     }
 
+    const payload = { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id };
+
+    // Si esta sesión es una impersonación de soporte, el claim debe sobrevivir
+    // al refresh — si no, se perdería a los 10 min (ver SessionKeepAlive.jsx)
+    // y la sesión dejaría de estar marcada/bloqueada de rutas de superadmin.
+    const isImpersonating = Boolean(req.user.impersonated_by);
+    if (isImpersonating) {
+      payload.impersonated_by = req.user.impersonated_by;
+    }
+
     const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id },
+      payload,
       JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
+      { expiresIn: isImpersonating ? IMPERSONATION_EXPIRES_IN : JWT_EXPIRES_IN }
     );
 
     res.json({ success: true, data: { token } });
@@ -256,9 +267,35 @@ const refreshToken = async (req, res) => {
   }
 };
 
+/* =====================================================
+   FIN DE IMPERSONACIÓN
+   Cierra una sesión de soporte iniciada desde superadmin — vive en /api/auth
+   (no en /api/superadmin) para que una sesión impersonada, bloqueada de las
+   rutas de superadmin, sí pueda terminarse a sí misma.
+===================================================== */
+
+const endImpersonation = async (req, res) => {
+  if (!req.user.impersonated_by) {
+    return res.status(400).json({ success: false, message: 'No estás en una sesión de soporte' });
+  }
+
+  setImmediate(() => audit({
+    tenant_id: req.user.tenant_id,
+    user_id: req.user.impersonated_by,
+    action: 'IMPERSONATE_END',
+    entity: 'user',
+    entity_id: req.user.id,
+    changes: { impersonated_email: req.user.email },
+    req,
+  }));
+
+  res.json({ success: true, message: 'Sesión de soporte finalizada' });
+};
+
 module.exports = {
   login,
   getProfile,
   verifyToken,
   refreshToken,
+  endImpersonation,
 };

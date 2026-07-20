@@ -3,8 +3,21 @@ const express = require('express');
 const router = express.Router();
 const { authMiddleware } = require('../middleware/auth');
 const { checkPermission } = require('../middleware/checkPermission');
+const { denyImpersonation } = require('../middleware/denyImpersonation');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const audit = require('../utils/audit');
+
+const JWT_SECRET = process.env.JWT_SECRET;
+const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
+
+// Ninguna ruta de este router es alcanzable desde una sesión impersonada,
+// aunque el rol impersonado tuviera por error un permiso superadmin.*
+// asignado en RolePermission — ver backend/src/middleware/denyImpersonation.js.
+// Cada ruta abajo sigue trayendo su propio authMiddleware (redundante pero
+// inofensivo: solo re-decodifica el mismo token).
+router.use(authMiddleware, denyImpersonation);
 
 const Tenant = require('../models/Tenant');
 const User = require('../models/User');
@@ -1144,6 +1157,12 @@ router.get(
         console.warn('No se pudo obtener facturación real del Núcleo, usando estimado:', ncfErr.message);
       }
 
+      // Estado de cobro -- cuántos tenants están suspendidos por impago
+      // ahora mismo, y cuántos están en el margen de gracia (vencidos pero
+      // todavía no suspendidos). Ver ncfSyncService.revisarSuspensiones.
+      const tenantsSuspendidos = await Tenant.count({ where: { subscription_status: 'suspended' } });
+      const tenantsPorVencer = await TenantSubscription.count({ where: { status: 'past_due' } });
+
       // ✅ ESTRUCTURA CORRECTA
       res.json({
         data: {
@@ -1153,6 +1172,8 @@ router.get(
           })),
           revenueByMonth,
           revenueIsEstimate,
+          tenantsSuspendidos,
+          tenantsPorVencer,
         },
       });
     } catch (error) {
@@ -2082,6 +2103,77 @@ router.put(
     } catch (error) {
       console.error('Error reseteando contraseña:', error);
       res.status(500).json({ success: false, message: 'Error al resetear contraseña', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/tenants/:tenantId/users/:userId/impersonate
+ * Inicia una sesión de soporte "como" el usuario indicado — nunca hacia un
+ * super_admin ni un usuario inactivo. El token resultante lleva
+ * `impersonated_by` (bloqueado de este mismo router por denyImpersonation)
+ * y expira en IMPERSONATION_EXPIRES_IN, no en el JWT_EXPIRES_IN normal.
+ */
+router.post(
+  '/tenants/:tenantId/users/:userId/impersonate',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { tenantId, userId } = req.params;
+
+      const tenant = await Tenant.findByPk(tenantId);
+      if (!tenant) {
+        return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
+      }
+
+      const user = await User.findOne({ where: { id: userId, tenant_id: tenantId } });
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (user.role === 'super_admin') {
+        return res.status(403).json({ success: false, message: 'No se puede iniciar sesión como un super admin' });
+      }
+
+      if (!user.is_active) {
+        return res.status(403).json({ success: false, message: 'No se puede iniciar sesión como un usuario inactivo' });
+      }
+
+      const token = jwt.sign(
+        { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id, impersonated_by: req.user.id },
+        JWT_SECRET,
+        { expiresIn: IMPERSONATION_EXPIRES_IN }
+      );
+
+      setImmediate(() => audit({
+        tenant_id: tenantId,
+        user_id: req.user.id,
+        action: 'IMPERSONATE_START',
+        entity: 'user',
+        entity_id: user.id,
+        changes: { impersonated_email: user.email, impersonated_role: user.role, company_name: tenant.company_name },
+        req,
+      }));
+
+      res.json({
+        success: true,
+        message: 'Sesión de soporte iniciada',
+        data: {
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            first_name: user.first_name,
+            last_name: user.last_name,
+            role: user.role,
+            tenant_id: user.tenant_id,
+          },
+        },
+      });
+    } catch (error) {
+      console.error('Error iniciando impersonación:', error);
+      res.status(500).json({ success: false, message: 'Error al iniciar sesión de soporte', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
     }
   }
 );
