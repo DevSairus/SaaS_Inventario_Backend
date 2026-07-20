@@ -1,8 +1,11 @@
 // backend/src/routes/cron.routes.js
 //
-// Endpoints para cron jobs de Vercel.
+// Estos endpoints ya NO son el mecanismo principal -- los 3 jobs corren
+// solos dentro del proceso vía node-cron (ver src/jobs/scheduler.js),
+// pensado para Railway (proceso persistente). Estas rutas quedan como
+// respaldo: disparar un job a mano, o desde un servicio externo si algún
+// día se prefiere sacar el scheduler de acá.
 // Protegidos con CRON_SECRET en el header Authorization.
-// En vercel.json se configura para que se llamen automáticamente.
 //
 // Variables de entorno requeridas:
 //   CRON_SECRET=un-secreto-largo-y-seguro
@@ -15,12 +18,12 @@ const express = require('express');
 const router  = express.Router();
 
 // Middleware de protección
-// Vercel Cron Jobs llama el endpoint directamente sin Authorization header,
+// (histórico, ya no aplica) Vercel Cron llamaba el endpoint directamente,
 // NOTA: x-vercel-cron es spoofeable — la autenticación real es exclusivamente via CRON_SECRET.
-// En vercel.json configurar: { "crons": [{ "path": "/api/cron/...", "schedule": "..." }] }
+// Mecanismo actual: src/jobs/scheduler.js (node-cron, dentro del proceso)
 const cronAuth = (req, res, next) => {
   // Verificar CRON_SECRET siempre (x-vercel-cron es spoofeable por cualquier cliente)
-  // Vercel incluye el header Authorization con el secret configurado en vercel.json
+  // Si se dispara manual o desde un servicio externo, mandar Authorization: Bearer $CRON_SECRET
   const secret = process.env.CRON_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {
@@ -39,7 +42,7 @@ const cronAuth = (req, res, next) => {
 /**
  * GET /api/cron/vehicle-reminders
  * Envía recordatorios de SOAT y Tecnomecánica.
- * Ejecutado automáticamente por Vercel Cron todos los días a las 8am COT (13:00 UTC).
+ * Corre solo vía src/jobs/scheduler.js todos los días a las 8am COT.
  */
 router.get('/vehicle-reminders', cronAuth, async (req, res) => {
   try {
@@ -65,17 +68,19 @@ router.get('/vehicle-reminders', cronAuth, async (req, res) => {
  * defecto) de anticipación a su next_billing_date, para que alcance a
  * pagar antes del vencimiento. Es la misma función que usa el botón
  * "Sincronizar tenants ahora" del panel -- acá corre sola.
- * Ejecutado automáticamente por Vercel Cron todos los días a las 7am COT (12:00 UTC).
+ * Corre solo vía src/jobs/scheduler.js todos los días a las 7am COT.
  */
 router.get('/ncf-sync', cronAuth, async (req, res) => {
   try {
     console.log('🔔 [CRON] Iniciando sincronización NCF...');
-    const { sincronizarTodosLosTenants } = require('../services/ncf/ncfSyncService');
+    const { sincronizarTodosLosTenants, revisarSuspensiones } = require('../services/ncf/ncfSyncService');
     const resultados = await sincronizarTodosLosTenants();
+    const suspendidos = await revisarSuspensiones();
     res.json({
       success: true,
-      message: `Sincronización NCF completada -- ${resultados.length} tenants evaluados`,
+      message: `Sincronización NCF completada -- ${resultados.length} tenants evaluados, ${suspendidos.length} suspendidos por impago`,
       resultados,
+      suspendidos,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -89,7 +94,7 @@ router.get('/ncf-sync', cronAuth, async (req, res) => {
  * Red de seguridad: re-escanea todos los productos con min_stock configurado
  * y crea/resuelve alertas de stock bajo/sin stock, por si algún flujo no
  * disparó la verificación automática (ej. edición directa de producto).
- * Ejecutado automáticamente por Vercel Cron cada hora.
+ * Corre solo vía src/jobs/scheduler.js cada hora.
  */
 router.get('/stock-alerts', cronAuth, async (req, res) => {
   try {

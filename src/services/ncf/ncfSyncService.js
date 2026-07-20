@@ -23,6 +23,7 @@ const ncfClient = require('./ncfClient');
 const logger = require('../../config/logger');
 
 const ANTICIPATION_DAYS = Number(process.env.NCF_ANTICIPATION_DAYS || 7);
+const GRACE_DAYS = Number(process.env.NCF_SUSPENSION_GRACE_DAYS || 2);
 
 /** Separa "900123456-7" en { numero: "900123456", dv: "7" }. Si no trae
  * guion, usa dian_config.dv si existe, o deja dv vacío (el Núcleo lo pide
@@ -189,4 +190,88 @@ async function sincronizarTodosLosTenants({ forzar = false } = {}) {
   return resultados;
 }
 
-module.exports = { sincronizarTodosLosTenants, construirPrefactura, periodoDelCiclo };
+/**
+ * Suspende (por impago) a los tenants cuya fecha de corte + los días de
+ * gracia (NCF_SUSPENSION_GRACE_DAYS, por defecto 2) ya pasaron y siguen
+ * sin pagar según el último estado que reportó el Núcleo. Corre en el
+ * mismo cron diario que sincronizarTodosLosTenants -- ver scheduler.js.
+ *
+ * "Sin pagar" = ncf_last_status no es 'paid' ni 'invoiced'. Si el tenant
+ * no usa facturación centralizada (nunca se le generó una prefactura,
+ * ncf_external_ref null), se omite -- no hay de dónde saber si pagó o no
+ * por este canal, y no es este job el que debe decidir sobre esos casos.
+ */
+async function revisarSuspensiones() {
+  const limite = new Date();
+  limite.setDate(limite.getDate() - GRACE_DAYS);
+
+  const tenants = await Tenant.findAll({
+    where: {
+      is_active: true,
+      subscription_status: 'active', // 'past_due' no es un valor válido acá, ver nota en ncfWebhook.controller.js
+      ncf_external_ref: { [Op.ne]: null },
+      ncf_last_status: { [Op.notIn]: ['paid', 'invoiced'] },
+    },
+    include: [{
+      model: TenantSubscription,
+      as: 'subscriptions',
+      where: {
+        status: { [Op.in]: ['active', 'past_due'] },
+        next_billing_date: { [Op.lte]: limite },
+      },
+      required: true,
+      limit: 1,
+      order: [['created_at', 'DESC']],
+    }],
+  });
+
+  const suspendidos = [];
+
+  for (const tenant of tenants) {
+    const sub = tenant.subscriptions[0];
+
+    await tenant.update({ subscription_status: 'suspended' });
+    await sub.update({ status: 'suspended' });
+
+    logger.warn(`[NCF Sync] Tenant ${tenant.id} (${tenant.business_name || tenant.company_name}) suspendido por impago -- venció ${new Date(sub.next_billing_date).toLocaleDateString('es-CO')}, gracia de ${GRACE_DAYS} días agotada`);
+
+    try {
+      const emailService = require('../emailService');
+      await emailService.sendSubscriptionSuspendedEmail(tenant.id, {
+        fecha_vencimiento: sub.next_billing_date,
+        payment_link_url: tenant.ncf_payment_link_url,
+      });
+    } catch (e) {
+      logger.error(`[NCF Sync] Error notificando suspensión a tenant ${tenant.id}: ${e.message}`);
+    }
+
+    suspendidos.push({ tenant_id: tenant.id, tenant: tenant.business_name || tenant.company_name });
+  }
+
+  if (suspendidos.length > 0) {
+    logger.warn(`[NCF Sync] ${suspendidos.length} tenant(s) suspendido(s) por impago`);
+  }
+
+  return suspendidos;
+}
+
+/**
+ * Avanza next_billing_date al siguiente ciclo (mensual/anual) -- se llama
+ * al confirmar el pago (ver ncfWebhook.controller.js). Sin esto, el mismo
+ * ciclo quedaría marcado como "ya sincronizado" para siempre y el tenant
+ * nunca volvería a facturarse.
+ */
+function calcularProximoCiclo(fechaActual, billingCycle) {
+  const next = new Date(fechaActual);
+  if (billingCycle === 'yearly') next.setFullYear(next.getFullYear() + 1);
+  else next.setMonth(next.getMonth() + 1);
+  return next;
+}
+
+module.exports = {
+  sincronizarTodosLosTenants,
+  revisarSuspensiones,
+  construirPrefactura,
+  periodoDelCiclo,
+  calcularProximoCiclo,
+};

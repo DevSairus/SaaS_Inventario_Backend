@@ -295,6 +295,17 @@ if (!isVercel) {
       } catch (err) {
         console.error('[Migrator] Error ejecutando migraciones:', err.message);
       }
+
+      // Jobs programados (vehicle-reminders, stock-alerts, ncf-sync) --
+      // corren dentro de este mismo proceso porque Railway lo mantiene
+      // vivo 24/7 (a diferencia de Vercel serverless, donde no aplicaría).
+      // Ver src/jobs/scheduler.js -- desactivable con ENABLE_CRON_SCHEDULER=false.
+      try {
+        const { iniciarScheduler } = require('./jobs/scheduler');
+        iniciarScheduler();
+      } catch (err) {
+        console.error('[Scheduler] Error al iniciar los jobs programados:', err.message);
+      }
     }
   });
 } else {

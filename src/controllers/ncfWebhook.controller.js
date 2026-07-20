@@ -11,8 +11,10 @@
 // para que el Núcleo no reintente indefinidamente algo que nunca va a
 // encontrar (ej. ambiente de pruebas distinto).
 const Tenant = require('../models/Tenant');
+const TenantSubscription = require('../models/subscriptions/TenantSubscription');
 const ncfClient = require('../services/ncf/ncfClient');
 const emailService = require('../services/emailService');
+const { calcularProximoCiclo } = require('../services/ncf/ncfSyncService');
 const logger = require('../config/logger');
 
 async function handleWebhook(req, res) {
@@ -51,9 +53,33 @@ async function handleWebhook(req, res) {
       }).catch((e) => logger.error(`[NCF Webhook] Error notificando link de pago: ${e.message}`));
       break;
 
-    case 'prefactura.paid':
-      await tenant.update({ ncf_last_status: 'paid', ncf_last_error: null });
+    case 'prefactura.paid': {
+      const estabaSuspendido = tenant.subscription_status === 'suspended';
+      await tenant.update({ ncf_last_status: 'paid', ncf_last_error: null, subscription_status: 'active' });
+
+      // Avanzar al siguiente ciclo -- si no se hace esto, la próxima
+      // sincronización ve el mismo ciclo "ya sincronizado" para siempre y
+      // el tenant nunca se vuelve a facturar.
+      const sub = await TenantSubscription.findOne({
+        where: { tenant_id: tenant.id, status: { [require('sequelize').Op.in]: ['active', 'past_due', 'suspended'] } },
+        order: [['created_at', 'DESC']],
+      });
+      if (sub) {
+        const proximoCiclo = calcularProximoCiclo(sub.next_billing_date, sub.billing_cycle);
+        await sub.update({
+          status: 'active',
+          current_period_start: sub.next_billing_date,
+          current_period_end: proximoCiclo,
+          next_billing_date: proximoCiclo,
+        });
+      }
+
+      if (estabaSuspendido) {
+        logger.info(`[NCF Webhook] Tenant ${tenant.id} reactivado automáticamente tras confirmar el pago`);
+        emailService.sendSubscriptionReactivatedEmail(tenant.id, {}).catch((e) => logger.error(`[NCF Webhook] Error notificando reactivación: ${e.message}`));
+      }
       break;
+    }
 
     case 'invoice.issued':
       await tenant.update({
@@ -73,7 +99,16 @@ async function handleWebhook(req, res) {
       break;
 
     case 'prefactura.expired':
+      // OJO: Tenant.subscription_status solo admite trial/active/suspended/
+      // cancelled (ver models/auth/Tenant.js) -- 'past_due' NO es válido
+      // ahí, solo en TenantSubscription.status. El tenant sigue con acceso
+      // normal durante la gracia; se bloquea de verdad recién cuando
+      // revisarSuspensiones() lo marca 'suspended' (ver ncfSyncService.js).
       await tenant.update({ ncf_last_status: 'expired', ncf_last_error: 'Venció el plazo de pago sin confirmarse' });
+      await TenantSubscription.update(
+        { status: 'past_due' },
+        { where: { tenant_id: tenant.id, status: 'active' } }
+      );
       break;
 
     case 'invoice.error':

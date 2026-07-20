@@ -148,6 +148,29 @@ const emailTemplates = {
     text: `Hola ${user.first_name}, se emitió la factura ${data.full_invoice_number || ''} de tu suscripción a Pitbox.${data.pdf_url ? ` PDF: ${data.pdf_url}` : ''}`,
   }),
 
+  subscriptionSuspended: (user, data) => ({
+    subject: '⚠️ Tu servicio de Pitbox fue suspendido por falta de pago',
+    html: `
+      <h2>Hola ${user.first_name},</h2>
+      <p>Tu suscripción a Pitbox venció el ${new Date(data.fecha_vencimiento).toLocaleDateString('es-CO')} y no
+         registramos el pago dentro del plazo de gracia -- el servicio quedó suspendido.</p>
+      <p>El acceso se reactiva automáticamente en cuanto se confirme el pago, sin necesidad de contactarnos.</p>
+      ${data.payment_link_url ? `<p><a href="${data.payment_link_url}" style="display:inline-block;padding:10px 20px;background:#146B4C;color:#fff;border-radius:4px;text-decoration:none;">Pagar ahora</a></p>` : ''}
+      <hr><p><small>ESC DataCore Solutions -- Facturación de suscripciones Pitbox</small></p>
+    `,
+    text: `Hola ${user.first_name}, tu servicio de Pitbox fue suspendido por falta de pago (vencía ${data.fecha_vencimiento}). Se reactiva automático al pagar.${data.payment_link_url ? ` ${data.payment_link_url}` : ''}`,
+  }),
+
+  subscriptionReactivated: (user) => ({
+    subject: '✅ Tu servicio de Pitbox fue reactivado',
+    html: `
+      <h2>Hola ${user.first_name},</h2>
+      <p>Confirmamos tu pago -- tu servicio de Pitbox ya está activo de nuevo.</p>
+      <hr><p><small>ESC DataCore Solutions -- Facturación de suscripciones Pitbox</small></p>
+    `,
+    text: `Hola ${user.first_name}, confirmamos tu pago -- tu servicio de Pitbox ya está activo de nuevo.`,
+  }),
+
   pqrsUpdate: (user, pqrs) => ({
     subject: `Actualización PQRS #${pqrs.ticket_number}`,
     html: `
@@ -321,6 +344,12 @@ const sendSubscriptionPaymentLinkEmail = (tenantId, data) =>
 const sendSubscriptionInvoiceIssuedEmail = (tenantId, data) =>
   notifySubscriptionAdmins(tenantId, emailTemplates.subscriptionInvoiceIssued, data);
 
+const sendSubscriptionSuspendedEmail = (tenantId, data) =>
+  notifySubscriptionAdmins(tenantId, emailTemplates.subscriptionSuspended, data);
+
+const sendSubscriptionReactivatedEmail = (tenantId, data) =>
+  notifySubscriptionAdmins(tenantId, emailTemplates.subscriptionReactivated, data);
+
 module.exports = {
   sendEmail,
   verifyEmailConfig,
@@ -336,4 +365,6 @@ module.exports = {
   sendPQRSUpdatedEmail,
   sendSubscriptionPaymentLinkEmail,
   sendSubscriptionInvoiceIssuedEmail,
+  sendSubscriptionSuspendedEmail,
+  sendSubscriptionReactivatedEmail,
 };
