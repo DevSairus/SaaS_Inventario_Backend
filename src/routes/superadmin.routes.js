@@ -192,6 +192,8 @@ router.get(
         } 
       });
       const totalInvoices = await Invoice.count({ where: { tenant_id: id } });
+      const Branch = require('../models/Branch');
+      const totalBranches = await Branch.count({ where: { tenant_id: id, is_active: true } });
 
       const subscription = tenant.subscriptions && tenant.subscriptions[0];
 
@@ -226,6 +228,9 @@ router.get(
           max_clients: subscription?.plan?.max_clients || 50,
           max_invoices_per_month:
             subscription?.plan?.max_invoices_per_month || 100,
+          max_branches: subscription?.plan?.max_branches ?? 1,
+          allow_extra_branches: subscription?.plan?.allow_extra_branches || false,
+          extra_branch_price: subscription?.plan?.extra_branch_price || 0,
 
           // Suscripción completa
           subscription: subscription || null,
@@ -240,6 +245,7 @@ router.get(
         stats: {
           totalUsers,
           totalInvoices,
+          totalBranches,
         },
       };
 
@@ -624,6 +630,9 @@ router.post(
         max_clients: req.body.max_clients || 50,
         max_products: req.body.max_products ?? 100,
         max_warehouses: req.body.max_warehouses ?? 1,
+        max_branches: req.body.max_branches ?? 1,
+        allow_extra_branches: req.body.allow_extra_branches || false,
+        extra_branch_price: req.body.extra_branch_price || 0,
         max_invoices_per_month: req.body.max_invoices_per_month || 100,
         max_storage_mb: req.body.max_storage_mb || 100,
         modules: req.body.modules || [],
@@ -663,6 +672,9 @@ router.put(
         max_clients: req.body.max_clients !== undefined ? req.body.max_clients : plan.max_clients,
         max_products: req.body.max_products !== undefined ? req.body.max_products : plan.max_products,
         max_warehouses: req.body.max_warehouses !== undefined ? req.body.max_warehouses : plan.max_warehouses,
+        max_branches: req.body.max_branches !== undefined ? req.body.max_branches : plan.max_branches,
+        allow_extra_branches: req.body.allow_extra_branches !== undefined ? req.body.allow_extra_branches : plan.allow_extra_branches,
+        extra_branch_price: req.body.extra_branch_price !== undefined ? req.body.extra_branch_price : plan.extra_branch_price,
         max_invoices_per_month: req.body.max_invoices_per_month !== undefined ? req.body.max_invoices_per_month : plan.max_invoices_per_month,
         modules: req.body.modules !== undefined ? req.body.modules : plan.modules,
         features: req.body.features !== undefined ? req.body.features : plan.features,

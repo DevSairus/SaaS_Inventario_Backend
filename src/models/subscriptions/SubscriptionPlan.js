@@ -91,6 +91,24 @@ const SubscriptionPlan = sequelize.define(
       defaultValue: 1,
       comment: 'Número máximo de bodegas activas. -1 = ilimitado',
     },
+    max_branches: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 1,
+      comment: 'Número máximo de sedes activas. -1 = ilimitado',
+    },
+    allow_extra_branches: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      comment: 'Si true, se puede exceder max_branches (sobrecargo facturable manualmente en vez de bloqueo)',
+    },
+    extra_branch_price: {
+      type: DataTypes.DECIMAL(12, 2),
+      allowNull: false,
+      defaultValue: 0,
+      comment: 'Precio mensual sugerido por cada sede que exceda max_branches (solo si allow_extra_branches)',
+    },
 
     // Módulos incluidos
     modules: {
