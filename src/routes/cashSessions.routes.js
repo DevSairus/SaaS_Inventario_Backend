@@ -7,6 +7,7 @@ const ctrl = require('../controllers/finance/cashSessions.controller');
 router.get('/current',        checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getCurrentSession);
 router.post('/open',          checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.openSession);
 router.get('/:id/summary',    checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getSessionSummary);
+router.get('/:id/payments',   checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getSessionPayments);
 router.post('/:id/close',     checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.closeSession);
 router.get('/:id',            checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getSessionById);
 router.get('/',                checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.listSessions);

@@ -5,6 +5,7 @@
 // fecha de la caja, y los agrupa por método de pago normalizado.
 const { CashSession, Branch, User } = require('../../models');
 const { buildCashFlow } = require('./cashflow.controller');
+const { getOpenSession } = require('../../services/finance/cashSession.service');
 
 const ZERO_BUCKET = { efectivo: 0, tarjeta: 0, transferencia: 0, otro: 0 };
 
@@ -23,6 +24,14 @@ function normalizeMethod(method) {
 // Calcula lo que DEBERÍA haber en caja por método de pago: la base de
 // apertura (siempre en efectivo) + entradas - salidas de ese día para esa
 // sede, agrupadas por método normalizado.
+// Movimientos que efectivamente pertenecen a ESTA sesión: los que ya llevan
+// `cash_session_id` explícito deben coincidir exactamente (evita que un pago
+// de otra sesión abierta el mismo día en la misma sede se cuele); los pagos
+// legados (de antes de que existiera este vínculo) siguen entrando por el
+// criterio anterior de fecha+sede, para no romper el histórico.
+const filterBySession = (transactions, session) =>
+  transactions.filter(t => !t.cash_session_id || t.cash_session_id === session.id);
+
 const calculateExpected = async (session) => {
   const dateStr = session.session_date; // 'YYYY-MM-DD' (DATEONLY)
   const cashFlow = await buildCashFlow(session.tenant_id, {
@@ -31,15 +40,17 @@ const calculateExpected = async (session) => {
     branch_id: session.branch_id,
   });
 
+  const relevant = filterBySession(cashFlow.allTransactions, session);
+
   const expected = { ...ZERO_BUCKET, efectivo: parseFloat(session.opening_amount) || 0 };
-  cashFlow.allTransactions.forEach(t => {
+  relevant.forEach(t => {
     const bucket = normalizeMethod(t.method);
     const signedAmount = t.direction === 'in' ? t.amount : -t.amount;
     expected[bucket] += signedAmount;
   });
 
   Object.keys(expected).forEach(k => { expected[k] = Math.round(expected[k] * 100) / 100; });
-  return { expected, transactionCount: cashFlow.allTransactions.length };
+  return { expected, transactionCount: relevant.length, transactions: relevant };
 };
 
 // GET /api/cash-sessions/current?branch_id=
@@ -81,7 +92,7 @@ const openSession = async (req, res) => {
     const branch = await Branch.findOne({ where: { id: branch_id, tenant_id } });
     if (!branch) return res.status(404).json({ success: false, message: 'Sede no encontrada' });
 
-    const existing = await CashSession.findOne({ where: { tenant_id, branch_id, status: 'open' } });
+    const existing = await getOpenSession(tenant_id, branch_id);
     if (existing) {
       return res.status(409).json({
         success: false,
@@ -249,4 +260,31 @@ const getSessionById = async (req, res) => {
   }
 };
 
-module.exports = { getCurrentSession, openSession, getSessionSummary, closeSession, listSessions, getSessionById };
+// GET /api/cash-sessions/:id/payments — detalle de movimientos de la sesión
+// (drill-down del cuadre: qué venta/OT/compra/gasto compone cada total).
+const getSessionPayments = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { id } = req.params;
+
+    const session = await CashSession.findOne({ where: { id, tenant_id } });
+    if (!session) return res.status(404).json({ success: false, message: 'Caja no encontrada' });
+
+    const dateStr = session.session_date;
+    const cashFlow = await buildCashFlow(tenant_id, {
+      from_date: dateStr,
+      to_date: dateStr,
+      branch_id: session.branch_id,
+    });
+
+    const transactions = filterBySession(cashFlow.allTransactions, session)
+      .map(t => ({ ...t, bucket: normalizeMethod(t.method) }));
+
+    res.json({ success: true, data: { session_id: session.id, transactions } });
+  } catch (error) {
+    console.error('Error obteniendo pagos de la caja:', error);
+    res.status(500).json({ success: false, message: 'Error obteniendo pagos de la caja' });
+  }
+};
+
+module.exports = { getCurrentSession, openSession, getSessionSummary, closeSession, listSessions, getSessionById, getSessionPayments };

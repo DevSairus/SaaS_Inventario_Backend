@@ -5,7 +5,7 @@
 // movimiento real de efectivo/dinero. Si en el futuro se agrega un módulo de
 // caja/bancos con transacciones propias, este endpoint debería sumarlas aquí
 // también en vez de reemplazarlas.
-const { Sale, Purchase, Expense, Supplier, Tenant } = require('../../models');
+const { Sale, Purchase, Expense, Supplier, Tenant, WorkOrder } = require('../../models');
 const { Op } = require('sequelize');
 const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
@@ -24,7 +24,7 @@ const toDateOnly = (value) => {
 // Compras y Gastos. Usado tanto por el JSON de la pantalla como por el PDF,
 // para que ambos siempre muestren exactamente los mismos números.
 const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) => {
-  const [sales, purchases, expenses] = await Promise.all([
+  const [sales, purchases, expenses, pendingWorkOrders] = await Promise.all([
     Sale.findAll({
       where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
       attributes: ['id', 'sale_number', 'customer_name', 'payment_history', 'branch_id']
@@ -37,7 +37,16 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     Expense.findAll({
       where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
       attributes: ['id', 'expense_number', 'description', 'category', 'payment_history', 'branch_id']
-    })
+    }),
+    // Abonos cobrados en una OT ANTES de facturarla (sale_id null) — antes
+    // eran invisibles para el cuadre de caja aunque fuera dinero real
+    // recibido. Solo `sale_id: null`: una vez facturada, estos mismos abonos
+    // se trasladan a Sale.payment_history (ver generateSale) y ya se cuentan
+    // por ese lado — incluir ambos duplicaría el monto.
+    WorkOrder.findAll({
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, sale_id: null },
+      attributes: ['id', 'order_number', 'payment_history'],
+    }),
   ]);
 
   let transactions = [];
@@ -52,7 +61,26 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
         reference: s.sale_number,
         detail: s.customer_name,
         method: p.method || null,
-        branch_id: s.branch_id
+        branch_id: p.branch_id || s.branch_id,
+        cash_session_id: p.cash_session_id || null,
+      });
+    });
+  });
+
+  pendingWorkOrders.forEach(w => {
+    (w.payment_history || []).forEach(p => {
+      transactions.push({
+        date: toDateOnly(p.date),
+        amount: parseFloat(p.amount) || 0,
+        direction: 'in',
+        source: 'work_order',
+        reference: w.order_number,
+        detail: 'Abono a OT (sin facturar aún)',
+        method: p.method || null,
+        // WorkOrder no tiene sede propia — la única fuente de sede es la
+        // que quedó guardada en el propio pago (ver registerPayment).
+        branch_id: p.branch_id || null,
+        cash_session_id: p.cash_session_id || null,
       });
     });
   });
