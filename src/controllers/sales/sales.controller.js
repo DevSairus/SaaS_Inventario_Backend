@@ -10,6 +10,7 @@ const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
+const { getOpenSession } = require('../../services/finance/cashSession.service');
 
 // Obtener todas las ventas
 const getAll = async (req, res) => {
@@ -677,16 +678,28 @@ const confirm = async (req, res) => {
 
       // Registrar el pago inicial en payment_history para que Flujo de Caja
       // (que solo lee payment_history) refleje el ingreso, igual que registerPayment.
+      let initialPayment = null;
+      let openSession = null;
       if (amountPaid > 0) {
-        const payment_history = [...(sale.payment_history || [])];
-        payment_history.push({
+        // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
+        // caja abierta en la sede activa — sin esto, el cuadre de caja nunca
+        // podría reconciliar de dónde salió este dinero.
+        openSession = await getOpenSession(tenantId, req.branch_id, transaction);
+        if (!openSession) {
+          await transaction.rollback();
+          return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+        }
+
+        initialPayment = {
+          payment_id: require('crypto').randomUUID(),
           date: sale.sale_date || new Date(),
           amount: amountPaid,
           method: payment_method,
           user_id: userId,
-          notes: 'Pago registrado al confirmar la venta'
-        });
-        updateData.payment_history = payment_history;
+          notes: 'Pago registrado al confirmar la venta',
+          cash_session_id: openSession.id,
+          branch_id: req.branch_id,
+        };
       }
 
       // ── Asignar tipo de documento al confirmar ───────────────────────────────
@@ -701,6 +714,35 @@ const confirm = async (req, res) => {
       } else if (document_type) {
         updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
 
+      }
+
+      // El recibo se numera al final, ya con el sale_number definitivo
+      // (la renumeración de arriba puede cambiarlo respecto al de la Sale
+      // recién creada), y viaja en el mismo payment_history entry.
+      if (initialPayment) {
+        const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
+        const { Receipt } = require('../../models');
+        const receipt_number = await generateReceiptNumber(tenantId, transaction);
+        initialPayment.receipt_number = receipt_number;
+        await Receipt.create({
+          tenant_id: tenantId,
+          branch_id: req.branch_id,
+          receipt_number,
+          source_type: 'sale',
+          source_id: sale.id,
+          payment_id: initialPayment.payment_id,
+          cash_session_id: openSession.id,
+          amount: initialPayment.amount,
+          method: initialPayment.method,
+          payment_date: initialPayment.date,
+          reference: updateData.sale_number || sale.sale_number,
+          customer_name: sale.customer_name,
+          created_by: userId,
+        }, { transaction });
+
+        const payment_history = [...(sale.payment_history || [])];
+        payment_history.push(initialPayment);
+        updateData.payment_history = payment_history;
       }
 
       await sale.update(updateData, { transaction });
@@ -805,6 +847,21 @@ const cancel = async (req, res) => {
       try {
         const { reverseSourceEntries } = require('../../services/accounting/autoEntries.service');
         await reverseSourceEntries('sale', sale.id, tenantId, userId, `Venta ${sale.sale_number || sale.id} cancelada${reason ? ' — ' + reason : ''}`);
+
+        // Los abonos de esta venta generaron su propio asiento (ver
+        // registerPayment) — sin esto, quedarían huérfanos: cash/cartera
+        // contabilizados para una venta que ya no existe.
+        // Los recibos de esos abonos quedan anulados junto con su asiento —
+        // se conservan (no se borran) para trazabilidad, solo cambian de estado.
+        const { Receipt } = require('../../models');
+        for (const p of (sale.payment_history || [])) {
+          if (!p.payment_id) continue;
+          await reverseSourceEntries('payment', p.payment_id, tenantId, userId, `Venta ${sale.sale_number || sale.id} cancelada${reason ? ' — ' + reason : ''}`);
+          await Receipt.update(
+            { status: 'voided', voided_at: new Date(), voided_reason: reason || 'Venta cancelada' },
+            { where: { payment_id: p.payment_id } }
+          );
+        }
       } catch (err) {
         logger.warn(`[accounting] Error reversando asiento de venta cancelada ${id}: ${err.message}`);
       }
@@ -886,6 +943,14 @@ const registerPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Esta venta ya está pagada en su totalidad' });
     }
 
+    // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
+    // caja abierta en la sede activa.
+    const openSession = await getOpenSession(tenantId, req.branch_id, transaction);
+    if (!openSession) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+    }
+
     // Limitar el monto al saldo pendiente para evitar sobrepagos
     const effectiveAmount = Math.min(parseFloat(amount), remaining);
     const paid_amount = alreadyPaid + effectiveAmount;
@@ -894,13 +959,40 @@ const registerPayment = async (req, res) => {
     if (paid_amount >= total) payment_status = 'paid';
     else if (paid_amount > 0) payment_status = 'partial';
 
+    const payment_id = require('crypto').randomUUID();
     const payment_history = [...(sale.payment_history || [])];
-    payment_history.push({
-      date: payment_date || new Date(),
+    const effectiveMethod = payment_method || sale.payment_method || 'Efectivo';
+    const effectiveDate = payment_date || new Date();
+
+    const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
+    const { Receipt } = require('../../models');
+    const receipt_number = await generateReceiptNumber(tenantId, transaction);
+    await Receipt.create({
+      tenant_id: tenantId,
+      branch_id: req.branch_id,
+      receipt_number,
+      source_type: 'sale',
+      source_id: sale.id,
+      payment_id,
+      cash_session_id: openSession.id,
       amount: effectiveAmount,
-      method: payment_method || sale.payment_method || 'Efectivo',
+      method: effectiveMethod,
+      payment_date: effectiveDate,
+      reference: sale.sale_number,
+      customer_name: sale.customer_name,
+      created_by: userId,
+    }, { transaction });
+
+    payment_history.push({
+      payment_id,
+      date: effectiveDate,
+      amount: effectiveAmount,
+      method: effectiveMethod,
       user_id: userId,
-      notes: notes || null
+      notes: notes || null,
+      cash_session_id: openSession.id,
+      branch_id: req.branch_id,
+      receipt_number,
     });
 
     await sale.update(
@@ -909,6 +1001,22 @@ const registerPayment = async (req, res) => {
     );
 
     await transaction.commit();
+
+    // Asiento contable del abono (caja/bancos vs cartera), no bloqueante —
+    // mismo patrón fire-and-forget que el asiento de la venta en confirm().
+    setImmediate(async () => {
+      try {
+        const { generatePaymentEntry } = require('../../services/accounting/autoEntries.service');
+        await generatePaymentEntry(
+          { payment_id, amount: effectiveAmount, method: effectiveMethod, date: effectiveDate },
+          sale,
+          tenantId,
+          userId
+        );
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de abono (venta ${id}): ${err.message}`);
+      }
+    });
 
     const updatedSale = await Sale.findByPk(id, {
       include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
@@ -1029,7 +1137,17 @@ const generatePaymentReceipt = async (req, res) => {
       payment = { amount: sale.paid_amount || 0, method: sale.payment_method || 'efectivo', date: sale.updated_at || sale.created_at, notes: null };
     }
     payment.index = idx;
-    payment.receipt_number = `REC-${sale.sale_number}-${String(idx + 1).padStart(2, '0')}`;
+    // El número real vive en la tabla receipts (fuente única de verdad desde
+    // que existe); si el pago es anterior a ese cambio, se conserva el
+    // fallback histórico por índice para no romper reimpresiones viejas.
+    if (payment.payment_id) {
+      const { Receipt } = require('../../models');
+      const receipt = await Receipt.findOne({ where: { tenant_id: tenantId, payment_id: payment.payment_id } });
+      if (receipt) payment.receipt_number = receipt.receipt_number;
+    }
+    if (!payment.receipt_number) {
+      payment.receipt_number = `REC-${sale.sale_number}-${String(idx + 1).padStart(2, '0')}`;
+    }
     const tenant = await Tenant.findByPk(tenantId);
 
     // Buffer mode: necesario para Vercel serverless (no soporta streaming)

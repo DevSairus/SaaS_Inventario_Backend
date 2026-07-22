@@ -165,6 +165,7 @@ const accountsPayableRoutes         = require('./routes/accounts-payable.routes'
 const expensesRoutes                = require('./routes/expenses.routes');
 const cashflowRoutes                = require('./routes/cashflow.routes');
 const cashSessionsRoutes            = require('./routes/cashSessions.routes');
+const receiptsRoutes                = require('./routes/receipts.routes');
 
 // Públicas y Cron
 const publicRoutes                  = require('./routes/public.routes');
@@ -229,6 +230,7 @@ app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware,
 app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, expensesRoutes);
 app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, cashflowRoutes);
 app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, cashSessionsRoutes);
+app.use('/api/receipts',                       authMiddleware, tenantMiddleware, branchMiddleware, receiptsRoutes);
 app.use('/api/tenant',                         authMiddleware, tenantMiddleware, tenantRoutes);
 app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, reportsRoutes);
 app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware, branchMiddleware, invoiceImportRoutes);

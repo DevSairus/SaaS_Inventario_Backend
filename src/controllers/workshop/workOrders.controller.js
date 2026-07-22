@@ -8,6 +8,7 @@ const {
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
+const { getOpenSession } = require('../../services/finance/cashSession.service');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -957,6 +958,9 @@ const generateSale = async (req, res) => {
     const customerName = customer
       ? (customer.business_name || `${customer.first_name} ${customer.last_name}`)
       : 'Cliente General';
+    // Método del último abono ya cobrado en la OT, si hubo alguno — usado por
+    // generateSaleEntry para decidir caja vs bancos en el saldo ya pagado.
+    const lastPayment = (order.payment_history || [])[order.payment_history?.length - 1];
 
     const sale = await Sale.create({
       tenant_id,
@@ -978,8 +982,18 @@ const generateSale = async (req, res) => {
       tax_amount:       order.tax_amount,
       discount_amount:  order.discount_amount || 0,
       total_amount:     order.total_amount,
-      status:           'pending',
-      payment_status:   'pending',
+      // Una remisión/factura emitida desde una OT ya cerrada es un hecho
+      // consumado — no hay un paso de "confirmar" posterior para estas
+      // ventas, así que nace 'completed' (no 'pending') para que sí dispare
+      // el asiento contable automático y aparezca en Salud Contable.
+      status:           'completed',
+      // Se trasladan los abonos ya cobrados DURANTE la reparación (vía
+      // registerPayment de la OT) — antes quedaban en blanco acá, perdiendo
+      // el rastro de lo ya cobrado frente a la factura/remisión final.
+      paid_amount:      order.paid_amount || 0,
+      payment_status:   order.payment_status || 'pending',
+      payment_history:  order.payment_history || [],
+      payment_method:   lastPayment?.method || null,
       dian_status:      document_type === 'factura' ? 'pending' : 'not_applicable',
       notes: `Generada desde OT ${order.order_number}${order.work_performed ? '. ' + order.work_performed : ''}`.trim(),
       created_by: req.user.id,
@@ -1050,6 +1064,19 @@ const generateSale = async (req, res) => {
     await order.update({ sale_id: sale.id, status: 'entregado', delivered_at: new Date() }, { transaction });
 
     await transaction.commit();
+
+    // Asiento contable en borrador (no bloqueante) — mismo patrón que
+    // confirm() en sales.controller.js. Antes NUNCA se llamaba para ventas
+    // generadas desde Taller (quedaban sin contabilizar).
+    setImmediate(async () => {
+      try {
+        const { generateSaleEntry } = require('../../services/accounting/autoEntries.service');
+        const saleForAccounting = await Sale.findByPk(sale.id, { include: [{ model: SaleItem, as: 'items' }] });
+        await generateSaleEntry(saleForAccounting, saleForAccounting.items, tenant_id, req.user.id);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de venta ${sale.id} (OT ${order.id}): ${err.message}`);
+      }
+    });
 
     res.status(201).json({
       success: true,
@@ -1261,6 +1288,14 @@ const registerPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Esta orden ya está pagada en su totalidad' });
     }
 
+    // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
+    // caja abierta en la sede activa.
+    const openSession = await getOpenSession(tenant_id, req.branch_id, transaction);
+    if (!openSession) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+    }
+
     // Si aún no hay total_amount definido (OT sin ítems cerrados), se acepta el abono tal cual;
     // si sí hay total, se limita el monto al saldo pendiente para evitar sobrepagos.
     const effectiveAmount = total > 0 ? Math.min(parseFloat(amount), remaining) : parseFloat(amount);
@@ -1270,15 +1305,39 @@ const registerPayment = async (req, res) => {
     if (total > 0 && paid_amount >= total) payment_status = 'paid';
     else if (paid_amount > 0) payment_status = 'partial';
 
-    const receipt_number = `REC-${Date.now().toString().slice(-6)}`;
+    const payment_id = require('crypto').randomUUID();
+    const effectiveMethod = payment_method || 'cash';
+    const effectiveDate = payment_date || new Date();
+
+    const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
+    const { Receipt } = require('../../models');
+    const receipt_number = await generateReceiptNumber(tenant_id, transaction);
+    await Receipt.create({
+      tenant_id,
+      branch_id: req.branch_id,
+      receipt_number,
+      source_type: 'work_order',
+      source_id: order.id,
+      payment_id,
+      cash_session_id: openSession.id,
+      amount: effectiveAmount,
+      method: effectiveMethod,
+      payment_date: effectiveDate,
+      reference: order.order_number,
+      created_by: userId,
+    }, { transaction });
+
     const payment_history = [...(order.payment_history || [])];
     payment_history.push({
-      date: payment_date || new Date(),
+      payment_id,
+      date: effectiveDate,
       amount: effectiveAmount,
-      method: payment_method || 'cash',
+      method: effectiveMethod,
       user_id: userId,
       notes: notes || null,
       receipt_number,
+      cash_session_id: openSession.id,
+      branch_id: req.branch_id,
     });
 
     await order.update(
@@ -1287,6 +1346,32 @@ const registerPayment = async (req, res) => {
     );
 
     await transaction.commit();
+
+    // Asiento contable del abono (caja/bancos vs cartera), no bloqueante —
+    // SOLO si esta OT ya tiene una venta/factura generada (order.sale_id).
+    // Si todavía no la tiene, este abono NO debe contabilizarse aquí: no
+    // existe cartera que reducir todavía (aún no hay asiento de venta), y
+    // generateSale ya traslada este payment_history completo a la Sale —
+    // ahí sí queda correctamente repartido pagado/pendiente en un solo
+    // asiento. Generar un asiento acá adelantado duplicaría ese monto.
+    if (order.sale_id) {
+      setImmediate(async () => {
+        try {
+          const { generatePaymentEntry } = require('../../services/accounting/autoEntries.service');
+          const sale = await Sale.findByPk(order.sale_id);
+          if (sale) {
+            await generatePaymentEntry(
+              { payment_id, amount: effectiveAmount, method: effectiveMethod, date: effectiveDate },
+              sale,
+              tenant_id,
+              userId
+            );
+          }
+        } catch (err) {
+          logger.warn(`[accounting] Error generando asiento de abono (OT ${id}): ${err.message}`);
+        }
+      });
+    }
 
     const updatedOrder = await WorkOrder.findOne({
       where: { id, tenant_id },

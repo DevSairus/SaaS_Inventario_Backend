@@ -73,6 +73,7 @@ const DianEvent = require('./dian/DianEvent');
 // ✅ NUEVO - Tesorería
 const Expense = require('./finance/Expense');
 const CashSession = require('./finance/CashSession');
+const Receipt = require('./finance/Receipt');
 
 // ✅ NUEVO - Asistente de IA (Fase 1 solo lectura + Fase 2 propuestas)
 const AiConversation = require('./ai/AiConversation');
@@ -132,6 +133,15 @@ CashSession.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
 CashSession.belongsTo(User, { foreignKey: 'opened_by', as: 'opener' });
 CashSession.belongsTo(User, { foreignKey: 'closed_by', as: 'closer' });
 User.hasMany(Expense, { foreignKey: 'created_by', as: 'created_expenses' });
+
+// Receipt ↔ Tenant / Branch / CashSession / User (Recibos de caja)
+Tenant.hasMany(Receipt, { foreignKey: 'tenant_id', as: 'receipts' });
+Receipt.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(Receipt, { foreignKey: 'branch_id', as: 'receipts' });
+Receipt.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+CashSession.hasMany(Receipt, { foreignKey: 'cash_session_id', as: 'receipts' });
+Receipt.belongsTo(CashSession, { foreignKey: 'cash_session_id', as: 'cash_session' });
+Receipt.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 
 InventoryMovement.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(InventoryMovement, { foreignKey: 'user_id', as: 'movements' });
@@ -483,6 +493,7 @@ module.exports = {
   DianEvent,
   Expense,
   CashSession,
+  Receipt,
   ChartOfAccount,
   FiscalPeriod,
   JournalEntry,
