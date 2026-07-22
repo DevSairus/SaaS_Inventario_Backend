@@ -146,6 +146,64 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
 }
 
 /**
+ * Genera el asiento en borrador de UN abono/pago puntual sobre una venta ya
+ * existente (venta manual confirmada o remisión/factura generada desde una
+ * OT de Taller). Es el contrapunto del hueco donde `registerPayment` solo
+ * actualizaba `Sale.payment_history` sin mover nunca caja/bancos vs cartera.
+ *
+ * A diferencia de `generateSaleEntry` (un asiento por venta, con el reparto
+ * pagado/pendiente de ESE momento), este genera un asiento nuevo por CADA
+ * abono, así cada uno es reversable individualmente (ej. si se cancela la
+ * venta después de varios abonos) sin tocar el asiento original de la venta.
+ *
+ * @param {object} payment - { payment_id, amount, method, date }
+ * @param {object} sale - venta (para customer_id, branch_id, sale_number)
+ */
+async function generatePaymentEntry(payment, sale, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Number(payment.amount || 0);
+      if (amount <= 0) return null;
+
+      const pm = (payment.method || '').toLowerCase();
+      const isCash = pm.includes('efectivo') || pm.includes('cash');
+      const debitAccount = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+      const receivableAccount = await getMappedAccountId(tenantId, 'sale_receivable', t);
+
+      const lines = [
+        { account_id: debitAccount, debit: amount, credit: 0, description: 'Cobro de abono' },
+        {
+          account_id: receivableAccount, debit: 0, credit: amount,
+          description: 'Reducción de cartera por abono',
+          third_party_id: sale.customer_id || null,
+        },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: sale.branch_id,
+          entryDate: payment.date || new Date(),
+          sourceType: 'payment',
+          sourceId: payment.payment_id,
+          description: `Abono a venta ${sale.sale_number || sale.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `abono ${payment.payment_id} (venta ${sale.id})`, options);
+}
+
+/**
  * Genera el asiento en borrador de una compra recibida.
  */
 async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
@@ -500,6 +558,7 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
 
 module.exports = {
   generateSaleEntry,
+  generatePaymentEntry,
   generatePurchaseEntry,
   generateExpenseEntry,
   generateCashSessionEntry,
