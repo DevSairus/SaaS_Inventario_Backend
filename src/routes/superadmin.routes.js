@@ -2152,6 +2152,14 @@ router.post(
         return res.status(403).json({ success: false, message: 'No se puede iniciar sesión como un usuario inactivo' });
       }
 
+      // La impersonación es para dar soporte administrativo — roles operativos
+      // (técnico, vendedor, bodeguero, etc.) no tienen acceso a la mayoría de
+      // pantallas ni aunque se les impersone, así que solo confunde ("¿por qué
+      // me da 403 si dice que inició sesión?"). Se limita a admin/manager.
+      if (!['admin', 'manager'].includes(user.role)) {
+        return res.status(403).json({ success: false, message: 'Solo se puede iniciar sesión como administrador o gerente del tenant' });
+      }
+
       const token = jwt.sign(
         { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id, impersonated_by: req.user.id },
         JWT_SECRET,
