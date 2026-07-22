@@ -8,7 +8,7 @@ const {
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
-const { getOpenSession } = require('../../services/finance/cashSession.service');
+const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1289,11 +1289,14 @@ const registerPayment = async (req, res) => {
     }
 
     // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
-    // caja abierta en la sede activa.
-    const openSession = await getOpenSession(tenant_id, req.branch_id, transaction);
-    if (!openSession) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+    // caja abierta en la sede activa — solo para tenants con Tesorería activa.
+    let openSession = null;
+    if (await isTreasuryEnabled(tenant_id)) {
+      openSession = await getOpenSession(tenant_id, req.branch_id, transaction);
+      if (!openSession) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+      }
     }
 
     // Si aún no hay total_amount definido (OT sin ítems cerrados), se acepta el abono tal cual;
@@ -1319,7 +1322,7 @@ const registerPayment = async (req, res) => {
       source_type: 'work_order',
       source_id: order.id,
       payment_id,
-      cash_session_id: openSession.id,
+      cash_session_id: openSession?.id || null,
       amount: effectiveAmount,
       method: effectiveMethod,
       payment_date: effectiveDate,
@@ -1336,7 +1339,7 @@ const registerPayment = async (req, res) => {
       user_id: userId,
       notes: notes || null,
       receipt_number,
-      cash_session_id: openSession.id,
+      cash_session_id: openSession?.id || null,
       branch_id: req.branch_id,
     });
 

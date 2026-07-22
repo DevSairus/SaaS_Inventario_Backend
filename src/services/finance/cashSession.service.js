@@ -12,4 +12,14 @@ async function getOpenSession(tenantId, branchId, transaction) {
   });
 }
 
-module.exports = { getOpenSession };
+// Exigir caja abierta solo tiene sentido para tenants que contrataron
+// Tesorería — un tenant sin ese módulo no tiene dónde abrir una caja, y
+// bloquearle ventas/abonos por eso les impediría operar en un módulo que ni
+// siquiera tienen habilitado.
+async function isTreasuryEnabled(tenantId) {
+  const { getEffectiveModulesForTenantId } = require('../moduleAccess');
+  const modules = await getEffectiveModulesForTenantId(tenantId);
+  return modules.includes('treasury');
+}
+
+module.exports = { getOpenSession, isTreasuryEnabled };

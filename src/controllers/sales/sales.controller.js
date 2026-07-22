@@ -10,7 +10,7 @@ const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
-const { getOpenSession } = require('../../services/finance/cashSession.service');
+const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 
 // Obtener todas las ventas
 const getAll = async (req, res) => {
@@ -683,11 +683,15 @@ const confirm = async (req, res) => {
       if (amountPaid > 0) {
         // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
         // caja abierta en la sede activa — sin esto, el cuadre de caja nunca
-        // podría reconciliar de dónde salió este dinero.
-        openSession = await getOpenSession(tenantId, req.branch_id, transaction);
-        if (!openSession) {
-          await transaction.rollback();
-          return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+        // podría reconciliar de dónde salió este dinero. Pero esto solo aplica
+        // a tenants con el módulo de Tesorería activo: sin ese módulo no hay
+        // dónde abrir una caja, y exigirla les bloquearía las ventas.
+        if (await isTreasuryEnabled(tenantId)) {
+          openSession = await getOpenSession(tenantId, req.branch_id, transaction);
+          if (!openSession) {
+            await transaction.rollback();
+            return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+          }
         }
 
         initialPayment = {
@@ -697,7 +701,7 @@ const confirm = async (req, res) => {
           method: payment_method,
           user_id: userId,
           notes: 'Pago registrado al confirmar la venta',
-          cash_session_id: openSession.id,
+          cash_session_id: openSession?.id || null,
           branch_id: req.branch_id,
         };
       }
@@ -731,7 +735,7 @@ const confirm = async (req, res) => {
           source_type: 'sale',
           source_id: sale.id,
           payment_id: initialPayment.payment_id,
-          cash_session_id: openSession.id,
+          cash_session_id: openSession?.id || null,
           amount: initialPayment.amount,
           method: initialPayment.method,
           payment_date: initialPayment.date,
@@ -944,11 +948,14 @@ const registerPayment = async (req, res) => {
     }
 
     // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
-    // caja abierta en la sede activa.
-    const openSession = await getOpenSession(tenantId, req.branch_id, transaction);
-    if (!openSession) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+    // caja abierta en la sede activa — solo para tenants con Tesorería activa.
+    let openSession = null;
+    if (await isTreasuryEnabled(tenantId)) {
+      openSession = await getOpenSession(tenantId, req.branch_id, transaction);
+      if (!openSession) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+      }
     }
 
     // Limitar el monto al saldo pendiente para evitar sobrepagos
@@ -974,7 +981,7 @@ const registerPayment = async (req, res) => {
       source_type: 'sale',
       source_id: sale.id,
       payment_id,
-      cash_session_id: openSession.id,
+      cash_session_id: openSession?.id || null,
       amount: effectiveAmount,
       method: effectiveMethod,
       payment_date: effectiveDate,
@@ -990,7 +997,7 @@ const registerPayment = async (req, res) => {
       method: effectiveMethod,
       user_id: userId,
       notes: notes || null,
-      cash_session_id: openSession.id,
+      cash_session_id: openSession?.id || null,
       branch_id: req.branch_id,
       receipt_number,
     });
