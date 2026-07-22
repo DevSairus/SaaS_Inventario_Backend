@@ -14,6 +14,7 @@ const accountingHealthCtrl = require('../../controllers/accounting/accountingHea
 const agingReportCtrl = require('../../controllers/accounting/agingReport.controller');
 const withholdingReportCtrl = require('../../controllers/accounting/withholdingReport.controller');
 const cashFlowIndirectCtrl = require('../../controllers/accounting/cashFlowIndirect.controller');
+const openingBalancesCtrl = require('../../controllers/accounting/openingBalances.controller');
 
 // Plan de cuentas
 router.get('/chart-of-accounts', chartOfAccountsCtrl.list);
@@ -91,5 +92,16 @@ router.get('/reports/retenciones/export', withholdingReportCtrl.withholdingExpor
 // Estado de Flujo de Efectivo — método indirecto, derivado de los asientos.
 router.get('/reports/cashflow-indirecto', cashFlowIndirectCtrl.cashFlowIndirect);
 router.get('/reports/cashflow-indirecto/export', cashFlowIndirectCtrl.cashFlowIndirectExport);
+
+// Saldos iniciales (cartera/CxP/cuentas/inventario al arrancar con Pitbox)
+router.get('/opening-balances', openingBalancesCtrl.list);
+router.post('/opening-balances/receivable', openingBalancesCtrl.createReceivable);
+router.post('/opening-balances/payable', openingBalancesCtrl.createPayable);
+router.post('/opening-balances/account', openingBalancesCtrl.createAccount);
+router.post('/opening-balances/inventory', openingBalancesCtrl.createInventory);
+router.get('/opening-balances/bridge-status', openingBalancesCtrl.getBridgeStatus);
+router.post('/opening-balances/bridge-status/close', openingBalancesCtrl.closeBridge);
+router.post('/opening-balances/:id/void', openingBalancesCtrl.voidOpeningBalance);
+router.post('/opening-balances/:id/payments', openingBalancesCtrl.registerPayment);
 
 module.exports = router;

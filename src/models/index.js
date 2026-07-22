@@ -15,6 +15,7 @@ const JournalEntry = require('./accounting/JournalEntry');
 const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
 const AccountMappingAudit = require('./accounting/AccountMappingAudit');
+const OpeningBalance = require('./accounting/OpeningBalance');
 
 // Inventario
 const Category = require('./inventory/Category');
@@ -142,6 +143,20 @@ Receipt.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
 CashSession.hasMany(Receipt, { foreignKey: 'cash_session_id', as: 'receipts' });
 Receipt.belongsTo(CashSession, { foreignKey: 'cash_session_id', as: 'cash_session' });
 Receipt.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
+// OpeningBalance ↔ Tenant / Branch / Customer / Supplier / JournalEntry / User
+// (Saldos iniciales de cartera/CxP al arrancar con Pitbox)
+Tenant.hasMany(OpeningBalance, { foreignKey: 'tenant_id', as: 'opening_balances' });
+OpeningBalance.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(OpeningBalance, { foreignKey: 'branch_id', as: 'opening_balances' });
+OpeningBalance.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Customer.hasMany(OpeningBalance, { foreignKey: 'customer_id', as: 'opening_balances' });
+OpeningBalance.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Supplier.hasMany(OpeningBalance, { foreignKey: 'supplier_id', as: 'opening_balances' });
+OpeningBalance.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+OpeningBalance.belongsTo(JournalEntry, { foreignKey: 'journal_entry_id', as: 'journal_entry' });
+OpeningBalance.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+OpeningBalance.belongsTo(User, { foreignKey: 'voided_by', as: 'voider' });
 
 InventoryMovement.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(InventoryMovement, { foreignKey: 'user_id', as: 'movements' });
@@ -500,6 +515,7 @@ module.exports = {
   JournalEntryLine,
   AccountMapping,
   AccountMappingAudit,
+  OpeningBalance,
   AiConversation,
   AiMessage,
   AiProposal,
