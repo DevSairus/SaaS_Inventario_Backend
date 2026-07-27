@@ -156,6 +156,8 @@ const Product = sequelize.define('Product', {
 
 const Supplier = require('./Supplier');
 const ProductSupplier = require('./ProductSupplier');
+const ProductEquivalenceGroup = require('./ProductEquivalenceGroup');
+const ProductEquivalenceGroupMember = require('./ProductEquivalenceGroupMember');
 
 Product.belongsToMany(Supplier, {
   through: ProductSupplier,
@@ -169,6 +171,24 @@ Supplier.belongsToMany(Product, {
   foreignKey: 'supplier_id',
   otherKey: 'product_id',
   as: 'products'
+});
+
+// Equivalencias: Product ↔ Group (N:M a través de GroupMember)
+ProductEquivalenceGroup.hasMany(ProductEquivalenceGroupMember, {
+  foreignKey: 'group_id',
+  as: 'members'
+});
+ProductEquivalenceGroupMember.belongsTo(ProductEquivalenceGroup, {
+  foreignKey: 'group_id',
+  as: 'group'
+});
+ProductEquivalenceGroupMember.belongsTo(Product, {
+  foreignKey: 'product_id',
+  as: 'product'
+});
+Product.hasMany(ProductEquivalenceGroupMember, {
+  foreignKey: 'product_id',
+  as: 'equivalenceMemberships'
 });
 
 module.exports = Product;
