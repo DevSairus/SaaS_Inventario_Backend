@@ -4,11 +4,11 @@ const { sequelize } = require('../../config/database');
 const {
   WorkOrder, WorkOrderItem, WorkOrderQuoteRequest, Vehicle, Customer, User,
   Warehouse, Product, InventoryMovement, Sale, SaleItem,
+  DiagramTemplate, WorkOrderDiagnosisMark,
 } = require('../../models');
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
-const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -52,25 +52,6 @@ async function generateMovementNumber(tenant_id, transaction) {
   return `MOV-${year}-${String(seq).padStart(5, '0')}`;
 }
 
-// Soporte de detección de conflictos para la cola de sincronización offline
-// de la PWA "Taller" (frontend/src/pwa/offlineQueue/syncManager.js): el
-// cliente manda `expected_updated_at` = el `updated_at` que conocía cuando
-// editó sin conexión. Si no coincide con el actual, alguien más modificó el
-// registro mientras tanto → 409, sin aplicar el cambio (el frontend decide:
-// descartar o forzar sobrescritura). Si no viene el campo (llamadas normales
-// sin offline), no se bloquea nada — mismo comportamiento de siempre.
-function popExpectedVersion(body) {
-  const { expected_updated_at, ...rest } = body || {};
-  return { expectedVersion: expected_updated_at, rest };
-}
-
-function hasVersionConflict(record, expectedVersion) {
-  if (!expectedVersion) return false;
-  const current  = new Date(record.updated_at).getTime();
-  const expected = new Date(expectedVersion).getTime();
-  return !isNaN(current) && !isNaN(expected) && current !== expected;
-}
-
 // Solo los ítems 'aprobado' (default para los que no usan cotización) cuentan
 // en los totales de la OT — un ítem 'pendiente' todavía no tiene luz verde
 // del cliente y uno 'rechazado' no se va a cobrar, así que ninguno de los
@@ -80,16 +61,6 @@ function calcTotals(items) {
   const subtotal   = billable.reduce((s, i) => s + parseFloat(i.subtotal   || 0), 0);
   const tax_amount = billable.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
   return { subtotal, tax_amount, total_amount: subtotal + tax_amount };
-}
-
-// WorkOrderItem.item_type ('repuesto'/'servicio'/'mano_obra'/'free_line') no
-// comparte vocabulario con SaleItem.item_type ('product'/'service'/'free_line')
-// — al generar la remisión/factura desde la OT hay que traducir uno al otro
-// para que autoEntries.service.js reconozca correctamente el ingreso.
-function mapWorkOrderItemTypeToSale(workOrderItemType) {
-  if (workOrderItemType === 'repuesto') return 'product';
-  if (workOrderItemType === 'free_line') return 'free_line';
-  return 'service'; // 'servicio' | 'mano_obra'
 }
 
 /**
@@ -255,8 +226,20 @@ const create = async (req, res) => {
 
     // Sanitizar campos UUID opcionales: convertir string vacío a null
     const sanitizedTechnicianId = technician_id || null;
-    const sanitizedWarehouseId = warehouse_id || null;
     const sanitizedCustomerId = customer_id || null;
+
+    // Si no viene bodega explícita, usar la bodega default de la sede activa
+    // como respaldo (el frontend ya la precarga, pero esto protege contra
+    // integraciones/clientes que no la envíen).
+    let sanitizedWarehouseId = warehouse_id || null;
+    if (!sanitizedWarehouseId && req.branch_id) {
+      const branchWarehouse = await Warehouse.findOne({
+        where: { branch_id: req.branch_id, tenant_id, is_active: true },
+        order: [['is_default', 'DESC'], ['created_at', 'ASC']],
+        transaction,
+      });
+      sanitizedWarehouseId = branchWarehouse?.id || null;
+    }
 
     if (mileage_in) {
       await Vehicle.update({ current_mileage: mileage_in }, { where: { id: vehicle_id, tenant_id }, transaction });
@@ -307,26 +290,23 @@ const update = async (req, res) => {
     if (['entregado', 'cancelado'].includes(order.status))
       return res.status(400).json({ success: false, message: 'No se puede editar una OT cerrada' });
 
-    const { expectedVersion, rest } = popExpectedVersion(req.body);
-    if (hasVersionConflict(order, expectedVersion)) {
-      return res.status(409).json({
-        success: false,
-        message: 'La orden fue modificada por otro usuario mientras estabas sin conexión',
-        data: order,
-      });
-    }
-
     const {
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
       notes, mileage_in, mileage_out, discount_amount,
-    } = rest;
+      quality_checklist,
+    } = req.body;
 
     await order.update({
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
       notes, mileage_in, mileage_out,
       discount_amount: discount_amount != null ? parseFloat(discount_amount) : order.discount_amount,
+      // Merge en vez de reemplazo: permite marcar un solo check (ej. "Limpieza
+      // final") sin borrar los demás que ya estaban marcados.
+      quality_checklist: quality_checklist
+        ? { ...(order.quality_checklist || {}), ...quality_checklist }
+        : order.quality_checklist,
     });
 
     const items = await WorkOrderItem.findAll({ where: { work_order_id: order.id } });
@@ -346,8 +326,7 @@ const update = async (req, res) => {
 const changeStatus = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { expectedVersion, rest } = popExpectedVersion(req.body);
-    const { status, mileage_out } = rest;
+    const { status, mileage_out } = req.body;
     const validStatuses = ['recibido', 'en_proceso', 'en_espera', 'listo', 'entregado', 'cancelado'];
     if (!validStatuses.includes(status)) {
       await transaction.rollback();
@@ -361,15 +340,6 @@ const changeStatus = async (req, res) => {
     if (!order) {
       await transaction.rollback();
       return res.status(404).json({ success: false, message: 'Orden no encontrada' });
-    }
-
-    if (hasVersionConflict(order, expectedVersion)) {
-      await transaction.rollback();
-      return res.status(409).json({
-        success: false,
-        message: 'La orden fue modificada por otro usuario mientras estabas sin conexión',
-        data: order,
-      });
     }
 
     if (['entregado', 'cancelado'].includes(order.status)) {
@@ -472,64 +442,8 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT cerrada' });
     }
 
-    const {
-      product_id, item_type, quantity, unit_price, tax_percentage,
-      technician_id: itemTechnicianId, requires_approval,
-      product_name: freeLineName,
-    } = req.body;
-
-    if (!item_type || !quantity) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Tipo y cantidad son requeridos' });
-    }
-
-    // Cotización con aprobación del cliente: no descuenta inventario todavía,
-    // así que tampoco tiene sentido bloquear por stock insuficiente ahora
-    // mismo — puede llegar a reponerse antes de que el cliente apruebe.
-    const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
-    const qty = parseFloat(quantity);
-
-    // ── Línea libre: ad-hoc, sin producto de catálogo — mismo criterio que
-    // sales.controller.js. No busca producto, no valida ni descuenta stock.
-    if (item_type === 'free_line') {
-      if (!freeLineName || !freeLineName.trim()) {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'La descripción de la línea libre es requerida' });
-      }
-
-      const price  = parseFloat(unit_price) || 0;
-      const taxPct = parseFloat(tax_percentage ?? 19);
-      const subtotal   = qty * price;
-      const tax_amount = taxPct > 0 ? Math.round(subtotal * (taxPct / 100)) : 0;
-      const total = subtotal + tax_amount;
-
-      const item = await WorkOrderItem.create({
-        tenant_id,
-        work_order_id: order.id,
-        item_type: 'free_line',
-        product_id: null,
-        product_name: freeLineName.trim(),
-        product_sku: null,
-        quantity: qty,
-        unit_price: price,
-        tax_percentage: taxPct,
-        tax_amount,
-        subtotal,
-        total,
-        technician_id: itemTechnicianId || null,
-        approval_status: requiresApproval ? 'pendiente' : 'aprobado',
-      }, { transaction });
-
-      const allItemsFL = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
-      const { subtotal: sFL, tax_amount: tFL } = calcTotals(allItemsFL);
-      const discFL = parseFloat(order.discount_amount) || 0;
-      await order.update({ subtotal: sFL, tax_amount: tFL, total_amount: sFL + tFL - discFL }, { transaction });
-
-      await transaction.commit();
-      return res.status(201).json({ success: true, message: 'Ítem agregado', data: item });
-    }
-
-    if (!product_id) {
+    const { product_id, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId, requires_approval } = req.body;
+    if (!product_id || !item_type || !quantity) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
     }
@@ -546,10 +460,22 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Un producto de tipo servicio no puede ser "repuesto"' });
     }
 
+    // Cotización con aprobación del cliente: no descuenta inventario todavía,
+    // así que tampoco tiene sentido bloquear por stock insuficiente ahora
+    // mismo — puede llegar a reponerse antes de que el cliente apruebe.
+    const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
+
     // Validar stock si es repuesto físico
+    const qty = parseFloat(quantity);
     if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
+      const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
+      const alternatives = await getEquivalentsWithStock(product_id, tenant_id);
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: `Stock insuficiente. Disponible: ${product.current_stock}` });
+      return res.status(400).json({
+        success: false,
+        message: `Stock insuficiente. Disponible: ${product.current_stock}`,
+        alternatives
+      });
     }
 
     // Calcular importes — respetar price_includes_tax y has_tax
@@ -670,6 +596,230 @@ const removeItem = async (req, res) => {
     await transaction.rollback();
     logger.error('Error eliminando ítem OT:', error);
     res.status(500).json({ success: false, message: 'Error al eliminar ítem' });
+  }
+};
+
+// ── DIAGRAMAS INTERACTIVOS DE INTERVENCIÓN ──────────────────────────────────
+// "Hoja de inspección" de la OT: el técnico elige un diagrama (vehicle_type +
+// system + configuration), marca los puntos dañados y opcionalmente los
+// puede convertir en WorkOrderItem — ver propuesta, secciones 2 y 2.5.
+
+const DIAGNOSIS_MARK_INCLUDE = [
+  { model: Product, as: 'suggested_product', attributes: ['id', 'name', 'sku', 'base_price'], required: false },
+  { model: User, as: 'marked_by_user', attributes: ['id', 'first_name', 'last_name'], required: false },
+];
+
+/**
+ * GET /work-orders/:id/diagnosis-marks
+ * Lista las marcas hechas sobre uno o varios diagramas para esta OT.
+ */
+const listDiagnosisMarks = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id } });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    const marks = await WorkOrderDiagnosisMark.findAll({
+      where: { work_order_id: order.id, tenant_id },
+      include: DIAGNOSIS_MARK_INCLUDE,
+      order: [['marked_at', 'ASC']],
+    });
+
+    res.json({ success: true, data: marks });
+  } catch (error) {
+    logger.error('Error listando marcas de diagnóstico:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener las marcas del diagrama' });
+  }
+};
+
+/**
+ * POST /work-orders/:id/diagnosis-marks
+ * Registra un punto marcado por el técnico sobre un diagrama.
+ */
+const addDiagnosisMark = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id } });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    if (['entregado', 'cancelado'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'No se pueden agregar marcas a una OT cerrada' });
+    }
+
+    const { diagram_template_id, point_number, severity, side, observation, suggested_product_id } = req.body;
+    if (!diagram_template_id || !point_number) {
+      return res.status(400).json({ success: false, message: 'El diagrama y el número de punto son requeridos' });
+    }
+
+    const template = await DiagramTemplate.findOne({
+      where: { id: diagram_template_id, is_active: true, [Op.or]: [{ tenant_id: null }, { tenant_id }] },
+    });
+    if (!template) return res.status(404).json({ success: false, message: 'Diagrama no encontrado' });
+
+    const pointExists = (template.points || []).some(p => p.point_number === parseInt(point_number));
+    if (!pointExists) {
+      return res.status(400).json({ success: false, message: 'Ese punto no existe en el diagrama seleccionado' });
+    }
+
+    const mark = await WorkOrderDiagnosisMark.create({
+      tenant_id,
+      work_order_id: order.id,
+      diagram_template_id,
+      point_number: parseInt(point_number),
+      severity: severity || 'revisar',
+      side: side || null,
+      observation: observation || null,
+      suggested_product_id: suggested_product_id || null,
+      marked_by: req.user.id,
+    });
+
+    const full = await WorkOrderDiagnosisMark.findByPk(mark.id, { include: DIAGNOSIS_MARK_INCLUDE });
+    res.status(201).json({ success: true, message: 'Marca registrada', data: full });
+  } catch (error) {
+    logger.error('Error agregando marca de diagnóstico:', error);
+    res.status(500).json({ success: false, message: 'Error al registrar la marca' });
+  }
+};
+
+/**
+ * PUT /work-orders/:id/diagnosis-marks/:markId
+ * Edita severidad/lado/observación/producto sugerido de una marca existente.
+ */
+const updateDiagnosisMark = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const mark = await WorkOrderDiagnosisMark.findOne({
+      where: { id: req.params.markId, work_order_id: req.params.id, tenant_id },
+    });
+    if (!mark) return res.status(404).json({ success: false, message: 'Marca no encontrada' });
+    if (mark.generated_item_id) {
+      return res.status(400).json({ success: false, message: 'Esta marca ya generó un ítem y no se puede editar' });
+    }
+
+    const { severity, side, observation, suggested_product_id } = req.body;
+    await mark.update({
+      severity: severity || mark.severity,
+      side: side !== undefined ? side : mark.side,
+      observation: observation !== undefined ? observation : mark.observation,
+      suggested_product_id: suggested_product_id !== undefined ? suggested_product_id : mark.suggested_product_id,
+    });
+
+    const full = await WorkOrderDiagnosisMark.findByPk(mark.id, { include: DIAGNOSIS_MARK_INCLUDE });
+    res.json({ success: true, message: 'Marca actualizada', data: full });
+  } catch (error) {
+    logger.error('Error actualizando marca de diagnóstico:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar la marca' });
+  }
+};
+
+/**
+ * DELETE /work-orders/:id/diagnosis-marks/:markId
+ */
+const removeDiagnosisMark = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const mark = await WorkOrderDiagnosisMark.findOne({
+      where: { id: req.params.markId, work_order_id: req.params.id, tenant_id },
+    });
+    if (!mark) return res.status(404).json({ success: false, message: 'Marca no encontrada' });
+    if (mark.generated_item_id) {
+      return res.status(400).json({ success: false, message: 'Esta marca ya generó un ítem — elimina el ítem primero' });
+    }
+
+    await mark.destroy();
+    res.json({ success: true, message: 'Marca eliminada' });
+  } catch (error) {
+    logger.error('Error eliminando marca de diagnóstico:', error);
+    res.status(500).json({ success: false, message: 'Error al eliminar la marca' });
+  }
+};
+
+/**
+ * POST /work-orders/:id/diagnosis-marks/generate-items
+ * Convierte las marcas con producto sugerido (y que aún no generaron ítem)
+ * en WorkOrderItem — el "reduce doble trabajo" de la sección 2.5.3. Los
+ * ítems quedan 'pendiente' de aprobación del cliente, igual que cualquier
+ * otro ítem agregado antes de una ronda de cotización.
+ */
+const generateItemsFromMarks = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
+    if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
+    if (['entregado', 'cancelado'].includes(order.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se pueden generar ítems en una OT cerrada' });
+    }
+
+    const { mark_ids } = req.body; // opcional: subset de marcas a convertir
+    const where = { work_order_id: order.id, tenant_id, generated_item_id: null, suggested_product_id: { [Op.ne]: null } };
+    if (Array.isArray(mark_ids) && mark_ids.length) where.id = { [Op.in]: mark_ids };
+
+    const marks = await WorkOrderDiagnosisMark.findAll({ where, transaction });
+    if (!marks.length) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay marcas pendientes con producto sugerido para generar' });
+    }
+
+    const toBool = (v, def = false) => {
+      if (v === true || v === 'true' || v === 1) return true;
+      if (v === false || v === 'false' || v === 0) return false;
+      return def;
+    };
+
+    const created = [];
+    for (const mark of marks) {
+      const product = await Product.findOne({ where: { id: mark.suggested_product_id, tenant_id }, transaction });
+      if (!product) continue; // producto desactivado/borrado desde que se marcó — se omite, no se rompe el lote
+
+      const qty   = 1;
+      const price = parseFloat(product.base_price) || 0;
+      const taxPct = parseFloat(product.tax_percentage ?? 19);
+      const hasTax = toBool(product.has_tax, true) && taxPct > 0;
+      const priceIncludesTax = toBool(product.price_includes_tax, false);
+
+      let subtotal, tax_amount;
+      if (!hasTax) {
+        subtotal = qty * price; tax_amount = 0;
+      } else if (priceIncludesTax) {
+        const totalBruto = qty * price;
+        subtotal = Math.round(totalBruto / (1 + taxPct / 100));
+        tax_amount = totalBruto - subtotal;
+      } else {
+        subtotal = qty * price;
+        tax_amount = Math.round(subtotal * (taxPct / 100));
+      }
+
+      const item_type = product.product_type === 'service' ? 'servicio' : 'repuesto';
+      const item = await WorkOrderItem.create({
+        tenant_id,
+        work_order_id: order.id,
+        item_type,
+        product_id: product.id,
+        product_name: product.name,
+        product_sku: product.sku,
+        quantity: qty,
+        unit_price: price,
+        tax_percentage: taxPct,
+        tax_amount,
+        subtotal,
+        total: subtotal + tax_amount,
+        approval_status: 'pendiente',
+      }, { transaction });
+
+      await mark.update({ generated_item_id: item.id }, { transaction });
+      created.push(item);
+    }
+
+    // El ítem queda 'pendiente' (no facturable todavía), así que no se
+    // recalculan totales de la OT aquí — se recalculan cuando el cliente
+    // aprueba, igual que el resto del flujo de cotización.
+    await transaction.commit();
+    res.status(201).json({ success: true, message: `${created.length} ítem(s) generados desde el diagrama`, data: created });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error generando ítems desde marcas de diagnóstico:', error);
+    res.status(500).json({ success: false, message: 'Error al generar los ítems' });
   }
 };
 
@@ -958,9 +1108,6 @@ const generateSale = async (req, res) => {
     const customerName = customer
       ? (customer.business_name || `${customer.first_name} ${customer.last_name}`)
       : 'Cliente General';
-    // Método del último abono ya cobrado en la OT, si hubo alguno — usado por
-    // generateSaleEntry para decidir caja vs bancos en el saldo ya pagado.
-    const lastPayment = (order.payment_history || [])[order.payment_history?.length - 1];
 
     const sale = await Sale.create({
       tenant_id,
@@ -982,18 +1129,8 @@ const generateSale = async (req, res) => {
       tax_amount:       order.tax_amount,
       discount_amount:  order.discount_amount || 0,
       total_amount:     order.total_amount,
-      // Una remisión/factura emitida desde una OT ya cerrada es un hecho
-      // consumado — no hay un paso de "confirmar" posterior para estas
-      // ventas, así que nace 'completed' (no 'pending') para que sí dispare
-      // el asiento contable automático y aparezca en Salud Contable.
-      status:           'completed',
-      // Se trasladan los abonos ya cobrados DURANTE la reparación (vía
-      // registerPayment de la OT) — antes quedaban en blanco acá, perdiendo
-      // el rastro de lo ya cobrado frente a la factura/remisión final.
-      paid_amount:      order.paid_amount || 0,
-      payment_status:   order.payment_status || 'pending',
-      payment_history:  order.payment_history || [],
-      payment_method:   lastPayment?.method || null,
+      status:           'pending',
+      payment_status:   'pending',
       dian_status:      document_type === 'factura' ? 'pending' : 'not_applicable',
       notes: `Generada desde OT ${order.order_number}${order.work_performed ? '. ' + order.work_performed : ''}`.trim(),
       created_by: req.user.id,
@@ -1012,7 +1149,6 @@ const generateSale = async (req, res) => {
       await SaleItem.create({
         tenant_id,
         sale_id:          sale.id,
-        item_type:        mapWorkOrderItemTypeToSale(item.item_type),
         product_id:       item.product_id,
         product_name:     item.product_name,
         product_sku:      item.product_sku,
@@ -1065,19 +1201,6 @@ const generateSale = async (req, res) => {
 
     await transaction.commit();
 
-    // Asiento contable en borrador (no bloqueante) — mismo patrón que
-    // confirm() en sales.controller.js. Antes NUNCA se llamaba para ventas
-    // generadas desde Taller (quedaban sin contabilizar).
-    setImmediate(async () => {
-      try {
-        const { generateSaleEntry } = require('../../services/accounting/autoEntries.service');
-        const saleForAccounting = await Sale.findByPk(sale.id, { include: [{ model: SaleItem, as: 'items' }] });
-        await generateSaleEntry(saleForAccounting, saleForAccounting.items, tenant_id, req.user.id);
-      } catch (err) {
-        logger.warn(`[accounting] Error generando asiento de venta ${sale.id} (OT ${order.id}): ${err.message}`);
-      }
-    });
-
     res.status(201).json({
       success: true,
       message: 'Remisión generada exitosamente',
@@ -1104,7 +1227,6 @@ const uploadPhotos = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se recibieron archivos' });
 
     const useCloudinary =
-      process.env.USE_CLOUDINARY === 'true' &&
       process.env.CLOUDINARY_CLOUD_NAME &&
       process.env.CLOUDINARY_API_KEY &&
       process.env.CLOUDINARY_API_SECRET;
@@ -1121,12 +1243,12 @@ const uploadPhotos = async (req, res) => {
         });
         const result = await new Promise((resolve, reject) => {
           const stream = cloudinary.uploader.upload_stream(
-            { folder: `workshop/${order.tenant_id}/${order.id}`, resource_type: 'image' },
+            { folder: `workshop/${order.tenant_id}/${order.id}`, resource_type: 'auto' },
             (err, r) => (err ? reject(err) : resolve(r))
           );
           stream.end(file.buffer);
         });
-        newPhotos.push({ url: result.secure_url, public_id: result.public_id, caption: '' });
+        newPhotos.push({ url: result.secure_url, public_id: result.public_id, caption: '', type: file.mimetype?.startsWith('video') ? 'video' : 'image' });
       } else {
         const path  = require('path');
         const fs    = require('fs');
@@ -1134,7 +1256,7 @@ const uploadPhotos = async (req, res) => {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         const filename = `wo-${Date.now()}-${file.originalname}`;
         fs.writeFileSync(path.join(dir, filename), file.buffer);
-        newPhotos.push({ url: `/uploads/workshop/${filename}`, public_id: filename, caption: '' });
+        newPhotos.push({ url: `/uploads/workshop/${filename}`, public_id: filename, caption: '', type: file.mimetype?.startsWith('video') ? 'video' : 'image' });
       }
     }
 
@@ -1165,9 +1287,14 @@ const deletePhoto = async (req, res) => {
 
     const removed = photos.splice(idx, 1)[0];
 
-    if (removed.public_id && removed.url?.includes('cloudinary')) {
+    if (removed.url?.includes('cloudinary') && removed.public_id) {
       const cloudinary = require('cloudinary').v2;
       await cloudinary.uploader.destroy(removed.public_id).catch(() => {});
+    } else if (removed.url?.startsWith('/uploads/')) {
+      const path = require('path');
+      const fs   = require('fs');
+      const filePath = path.join(__dirname, '../../../', removed.url);
+      fs.unlink(filePath, () => {}); // best-effort, no romper si falta
     }
 
     await order.update({ [field]: photos });
@@ -1288,17 +1415,6 @@ const registerPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Esta orden ya está pagada en su totalidad' });
     }
 
-    // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
-    // caja abierta en la sede activa — solo para tenants con Tesorería activa.
-    let openSession = null;
-    if (await isTreasuryEnabled(tenant_id)) {
-      openSession = await getOpenSession(tenant_id, req.branch_id, transaction);
-      if (!openSession) {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
-      }
-    }
-
     // Si aún no hay total_amount definido (OT sin ítems cerrados), se acepta el abono tal cual;
     // si sí hay total, se limita el monto al saldo pendiente para evitar sobrepagos.
     const effectiveAmount = total > 0 ? Math.min(parseFloat(amount), remaining) : parseFloat(amount);
@@ -1308,39 +1424,15 @@ const registerPayment = async (req, res) => {
     if (total > 0 && paid_amount >= total) payment_status = 'paid';
     else if (paid_amount > 0) payment_status = 'partial';
 
-    const payment_id = require('crypto').randomUUID();
-    const effectiveMethod = payment_method || 'cash';
-    const effectiveDate = payment_date || new Date();
-
-    const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
-    const { Receipt } = require('../../models');
-    const receipt_number = await generateReceiptNumber(tenant_id, transaction);
-    await Receipt.create({
-      tenant_id,
-      branch_id: req.branch_id,
-      receipt_number,
-      source_type: 'work_order',
-      source_id: order.id,
-      payment_id,
-      cash_session_id: openSession?.id || null,
-      amount: effectiveAmount,
-      method: effectiveMethod,
-      payment_date: effectiveDate,
-      reference: order.order_number,
-      created_by: userId,
-    }, { transaction });
-
+    const receipt_number = `REC-${Date.now().toString().slice(-6)}`;
     const payment_history = [...(order.payment_history || [])];
     payment_history.push({
-      payment_id,
-      date: effectiveDate,
+      date: payment_date || new Date(),
       amount: effectiveAmount,
-      method: effectiveMethod,
+      method: payment_method || 'cash',
       user_id: userId,
       notes: notes || null,
       receipt_number,
-      cash_session_id: openSession?.id || null,
-      branch_id: req.branch_id,
     });
 
     await order.update(
@@ -1349,32 +1441,6 @@ const registerPayment = async (req, res) => {
     );
 
     await transaction.commit();
-
-    // Asiento contable del abono (caja/bancos vs cartera), no bloqueante —
-    // SOLO si esta OT ya tiene una venta/factura generada (order.sale_id).
-    // Si todavía no la tiene, este abono NO debe contabilizarse aquí: no
-    // existe cartera que reducir todavía (aún no hay asiento de venta), y
-    // generateSale ya traslada este payment_history completo a la Sale —
-    // ahí sí queda correctamente repartido pagado/pendiente en un solo
-    // asiento. Generar un asiento acá adelantado duplicaría ese monto.
-    if (order.sale_id) {
-      setImmediate(async () => {
-        try {
-          const { generatePaymentEntry } = require('../../services/accounting/autoEntries.service');
-          const sale = await Sale.findByPk(order.sale_id);
-          if (sale) {
-            await generatePaymentEntry(
-              { payment_id, amount: effectiveAmount, method: effectiveMethod, date: effectiveDate },
-              sale,
-              tenant_id,
-              userId
-            );
-          }
-        } catch (err) {
-          logger.warn(`[accounting] Error generando asiento de abono (OT ${id}): ${err.message}`);
-        }
-      });
-    }
 
     const updatedOrder = await WorkOrder.findOne({
       where: { id, tenant_id },
@@ -1447,6 +1513,7 @@ const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrde
 const whatsappService = require('../../services/whatsappService');
 
 async function getOrderWithTenant(id, tenant_id) {
+  const { WorkOrderDiagnosisMark, DiagramTemplate } = require('../../models');
   const order = await WorkOrder.findOne({
     where: { id, tenant_id },
     include: [
@@ -1458,6 +1525,9 @@ async function getOrderWithTenant(id, tenant_id) {
           { model: require('../../models/inventory/Product'), as: 'product', attributes: ['id', 'name', 'sku'] },
           ITEM_TECHNICIAN_INCLUDE,
         ] },
+      { model: WorkOrderDiagnosisMark, as: 'diagnosis_marks',
+        include: [{ model: DiagramTemplate, as: 'diagram_template' }],
+      },
     ],
   });
 
@@ -1533,21 +1603,12 @@ const updateChecklist = async (req, res) => {
     const order = await WorkOrder.findOne({ where: { id, tenant_id } });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
-    const { expectedVersion, rest: checklistData } = popExpectedVersion(req.body);
-    if (hasVersionConflict(order, expectedVersion)) {
-      return res.status(409).json({
-        success: false,
-        message: 'La orden fue modificada por otro usuario mientras estabas sin conexión',
-        data: order,
-      });
-    }
-
     // Raw SQL para evitar problemas de Sequelize con JSONB
     await sequelize.query(
       `UPDATE work_orders SET checklist_in = :data::jsonb WHERE id = :id AND tenant_id = :tenant_id`,
       {
         replacements: {
-          data: JSON.stringify(checklistData),
+          data: JSON.stringify(req.body),
           id,
           tenant_id,
         },
@@ -1555,7 +1616,7 @@ const updateChecklist = async (req, res) => {
       }
     );
 
-    res.json({ success: true, data: checklistData });
+    res.json({ success: true, data: req.body });
   } catch (error) {
     logger.error('Error actualizando checklist:', error);
     res.status(500).json({ success: false, message: 'Error al actualizar checklist' });
@@ -1772,6 +1833,44 @@ const getPublicOrder = async (req, res) => {
     const activeQuoteRequest = quoteRequests.find(q => q.status === 'enviada');
     const respondedQuoteRequests = quoteRequests.filter(q => q.status === 'respondida');
 
+    // Mapa de intervención — diagramas marcados por el técnico (fase 4 de la
+    // propuesta de diagramas interactivos). Se agrupan por diagrama, con solo
+    // los campos seguros: nada de suggested_product_id/generated_item_id/
+    // marked_by, que son internos del taller.
+    const diagnosisMarks = await WorkOrderDiagnosisMark.findAll({
+      where: { work_order_id: orderId },
+      include: [{
+        model: DiagramTemplate,
+        as: 'diagram_template',
+        attributes: ['id', 'name', 'svg_content', 'image_path', 'view_box', 'points'],
+      }],
+      order: [['marked_at', 'ASC']],
+    });
+
+    const diagramsMap = new Map();
+    for (const mark of diagnosisMarks) {
+      const tpl = mark.diagram_template;
+      if (!tpl) continue;
+      if (!diagramsMap.has(tpl.id)) {
+        diagramsMap.set(tpl.id, {
+          id: tpl.id,
+          name: tpl.name,
+          svg_content: tpl.svg_content,
+          image_path: tpl.image_path,
+          view_box: tpl.view_box,
+          points: tpl.points || [],
+          marks: [],
+        });
+      }
+      diagramsMap.get(tpl.id).marks.push({
+        point_number: mark.point_number,
+        severity: mark.severity,
+        side: mark.side,
+        observation: mark.observation,
+      });
+    }
+    const diagrams = Array.from(diagramsMap.values());
+
     // Buscar datos del taller (tenant) para mostrar nombre y contacto
     const tenant = await Tenant.findByPk(order.tenant_id, {
       attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color'],
@@ -1800,6 +1899,10 @@ const getPublicOrder = async (req, res) => {
         name: order.customer.business_name || `${order.customer.first_name} ${order.customer.last_name || ''}`.trim(),
       } : null,
       technician: order.technician ? `${order.technician.first_name} ${order.technician.last_name}` : null,
+      // Mapa de intervención — diagrama(s) con los puntos marcados por el
+      // técnico, para que el cliente entienda visualmente de dónde salen
+      // los ítems cotizados (ver propuesta, sección 3).
+      diagrams,
       // Solo los ítems ya confirmados (aprobado) — los pendientes de cotizar
       // se muestran aparte en active_quote_request, no acá.
       items: (order.items || [])
@@ -1905,4 +2008,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks };
