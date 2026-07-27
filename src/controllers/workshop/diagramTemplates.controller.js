@@ -57,6 +57,12 @@ const getById = async (req, res) => {
 // imágenes WEBP reales, donde las posiciones dibujadas a mano ya no calzan
 // con la foto. Solo toca `points`; no crea ni borra marcas de ninguna OT
 // (las marcas solo referencian point_number, nunca x/y).
+// label_dx/label_dy son opcionales: desplazan el número respecto al punto
+// real y el frontend dibuja la línea guía entre ambos — se usan cuando hay
+// varias marcas muy próximas entre sí.
+// Marca is_customized = true: a partir de este PATCH, el seed que corre en
+// cada arranque del server (seedDiagramTemplates) deja esta fila en paz y
+// ya no la vuelve a pisar con lo que haya en el catálogo estático.
 const updatePoints = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
@@ -66,9 +72,14 @@ const updatePoints = async (req, res) => {
       typeof p.point_number !== 'number' ||
       typeof p.x !== 'number' ||
       typeof p.y !== 'number' ||
-      typeof p.part_name !== 'string'
+      typeof p.part_name !== 'string' ||
+      (p.label_dx !== undefined && typeof p.label_dx !== 'number') ||
+      (p.label_dy !== undefined && typeof p.label_dy !== 'number')
     ))) {
-      return res.status(400).json({ success: false, message: 'points debe ser un array de {point_number, x, y, part_name}' });
+      return res.status(400).json({
+        success: false,
+        message: 'points debe ser un array de {point_number, x, y, part_name, label_dx?, label_dy?}',
+      });
     }
 
     const template = await DiagramTemplate.findOne({
@@ -79,7 +90,7 @@ const updatePoints = async (req, res) => {
     });
     if (!template) return res.status(404).json({ success: false, message: 'Diagrama no encontrado' });
 
-    await template.update({ points });
+    await template.update({ points, is_customized: true });
     res.json({ success: true, message: 'Puntos actualizados', data: template });
   } catch (error) {
     logger.error('Error actualizando puntos de plantilla de diagrama:', error);
@@ -87,4 +98,39 @@ const updatePoints = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, updatePoints };
+// Setea la ruta de la imagen WEBP real de una plantilla (relativa a
+// public/assets/diagrams/ en el frontend, ej. "suspension/macpherson.webp")
+// — usado por el panel admin tras subir/organizar los assets del diagrama.
+// No hay endpoint de subida de archivo acá a propósito: los WEBP viven como
+// assets estáticos del frontend, este endpoint solo guarda la ruta relativa.
+// Igual que updatePoints, marca is_customized = true para que el seed no
+// vuelva a resetear la ruta al siguiente reinicio del server.
+const updateImage = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { image_path } = req.body;
+
+    if (image_path !== null && typeof image_path !== 'string') {
+      return res.status(400).json({ success: false, message: 'image_path debe ser un string (o null para limpiarlo)' });
+    }
+    if (typeof image_path === 'string' && !image_path.trim()) {
+      return res.status(400).json({ success: false, message: 'image_path no puede ser un string vacío' });
+    }
+
+    const template = await DiagramTemplate.findOne({
+      where: {
+        id: req.params.id,
+        [Op.or]: [{ tenant_id: null }, { tenant_id }],
+      },
+    });
+    if (!template) return res.status(404).json({ success: false, message: 'Diagrama no encontrado' });
+
+    await template.update({ image_path, is_customized: true });
+    res.json({ success: true, message: 'Imagen actualizada', data: template });
+  } catch (error) {
+    logger.error('Error actualizando imagen de plantilla de diagrama:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar la imagen' });
+  }
+};
+
+module.exports = { list, getById, updatePoints, updateImage };

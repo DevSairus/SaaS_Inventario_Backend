@@ -61,11 +61,19 @@ const DiagramTemplate = sequelize.define('DiagramTemplate', {
     type: DataTypes.JSONB,
     allowNull: false,
     defaultValue: [],
-    comment: 'Catálogo de partes numeradas: [{point_number, x, y, part_name}]'
+    comment: 'Catálogo de partes numeradas: [{point_number, x, y, part_name, label_dx?, label_dy?}]. ' +
+      'label_dx/label_dy (opcionales) desplazan el número respecto a (x,y) y el frontend dibuja una ' +
+      'línea guía desde el label hasta el punto real — usados cuando hay varias marcas muy próximas.'
   },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  is_customized: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    comment: 'true = editado a mano vía el panel admin (image_path y/o points); el seed deja de sobreescribirla'
   }
 }, {
   tableName: 'diagram_templates',
