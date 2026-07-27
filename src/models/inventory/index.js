@@ -9,6 +9,9 @@ const Warehouse = require('./Warehouse');
 const InventoryMovement = require('./InventoryMovement');
 const InventoryAdjustment = require('./InventoryAdjustment');
 const InventoryAdjustmentItem = require('./InventoryAdjustmentItem');
+const ProductEquivalenceGroup = require('./ProductEquivalenceGroup');
+const ProductEquivalenceGroupMember = require('./ProductEquivalenceGroupMember');
+const ProductVehicleApplication = require('./ProductVehicleApplication');
 
 // ========== RELACIONES ==========
 
@@ -48,23 +51,33 @@ InventoryMovement.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'wareho
 Warehouse.hasMany(InventoryMovement, { foreignKey: 'warehouse_id', as: 'movements' });
 
 // InventoryAdjustment - InventoryAdjustmentItem (1:N)
-InventoryAdjustment.hasMany(InventoryAdjustmentItem, { 
-  foreignKey: 'adjustment_id', 
-  as: 'items' 
+InventoryAdjustment.hasMany(InventoryAdjustmentItem, {
+  foreignKey: 'adjustment_id',
+  as: 'items'
 });
-InventoryAdjustmentItem.belongsTo(InventoryAdjustment, { 
-  foreignKey: 'adjustment_id', 
-  as: 'adjustment' 
+InventoryAdjustmentItem.belongsTo(InventoryAdjustment, {
+  foreignKey: 'adjustment_id',
+  as: 'adjustment'
 });
 
 // InventoryAdjustmentItem - Product (N:1)
-InventoryAdjustmentItem.belongsTo(Product, { 
-  foreignKey: 'product_id', 
-  as: 'product' 
+InventoryAdjustmentItem.belongsTo(Product, {
+  foreignKey: 'product_id',
+  as: 'product'
 });
-Product.hasMany(InventoryAdjustmentItem, { 
-  foreignKey: 'product_id', 
-  as: 'adjustment_items' 
+Product.hasMany(InventoryAdjustmentItem, {
+  foreignKey: 'product_id',
+  as: 'adjustment_items'
+});
+
+// ProductVehicleApplication - Product (N:1)
+ProductVehicleApplication.belongsTo(Product, {
+  foreignKey: 'product_id',
+  as: 'product'
+});
+Product.hasMany(ProductVehicleApplication, {
+  foreignKey: 'product_id',
+  as: 'vehicleApplications'
 });
 
 // ========== EXPORTAR ==========
@@ -78,5 +91,8 @@ module.exports = {
   Warehouse,
   InventoryMovement,
   InventoryAdjustment,
-  InventoryAdjustmentItem
+  InventoryAdjustmentItem,
+  ProductEquivalenceGroup,
+  ProductEquivalenceGroupMember,
+  ProductVehicleApplication
 };
