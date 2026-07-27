@@ -3,12 +3,14 @@
 // Catálogo de diagramas base para el "Mapa de intervención".
 // Cubre automóviles, camionetas, camiones y motocicletas.
 // Automóvil: estilo 3D fotográfico (gradientes, sombras, brillos especulares).
+// Puntos con label_dx/label_dy: el numero se dibuja desplazado y conectado
+// por una linea guia al punto real (x,y) sobre la pieza, para diagramas con
+// varias marcas muy próximas entre sí.
 module.exports = [
   {
     "vehicle_type": "automovil",
     "system": "suspension_delantera",
     "configuration": "macpherson",
-    "image_path": "suspension/macpherson.webp",
     "name": "Suspensión delantera MacPherson",
     "description": "Configuración más común en automóviles: amortiguador y resorte integrados en una sola columna (strut).",
     "view_box": "0 0 600 400",
@@ -30,7 +32,9 @@ module.exports = [
         "point_number": 3,
         "x": 330,
         "y": 220,
-        "part_name": "Tope de goteo"
+        "part_name": "Tope de goteo",
+        "label_dx": 0,
+        "label_dy": -1.1
       },
       {
         "point_number": 4,
@@ -46,8 +50,8 @@ module.exports = [
       },
       {
         "point_number": 6,
-        "x": 230,
-        "y": 326,
+        "x": 235,
+        "y": 305,
         "part_name": "Brazo de control inferior"
       },
       {
@@ -58,8 +62,8 @@ module.exports = [
       },
       {
         "point_number": 8,
-        "x": 230,
-        "y": 326,
+        "x": 200,
+        "y": 313,
         "part_name": "Buje trasero del brazo"
       },
       {
@@ -82,14 +86,16 @@ module.exports = [
       },
       {
         "point_number": 12,
-        "x": 341,
-        "y": 278,
-        "part_name": "Mangueta (knuckle)"
+        "x": 330,
+        "y": 250,
+        "part_name": "Mangueta (knuckle)",
+        "label_dx": 0,
+        "label_dy": 1.1
       },
       {
         "point_number": 13,
         "x": 341,
-        "y": 310,
+        "y": 290,
         "part_name": "Rodamiento de rueda"
       }
     ]
@@ -98,7 +104,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "suspension_delantera",
     "configuration": "doble_horquilla",
-    "image_path": "suspension/double-wishbone.webp",
     "name": "Suspensión delantera doble horquilla",
     "description": "Dos brazos (superior e inferior) independientes sostienen la mangueta — más habitual en camionetas y vehículos de mayor porte.",
     "view_box": "0 0 600 400",
@@ -160,8 +165,8 @@ module.exports = [
       },
       {
         "point_number": 10,
-        "x": 300,
-        "y": 175,
+        "x": 318,
+        "y": 180,
         "part_name": "Link de barra estabilizadora"
       },
       {
@@ -182,7 +187,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "suspension_trasera",
     "configuration": "eje_rigido",
-    "image_path": "suspension/solid-axle-leaf-spring.webp",
     "name": "Suspensión trasera de eje rígido (ballestas)",
     "description": "Eje trasero rígido conectado mediante ballestas longitudinales — simple, robusto, común en vehículos comerciales.",
     "view_box": "0 0 600 400",
@@ -204,18 +208,22 @@ module.exports = [
         "point_number": 3,
         "x": 190,
         "y": 133,
-        "part_name": "Amortiguador"
+        "part_name": "Amortiguador",
+        "label_dx": 3.3,
+        "label_dy": -4.7
       },
       {
         "point_number": 4,
-        "x": 190,
+        "x": 178,
         "y": 150,
-        "part_name": "Soporte amortiguador"
+        "part_name": "Soporte amortiguador",
+        "label_dx": -3.3,
+        "label_dy": 4.7
       },
       {
         "point_number": 5,
-        "x": 190,
-        "y": 225,
+        "x": 205,
+        "y": 228,
         "part_name": "U-bolt (grapa)"
       },
       {
@@ -242,7 +250,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "suspension_trasera",
     "configuration": "multilink",
-    "image_path": "suspension/multilink.webp",
     "name": "Suspensión trasera multilink",
     "description": "Múltiples brazos independientes controlan la rueda — mejor estabilidad y confort.",
     "view_box": "0 0 600 400",
@@ -302,7 +309,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "suspension_trasera",
     "configuration": "independiente",
-    "image_path": "suspension/torsion-beam.webp",
     "name": "Suspensión trasera independiente (brazo longitudinal)",
     "description": "Cada rueda se mueve de forma independiente mediante un brazo longitudinal — frecuente en autos compactos.",
     "view_box": "0 0 600 400",
@@ -312,13 +318,17 @@ module.exports = [
         "point_number": 1,
         "x": 300,
         "y": 145,
-        "part_name": "Amortiguador"
+        "part_name": "Amortiguador",
+        "label_dx": -1.5,
+        "label_dy": 1.5
       },
       {
         "point_number": 2,
         "x": 320,
         "y": 125,
-        "part_name": "Resorte helicoidal"
+        "part_name": "Resorte helicoidal",
+        "label_dx": 1.5,
+        "label_dy": -1.5
       },
       {
         "point_number": 3,
@@ -350,7 +360,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "frenos_delanteros",
     "configuration": "disco_ventilado",
-    "image_path": "brakes/front-disc-vented.webp",
     "name": "Frenos delanteros — disco ventilado",
     "description": "Disco con canales internos de ventilación para disipar mejor el calor — estándar en el eje delantero.",
     "view_box": "0 0 600 400",
@@ -364,38 +373,46 @@ module.exports = [
       },
       {
         "point_number": 2,
-        "x": 272,
-        "y": 140,
-        "part_name": "Mordaza (caliper)"
+        "x": 280,
+        "y": 172,
+        "part_name": "Mordaza (caliper)",
+        "label_dx": 1.5,
+        "label_dy": 2.1
       },
       {
         "point_number": 3,
-        "x": 260,
-        "y": 115,
-        "part_name": "Pastilla interior"
+        "x": 264,
+        "y": 110,
+        "part_name": "Pastilla interior",
+        "label_dx": -1.5,
+        "label_dy": 2.1
       },
       {
         "point_number": 4,
-        "x": 260,
-        "y": 135,
-        "part_name": "Pastilla exterior"
+        "x": 264,
+        "y": 150,
+        "part_name": "Pastilla exterior",
+        "label_dx": -1.5,
+        "label_dy": -2.1
       },
       {
         "point_number": 5,
-        "x": 272,
-        "y": 95,
-        "part_name": "Perno guía del caliper"
+        "x": 280,
+        "y": 88,
+        "part_name": "Perno guía del caliper",
+        "label_dx": 1.5,
+        "label_dy": -2.1
       },
       {
         "point_number": 6,
-        "x": 272,
-        "y": 100,
+        "x": 296,
+        "y": 118,
         "part_name": "Portamordaza (bracket)"
       },
       {
         "point_number": 7,
-        "x": 248,
-        "y": 135,
+        "x": 232,
+        "y": 130,
         "part_name": "Latiguillo de freno"
       },
       {
@@ -416,7 +433,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "frenos_delanteros",
     "configuration": "disco_solido",
-    "image_path": "brakes/front-disc-solid.webp",
     "name": "Frenos delanteros — disco sólido",
     "description": "Disco macizo sin canales de ventilación — más económico, usado en ejes traseros o autos de baja potencia.",
     "view_box": "0 0 600 400",
@@ -430,33 +446,43 @@ module.exports = [
       },
       {
         "point_number": 2,
-        "x": 275,
-        "y": 135,
-        "part_name": "Mordaza (caliper)"
+        "x": 284,
+        "y": 174,
+        "part_name": "Mordaza (caliper)",
+        "label_dx": 1.5,
+        "label_dy": 2.1
       },
       {
         "point_number": 3,
-        "x": 265,
-        "y": 115,
-        "part_name": "Pastilla interior"
+        "x": 268,
+        "y": 112,
+        "part_name": "Pastilla interior",
+        "label_dx": -1.6,
+        "label_dy": 1.8
       },
       {
         "point_number": 4,
-        "x": 265,
-        "y": 135,
-        "part_name": "Pastilla exterior"
+        "x": 268,
+        "y": 152,
+        "part_name": "Pastilla exterior",
+        "label_dx": -1.5,
+        "label_dy": -2.1
       },
       {
         "point_number": 5,
-        "x": 275,
-        "y": 100,
-        "part_name": "Perno guía del caliper"
+        "x": 286,
+        "y": 92,
+        "part_name": "Perno guía del caliper",
+        "label_dx": 0.8,
+        "label_dy": -3.4
       },
       {
         "point_number": 6,
-        "x": 275,
-        "y": 105,
-        "part_name": "Portamordaza (bracket)"
+        "x": 300,
+        "y": 116,
+        "part_name": "Portamordaza (bracket)",
+        "label_dx": 0.8,
+        "label_dy": 1.5
       },
       {
         "point_number": 7,
@@ -466,8 +492,8 @@ module.exports = [
       },
       {
         "point_number": 8,
-        "x": 330,
-        "y": 220,
+        "x": 335,
+        "y": 225,
         "part_name": "Tornillos de rueda"
       }
     ]
@@ -476,7 +502,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "frenos_traseros",
     "configuration": "disco",
-    "image_path": "brakes/rear-disc.webp",
     "name": "Frenos traseros — disco",
     "description": "Disco de freno en el eje trasero — mejor rendimiento que tambor, común en autos deportivos.",
     "view_box": "0 0 600 400",
@@ -490,39 +515,51 @@ module.exports = [
       },
       {
         "point_number": 2,
-        "x": 280,
-        "y": 140,
-        "part_name": "Mordaza (caliper)"
+        "x": 288,
+        "y": 178,
+        "part_name": "Mordaza (caliper)",
+        "label_dx": 1.5,
+        "label_dy": 2.1
       },
       {
         "point_number": 3,
-        "x": 270,
-        "y": 120,
-        "part_name": "Pastilla interior"
+        "x": 272,
+        "y": 116,
+        "part_name": "Pastilla interior",
+        "label_dx": -1.8,
+        "label_dy": 2
       },
       {
         "point_number": 4,
-        "x": 270,
-        "y": 140,
-        "part_name": "Pastilla exterior"
+        "x": 272,
+        "y": 156,
+        "part_name": "Pastilla exterior",
+        "label_dx": -1.5,
+        "label_dy": -2.1
       },
       {
         "point_number": 5,
-        "x": 280,
-        "y": 105,
-        "part_name": "Perno guía del caliper"
+        "x": 290,
+        "y": 96,
+        "part_name": "Perno guía del caliper",
+        "label_dx": 1.8,
+        "label_dy": -2
       },
       {
         "point_number": 6,
         "x": 300,
         "y": 220,
-        "part_name": "Buje central (hub)"
+        "part_name": "Buje central (hub)",
+        "label_dx": -1.5,
+        "label_dy": -1.3
       },
       {
         "point_number": 7,
-        "x": 294,
-        "y": 225,
-        "part_name": "Freno de mano (zapata)"
+        "x": 322,
+        "y": 238,
+        "part_name": "Freno de mano (zapata)",
+        "label_dx": 1.5,
+        "label_dy": 1.3
       }
     ]
   },
@@ -530,7 +567,6 @@ module.exports = [
     "vehicle_type": "automovil",
     "system": "frenos_traseros",
     "configuration": "tambor",
-    "image_path": "brakes/rear-drum.webp",
     "name": "Frenos traseros — tambor",
     "description": "Tambor con zapatas internas — económico y autoajustable, común en ejes traseros de autos económicos.",
     "view_box": "0 0 600 400",
@@ -538,8 +574,8 @@ module.exports = [
     "points": [
       {
         "point_number": 1,
-        "x": 300,
-        "y": 310,
+        "x": 315,
+        "y": 320,
         "part_name": "Tambor de freno"
       },
       {
@@ -580,8 +616,8 @@ module.exports = [
       },
       {
         "point_number": 8,
-        "x": 300,
-        "y": 200,
+        "x": 326,
+        "y": 198,
         "part_name": "Tensor automático (star adjuster)"
       }
     ]
@@ -590,7 +626,6 @@ module.exports = [
     "vehicle_type": "camioneta",
     "system": "suspension_delantera",
     "configuration": "doble_horquilla",
-    "image_path": "suspension/double-wishbone-heavy-duty.webp",
     "name": "Suspensión delantera doble horquilla (camioneta)",
     "description": "Doble horquilla reforzada para camionetas — brazos más robustos, resorte más alto, diseñada para mayor carga.",
     "view_box": "0 0 600 400",
@@ -674,7 +709,6 @@ module.exports = [
     "vehicle_type": "camioneta",
     "system": "suspension_trasera",
     "configuration": "eje_rigido_ballestas",
-    "image_path": "suspension/solid-axle-leaf-spring-heavy-duty.webp",
     "name": "Suspensión trasera eje rígido con ballestas (camioneta)",
     "description": "Eje rígido con ballestas reforzadas de múltiples hojas — diseñado para carga pesada y remolque.",
     "view_box": "0 0 600 400",
@@ -746,7 +780,6 @@ module.exports = [
     "vehicle_type": "camioneta",
     "system": "frenos_delanteros",
     "configuration": "disco_ventilado",
-    "image_path": "brakes/front-disc-vented-heavy-duty.webp",
     "name": "Frenos delanteros — disco ventilado (camioneta)",
     "description": "Disco ventilado de mayor diámetro para camionetas — mayor capacidad de frenado para vehículos más pesados.",
     "view_box": "0 0 600 400",
@@ -812,7 +845,6 @@ module.exports = [
     "vehicle_type": "camioneta",
     "system": "frenos_traseros",
     "configuration": "tambor",
-    "image_path": "brakes/rear-drum-heavy-duty.webp",
     "name": "Frenos traseros — tambor (camioneta)",
     "description": "Tambor reforzado para camionetas — zapatas más anchas y cilindro de rueda de mayor capacidad.",
     "view_box": "0 0 600 400",
@@ -878,7 +910,6 @@ module.exports = [
     "vehicle_type": "camion",
     "system": "suspension_delantera",
     "configuration": "eje_rigido_ballestas",
-    "image_path": "suspension/solid-axle-leaf-spring-truck-front.webp",
     "name": "Suspensión delantera eje rígido con ballestas (camión)",
     "description": "Eje rígido delantero con ballestas longitudinales — configuración estándar en camiones de carga media y pesada.",
     "view_box": "0 0 600 400",
@@ -962,7 +993,6 @@ module.exports = [
     "vehicle_type": "camion",
     "system": "suspension_trasera",
     "configuration": "tandem_ballestas",
-    "image_path": "suspension/tandem-leaf-spring-truck.webp",
     "name": "Suspensión trasera tandem con ballestas (camión)",
     "description": "Doble eje trasero (tandem) con ballestas reforzadas — configuración estándar en camiones de carga pesada.",
     "view_box": "0 0 600 400",
@@ -1046,7 +1076,6 @@ module.exports = [
     "vehicle_type": "camion",
     "system": "frenos_delanteros",
     "configuration": "tambor_neumatico",
-    "image_path": "brakes/front-drum-air-truck.webp",
     "name": "Frenos delanteros — tambor neumático (camión)",
     "description": "Tambor de freno con actuador neumático — sistema de frenos estándar en camiones de carga pesada.",
     "view_box": "0 0 600 400",
@@ -1118,7 +1147,6 @@ module.exports = [
     "vehicle_type": "camion",
     "system": "frenos_traseros",
     "configuration": "tambor_neumatico_doble",
-    "image_path": "brakes/rear-drum-air-dual-truck.webp",
     "name": "Frenos traseros — tambor neumático doble (camión)",
     "description": "Tambor de freno con doble actuador neumático para eje tandem — máxima capacidad de frenado en camiones pesados.",
     "view_box": "0 0 600 400",
@@ -1202,7 +1230,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "suspension_delantera",
     "configuration": "telescopica_convencional",
-    "image_path": "suspension/telescopic-fork.webp",
     "name": "Suspensión delantera telescópica convencional",
     "description": "Horquilla telescópica convencional — la más común en motocicletas.",
     "view_box": "0 0 600 400",
@@ -1262,7 +1289,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "suspension_delantera",
     "configuration": "invertida_usd",
-    "image_path": "suspension/upside-down-fork.webp",
     "name": "Suspensión delantera invertida (USD)",
     "description": "Horquilla invertida — tubos más gruesos arriba, mayor rigidez, común en motos deportivas.",
     "view_box": "0 0 600 400",
@@ -1322,7 +1348,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "suspension_delantera",
     "configuration": "leading_link",
-    "image_path": "suspension/leading-link.webp",
     "name": "Suspensión delantera leading link (scooter)",
     "description": "Brazo oscilante delantero con amortiguador — típica de scooters y motos clásicas.",
     "view_box": "0 0 600 400",
@@ -1376,7 +1401,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "suspension_trasera",
     "configuration": "monoamortiguador",
-    "image_path": "suspension/mono-shock.webp",
     "name": "Suspensión trasera monoamortiguador",
     "description": "Un solo amortiguador central conectado al basculante — la más común en motos modernas.",
     "view_box": "0 0 600 400",
@@ -1436,7 +1460,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "suspension_trasera",
     "configuration": "doble_amortiguador",
-    "image_path": "suspension/dual-shock.webp",
     "name": "Suspensión trasera doble amortiguador",
     "description": "Dos amortiguadores laterales — típica de motos clásicas, custom y algunas naked.",
     "view_box": "0 0 600 400",
@@ -1496,7 +1519,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "frenos",
     "configuration": "disco_delantero_tambor_trasero",
-    "image_path": "brakes/moto-disc-front-drum-rear.webp",
     "name": "Frenos — disco delantero + tambor trasero",
     "description": "Configuración más común en motos económicas: disco ventilado delantero con mordaza, tambor trasero con zapatas.",
     "view_box": "0 0 600 400",
@@ -1556,7 +1578,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "frenos",
     "configuration": "disco_doble",
-    "image_path": "brakes/moto-disc-front-disc-rear.webp",
     "name": "Frenos — disco doble (delantero + trasero)",
     "description": "Discos tanto adelante como atrás — motos deportivas y naked de alta cilindrada.",
     "view_box": "0 0 600 400",
@@ -1616,7 +1637,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "transmision",
     "configuration": "cadena_pinon_catalina",
-    "image_path": "transmission/chain-sprocket.webp",
     "name": "Transmisión por cadena — piñón y catalina",
     "description": "Sistema de transmisión más común en motocicletas: cadena de rodillos conectando piñón con catalina.",
     "view_box": "0 0 600 400",
@@ -1676,7 +1696,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "transmision",
     "configuration": "banda_scooter",
-    "image_path": "transmission/cvt-belt-scooter.webp",
     "name": "Transmisión por banda (scooter automática)",
     "description": "Banda de transmisión variable (CVT) con variador adelante y embrague centrífugo atrás.",
     "view_box": "0 0 600 400",
@@ -1742,7 +1761,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "motor_culata",
     "configuration": "monocilindrico_aire",
-    "image_path": "engine/single-cylinder-head-air-cooled.webp",
     "name": "Motor monocilíndrico 4T — culata (aire)",
     "description": "Culata y tren de válvulas de motor monocilíndrico refrigerado por aire.",
     "view_box": "0 0 600 400",
@@ -1814,7 +1832,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "motor_culata",
     "configuration": "monocilindrico_liquido",
-    "image_path": "engine/single-cylinder-head-liquid-cooled.webp",
     "name": "Motor monocilíndrico 4T — culata (líquido)",
     "description": "Culata con refrigeración líquida — camisas de agua, termostato, bomba de agua.",
     "view_box": "0 0 600 400",
@@ -1886,7 +1903,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "motor_bloque",
     "configuration": "ciguenal_biela",
-    "image_path": "engine/crankshaft-connecting-rod.webp",
     "name": "Motor — cigüeñal y biela",
     "description": "Cigüeñal con contrapesos, biela y pistón — el corazón del motor monocilíndrico.",
     "view_box": "0 0 600 400",
@@ -1958,7 +1974,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "motor_bloque",
     "configuration": "embrague_multidisco",
-    "image_path": "engine/multi-disc-clutch.webp",
     "name": "Embrague multidisco húmedo",
     "description": "Embrague de múltiples discos bañados en aceite — el más común en motocicletas.",
     "view_box": "0 0 600 400",
@@ -2030,7 +2045,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "sistema_electrico",
     "configuration": "cdi_bateria",
-    "image_path": "electrical/cdi-battery-system.webp",
     "name": "Sistema eléctrico — CDI + batería 12V",
     "description": "Sistema de encendido CDI con batería de 12V — el más completo: arranque eléctrico, luces, encendido electrónico.",
     "view_box": "0 0 600 400",
@@ -2102,7 +2116,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "sistema_electrico",
     "configuration": "solo_cdi",
-    "image_path": "electrical/cdi-only-system.webp",
     "name": "Sistema eléctrico — solo CDI (sin batería)",
     "description": "Encendido CDI alimentado directamente por el estator — sin batería. Común en motos económicas.",
     "view_box": "0 0 600 400",
@@ -2174,7 +2187,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "sistema_combustible",
     "configuration": "carburador",
-    "image_path": "fuel/carburetor.webp",
     "name": "Sistema de combustible — carburador",
     "description": "Carburador de pistón deslizante (CV) — mezcla aire/combustible por depresión.",
     "view_box": "0 0 600 400",
@@ -2246,7 +2258,6 @@ module.exports = [
     "vehicle_type": "motocicleta",
     "system": "sistema_combustible",
     "configuration": "inyeccion",
-    "image_path": "fuel/fuel-injection.webp",
     "name": "Sistema de combustible — inyección electrónica",
     "description": "Inyección electrónica de combustible (EFI) — ECU controla los inyectores según sensores.",
     "view_box": "0 0 600 400",

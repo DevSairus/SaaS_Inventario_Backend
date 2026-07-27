@@ -59,13 +59,24 @@ async function renderDiagramToPng(imagePath, viewBox, points, marks) {
   const targetWidth = bgMeta.width || 800;
 
   // SVG transparente solo con los círculos/números de las marcas, en las
-  // mismas coordenadas (unidades de view_box) que usa el frontend.
+  // mismas coordenadas (unidades de view_box) que usa el frontend. Si el
+  // punto trae label_dx/label_dy (números que quedarían pegados o encima de
+  // la pieza), el círculo se dibuja desplazado + una línea guía + un puntito
+  // exacto sobre la pieza — igual que en DiagramMapEditor/WorkOrderPublicPage.
   const markSvgParts = (marks || []).map(m => {
     const pt = (points || []).find(p => p.point_number === m.point_number);
     if (!pt) return '';
     const color = SEVERITY_COLORS[m.severity] || '#2563eb';
-    return `<circle cx="${pt.x}" cy="${pt.y}" r="12" fill="${color}" fill-opacity="0.85" stroke="#fff" stroke-width="2"/>
-            <text x="${pt.x}" y="${pt.y + 4}" text-anchor="middle" font-size="10" font-family="Arial,sans-serif" fill="#fff" font-weight="bold">${pt.point_number}</text>`;
+    const hasOffset = !!(pt.label_dx || pt.label_dy);
+    const lx = pt.x + (pt.label_dx || 0);
+    const ly = pt.y + (pt.label_dy || 0);
+    const leader = hasOffset
+      ? `<line x1="${pt.x}" y1="${pt.y}" x2="${lx}" y2="${ly}" stroke="${color}" stroke-width="1.25" opacity="0.85"/>
+         <circle cx="${pt.x}" cy="${pt.y}" r="3" fill="${color}" stroke="#fff" stroke-width="1"/>`
+      : '';
+    return `${leader}
+            <circle cx="${lx}" cy="${ly}" r="12" fill="${color}" fill-opacity="0.85" stroke="#fff" stroke-width="2"/>
+            <text x="${lx}" y="${ly + 4}" text-anchor="middle" font-size="10" font-family="Arial,sans-serif" fill="#fff" font-weight="bold">${pt.point_number}</text>`;
   }).join('\n');
   const overlaySvg = `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">${markSvgParts}</svg>`;
 
