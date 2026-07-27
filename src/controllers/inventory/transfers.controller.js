@@ -8,6 +8,43 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
+/**
+ * Valida que el usuario tenga autorización sobre la sede dueña de una bodega
+ * antes de permitir que se disponga de su stock (enviar o recibir).
+ *
+ * - admin / super_admin: pueden operar cualquier sede del tenant (mismo
+ *   criterio que branchMiddleware).
+ * - Resto de roles: solo pueden operar la bodega si pertenece a la sede
+ *   activa de su request (req.branch_id, resuelta por branchMiddleware).
+ *
+ * Devuelve null si está autorizado, o un objeto { status, message } listo
+ * para responder si no lo está.
+ */
+const assertBranchOwnsWarehouse = async (req, warehouseId) => {
+  if (req.user.role === 'admin' || req.user.role === 'super_admin') return null;
+
+  if (!req.branch_id) {
+    return { status: 403, message: 'Tu usuario no tiene una sede activa asignada.' };
+  }
+
+  const warehouse = await Warehouse.findOne({
+    where: { id: warehouseId, tenant_id: req.user.tenant_id }
+  });
+
+  if (!warehouse) {
+    return { status: 404, message: 'Bodega no encontrada' };
+  }
+
+  if (warehouse.branch_id !== req.branch_id) {
+    return {
+      status: 403,
+      message: 'No tienes autorización para disponer del stock de una bodega de otra sede.'
+    };
+  }
+
+  return null;
+};
+
 const generateTransferNumber = async (tenant_id, transaction = null) => {
   const year = new Date().getFullYear();
   const prefix = `TRANS-${year}-`;
@@ -350,6 +387,13 @@ const sendTransfer = async (req, res) => {
       });
     }
 
+    // Solo la sede dueña de la bodega origen puede autorizar la salida del stock
+    const authError = await assertBranchOwnsWarehouse(req, transfer.from_warehouse_id);
+    if (authError) {
+      await transaction.rollback();
+      return res.status(authError.status).json({ success: false, message: authError.message });
+    }
+
     const { createMovement } = require('./movements.controller');
 
     // REDUCE stock en bodega origen
@@ -439,6 +483,13 @@ const receiveTransfer = async (req, res) => {
         success: false,
         message: 'Solo se pueden recibir transferencias enviadas'
       });
+    }
+
+    // Solo la sede dueña de la bodega destino puede confirmar la recepción del stock
+    const authError = await assertBranchOwnsWarehouse(req, transfer.to_warehouse_id);
+    if (authError) {
+      await transaction.rollback();
+      return res.status(authError.status).json({ success: false, message: authError.message });
     }
 
     const { createMovement } = require('./movements.controller');

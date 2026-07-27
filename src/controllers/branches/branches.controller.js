@@ -13,7 +13,9 @@ const list = async (req, res) => {
     if (isTenantAdmin) {
       const branches = await Branch.findAll({
         where: { tenant_id: req.tenant_id },
-        include: [{ model: Warehouse, as: 'warehouse', attributes: ['id', 'name', 'code'] }],
+        include: [
+          { model: Warehouse, as: 'warehouse', attributes: ['id', 'name', 'code'] },
+        ],
         order: [['is_main', 'DESC'], ['name', 'ASC']],
       });
       return res.json({ success: true, data: branches });
@@ -47,6 +49,7 @@ const getById = async (req, res) => {
       where: { id: req.params.id, tenant_id: req.tenant_id },
       include: [
         { model: Warehouse, as: 'warehouse' },
+        { model: Warehouse, as: 'warehouses' },
         { model: User, as: 'users', attributes: ['id', 'first_name', 'last_name', 'email', 'role'], through: { attributes: ['is_default'] } },
       ],
     });
@@ -98,6 +101,7 @@ const create = async (req, res) => {
         phone,
         manager_id: manager_id || null,
         is_main: is_main || false,
+        is_default: true,
         is_active: true,
       }, { transaction });
     }

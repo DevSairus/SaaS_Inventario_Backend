@@ -18,12 +18,11 @@ const Warehouse = sequelize.define('Warehouse', {
   branch_id: {
     type: DataTypes.UUID,
     allowNull: true,
-    unique: true,
     references: {
       model: 'branches',
       key: 'id'
     },
-    comment: 'Sede a la que pertenece esta bodega (1 sede = 1 bodega)'
+    comment: 'Sede a la que pertenece esta bodega. Una sede puede tener varias bodegas; is_default marca cuál se usa automáticamente.'
   },
   code: {
     type: DataTypes.STRING(50),
@@ -56,6 +55,11 @@ const Warehouse = sequelize.define('Warehouse', {
   is_main: {
     type: DataTypes.BOOLEAN,
     defaultValue: false
+  },
+  is_default: {
+    type: DataTypes.BOOLEAN,
+    defaultValue: false,
+    comment: 'Bodega que se asigna automáticamente en OT/ventas cuando no se especifica una para la sede (branch_id). Máximo una por sede.'
   },
   is_active: {
     type: DataTypes.BOOLEAN,

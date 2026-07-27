@@ -1,6 +1,7 @@
 const { InventoryMovement, Product, Warehouse } = require('../../models/inventory');
 const { Op } = require('sequelize');
 const { checkAlertsForProduct } = require('../../middleware/autoCheckAlerts.middleware');
+const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 /**
  * Obtener todos los movimientos con filtros y paginación
@@ -14,7 +15,6 @@ const getMovements = async (req, res) => {
       movement_reason,
       reference_type,
       reference_id,
-      branch_id,
       start_date,
       end_date,
       sort_by = 'movement_date',
@@ -56,6 +56,9 @@ const getMovements = async (req, res) => {
     // global/compartido entre sedes), pero como 1 sede = 1 bodega (decisión
     // de diseño de Fase 1), filtrar por sede equivale a filtrar por la
     // bodega asociada a esa sede.
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario.
+    const branch_id = resolveBranchFilter(req);
     if (branch_id) {
       const warehouse = await Warehouse.findOne({
         where: { tenant_id, branch_id },

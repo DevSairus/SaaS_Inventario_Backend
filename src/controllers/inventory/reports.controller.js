@@ -1,5 +1,6 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 // ── Helpers de seguridad para parámetros de query ────────────────────────────
 const isValidDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d));
@@ -14,8 +15,12 @@ const PurchaseItem = require('../../models/inventory/PurchaseItem');
 
 exports.getMovementsByMonth = async (req, res) => {
   try {
-    const { months, from_date, to_date, branch_id } = req.query;
+    const { months, from_date, to_date } = req.query;
     const tenantId = req.user.tenant_id;
+
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario (ver utils/branchFilter.js).
+    const branch_id = resolveBranchFilter(req);
 
     // Validar fechas
     if (from_date && !isValidDate(from_date)) {
@@ -227,8 +232,12 @@ exports.getValuation = async (req, res) => {
  */
 exports.getProfitReport = async (req, res) => {
   try {
-    const { months, from_date, to_date, limit = 100, branch_id } = req.query;
+    const { months, from_date, to_date, limit = 100 } = req.query;
     const tenantId = req.user.tenant_id;
+
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario (ver utils/branchFilter.js).
+    const branch_id = resolveBranchFilter(req);
 
     // ── Validar fechas — prevenir SQL injection ───────────────────────────
     if (from_date && !isValidDate(from_date)) {
@@ -368,8 +377,12 @@ exports.getProfitReport = async (req, res) => {
  */
 exports.getRotationReport = async (req, res) => {
   try {
-    const { months = 3, from_date, to_date, branch_id } = req.query;
+    const { months = 3, from_date, to_date } = req.query;
     const tenantId = req.user.tenant_id;
+
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario (ver utils/branchFilter.js).
+    const branch_id = resolveBranchFilter(req);
 
     // ── Validar fechas — prevenir SQL injection ───────────────────────────
     if (from_date && !isValidDate(from_date)) {

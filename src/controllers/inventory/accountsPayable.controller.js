@@ -3,12 +3,13 @@ const { Purchase, Supplier } = require('../../models/inventory');
 const { User } = require('../../models');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
+const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 // Obtener resumen de cuentas por pagar
 const getAccountsPayableSummary = async (req, res) => {
   try {
     const tenantId = req.user.tenant_id;
-    const { from_date, to_date, supplier_id, branch_id } = req.query;
+    const { from_date, to_date, supplier_id } = req.query;
 
     const where = {
       tenant_id: tenantId,
@@ -17,6 +18,10 @@ const getAccountsPayableSummary = async (req, res) => {
     };
 
     if (supplier_id) where.supplier_id = supplier_id;
+
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario.
+    const branch_id = resolveBranchFilter(req);
     if (branch_id) where.branch_id = branch_id;
 
     if (from_date && to_date) {

@@ -5,6 +5,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { createMovement } = require('./movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 /**
  * Generar número de compra único
@@ -43,7 +44,6 @@ const getPurchases = async (req, res) => {
       status,
       start_date,
       end_date,
-      branch_id,
       sort_by = 'purchase_date',
       sort_order = 'DESC',
       page = 1,
@@ -56,7 +56,10 @@ const getPurchases = async (req, res) => {
     // Construir condiciones de búsqueda
     const where = { tenant_id };
 
-    // Filtro explícito por sede (opcional; sin él se listan todas las sedes del tenant)
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario. Admin/super_admin conservan el filtro
+    // opcional (ven todas las sedes si no lo envían).
+    const branch_id = resolveBranchFilter(req);
     if (branch_id) where.branch_id = branch_id;
 
     if (search) {
