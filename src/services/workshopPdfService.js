@@ -772,44 +772,56 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
       });
 
       for (const [, { template: tpl, marks: dMarks }] of Object.entries(diagramMap)) {
-        // Chequear espacio
-        if (y > doc.page.height - 180) { doc.addPage(); y = 40; }
+        // Imagen a la izquierda, tabla de marcas a la derecha (en vez de apilados)
+        const imgW = 200;
+        const imgH = imgW * 0.667; // 3:2 aspect ratio
+        const titleH = 14;
+
+        const tableX = MARGIN + imgW + 16;
+        const tableW = INNER - imgW - 16;
+        const colW = [18, 68, 34, 48, tableW - 18 - 68 - 34 - 48];
+        const headers = ['#', 'Parte', 'Lado', 'Sev.', 'Observación'];
+
+        // Precalcular alto real de la tabla (para saltar de página con el bloque completo, no a medias)
+        doc.font('Helvetica').fontSize(6.5);
+        const rowHeights = dMarks.map(m =>
+          Math.max(11, doc.heightOfString(m.observation || '', { width: colW[4] - 4 }) + 2)
+        );
+        const tableH = 13 + rowHeights.reduce((a, b) => a + b, 0);
+        const blockH = titleH + Math.max(imgH, tableH) + 10;
+
+        if (y + blockH > doc.page.height - 100) { doc.addPage(); y = 40; }
 
         doc.font('Helvetica-Bold').fontSize(9).fillColor(C.dark)
           .text(`DIAGNÓSTICO — ${tpl.name}`, MARGIN, y);
-        y += 14;
+        y += titleH;
+        const blockTop = y;
 
+        // Columna izquierda: imagen del diagrama
         try {
           const pngBuf = await renderDiagramToPng(
             tpl.image_path, tpl.view_box, tpl.points, dMarks
           );
-          const imgW = INNER;
-          const imgH = imgW * 0.667; // 3:2 aspect ratio
-          if (y + imgH > doc.page.height - 100) { doc.addPage(); y = 40; }
-          doc.image(pngBuf, MARGIN, y, { fit: [imgW, imgH] });
-          y += imgH + 8;
+          doc.image(pngBuf, MARGIN, blockTop, { fit: [imgW, imgH] });
         } catch (e) {
           console.error('Error renderizando diagrama:', e.message);
           doc.font('Helvetica-Oblique').fontSize(8).fillColor(C.lightGray)
-            .text('(Error al renderizar diagrama)', MARGIN, y);
-          y += 14;
+            .text('(Error al renderizar diagrama)', MARGIN, blockTop, { width: imgW });
         }
 
-        // Tabla de marcas
-        const colW = [30, 160, 80, 80, INNER - 350];
-        const headers = ['#', 'Parte', 'Lado', 'Severidad', 'Observación'];
-        doc.font('Helvetica-Bold').fontSize(7).fillColor(C.dark);
+        // Columna derecha: tabla de marcas
+        let ty = blockTop;
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(C.dark);
         headers.forEach((h, i) => {
-          const cx = MARGIN + colW.slice(0, i).reduce((a, b) => a + b, 0);
-          doc.text(h, cx, y, { width: colW[i], align: i === 0 ? 'center' : 'left' });
+          const hx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+          doc.text(h, hx, ty, { width: colW[i], align: i === 0 ? 'center' : 'left' });
         });
-        y += 12;
-        doc.moveTo(MARGIN, y).lineTo(MARGIN + INNER, y).strokeColor(C.lightGray).lineWidth(0.3).stroke();
-        y += 4;
+        ty += 10;
+        doc.moveTo(tableX, ty).lineTo(tableX + tableW, ty).strokeColor(C.lightGray).lineWidth(0.3).stroke();
+        ty += 3;
 
-        doc.font('Helvetica').fontSize(7).fillColor(C.gray);
-        dMarks.forEach(m => {
-          if (y > doc.page.height - 60) { doc.addPage(); y = 40; }
+        doc.font('Helvetica').fontSize(6.5).fillColor(C.gray);
+        dMarks.forEach((m, idx) => {
           const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
           const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
           const vals = [
@@ -819,15 +831,15 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
             sevLabel,
             m.observation || '',
           ];
-          const rowH2 = Math.max(12, doc.heightOfString(vals[4], { width: colW[4] - 4 }) + 2);
           vals.forEach((v, i) => {
-            const cx = MARGIN + colW.slice(0, i).reduce((a, b) => a + b, 0);
+            const cx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
             doc.fillColor(i === 3 ? (SEVERITY_COLORS[m.severity] || C.gray) : C.gray)
-              .text(v, cx + 2, y, { width: colW[i] - 4, align: i === 0 ? 'center' : 'left' });
+              .text(v, cx + 2, ty, { width: colW[i] - 4, align: i === 0 ? 'center' : 'left' });
           });
-          y += rowH2;
+          ty += rowHeights[idx];
         });
-        y += 10;
+
+        y = blockTop + Math.max(imgH, tableH) + 10;
       }
     }
 
