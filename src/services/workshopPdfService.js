@@ -76,15 +76,25 @@ async function renderDiagramToPng(imagePath, viewBox, points, marks) {
       : '';
     return `${leader}
             <circle cx="${lx}" cy="${ly}" r="12" fill="${color}" fill-opacity="0.85" stroke="#fff" stroke-width="2"/>
-            <text x="${lx}" y="${ly + 4}" text-anchor="middle" font-size="10" font-family="Arial,sans-serif" fill="#fff" font-weight="bold">${pt.point_number}</text>`;
+            <text x="${lx}" y="${ly + 4}" text-anchor="middle" font-size="10" font-family="DejaVu Sans" fill="#fff" font-weight="bold">${pt.point_number}</text>`;
   }).join('\n');
-  const overlaySvg = `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">${markSvgParts}</svg>`;
+  const overlaySvg = `<svg viewBox="${viewBox}" xmlns="http://www.w3.org/2000/svg" font-family="DejaVu Sans">${markSvgParts}</svg>`;
 
+  // NOTA: antes usaba `loadSystemFonts: true` + `defaultFontFamily: 'Arial'`.
+  // En producción el backend corre en Docker `node:20-alpine`, que no trae
+  // NINGUNA fuente instalada — resvg no encontraba con qué dibujar el <text>
+  // y el número quedaba invisible (los círculos/líneas sí se ven porque son
+  // formas vectoriales, no necesitan fuente). Por eso solo fallaba en el PDF
+  // y no en las vistas del navegador (el navegador del cliente sí tiene
+  // fuentes). Fix: empaquetar una fuente TTF con el propio repo y decirle a
+  // resvg que la use directamente, sin depender de lo que tenga el SO.
+  const FONT_PATH = path.join(__dirname, '..', 'assets', 'fonts', 'DejaVuSans-Bold.ttf');
   const resvg = new Resvg(overlaySvg, {
     fitTo: { mode: 'width', value: targetWidth },
     font: {
-      loadSystemFonts: true,
-      defaultFontFamily: 'Arial',
+      fontFiles: [FONT_PATH],
+      loadSystemFonts: false,
+      defaultFontFamily: 'DejaVu Sans',
     },
     background: 'rgba(0,0,0,0)',
   });
