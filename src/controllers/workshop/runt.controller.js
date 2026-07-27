@@ -175,6 +175,22 @@ const consultarVehiculo = async (req, res) => {
       DIESEL: 'diesel', ELECTRICO: 'electrico', HIBRIDO: 'hibrido',
     };
 
+    const VEHICLE_TYPE_MAP = {
+      AUTOMOVIL: 'automovil',
+      CAMIONETA: 'camioneta',
+      CAMPERO: 'camioneta',
+      PICKUP: 'camioneta',
+      MOTOCICLETA: 'motocicleta',
+      MOTOCICLO: 'motocicleta',
+      CARGA: 'camion',
+      CAMION: 'camion',
+      BUS: 'camion',
+      BUSETA: 'camion',
+      MICROBUS: 'camion',
+      REMOLQUE: 'camion',
+      SEMIRREMOLQUE: 'camion',
+    };
+
     let soat_number = null, soat_expiry = null;
     if (soatData.length > 0) {
       const vigente = soatData.find(s => s.estado === 'VIGENTE') || soatData[0];
@@ -194,6 +210,7 @@ const consultarVehiculo = async (req, res) => {
       year: v.modelo ? parseInt(v.modelo) : null, color: toTitle(v.color),
       vin: v.vin || v.numSerie || null, engine_number: v.numMotor || null,
       fuel_type: FUEL_MAP[v.tipoCombustible?.toUpperCase()] || 'gasolina',
+      vehicle_type: VEHICLE_TYPE_MAP[v.clase?.toUpperCase()] || 'automovil',
       soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
       _runt: {
         clase: v.clase, tipoCarroceria: v.tipoCarroceria, cilindraje: v.cilindraje,

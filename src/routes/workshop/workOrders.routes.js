@@ -5,10 +5,10 @@ const ctrl = require('../../controllers/workshop/workOrders.controller');
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB por foto
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB (video de OT necesita más que una foto)
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) cb(null, true);
-    else cb(new Error('Solo se permiten imágenes'), false);
+    if (file.mimetype.startsWith('image/') || file.mimetype.startsWith('video/')) cb(null, true);
+    else cb(new Error('Solo se permiten imágenes o videos'), false);
   }
 });
 
@@ -40,6 +40,13 @@ router.post('/:id/payments', ctrl.registerPayment);
 // Fotos
 router.post('/:id/photos/:phase', upload.array('photos', 10), ctrl.uploadPhotos);
 router.delete('/:id/photos/:phase/:photoIndex', ctrl.deletePhoto);
+
+// Diagramas interactivos de intervención — "hoja de inspección" del técnico
+router.get('/:id/diagnosis-marks', ctrl.listDiagnosisMarks);
+router.post('/:id/diagnosis-marks', ctrl.addDiagnosisMark);
+router.put('/:id/diagnosis-marks/:markId', ctrl.updateDiagnosisMark);
+router.delete('/:id/diagnosis-marks/:markId', ctrl.removeDiagnosisMark);
+router.post('/:id/diagnosis-marks/generate-items', ctrl.generateItemsFromMarks);
 
 // Compartir por WhatsApp (link público)
 router.post('/:id/share-token', ctrl.generateShareToken);
