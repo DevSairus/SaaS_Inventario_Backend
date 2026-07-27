@@ -1,3 +1,8 @@
+# Archivos subidos por usuarios (fotos de OT, adjuntos de soporte, etc.)
+# — datos de runtime, no código fuente. En producción se sirven desde
+# Cloudinary; este directorio solo existe como fallback local en dev.
+uploads/
+
 # Logs
 logs
 *.log
