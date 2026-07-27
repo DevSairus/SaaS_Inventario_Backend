@@ -25,6 +25,15 @@ const Vehicle = sequelize.define('Vehicle', {
     allowNull: false,
     comment: 'Número de placa'
   },
+  // Tipo de vehículo — determina qué diagramas de diagnóstico y qué
+  // sistemas mecánicos aplican (ver propuesta de diagramas interactivos).
+  // Sin este campo no hay forma de saber si un vehículo es carro o moto.
+  vehicle_type: {
+    type: DataTypes.ENUM('automovil', 'camioneta', 'motocicleta', 'camion', 'otro'),
+    allowNull: false,
+    defaultValue: 'automovil',
+    comment: 'Tipo de vehículo: automovil, camioneta, motocicleta, camion, otro'
+  },
   brand: {
     type: DataTypes.STRING(100),
     allowNull: true,
