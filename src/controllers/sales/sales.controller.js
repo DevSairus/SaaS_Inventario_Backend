@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -11,20 +11,24 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 // Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, branch_id, limit = 50, offset = 0 } = req.query;
+    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, limit = 50, offset = 0 } = req.query;
     // Cap de seguridad — evita requests que traigan miles de ventas en memoria
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
     const safeOffset = Math.max(0, parseInt(offset) || 0);
 
     const where = { tenant_id: tenantId };
 
-    // Filtro explícito por sede (ej: admin viendo el historial de una sede específica
-    // distinta a la activa). Si no se envía, se listan todas las sedes del tenant.
+    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+    // sede autorizada del usuario. Admin/super_admin conservan el filtro
+    // opcional (ej: viendo el historial de una sede específica distinta a la
+    // activa; si no lo envían, ven todas las sedes del tenant).
+    const branch_id = resolveBranchFilter(req);
     if (branch_id) where.branch_id = branch_id;
 
     if (status) where.status = status;
@@ -292,6 +296,19 @@ const create = async (req, res) => {
 
     const total_amount = saleItems.reduce((sum, i) => sum + i.total, 0);
 
+    // Si no viene bodega explícita, usar la bodega default de la sede activa
+    // como respaldo (el frontend ya la precarga, pero esto protege contra
+    // integraciones/clientes que no la envíen).
+    let effectiveWarehouseId = (warehouse_id && uuidRegex.test(warehouse_id)) ? warehouse_id : null;
+    if (!effectiveWarehouseId && req.branch_id) {
+      const branchWarehouse = await Warehouse.findOne({
+        where: { branch_id: req.branch_id, tenant_id: tenantId, is_active: true },
+        order: [['is_default', 'DESC'], ['created_at', 'ASC']],
+        transaction,
+      });
+      effectiveWarehouseId = branchWarehouse?.id || null;
+    }
+
     // Calcular retenciones si hay cliente configurado
     let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
     if (finalCustomerId) {
@@ -327,7 +344,7 @@ const create = async (req, res) => {
       payment_terms: effectivePaymentTerms,
       customer_id: finalCustomerId,
       ...customerInfo,
-      warehouse_id: (warehouse_id && uuidRegex.test(warehouse_id)) ? warehouse_id : null,
+      warehouse_id: effectiveWarehouseId,
       subtotal,
       tax_amount,
       discount_amount,
@@ -367,8 +384,10 @@ const create = async (req, res) => {
 
     const sale = await Sale.create(saleData, { transaction });
 
-    for (const item of saleItems) {
-      await SaleItem.create({
+    // bulkCreate en vez de un .create() por ítem (elimina N+1 — ventas con
+    // cientos de líneas hacían decenas de round-trips secuenciales a la DB).
+    await SaleItem.bulkCreate(
+      saleItems.map(item => ({
         sale_id: sale.id,
         tenant_id: item.tenant_id,
         item_type: item.item_type || 'product',
@@ -390,8 +409,9 @@ const create = async (req, res) => {
         unit_cost: item.unit_cost,
         notes: null,
         technician_id: item.technician_id || null,
-      }, { transaction });
-    }
+      })),
+      { transaction }
+    );
 
     await transaction.commit();
 
@@ -487,6 +507,17 @@ const update = async (req, res) => {
       let subtotal = 0, tax_amount = 0, discount_amount = 0;
       const newItems = [];
 
+      // Batch-load de todos los productos en 1 query (elimina N+1 — con ventas
+      // de cientos de líneas, una consulta por ítem hacía que la actualización
+      // superara el timeout de 30s del cliente).
+      const productIds = items
+        .filter(i => (i.item_type || 'product') !== 'free_line' && i.product_id)
+        .map(i => i.product_id);
+      const productRows = productIds.length
+        ? await Product.findAll({ where: { id: { [Op.in]: productIds }, tenant_id: tenantId }, transaction })
+        : [];
+      const productMap = Object.fromEntries(productRows.map(p => [p.id, p]));
+
       for (const item of items) {
         const itemType = item.item_type || 'product';
 
@@ -508,7 +539,7 @@ const update = async (req, res) => {
           continue;
         }
 
-        const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId } });
+        const product = productMap[item.product_id];
         if (!product) {
           await transaction.rollback();
           return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
@@ -532,7 +563,7 @@ const update = async (req, res) => {
         });
       }
 
-      for (const item of newItems) await SaleItem.create(item, { transaction });
+      await SaleItem.bulkCreate(newItems, { transaction });
 
       const total_amount = newItems.reduce((sum, i) => sum + i.total, 0);
       updateData.subtotal        = subtotal;
@@ -629,13 +660,23 @@ const confirm = async (req, res) => {
           const disponible = parseFloat(prodCheck.current_stock);
           const solicitado = parseFloat(item.quantity);
           if (disponible < solicitado) {
-            stockErrors.push(`• ${prodCheck.name}: disponible ${disponible}, solicitado ${solicitado}`);
+            const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
+            const alternatives = await getEquivalentsWithStock(item.product_id, tenantId);
+            stockErrors.push({
+              product_id: item.product_id,
+              sku: prodCheck.sku,
+              name: prodCheck.name,
+              available_stock: disponible,
+              requested: solicitado,
+              alternatives
+            });
           }
         }
       }
       if (stockErrors.length > 0) {
         await transaction.rollback();
-        return res.status(400).json({ success: false, message: `Stock insuficiente: ${stockErrors.join(', ')}` });
+        const msgLines = stockErrors.map(e => `• ${e.name}: disponible ${e.available_stock}, solicitado ${e.requested}`);
+        return res.status(400).json({ success: false, message: `Stock insuficiente en ${stockErrors.length} ítem(s): ${msgLines.join(', ')}`, stock_errors: stockErrors });
       }
 
       // Si hay ítems que descuentan inventario (track_inventory), la venta
