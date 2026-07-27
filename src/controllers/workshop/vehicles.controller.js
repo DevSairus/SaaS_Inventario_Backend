@@ -62,13 +62,14 @@ const create = async (req, res) => {
     const tenant_id = req.user.tenant_id;
     const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
             soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
-            fuel_type, current_mileage, customer_id, notes } = req.body;
+            fuel_type, current_mileage, customer_id, notes, vehicle_type } = req.body;
 
     if (!plate) return res.status(400).json({ success: false, message: 'La placa es requerida' });
 
     const vehicle = await Vehicle.create({
       tenant_id, plate: plate.toUpperCase().trim(),
       brand, model,
+      vehicle_type: vehicle_type || 'automovil',
       year: year ? parseInt(year) || null : null,
       color, vin, engine, engine_number, ownership_card,
       soat_number, soat_expiry: soat_expiry || null,
@@ -90,35 +91,18 @@ const create = async (req, res) => {
   }
 };
 
-// Ver workOrders.controller.js: mismo mecanismo de detección de conflictos
-// para la cola de sincronización offline de la PWA "Taller".
-function hasVersionConflict(record, expectedVersion) {
-  if (!expectedVersion) return false;
-  const current  = new Date(record.updated_at).getTime();
-  const expected = new Date(expectedVersion).getTime();
-  return !isNaN(current) && !isNaN(expected) && current !== expected;
-}
-
 const update = async (req, res) => {
   try {
     const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
     if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
 
-    const { expected_updated_at, ...rest } = req.body || {};
-    if (hasVersionConflict(vehicle, expected_updated_at)) {
-      return res.status(409).json({
-        success: false,
-        message: 'El vehículo fue modificado por otro usuario mientras estabas sin conexión',
-        data: vehicle,
-      });
-    }
-
     const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
             soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
-            fuel_type, current_mileage, customer_id, notes, is_active } = rest;
+            fuel_type, current_mileage, customer_id, notes, is_active, vehicle_type } = req.body;
     await vehicle.update({
       plate: plate?.toUpperCase().trim() || vehicle.plate,
       brand, model,
+      vehicle_type: vehicle_type || vehicle.vehicle_type,
       year: year ? parseInt(year) || null : null,
       color, vin, engine, engine_number, ownership_card,
       soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
