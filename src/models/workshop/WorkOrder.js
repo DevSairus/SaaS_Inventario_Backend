@@ -189,6 +189,13 @@ const WorkOrder = sequelize.define('WorkOrder', {
     allowNull: true,
     unique: true,
     comment: 'Token único para que el cliente consulte el estado de su OT sin autenticarse'
+  },
+  // Checklist de control de calidad al cierre — se muestra en el PDF final
+  // de la OT (sección "Proceso Calidad y Servicio al Cliente").
+  quality_checklist: {
+    type: DataTypes.JSONB,
+    defaultValue: { limpieza_final: false, torques_finales: false, entrega_repuestos: false },
+    comment: 'Checklist de calidad al cierre: {limpieza_final, torques_finales, entrega_repuestos}'
   }
 }, {
   tableName: 'work_orders',
