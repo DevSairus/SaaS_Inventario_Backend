@@ -195,6 +195,50 @@ const emailTemplates = {
     text: `Hola ${user.first_name}, PQRS #${pqrs.ticket_number} creada.`,
   }),
 
+  // ── Soporte ──────────────────────────────────────────
+  supportTicketCreated: (user, ticket) => ({
+    subject: `Nuevo ticket de soporte: ${ticket.subject}`,
+    html: `
+      <h2>Nuevo ticket de soporte</h2>
+      <p>Se ha creado un nuevo ticket que requiere atención.</p>
+      <p><strong>Asunto:</strong> ${ticket.subject}</p>
+      <p><strong>Categoría:</strong> ${ticket.category || 'Sin categoría'}</p>
+      <p><strong>Prioridad:</strong> ${ticket.priority}</p>
+      <p><strong>Creado por:</strong> ${ticket.creator?.first_name} ${ticket.creator?.last_name} (${ticket.tenant?.company_name})</p>
+      <p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/superadmin/support/tickets/${ticket.id}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;border-radius:4px;text-decoration:none;">Ver ticket</a></p>
+      <hr><p><small>Pitbox — Soporte</small></p>
+    `,
+    text: `Nuevo ticket: ${ticket.subject} — ${ticket.creator?.first_name} (${ticket.tenant?.company_name})`,
+  }),
+
+  supportNewMessage: (user, ticket, isFromAgent) => ({
+    subject: `${isFromAgent ? 'Respuesta de soporte' : 'Nuevo mensaje del cliente'}: ${ticket.subject}`,
+    html: `
+      <h2>Hola ${user.first_name},</h2>
+      <p>${isFromAgent ? 'Nuestro equipo de soporte ha respondido a tu ticket.' : 'Tu cliente ha enviado un nuevo mensaje en el ticket.'}</p>
+      <p><strong>Ticket:</strong> ${ticket.subject}</p>
+      <p><strong>Estado:</strong> ${ticket.status}</p>
+      <p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}${isFromAgent ? `/support/tickets/${ticket.id}` : `/superadmin/support/tickets/${ticket.id}`}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;border-radius:4px;text-decoration:none;">Ver mensaje</a></p>
+      <hr><p><small>Pitbox — Soporte</small></p>
+    `,
+    text: `${isFromAgent ? 'Respuesta de soporte' : 'Nuevo mensaje'} en ticket: ${ticket.subject}`,
+  }),
+
+  supportStatusChanged: (user, ticket, oldStatus, newStatus) => ({
+    subject: `Ticket actualizado: ${ticket.subject}`,
+    html: `
+      <h2>Hola ${user.first_name},</h2>
+      <p>El estado de tu ticket de soporte ha cambiado.</p>
+      <p><strong>Ticket:</strong> ${ticket.subject}</p>
+      <p><strong>Estado anterior:</strong> ${oldStatus}</p>
+      <p><strong>Estado actual:</strong> ${newStatus}</p>
+      ${newStatus === 'resolved' ? '<p>Si tu problema no está resuelto, puedes reabrir el ticket respondiendo en el hilo.</p>' : ''}
+      <p><a href="${process.env.FRONTEND_URL || 'http://localhost:5173'}/support/tickets/${ticket.id}" style="display:inline-block;padding:10px 20px;background:#4f46e5;color:#fff;border-radius:4px;text-decoration:none;">Ver ticket</a></p>
+      <hr><p><small>Pitbox — Soporte</small></p>
+    `,
+    text: `Tu ticket "${ticket.subject}" cambió a: ${newStatus}`,
+  }),
+
   trialExpiring: (tenant, days) => ({
     subject: `⏰ Tu período de prueba vence en ${days} ${days === 1 ? 'día' : 'días'}`,
     html: `
