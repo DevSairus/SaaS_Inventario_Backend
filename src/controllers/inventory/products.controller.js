@@ -51,7 +51,11 @@ const getProductStats = async (req, res) => {
 
 const getAllProducts = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search = '', category_id = '', is_active = '', sort_by = 'name', sort_order = 'ASC' } = req.query;
+    const {
+      page = 1, limit = 10, search = '', category_id = '', is_active = '',
+      sort_by = 'name', sort_order = 'ASC',
+      applies_to_vehicle_id, applies_to_brand, applies_to_line, applies_to_year
+    } = req.query;
 
     // ── Seguridad: whitelist ORDER BY — Sequelize NO parametriza ORDER BY ────
     const ALLOWED_SORT_FIELDS = ['name', 'sku', 'base_price', 'current_stock', 'average_cost', 'created_at', 'updated_at'];
@@ -77,6 +81,89 @@ const getAllProducts = async (req, res) => {
     }
     if (category_id) whereClause.category_id = category_id;
     if (is_active !== '') whereClause.is_active = is_active === 'true';
+
+    // ── Filtro por sede/bodega activa ─────────────────────────────────────────
+    // Solo se ven productos de las bodegas de la sede activa del usuario
+    // (req.branch_id, resuelto por branchMiddleware), o sin bodega asignada
+    // (catálogo compartido / servicios). super_admin no tiene sede (branch_id
+    // null) y ve todo.
+    if (req.branch_id) {
+      const { Warehouse } = require('../../models/inventory');
+      const branchWarehouses = await Warehouse.findAll({
+        where: { branch_id: req.branch_id },
+        attributes: ['id'],
+      });
+      const warehouseIds = branchWarehouses.map(w => w.id);
+      whereClause[Op.and] = [
+        ...(whereClause[Op.and] || []),
+        { [Op.or]: [{ warehouse_id: null }, { warehouse_id: { [Op.in]: warehouseIds } }] },
+      ];
+    }
+
+    // ── Filtro por aplicación vehicular ──────────────────────────────────────
+    let vehicleBrand = applies_to_brand;
+    let vehicleLine = applies_to_line;
+    let vehicleYear = applies_to_year ? parseInt(applies_to_year) : null;
+
+    // Si se proporciona vehicle_id, resolver brand/line/year desde la tabla vehicles
+    if (applies_to_vehicle_id && !vehicleBrand) {
+      try {
+        const Vehicle = require('../../models/workshop/Vehicle');
+        const vehicle = await Vehicle.findByPk(applies_to_vehicle_id);
+        if (vehicle) {
+          vehicleBrand = vehicle.brand;
+          vehicleLine = vehicle.model;
+          // Intentar extraer el año del campo year o de la matrícula
+          if (vehicle.year) vehicleYear = parseInt(vehicle.year);
+        }
+      } catch (e) {
+        // Si falla la resolución, continuar sin filtro vehicular
+      }
+    }
+
+    // Aplicar filtro vehicular como subquery.
+    // Si el usuario además escribió un término de búsqueda, el filtro vehicular
+    // NO debe excluir resultados (la mayoría de tenants no tiene cargada la
+    // tabla product_vehicle_applications) — en ese caso solo se usa para marcar
+    // _vehicleMatch. Sin término de búsqueda, sí se filtra estrictamente (uso:
+    // "ver repuestos compatibles con este vehículo").
+    let vehicleMatchIds = null;
+    if (vehicleBrand && vehicleLine) {
+      const { ProductVehicleApplication } = require('../../models/inventory');
+      const subqueryWhere = {
+        tenant_id: whereClause.tenant_id || { [Op.ne]: null },
+        brand: { [Op.iLike]: vehicleBrand.trim() },
+        line: { [Op.iLike]: vehicleLine.trim() }
+      };
+
+      // Filtrar por año: el producto aplica si year_from es null O year_from <= año
+      // Y year_to es null O year_to >= año
+      if (vehicleYear) {
+        subqueryWhere[Op.and] = [
+          { [Op.or]: [{ year_from: null }, { year_from: { [Op.lte]: vehicleYear } }] },
+          { [Op.or]: [{ year_to: null }, { year_to: { [Op.gte]: vehicleYear } }] }
+        ];
+      }
+
+      const matchingProductIds = await ProductVehicleApplication.findAll({
+        where: subqueryWhere,
+        attributes: ['product_id'],
+        group: ['product_id']
+      });
+
+      const ids = matchingProductIds.map(m => m.product_id);
+      vehicleMatchIds = new Set(ids);
+
+      if (!search) {
+        if (ids.length > 0) {
+          whereClause.id = { [Op.in]: ids };
+        } else {
+          // No hay productos que apliquen a este vehículo — retornar vacío
+          return res.json({ success: true, data: [], pagination: { total: 0, page: safePage, limit: safeLimit, totalPages: 0 } });
+        }
+      }
+    }
+
     const { count, rows } = await Product.findAndCountAll({
       where: whereClause,
       include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }],
@@ -84,7 +171,14 @@ const getAllProducts = async (req, res) => {
       offset: offset,
       order: [[safeSortBy, safeSortOrder]]
     });
-    res.json({ success: true, data: rows, pagination: { total: count, page: safePage, limit: safeLimit, totalPages: Math.ceil(count / safeLimit) } });
+
+    // Si hay filtro vehicular, anotar qué productos tienen aplicación confirmada
+    let data = rows.map(r => r.toJSON());
+    if (vehicleMatchIds) {
+      data = data.map(p => ({ ...p, _vehicleMatch: vehicleMatchIds.has(p.id) }));
+    }
+
+    res.json({ success: true, data, pagination: { total: count, page: safePage, limit: safeLimit, totalPages: Math.ceil(count / safeLimit) } });
   } catch (error) {
     console.error('Error en getAllProducts:', error);
     res.status(500).json({ success: false, message: 'Error al obtener productos' });
