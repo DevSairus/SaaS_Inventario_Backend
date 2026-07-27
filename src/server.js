@@ -148,6 +148,7 @@ const vehiclesRoutes                = require('./routes/workshop/vehicles.routes
 const workOrdersRoutes              = require('./routes/workshop/workOrders.routes');
 const commissionSettlementsRoutes   = require('./routes/workshop/commissionSettlements.routes');
 const runtRoutes                    = require('./routes/workshop/runt.routes');
+const diagramTemplatesRoutes        = require('./routes/workshop/diagramTemplates.routes');
 const userRoutes                    = require('./routes/user.routes');
 
 // Movimientos Avanzados
@@ -158,6 +159,10 @@ const customerReturnsRoutes         = require('./routes/sales/customerReturns.ro
 
 // Anuncios
 const announcementsRoutes           = require('./routes/announcements.routes');
+
+// Soporte
+const supportRoutes                 = require('./routes/support.routes');
+const superadminSupportRoutes       = require('./routes/superadmin/support.routes');
 
 // Cartera
 const accountsReceivableRoutes      = require('./routes/accounts-receivable.routes');
@@ -190,10 +195,14 @@ app.use('/api/auth', authRoutes);
 app.use('/api/public/pdf', publicPdfRoutes);
 
 app.use('/api/superadmin', authMiddleware, superadminRoutes);
+app.use('/api/superadmin/support', authMiddleware, superadminSupportRoutes);
 app.use('/api/webhooks/ncf', ncfWebhookRoutes);
 
 // ── Anuncios (sin tenant) ──
 app.use('/api/announcements', authMiddleware, announcementsRoutes);
+
+// ── Soporte (con tenant) ──
+app.use('/api/support', authMiddleware, tenantMiddleware, supportRoutes);
 
 // ── Permisos (sin tenant) ──
 app.use('/api/permissions', authMiddleware, permissionsRoutes);
@@ -203,13 +212,14 @@ app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware,
 app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware, vehiclesRoutes);
 app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, branchMiddleware, workOrdersRoutes);
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
+app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware, diagramTemplatesRoutes);
 
 // ── Inventario ──
 app.use('/api/products',                       authMiddleware, tenantMiddleware, productsRoutes);
 app.use('/api/categories',                     authMiddleware, tenantMiddleware, categoriesRoutes);
 app.use('/api/inventory/suppliers',            authMiddleware, tenantMiddleware, suppliersRoutes);
 app.use('/api/inventory/purchases',            authMiddleware, tenantMiddleware, branchMiddleware, purchasesRoutes);
-app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, movementsRoutes);
+app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, branchMiddleware, movementsRoutes);
 app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, adjustmentsRoutes);
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
@@ -219,40 +229,43 @@ app.use('/api/dashboard',                      authMiddleware, tenantMiddleware,
 // Estas rutas específicas ANTES de /api/sales para evitar conflicto con /:id
 app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware, branchMiddleware, customerReturnsRoutes);
 app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, branchMiddleware, supplierReturnsRoutes);
-app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, transfersRoutes);
+app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, branchMiddleware, transfersRoutes);
 app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, branchMiddleware, internalConsumptionsRoutes);
 
 // ── Ventas (genéricas — después de las específicas) ──
 app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, salesRoutes);
 app.use('/api/customers',                      authMiddleware, tenantMiddleware, customersRoutes);
 app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
-app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, accountsPayableRoutes);
-app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, expensesRoutes);
-app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, cashflowRoutes);
-app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, cashSessionsRoutes);
-app.use('/api/receipts',                       authMiddleware, tenantMiddleware, branchMiddleware, receiptsRoutes);
+app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);
+app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), expensesRoutes);
+app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashflowRoutes);
+app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashSessionsRoutes);
+app.use('/api/receipts',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), receiptsRoutes);
 app.use('/api/tenant',                         authMiddleware, tenantMiddleware, tenantRoutes);
-app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, reportsRoutes);
+app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, branchMiddleware, reportsRoutes);
 app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware, branchMiddleware, invoiceImportRoutes);
 app.use('/api/users',                          authMiddleware, tenantMiddleware, userRoutes);
 
 // ✅ DIAN — Facturación Electrónica (con tenant)
 app.use('/api/whatsapp',                      authMiddleware, whatsappRoutes);
 app.use('/api/dian',                           authMiddleware, tenantMiddleware, branchMiddleware, dianRoutes);
-// Contabilidad: mismo mecanismo que ya usa el resto de la app (checkRole).
-// Roles reales del sistema (ver User.js): super_admin, admin, manager,
-// seller, warehouse_keeper, user, viewer, technician — de esos, solo
-// admin/manager/super_admin tienen sentido para tocar libros contables.
-// ('accountant' aparece referenciado en cashSessions.routes.js pero NO es
-// un rol válido en User.js — no se reutiliza acá por ser un valor muerto).
+// Contabilidad: mismo mecanismo que ya usa el resto de la app (checkRole +
+// requireModule). Roles reales del sistema (ver User.js): super_admin, admin,
+// manager, seller, warehouse_keeper, accountant, user, viewer, technician,
+// support — de esos, solo admin/super_admin/manager/accountant tienen
+// sentido para tocar libros contables. requireModule('accounting') además
+// exige que el tenant tenga el módulo contratado (antes no se validaba acá,
+// solo se ocultaba el menú en el frontend).
 // Sin esta línea, cualquier usuario autenticado del tenant (un vendedor, un
 // bodeguero) podía postear, anular o reversar asientos, o cambiar el mapeo
 // de cuentas — no había segregación de funciones.
-app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, checkRole('admin', 'super_admin', 'manager'), accountingRoutes);
+app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, requireModule('accounting'), checkRole('admin', 'super_admin', 'manager', 'accountant'), accountingRoutes);
 app.use('/api/ai-assistant',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ai_assistant'), aiAssistantRoutes);
 
 const path = require('path');
 // /uploads/logos eliminado — logos ahora en Cloudinary (Vercel stateless)
+// Archivos de soporte (fallback local cuando no hay Cloudinary)
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // ================= HEALTH =================
 app.get('/api/health', (req, res) => {
@@ -285,7 +298,25 @@ const isVercel = !!process.env.VERCEL;
 
 if (!isVercel) {
   const PORT = process.env.PORT || 5000;
-  app.listen(PORT, async () => {
+  const http = require('http');
+  const server = http.createServer(app);
+
+  // Socket.io — señalización para acceso remoto
+  const { Server } = require('socket.io');
+  const io = new Server(server, {
+    cors: {
+      origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+      methods: ['GET', 'POST'],
+      credentials: true,
+    },
+  });
+  require('./services/remoteSupportSignaling')(io);
+
+  // Notificaciones en vivo de tickets
+  const { initTicketNotifications } = require('./services/ticketNotifications.socket');
+  initTicketNotifications(io);
+
+  server.listen(PORT, async () => {
     console.log('Servidor corriendo en puerto ' + PORT);
     const connected = await testConnection();
     console.log(connected ? 'DB conectada OK' : 'ERROR: DB no conectada');
@@ -296,6 +327,14 @@ if (!isVercel) {
         await runMigrations();
       } catch (err) {
         console.error('[Migrator] Error ejecutando migraciones:', err.message);
+      }
+
+      // Siembrar diagramas base si no existen (o actualizar si cambiaron)
+      try {
+        const { seedDiagramTemplates } = require('./services/seedDiagramTemplates');
+        await seedDiagramTemplates();
+      } catch (err) {
+        console.error('[Seed] Error al sembrar diagram templates:', err.message);
       }
 
       // Jobs programados (vehicle-reminders, stock-alerts, ncf-sync) --
@@ -322,6 +361,13 @@ if (!isVercel) {
       await runMigrations();
     } catch (err) {
       console.error('[Migrator] Error ejecutando migraciones:', err.message);
+    }
+    // Siembrar diagramas base
+    try {
+      const { seedDiagramTemplates } = require('./services/seedDiagramTemplates');
+      await seedDiagramTemplates();
+    } catch (err) {
+      console.error('[Seed] Error al sembrar diagram templates:', err.message);
     }
   });
 }
