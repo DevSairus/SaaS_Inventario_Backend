@@ -18,7 +18,7 @@ const getAllUsers = async (req, res) => {
 
     let where = {
       role: { 
-        [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'] 
+        [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'] 
       },
       // Por defecto mostrar solo activos; el frontend puede pedir todos con is_active=all
       is_active: true,
@@ -249,7 +249,7 @@ const createUser = async (req, res) => {
     } = req.body;
 
     // Validar rol (excluir super_admin que solo se crea desde backend)
-    const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'];
+    const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'];
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({
         success: false,
@@ -422,7 +422,7 @@ const updateUser = async (req, res) => {
         updateData.is_active = is_active;
       }
       if (role) {
-        const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'];
+        const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'];
         if (!validRoles.includes(role)) {
           return res.status(400).json({ success: false, message: `Rol inválido: ${role}` });
         }
@@ -633,7 +633,7 @@ const getLimitsStatus = async (req, res) => {
 
     // Contar usuarios (admin + manager + seller + warehouse_keeper + user + viewer) - usando addTenantScope
     let usersWhere = {
-      role: { [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'] },
+      role: { [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'] },
       is_active: true,
     };
     usersWhere = addTenantScope(usersWhere, req);

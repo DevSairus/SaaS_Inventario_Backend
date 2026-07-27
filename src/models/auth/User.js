@@ -47,9 +47,11 @@ const User = sequelize.define('User', {
         'manager',
         'seller',
         'warehouse_keeper',
+        'accountant',
         'user',
         'viewer',
-        'technician'
+        'technician',
+        'support'
       ]]
     }
   },

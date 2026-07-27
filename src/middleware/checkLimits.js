@@ -141,7 +141,7 @@ const checkLimits = (resourceType) => {
             where: {
               tenant_id: tenantId,
               role: {
-                [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician']
+                [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician']
               },
               is_active: true
             }
