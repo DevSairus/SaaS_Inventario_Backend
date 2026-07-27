@@ -607,6 +607,7 @@ const removeItem = async (req, res) => {
 const DIAGNOSIS_MARK_INCLUDE = [
   { model: Product, as: 'suggested_product', attributes: ['id', 'name', 'sku', 'base_price'], required: false },
   { model: User, as: 'marked_by_user', attributes: ['id', 'first_name', 'last_name'], required: false },
+  { model: DiagramTemplate, as: 'diagram_template', attributes: ['id', 'name', 'system', 'configuration'], required: false },
 ];
 
 /**

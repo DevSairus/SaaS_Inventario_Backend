@@ -773,7 +773,9 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
 
       for (const [, { template: tpl, marks: dMarks }] of Object.entries(diagramMap)) {
         // Imagen a la izquierda, tabla de marcas a la derecha (en vez de apilados)
-        const imgW = 200;
+        // Imagen más grande (antes 200pt) — las fuentes fuente son WEBP a 1536x1024,
+        // así que hay margen de sobra de resolución para crecer sin pixelarse.
+        const imgW = 240;
         const imgH = imgW * 0.667; // 3:2 aspect ratio
         const titleH = 14;
 
@@ -782,11 +784,23 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
         const colW = [18, 68, 34, 48, tableW - 18 - 68 - 34 - 48];
         const headers = ['#', 'Parte', 'Lado', 'Sev.', 'Observación'];
 
-        // Precalcular alto real de la tabla (para saltar de página con el bloque completo, no a medias)
+        // Precalcular alto real de la tabla (para saltar de página con el bloque completo, no a medias).
+        // OJO: hay que medir TODAS las columnas que pueden envolver a 2+ líneas
+        // (Parte y Sev. también envuelven con nombres largos como "Brazo de
+        // control inferior" o "Cambiar pronto"), no solo Observación — medir
+        // solo esa columna era la causa de que una fila corta "montara" su
+        // texto sobre la fila siguiente cuando Parte o Sev. sí envolvían.
         doc.font('Helvetica').fontSize(6.5);
-        const rowHeights = dMarks.map(m =>
-          Math.max(11, doc.heightOfString(m.observation || '', { width: colW[4] - 4 }) + 2)
-        );
+        const rowHeights = dMarks.map(m => {
+          const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
+          const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
+          const h = Math.max(
+            doc.heightOfString(pt?.part_name || '—', { width: colW[1] - 4 }),
+            doc.heightOfString(sevLabel, { width: colW[3] - 4 }),
+            doc.heightOfString(m.observation || '', { width: colW[4] - 4 }),
+          );
+          return Math.max(11, h + 3);
+        });
         const tableH = 13 + rowHeights.reduce((a, b) => a + b, 0);
         const blockH = titleH + Math.max(imgH, tableH) + 10;
 
