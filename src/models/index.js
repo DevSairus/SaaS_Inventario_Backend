@@ -66,6 +66,13 @@ const CommissionSettlement = require('./workshop/CommissionSettlement');
 const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
 const ProductCommissionSettlement = require('./workshop/ProductCommissionSettlement');
 const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSettlementItem');
+// ✅ NUEVO - Diagramas interactivos de intervención (fase 3)
+const DiagramTemplate = require('./workshop/DiagramTemplate');
+const WorkOrderDiagnosisMark = require('./workshop/WorkOrderDiagnosisMark');
+
+// ✅ NUEVO - Catálogo normalizado de vehículos (Fase 6)
+const VehicleBrand = require('./workshop/VehicleBrand');
+const VehicleLine = require('./workshop/VehicleLine');
 
 // DIAN - Facturación Electrónica
 const DianResolution = require('./dian/DianResolution');
@@ -80,6 +87,14 @@ const Receipt = require('./finance/Receipt');
 const AiConversation = require('./ai/AiConversation');
 const AiMessage = require('./ai/AiMessage');
 const AiProposal = require('./ai/AiProposal');
+
+// ✅ NUEVO - Módulo de Soporte
+const SupportFaqCategory = require('./support/SupportFaqCategory');
+const SupportFaqArticle = require('./support/SupportFaqArticle');
+const SupportTicket = require('./support/SupportTicket');
+const SupportTicketMessage = require('./support/SupportTicketMessage');
+const SupportTicketAttachment = require('./support/SupportTicketAttachment');
+const RemoteSupportSession = require('./support/RemoteSupportSession');
 // ============= RELACIONES EXISTENTES =============
 // Las asociaciones de Purchase, PurchaseItem, Supplier, Product e inventario base
 // están definidas en ./inventory/index.js. Se requiere aquí para garantizar que
@@ -94,8 +109,10 @@ User.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Branch.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.hasMany(Branch, { foreignKey: 'tenant_id', as: 'branches' });
 
-// Branch ↔ Warehouse (1 sede = 1 bodega, decisión de diseño confirmada)
-Branch.hasOne(Warehouse, { foreignKey: 'branch_id', as: 'warehouse' });
+// Branch ↔ Warehouse (1 sede : N bodegas — ver migración add-warehouse-default-per-branch;
+// `warehouse` expone solo la bodega marcada is_default=true, `warehouses` expone todas)
+Branch.hasMany(Warehouse, { foreignKey: 'branch_id', as: 'warehouses' });
+Branch.hasOne(Warehouse, { foreignKey: 'branch_id', as: 'warehouse', scope: { is_default: true } });
 Warehouse.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
 
 // Branch ↔ User (N:M vía UserBranch)
@@ -336,6 +353,12 @@ User.hasMany(UserAnnouncementView, { foreignKey: 'user_id', as: 'announcement_vi
 // UserAnnouncementView - Announcement
 UserAnnouncementView.belongsTo(Announcement, { foreignKey: 'announcement_id', as: 'announcement' });
 Announcement.hasMany(UserAnnouncementView, { foreignKey: 'announcement_id', as: 'views' });
+// ============= RELACIONES - CATÁLOGO VEHÍCULOS =============
+
+// VehicleBrand ↔ VehicleLine (1:N)
+VehicleBrand.hasMany(VehicleLine, { foreignKey: 'brand_id', as: 'lines' });
+VehicleLine.belongsTo(VehicleBrand, { foreignKey: 'brand_id', as: 'brand' });
+
 // ============= RELACIONES - TALLER =============
 
 // Vehicle ↔ Customer
@@ -377,6 +400,18 @@ WorkOrderQuoteRequest.hasMany(WorkOrderItem, { foreignKey: 'quote_request_id', a
 // WorkOrderItem ↔ Product
 WorkOrderItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(WorkOrderItem, { foreignKey: 'product_id', as: 'work_order_items' });
+
+// DiagramTemplate ↔ Tenant (NULL = biblioteca compartida global)
+DiagramTemplate.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+// WorkOrderDiagnosisMark ↔ WorkOrder / DiagramTemplate / Product / User
+WorkOrderDiagnosisMark.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+WorkOrder.hasMany(WorkOrderDiagnosisMark, { foreignKey: 'work_order_id', as: 'diagnosis_marks' });
+WorkOrderDiagnosisMark.belongsTo(DiagramTemplate, { foreignKey: 'diagram_template_id', as: 'diagram_template' });
+DiagramTemplate.hasMany(WorkOrderDiagnosisMark, { foreignKey: 'diagram_template_id', as: 'marks' });
+WorkOrderDiagnosisMark.belongsTo(Product, { foreignKey: 'suggested_product_id', as: 'suggested_product' });
+WorkOrderDiagnosisMark.belongsTo(WorkOrderItem, { foreignKey: 'generated_item_id', as: 'generated_item' });
+WorkOrderDiagnosisMark.belongsTo(User, { foreignKey: 'marked_by', as: 'marked_by_user' });
 
 // WorkOrderItem ↔ User (técnico responsable del ítem)
 WorkOrderItem.belongsTo(User, { foreignKey: 'technician_id', as: 'item_technician' });
@@ -457,6 +492,44 @@ AiProposal.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 AiProposal.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 AiProposal.belongsTo(User, { foreignKey: 'reviewed_by', as: 'reviewer' });
 
+// ============= RELACIONES - MÓDULO DE SOPORTE =============
+
+// SupportFaqArticle ↔ SupportFaqCategory
+SupportFaqArticle.belongsTo(SupportFaqCategory, { foreignKey: 'category_id', as: 'category' });
+SupportFaqCategory.hasMany(SupportFaqArticle, { foreignKey: 'category_id', as: 'articles' });
+
+// SupportTicket ↔ Tenant
+SupportTicket.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(SupportTicket, { foreignKey: 'tenant_id', as: 'support_tickets' });
+
+// SupportTicket ↔ User (creador / agente asignado)
+SupportTicket.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+User.hasMany(SupportTicket, { foreignKey: 'created_by', as: 'created_support_tickets' });
+SupportTicket.belongsTo(User, { foreignKey: 'assigned_agent_id', as: 'assigned_agent' });
+User.hasMany(SupportTicket, { foreignKey: 'assigned_agent_id', as: 'assigned_support_tickets' });
+
+// SupportTicketMessage ↔ SupportTicket / User
+SupportTicket.hasMany(SupportTicketMessage, { foreignKey: 'ticket_id', as: 'messages' });
+SupportTicketMessage.belongsTo(SupportTicket, { foreignKey: 'ticket_id', as: 'ticket' });
+SupportTicketMessage.belongsTo(User, { foreignKey: 'author_id', as: 'author' });
+User.hasMany(SupportTicketMessage, { foreignKey: 'author_id', as: 'support_ticket_messages' });
+
+// SupportTicketAttachment ↔ SupportTicket / SupportTicketMessage
+SupportTicket.hasMany(SupportTicketAttachment, { foreignKey: 'ticket_id', as: 'attachments' });
+SupportTicketAttachment.belongsTo(SupportTicket, { foreignKey: 'ticket_id', as: 'ticket' });
+SupportTicketMessage.hasMany(SupportTicketAttachment, { foreignKey: 'message_id', as: 'attachments' });
+SupportTicketAttachment.belongsTo(SupportTicketMessage, { foreignKey: 'message_id', as: 'message' });
+
+// RemoteSupportSession ↔ SupportTicket / Tenant / User (agente / cliente)
+SupportTicket.hasMany(RemoteSupportSession, { foreignKey: 'ticket_id', as: 'remote_sessions' });
+RemoteSupportSession.belongsTo(SupportTicket, { foreignKey: 'ticket_id', as: 'ticket' });
+RemoteSupportSession.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(RemoteSupportSession, { foreignKey: 'tenant_id', as: 'remote_support_sessions' });
+RemoteSupportSession.belongsTo(User, { foreignKey: 'agent_id', as: 'agent' });
+User.hasMany(RemoteSupportSession, { foreignKey: 'agent_id', as: 'agent_remote_sessions' });
+RemoteSupportSession.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+User.hasMany(RemoteSupportSession, { foreignKey: 'user_id', as: 'client_remote_sessions' });
+
 module.exports = {
   sequelize,
   Tenant,
@@ -504,6 +577,8 @@ module.exports = {
   CommissionSettlementItem,
   ProductCommissionSettlement,
   ProductCommissionSettlementItem,
+  DiagramTemplate,
+  WorkOrderDiagnosisMark,
   DianResolution,
   DianEvent,
   Expense,
@@ -519,4 +594,12 @@ module.exports = {
   AiConversation,
   AiMessage,
   AiProposal,
+  SupportFaqCategory,
+  SupportFaqArticle,
+  SupportTicket,
+  SupportTicketMessage,
+  SupportTicketAttachment,
+  RemoteSupportSession,
+  VehicleBrand,
+  VehicleLine,
 };
