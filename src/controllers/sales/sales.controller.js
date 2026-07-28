@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -800,16 +800,21 @@ const confirm = async (req, res) => {
       await sale.update(updateData, { transaction });
       await transaction.commit();
 
-      // Asiento contable en borrador (no bloqueante: si falla, solo se loguea)
-      setImmediate(async () => {
-        try {
-          const { generateSaleEntry } = require('../../services/accounting/autoEntries.service');
-          const finalSaleForAccounting = await Sale.findByPk(id, { include: [{ model: SaleItem, as: 'items' }] });
-          await generateSaleEntry(finalSaleForAccounting, finalSaleForAccounting.items, tenantId, userId);
-        } catch (err) {
-          logger.warn(`[accounting] Error generando asiento de venta ${id}: ${err.message}`);
-        }
-      });
+      // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+      // Una cotización NO es una venta real todavía — no debe tocar el libro
+      // diario hasta que se confirme como remisión/factura (o se convierta
+      // en OT, cuyo cierre genera su propio asiento en workOrders.controller).
+      if (finalDocType !== 'cotizacion') {
+        setImmediate(async () => {
+          try {
+            const { generateSaleEntry } = require('../../services/accounting/autoEntries.service');
+            const finalSaleForAccounting = await Sale.findByPk(id, { include: [{ model: SaleItem, as: 'items' }] });
+            await generateSaleEntry(finalSaleForAccounting, finalSaleForAccounting.items, tenantId, userId);
+          } catch (err) {
+            logger.warn(`[accounting] Error generando asiento de venta ${id}: ${err.message}`);
+          }
+        });
+      }
 
       // ── Disparar envío DIAN si quedó como factura ───────────────────────────
       if (finalDocType === 'factura') {
@@ -1147,7 +1152,8 @@ const generatePDF = async (req, res) => {
       where: { id, tenant_id: tenantId },
       include: [
         { model: Customer, as: 'customer' },
-        { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] }
+        { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] },
+        { model: SaleDiagnosisMark, as: 'diagnosis_marks', include: [{ model: DiagramTemplate, as: 'diagram_template' }] }
       ]
     });
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });

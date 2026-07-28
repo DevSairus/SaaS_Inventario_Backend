@@ -935,4 +935,8 @@ module.exports = {
   generatePaymentReceiptBuffer,
   generateIntakeFormBuffer,
   generateWorkOrderPDFBuffer,
+  // Reutilizados por pdfService.js para dibujar los mismos diagramas de
+  // intervención sobre el PDF de una cotización (SaleDiagnosisMark)
+  renderDiagramToPng,
+  SEVERITY_COLORS,
 };

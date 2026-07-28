@@ -5,7 +5,7 @@
 const express = require('express');
 const router  = express.Router();
 const jwt     = require('jsonwebtoken');
-const { Sale, Customer, SaleItem, Product, Tenant } = require('../models');
+const { Sale, Customer, SaleItem, Product, Tenant, SaleDiagnosisMark, DiagramTemplate } = require('../models');
 const { generateSalePDFBuffer } = require('../services/pdfService');
 const logger  = require('../config/logger');
 
@@ -33,6 +33,7 @@ router.get('/:token', async (req, res) => {
       include: [
         { model: Customer, as: 'customer' },
         { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] },
+        { model: SaleDiagnosisMark, as: 'diagnosis_marks', include: [{ model: DiagramTemplate, as: 'diagram_template' }] },
       ],
     });
 

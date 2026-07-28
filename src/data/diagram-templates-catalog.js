@@ -1540,11 +1540,11 @@ module.exports = [
   {
     "vehicle_type": "motocicleta",
     "system": "frenos",
-    "configuration": "disco_delantero_tambor_trasero",
-    "name": "Frenos — disco delantero + tambor trasero",
-    "description": "Configuración más común en motos económicas: disco ventilado delantero con mordaza, tambor trasero con zapatas.",
+    "configuration": "disco_delantero",
+    "name": "Frenos — disco delantero",
+    "description": "Conjunto de freno delantero de motocicleta con disco, pinza de montaje axial, horquilla telescópica y cubo de rueda",
     "view_box": "0 0 600 400",
-    "image_path": "brakes/moto-disc-front-drum-rear.webp",
+    "image_path": "brakes/moto-front-disc-brake.webp",
     "svg_content": "<svg viewBox=\"0 0 600 400\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"mDdDi\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#94a3b8\"/><stop offset=\"50%\" stop-color=\"#e2e8f0\"/><stop offset=\"100%\" stop-color=\"#64748b\"/></linearGradient><linearGradient id=\"mDdCa\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#dc2626\"/><stop offset=\"100%\" stop-color=\"#991b1b\"/></linearGradient></defs><rect width=\"600\" height=\"400\" fill=\"#f9fafb\"/><text x=\"170\" y=\"28\" text-anchor=\"middle\" font-size=\"11\" fill=\"#6b7280\" font-weight=\"bold\">DELANTERO</text><text x=\"450\" y=\"28\" text-anchor=\"middle\" font-size=\"11\" fill=\"#6b7280\" font-weight=\"bold\">TRASERO</text><circle cx=\"170\" cy=\"200\" r=\"80\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"2\" stroke-dasharray=\"4 3\"/><circle cx=\"170\" cy=\"200\" r=\"60\" fill=\"url(#mDdDi)\" stroke=\"#64748b\" stroke-width=\"2\"/><circle cx=\"170\" cy=\"200\" r=\"25\" fill=\"#cbd5e1\" stroke=\"#64748b\" stroke-width=\"1.5\"/><circle cx=\"170\" cy=\"200\" r=\"8\" fill=\"#64748b\"/><circle cx=\"175\" cy=\"180\" r=\"3\" fill=\"#475569\"/><circle cx=\"165\" cy=\"220\" r=\"3\" fill=\"#475569\"/><circle cx=\"190\" cy=\"200\" r=\"3\" fill=\"#475569\"/><circle cx=\"150\" cy=\"200\" r=\"3\" fill=\"#475569\"/><path d=\"M135,130 L135,170 Q135,178 143,178 L155,178 Q163,178 163,170 L163,130 Q163,122 155,122 L143,122 Q135,122 135,130 Z\" fill=\"url(#mDdCa)\" stroke=\"#7f1d1d\" stroke-width=\"1.5\"/><rect x=\"140\" y=\"135\" width=\"18\" height=\"35\" rx=\"2\" fill=\"#4b5563\" stroke=\"#374151\" stroke-width=\"1\"/><circle cx=\"149\" cy=\"127\" r=\"3\" fill=\"#374151\"/><circle cx=\"450\" cy=\"200\" r=\"75\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"2\" stroke-dasharray=\"4 3\"/><circle cx=\"450\" cy=\"200\" r=\"60\" fill=\"#e2e8f0\" stroke=\"#64748b\" stroke-width=\"2\"/><circle cx=\"450\" cy=\"200\" r=\"55\" fill=\"#f1f5f9\" stroke=\"#94a3b8\" stroke-width=\"1\"/><circle cx=\"450\" cy=\"200\" r=\"22\" fill=\"#cbd5e1\" stroke=\"#64748b\" stroke-width=\"1.5\"/><circle cx=\"450\" cy=\"200\" r=\"7\" fill=\"#64748b\"/><path d=\"M440,200 L440,155 Q440,148 448,148 L452,148 Q460,148 460,155 L460,200\" fill=\"#475569\" stroke=\"#1e293b\" stroke-width=\"1\"/><path d=\"M440,200 L440,245 Q440,252 448,252 L452,252 Q460,252 460,245 L460,200\" fill=\"#475569\" stroke=\"#1e293b\" stroke-width=\"1\"/><circle cx=\"448\" cy=\"155\" r=\"2.5\" fill=\"#cbd5e1\"/><circle cx=\"452\" cy=\"155\" r=\"2.5\" fill=\"#cbd5e1\"/><circle cx=\"448\" cy=\"245\" r=\"2.5\" fill=\"#cbd5e1\"/><circle cx=\"452\" cy=\"245\" r=\"2.5\" fill=\"#cbd5e1\"/></svg>",
     "points": [
       {
@@ -1600,11 +1600,71 @@ module.exports = [
   {
     "vehicle_type": "motocicleta",
     "system": "frenos",
-    "configuration": "disco_doble",
-    "name": "Frenos — disco doble (delantero + trasero)",
-    "description": "Discos tanto adelante como atrás — motos deportivas y naked de alta cilindrada.",
+    "configuration": "disco_trasero",
+    "name": "Frenos — disco trasero",
+    "description": "Conjunto de freno trasero de motocicleta con disco, pinza de montaje axial, basculante de aluminio y cubo de rueda.",
     "view_box": "0 0 600 400",
-    "image_path": "brakes/moto-disc-front-disc-rear.webp",
+    "image_path": "brakes/moto-rear-disc-brake.webp",
+    "svg_content": "<svg viewBox=\"0 0 600 400\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"mDblDi\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#94a3b8\"/><stop offset=\"50%\" stop-color=\"#e2e8f0\"/><stop offset=\"100%\" stop-color=\"#64748b\"/></linearGradient></defs><rect width=\"600\" height=\"400\" fill=\"#f9fafb\"/><text x=\"170\" y=\"28\" text-anchor=\"middle\" font-size=\"11\" fill=\"#6b7280\" font-weight=\"bold\">DELANTERO</text><text x=\"450\" y=\"28\" text-anchor=\"middle\" font-size=\"11\" fill=\"#6b7280\" font-weight=\"bold\">TRASERO</text><circle cx=\"170\" cy=\"200\" r=\"85\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"2\" stroke-dasharray=\"4 3\"/><circle cx=\"170\" cy=\"200\" r=\"65\" fill=\"url(#mDblDi)\" stroke=\"#64748b\" stroke-width=\"2\"/><circle cx=\"170\" cy=\"200\" r=\"28\" fill=\"#cbd5e1\" stroke=\"#64748b\" stroke-width=\"1.5\"/><circle cx=\"170\" cy=\"200\" r=\"9\" fill=\"#64748b\"/><circle cx=\"178\" cy=\"178\" r=\"3.5\" fill=\"#475569\"/><circle cx=\"162\" cy=\"222\" r=\"3.5\" fill=\"#475569\"/><circle cx=\"195\" cy=\"200\" r=\"3.5\" fill=\"#475569\"/><circle cx=\"145\" cy=\"200\" r=\"3.5\" fill=\"#475569\"/><path d=\"M130,125 L130,172 Q130,180 140,180 L158,180 Q168,180 168,172 L168,125 Q168,117 158,117 L140,117 Q130,117 130,125 Z\" fill=\"#dc2626\" stroke=\"#7f1d1d\" stroke-width=\"1.5\"/><rect x=\"136\" y=\"132\" width=\"26\" height=\"40\" rx=\"3\" fill=\"#4b5563\" stroke=\"#374151\" stroke-width=\"1\"/><circle cx=\"149\" cy=\"122\" r=\"3.5\" fill=\"#374151\"/><circle cx=\"450\" cy=\"200\" r=\"65\" fill=\"url(#mDblDi)\" stroke=\"#64748b\" stroke-width=\"2\"/><circle cx=\"450\" cy=\"200\" r=\"25\" fill=\"#cbd5e1\" stroke=\"#64748b\" stroke-width=\"1.5\"/><circle cx=\"450\" cy=\"200\" r=\"8\" fill=\"#64748b\"/><circle cx=\"457\" cy=\"183\" r=\"3\" fill=\"#475569\"/><circle cx=\"443\" cy=\"217\" r=\"3\" fill=\"#475569\"/><path d=\"M425,140 L425,178 Q425,185 433,185 L445,185 Q453,185 453,178 L453,140 Q453,133 445,133 L433,133 Q425,133 425,140 Z\" fill=\"#dc2626\" stroke=\"#7f1d1d\" stroke-width=\"1.5\"/><rect x=\"430\" y=\"148\" width=\"18\" height=\"28\" rx=\"2\" fill=\"#4b5563\" stroke=\"#374151\" stroke-width=\"1\"/><circle cx=\"439\" cy=\"138\" r=\"3\" fill=\"#374151\"/></svg>",
+    "points": [
+      {
+        "point_number": 1,
+        "x": 170,
+        "y": 265,
+        "part_name": "Disco delantero"
+      },
+      {
+        "point_number": 2,
+        "x": 149,
+        "y": 150,
+        "part_name": "Mordaza delantera"
+      },
+      {
+        "point_number": 3,
+        "x": 140,
+        "y": 138,
+        "part_name": "Pastillas delanteras"
+      },
+      {
+        "point_number": 4,
+        "x": 170,
+        "y": 200,
+        "part_name": "Buje central delantero"
+      },
+      {
+        "point_number": 5,
+        "x": 450,
+        "y": 265,
+        "part_name": "Disco trasero"
+      },
+      {
+        "point_number": 6,
+        "x": 439,
+        "y": 160,
+        "part_name": "Mordaza trasera"
+      },
+      {
+        "point_number": 7,
+        "x": 430,
+        "y": 148,
+        "part_name": "Pastillas traseras"
+      },
+      {
+        "point_number": 8,
+        "x": 450,
+        "y": 200,
+        "part_name": "Buje central trasero"
+      }
+    ]
+  },
+  {
+    "vehicle_type": "motocicleta",
+    "system": "frenos",
+    "configuration": "tambor_trasero",
+    "name": "Frenos — tambor trasero",
+    "description": "Conjunto de freno trasero de tambor para motocicleta con basculante, cubo de freno y mecanismo de accionamiento.",
+    "view_box": "0 0 600 400",
+    "image_path": "brakes/moto-rear-drum-brake.webp",
     "svg_content": "<svg viewBox=\"0 0 600 400\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"mDblDi\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0%\" stop-color=\"#94a3b8\"/><stop offset=\"50%\" stop-color=\"#e2e8f0\"/><stop offset=\"100%\" stop-color=\"#64748b\"/></linearGradient></defs><rect width=\"600\" height=\"400\" fill=\"#f9fafb\"/><text x=\"170\" y=\"28\" text-anchor=\"middle\" font-size=\"11\" fill=\"#6b7280\" font-weight=\"bold\">DELANTERO</text><text x=\"450\" y=\"28\" text-anchor=\"middle\" font-size=\"11\" fill=\"#6b7280\" font-weight=\"bold\">TRASERO</text><circle cx=\"170\" cy=\"200\" r=\"85\" fill=\"none\" stroke=\"#d1d5db\" stroke-width=\"2\" stroke-dasharray=\"4 3\"/><circle cx=\"170\" cy=\"200\" r=\"65\" fill=\"url(#mDblDi)\" stroke=\"#64748b\" stroke-width=\"2\"/><circle cx=\"170\" cy=\"200\" r=\"28\" fill=\"#cbd5e1\" stroke=\"#64748b\" stroke-width=\"1.5\"/><circle cx=\"170\" cy=\"200\" r=\"9\" fill=\"#64748b\"/><circle cx=\"178\" cy=\"178\" r=\"3.5\" fill=\"#475569\"/><circle cx=\"162\" cy=\"222\" r=\"3.5\" fill=\"#475569\"/><circle cx=\"195\" cy=\"200\" r=\"3.5\" fill=\"#475569\"/><circle cx=\"145\" cy=\"200\" r=\"3.5\" fill=\"#475569\"/><path d=\"M130,125 L130,172 Q130,180 140,180 L158,180 Q168,180 168,172 L168,125 Q168,117 158,117 L140,117 Q130,117 130,125 Z\" fill=\"#dc2626\" stroke=\"#7f1d1d\" stroke-width=\"1.5\"/><rect x=\"136\" y=\"132\" width=\"26\" height=\"40\" rx=\"3\" fill=\"#4b5563\" stroke=\"#374151\" stroke-width=\"1\"/><circle cx=\"149\" cy=\"122\" r=\"3.5\" fill=\"#374151\"/><circle cx=\"450\" cy=\"200\" r=\"65\" fill=\"url(#mDblDi)\" stroke=\"#64748b\" stroke-width=\"2\"/><circle cx=\"450\" cy=\"200\" r=\"25\" fill=\"#cbd5e1\" stroke=\"#64748b\" stroke-width=\"1.5\"/><circle cx=\"450\" cy=\"200\" r=\"8\" fill=\"#64748b\"/><circle cx=\"457\" cy=\"183\" r=\"3\" fill=\"#475569\"/><circle cx=\"443\" cy=\"217\" r=\"3\" fill=\"#475569\"/><path d=\"M425,140 L425,178 Q425,185 433,185 L445,185 Q453,185 453,178 L453,140 Q453,133 445,133 L433,133 Q425,133 425,140 Z\" fill=\"#dc2626\" stroke=\"#7f1d1d\" stroke-width=\"1.5\"/><rect x=\"430\" y=\"148\" width=\"18\" height=\"28\" rx=\"2\" fill=\"#4b5563\" stroke=\"#374151\" stroke-width=\"1\"/><circle cx=\"439\" cy=\"138\" r=\"3\" fill=\"#374151\"/></svg>",
     "points": [
       {

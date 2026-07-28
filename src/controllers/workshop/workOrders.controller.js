@@ -1202,6 +1202,21 @@ const generateSale = async (req, res) => {
 
     await transaction.commit();
 
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    // Mismo patrón que sales.controller.js#update — antes de este fix, las
+    // remisiones/facturas generadas desde el cierre de una OT nunca pasaban
+    // por acá y quedaban sin asiento, descuadrando el libro diario contra
+    // las ventas reales del taller.
+    setImmediate(async () => {
+      try {
+        const { generateSaleEntry } = require('../../services/accounting/autoEntries.service');
+        const finalSaleForAccounting = await Sale.findByPk(sale.id, { include: [{ model: SaleItem, as: 'items' }] });
+        await generateSaleEntry(finalSaleForAccounting, finalSaleForAccounting.items, tenant_id, req.user.id);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de venta ${sale.id} (desde cierre de OT ${order.id}): ${err.message}`);
+      }
+    });
+
     res.status(201).json({
       success: true,
       message: 'Remisión generada exitosamente',

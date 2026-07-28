@@ -404,6 +404,89 @@ const generateSalePDF = async (res, sale, tenant) => {
       doc.font('Helvetica').fontSize(9).fillColor(black).text(sale.notes, MARGIN, y, { width: INNER_W });
     }
 
+    /* ══════════════════════════════════════════════════════════
+       DIAGRAMA DE INTERVENCIÓN (si la cotización tiene marcas)
+       Mismo bloque (imagen + tabla en dos columnas) que ya se usa en
+       workshopPdfService.js para la OT — se reutiliza acá para que las
+       cotizaciones con diagnóstico marcado también lo muestren en su PDF
+       y en la vista pública (que sirve este mismo PDF).
+       ══════════════════════════════════════════════════════════ */
+    const diagMarks = sale.diagnosis_marks || [];
+    if (diagMarks.length > 0) {
+      const { renderDiagramToPng, SEVERITY_COLORS } = require('./workshopPdfService');
+
+      const diagramMap = {};
+      diagMarks.forEach(m => {
+        const tpl = m.diagram_template;
+        if (!tpl) return;
+        if (!diagramMap[tpl.id]) diagramMap[tpl.id] = { template: tpl, marks: [] };
+        diagramMap[tpl.id].marks.push(m);
+      });
+
+      y += 20;
+      if (y > 600) { doc.addPage(); y = 40; }
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(gray).text('DIAGNÓSTICO / DIAGRAMA DE INTERVENCIÓN', MARGIN, y);
+      y += 16;
+
+      for (const [, { template: tpl, marks: dMarks }] of Object.entries(diagramMap)) {
+        const imgW = 230;
+        const imgH = imgW * 0.667;
+        const titleH = 14;
+
+        const tableX = MARGIN + imgW + 16;
+        const tableW = INNER_W - imgW - 16;
+        const colW = [18, 68, 34, 48, tableW - 18 - 68 - 34 - 48];
+        const headers = ['#', 'Parte', 'Lado', 'Sev.', 'Observación'];
+
+        doc.font('Helvetica').fontSize(6.5);
+        const rowHeights = dMarks.map(m =>
+          Math.max(11, doc.heightOfString(m.observation || '', { width: colW[4] - 4 }) + 2)
+        );
+        const tableH = 13 + rowHeights.reduce((a, b) => a + b, 0);
+        const blockH = titleH + Math.max(imgH, tableH) + 10;
+
+        if (y + blockH > doc.page.height - 100) { doc.addPage(); y = 40; }
+
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(black)
+          .text(`DIAGNÓSTICO — ${tpl.name}`, MARGIN, y);
+        y += titleH;
+        const blockTop = y;
+
+        try {
+          const pngBuf = await renderDiagramToPng(tpl.image_path, tpl.view_box, tpl.points, dMarks);
+          doc.image(pngBuf, MARGIN, blockTop, { fit: [imgW, imgH] });
+        } catch (e) {
+          doc.font('Helvetica-Oblique').fontSize(8).fillColor(gray)
+            .text('(Error al renderizar diagrama)', MARGIN, blockTop, { width: imgW });
+        }
+
+        let ty = blockTop;
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(black);
+        headers.forEach((h, i) => {
+          const hx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+          doc.text(h, hx, ty, { width: colW[i], align: i === 0 ? 'center' : 'left' });
+        });
+        ty += 10;
+        doc.moveTo(tableX, ty).lineTo(tableX + tableW, ty).strokeColor(border).lineWidth(0.3).stroke();
+        ty += 3;
+
+        doc.font('Helvetica').fontSize(6.5).fillColor(gray);
+        dMarks.forEach((m, idx) => {
+          const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
+          const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
+          const vals = [String(m.point_number), pt?.part_name || '—', m.side || '—', sevLabel, m.observation || ''];
+          vals.forEach((v, i) => {
+            const cx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+            doc.fillColor(i === 3 ? (SEVERITY_COLORS[m.severity] || gray) : gray)
+              .text(v, cx + 2, ty, { width: colW[i] - 4, align: i === 0 ? 'center' : 'left' });
+          });
+          ty += rowHeights[idx];
+        });
+
+        y = blockTop + Math.max(imgH, tableH) + 10;
+      }
+    }
+
     /* ── ACENTO INFERIOR ────────────────────────────────────── */
     doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(red);
 
