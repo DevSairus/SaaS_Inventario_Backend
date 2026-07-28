@@ -32,11 +32,63 @@ const PUBLIC_ONLY_TABLES = new Set([
   'user_announcement_views', 'sequelize_migrations', 'SequelizeMeta',
 ]);
 
+// Valores legacy en `public` que ya no son válidos contra el CHECK constraint
+// del schema nuevo (dato viejo que quedó de antes de que el enum se
+// endureciera, nunca limpiado). Se remapean SOLO en la copia hacia el
+// tenant -- la fila original en `public` no se toca.
+const COLUMN_VALUE_TRANSFORMS = {
+  products: {
+    // 915 filas en el sistema (126 de este tenant) tienen 'product', que ya
+    // no es un valor válido de product_type (simple/variant/service/bundle/
+    // raw_material) -- decisión: tratarlas como 'simple' (ítem físico
+    // vendible genérico sin variantes).
+    product_type: `CASE WHEN "product_type" = 'product' THEN 'simple' ELSE "product_type" END`,
+    // Filas legacy en `public` tienen barcode = '' (string vacío) en vez de
+    // NULL para "sin código de barras". El constraint tenant_barcode_unique
+    // (tenant_id, barcode) del schema nuevo sí lo valida desde cero, y varios
+    // '' repetidos para el mismo tenant lo violan. NULL sí puede repetirse
+    // bajo UNIQUE -> normalizar '' a NULL preserva la semántica real.
+    barcode: `NULLIF("barcode", '')`,
+  },
+};
+
+// `diagram_templates` es una biblioteca híbrida: filas con tenant_id = NULL
+// son un catálogo global "compartido" que CADA schema de tenant vuelve a
+// sembrar de forma independiente (2026072502-seed-diagram-templates-catalog.js
+// usa gen_random_uuid()) -> el mismo template lógico tiene un id DISTINTO en
+// cada schema. Copiar diagram_template_id tal cual desde `public` rompe el FK.
+// Se resuelve en REMAPPED_FK_COLUMNS con lógica dedicada (ver más abajo), no
+// con un simple passthrough de id.
+const REMAPPED_FK_COLUMNS = {
+  work_order_diagnosis_marks: ['diagram_template_id'],
+  sale_diagnosis_marks: ['diagram_template_id'],
+};
+
+// sales <-> work_orders se referencian mutuamente (work_orders.sale_id /
+// quote_sale_id -> sales.id, sales.converted_to_work_order_id -> work_orders.id).
+// No existe un orden de inserción de una sola pasada que respete ambas
+// direcciones. Neon no permite `DISABLE TRIGGER ALL` a un rol no-superuser
+// (bloquea los triggers de sistema de FK), así que estas columnas se
+// insertan como NULL y se rellenan con un UPDATE después de que ambas
+// tablas ya tengan todas sus filas.
+const DEFERRED_FK_COLUMNS = {
+  work_orders: ['sale_id', 'quote_sale_id'],
+  sales: ['converted_to_work_order_id'],
+};
+
 async function getTenantTables(sequelize) {
+  // JOIN contra information_schema.tables filtrando table_type='BASE TABLE':
+  // sin esto, las vistas con columna tenant_id (ej. v_product_prices_comparison,
+  // v_customers_with_price_lists) también aparecen, pero no existen como
+  // relación propia en el schema del tenant -> el DELETE/INSERT contra ellas
+  // revienta con "relation does not exist".
   const [rows] = await sequelize.query(`
-    SELECT table_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public' AND column_name = 'tenant_id'
+    SELECT c.table_name
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+    WHERE c.table_schema = 'public' AND c.column_name = 'tenant_id'
+      AND t.table_type = 'BASE TABLE'
   `);
   return rows.map(r => r.table_name).filter(t => !PUBLIC_ONLY_TABLES.has(t));
 }
@@ -90,13 +142,82 @@ async function migrateTenantData(slug, tenantId) {
 
     const report = [];
 
+    // Las columnas de DEFERRED_FK_COLUMNS/REMAPPED_FK_COLUMNS se insertan como
+    // NULL y se rellenan después -- si la columna es NOT NULL en el schema
+    // destino, hay que relajarla temporalmente o el INSERT falla antes de
+    // llegar al backfill. Se restaura al final (si el backfill de verdad
+    // llenó todas las filas; si no, el ALTER ... SET NOT NULL revienta y
+    // avisa del problema en vez de dejar una columna NOT NULL mentirosa).
+    const relaxedNotNull = [];
+    for (const [table, columns] of [
+      ...Object.entries(DEFERRED_FK_COLUMNS),
+      ...Object.entries(REMAPPED_FK_COLUMNS),
+    ]) {
+      if (!ordered.includes(table)) continue;
+      for (const column of columns) {
+        const [[colInfo]] = await sequelize.query(`
+          SELECT is_nullable FROM information_schema.columns
+          WHERE table_schema = '${schemaName}' AND table_name = '${table}' AND column_name = '${column}'
+        `);
+        if (colInfo && colInfo.is_nullable === 'NO') {
+          await sequelize.query(`ALTER TABLE "${schemaName}"."${table}" ALTER COLUMN "${column}" DROP NOT NULL`);
+          relaxedNotNull.push({ table, column });
+        }
+      }
+    }
+
+    // Idempotencia: si un intento anterior (parcial) ya copió filas hacia
+    // este schema, un re-intento chocaría con duplicate key. `public` sigue
+    // siendo la fuente de verdad (nunca se toca acá), así que es seguro
+    // limpiar el destino y re-copiar desde cero en cada corrida. Hay que
+    // borrar en orden INVERSO (hijos antes que padres) para no violar FKs
+    // contra filas de otra tabla que ya haya quedado copiada de una corrida
+    // previa y todavía no se re-copie en ESTA hasta más adelante en el loop.
+    //
+    // OJO: filtrar por `tenant_id IS NOT NULL`, no un DELETE a secas. Tablas
+    // como `diagram_templates` son híbridas (catálogo global con tenant_id
+    // NULL + personalizaciones por tenant) -- el catálogo global lo siembra
+    // la migración correspondiente UNA vez por schema, no este script, y el
+    // INSERT de abajo solo repone filas con tenant_id = este tenant. Un
+    // DELETE sin filtro borraría el catálogo global y nunca lo repondría.
+    for (const table of [...ordered].reverse()) {
+      await sequelize.query(`DELETE FROM "${schemaName}"."${table}" WHERE tenant_id IS NOT NULL`);
+    }
+
     for (const table of ordered) {
-      const [cols] = await sequelize.query(`
-        SELECT column_name FROM information_schema.columns
+      const [allCols] = await sequelize.query(`
+        SELECT column_name, data_type, udt_name FROM information_schema.columns
         WHERE table_schema = 'public' AND table_name = '${table}'
         ORDER BY ordinal_position
       `);
+      // El baseline es un snapshot histórico que a propósito dejó afuera
+      // columnas legacy que ya quedaron obsoletas/reemplazadas (ej.
+      // products.has_tax/tax_percentage/base_price -> tax_config). `public`
+      // puede tener más columnas que el schema del tenant recién aprovisionado
+      // -> copiar solo la intersección, no asumir paridad total.
+      const [destColRows] = await sequelize.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = '${schemaName}' AND table_name = '${table}'
+      `);
+      const destColSet = new Set(destColRows.map(r => r.column_name));
+      const cols = allCols.filter(c => destColSet.has(c.column_name));
+      const deferredCols = new Set([...(DEFERRED_FK_COLUMNS[table] || []), ...(REMAPPED_FK_COLUMNS[table] || [])]);
       const colNames = cols.map(c => `"${c.column_name}"`).join(', ');
+      // Los tipos ENUM de Postgres son por-schema: aunque public.vehicles.vehicle_type
+      // y tenant_x.vehicles.vehicle_type se llamen igual (enum_vehicles_vehicle_type),
+      // son tipos distintos (OID distinto) y Postgres no castea implícitamente entre
+      // ellos. Para columnas USER-DEFINED (enum), forzar el cast vía texto contra el
+      // tipo del schema DESTINO explícito. Las columnas en DEFERRED_FK_COLUMNS se
+      // insertan como NULL (se rellenan después, una vez las dos tablas del ciclo
+      // ya tienen todas sus filas).
+      const valueTransforms = COLUMN_VALUE_TRANSFORMS[table] || {};
+      const selectExprs = cols.map(c => {
+        if (deferredCols.has(c.column_name)) return 'NULL';
+        if (valueTransforms[c.column_name]) return valueTransforms[c.column_name];
+        return c.data_type === 'USER-DEFINED'
+          ? `"${c.column_name}"::text::"${schemaName}"."${c.udt_name}"`
+          : `"${c.column_name}"`;
+      }).join(', ');
 
       const [[{ count: sourceCount }]] = await sequelize.query(
         `SELECT count(*) FROM "public"."${table}" WHERE tenant_id = :tenantId`,
@@ -110,7 +231,7 @@ async function migrateTenantData(slug, tenantId) {
 
       await sequelize.query(
         `INSERT INTO "${schemaName}"."${table}" (${colNames})
-         SELECT ${colNames} FROM "public"."${table}" WHERE tenant_id = :tenantId`,
+         SELECT ${selectExprs} FROM "public"."${table}" WHERE tenant_id = :tenantId`,
         { replacements: { tenantId } }
       );
 
@@ -124,6 +245,47 @@ async function migrateTenantData(slug, tenantId) {
         copied: Number(destCount),
         ok: Number(sourceCount) === Number(destCount),
       });
+    }
+
+    // Backfill de las columnas de FK circular, ahora que ambas tablas del
+    // ciclo tienen todas sus filas.
+    for (const [table, columns] of Object.entries(DEFERRED_FK_COLUMNS)) {
+      if (!ordered.includes(table)) continue;
+      for (const column of columns) {
+        await sequelize.query(`
+          UPDATE "${schemaName}"."${table}" t
+          SET "${column}" = p."${column}"
+          FROM "public"."${table}" p
+          WHERE t.id = p.id AND p.tenant_id = :tenantId AND p."${column}" IS NOT NULL
+        `, { replacements: { tenantId } });
+      }
+    }
+
+    // Backfill de diagram_template_id: si el template original era de ESTE
+    // tenant (tenant_id = tenantId en public), el id se conserva igual (ya
+    // se copió 1:1 al copiar la tabla diagram_templates). Si era del catálogo
+    // global (tenant_id IS NULL en public), se remapea por clave natural
+    // (vehicle_type + system + configuration) contra el catálogo recién
+    // sembrado de ESTE schema, que tiene sus propios ids nuevos.
+    for (const marksTable of ['work_order_diagnosis_marks', 'sale_diagnosis_marks']) {
+      if (!ordered.includes(marksTable) || !ordered.includes('diagram_templates')) continue;
+      await sequelize.query(`
+        UPDATE "${schemaName}"."${marksTable}" t
+        SET diagram_template_id = COALESCE(
+          (SELECT dt.id FROM "${schemaName}"."diagram_templates" dt WHERE dt.id = pdt.id),
+          (SELECT dt.id FROM "${schemaName}"."diagram_templates" dt
+             WHERE dt.tenant_id IS NULL AND dt.vehicle_type = pdt.vehicle_type
+               AND dt.system = pdt.system AND dt.configuration = pdt.configuration
+             LIMIT 1)
+        )
+        FROM "public"."${marksTable}" p
+        JOIN "public"."diagram_templates" pdt ON pdt.id = p.diagram_template_id
+        WHERE t.id = p.id AND p.tenant_id = :tenantId AND p.diagram_template_id IS NOT NULL
+      `, { replacements: { tenantId } });
+    }
+
+    for (const { table, column } of relaxedNotNull) {
+      await sequelize.query(`ALTER TABLE "${schemaName}"."${table}" ALTER COLUMN "${column}" SET NOT NULL`);
     }
 
     console.table(report);

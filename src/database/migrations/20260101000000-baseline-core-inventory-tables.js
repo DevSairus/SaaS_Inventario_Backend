@@ -325,7 +325,7 @@ CREATE TABLE IF NOT EXISTS inventory_movements (
     reference_id UUID,
     reference_number VARCHAR(100),
     product_id UUID NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
-    warehouse_id UUID NOT NULL REFERENCES warehouses(id) ON DELETE RESTRICT,
+    warehouse_id UUID REFERENCES warehouses(id) ON DELETE RESTRICT,
     source_warehouse_id UUID REFERENCES warehouses(id),
     destination_warehouse_id UUID REFERENCES warehouses(id),
     quantity DECIMAL(15,4) NOT NULL,

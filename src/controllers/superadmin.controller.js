@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Invoice = require('../models/Invoice');
 const Payment = require('../models/Payment');
 const { Op } = require('sequelize');
+const { cutoverTenant } = require('../scripts/cutoverTenant');
 
 // Dashboard con métricas SaaS
 const getDashboard = async (req, res) => {
@@ -412,6 +413,17 @@ const createTenant = async (req, res) => {
           last_name: admin.last_name,
         },
       },
+    });
+
+    // Aprovisiona el schema dedicado (schema-per-tenant) en background --
+    // no bloquea la respuesta del signup, que ya se envió arriba. Un tenant
+    // recién creado no tiene filas propias en las tablas compartidas, así
+    // que el paso de copia de datos es prácticamente instantáneo. Si esto
+    // falla, el tenant queda funcionando en el modelo legacy (schema_name
+    // null, datos en public) sin ningún impacto visible para el usuario --
+    // se puede reintentar más tarde a mano con `node src/scripts/cutoverTenant.js <slug>`.
+    cutoverTenant(slug).catch((err) => {
+      logger.error(`Error aprovisionando schema para tenant "${slug}":`, err);
     });
   } catch (error) {
     // ✅ FIX: Hacer rollback en caso de cualquier error para no dejar datos inconsistentes
