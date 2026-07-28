@@ -58,7 +58,9 @@ async function provisionTenantSchema(slug) {
 
   try {
     // Diagnóstico: confirmar que ESTA conexión efectivamente ve el search_path esperado
-    const [[{ current_search_path }]] = await sequelize.query('SHOW search_path AS current_search_path');
+    const [[{ current_search_path }]] = await sequelize.query(
+      "SELECT current_setting('search_path') AS current_search_path"
+    );
     console.log(`ℹ️  search_path efectivo de la conexión: ${current_search_path}`);
 
     const migrationsPath = path
