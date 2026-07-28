@@ -29,7 +29,12 @@ async function findEditableQuote(req, res) {
   const tenant_id = req.tenant_id;
   const sale = await Sale.findOne({ where: { id: req.params.id, tenant_id } });
   if (!sale) { res.status(404).json({ success: false, message: 'Cotización no encontrada' }); return null; }
-  if (sale.document_type !== 'cotizacion') {
+  // Una venta nace con document_type=null y solo se define al confirmarla
+  // (ver sales.controller.js: confirmSale). Se trata null como "todavía
+  // puede terminar siendo cotización" — igual que ya hace el frontend en
+  // el badge del detalle — y solo se rechaza si YA se confirmó como
+  // remisión o factura (esos dos sí son definitivos).
+  if (sale.document_type === 'remision' || sale.document_type === 'factura') {
     res.status(400).json({ success: false, message: 'El diagrama solo aplica a cotizaciones' });
     return null;
   }
@@ -258,7 +263,7 @@ const convertToWorkOrder = async (req, res) => {
     const tenant_id = req.tenant_id;
     const sale = await Sale.findOne({ where: { id: req.params.id, tenant_id }, transaction, include: [{ model: SaleItem, as: 'items' }] });
     if (!sale) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Cotización no encontrada' }); }
-    if (sale.document_type !== 'cotizacion') {
+    if (sale.document_type === 'remision' || sale.document_type === 'factura') {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Solo una cotización se puede convertir en Orden de Trabajo' });
     }
