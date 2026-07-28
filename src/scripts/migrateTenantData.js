@@ -21,16 +21,9 @@
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
 const { schemaNameFor } = require('./provisionTenantSchema');
+const { discoverTenantTables, tablesInOrder, buildIndirectSourceSql, buildIndirectCountSql } = require('./tenantScopedTables');
 
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
-
-// Tablas que NUNCA se copian a schema de tenant (se quedan en public)
-const PUBLIC_ONLY_TABLES = new Set([
-  'tenants', 'users', 'subscription_plans', 'tenant_subscriptions',
-  'subscription_invoices', 'super_admin_mercadopago_config',
-  'permissions', 'role_permissions', 'announcements',
-  'user_announcement_views', 'sequelize_migrations', 'SequelizeMeta',
-]);
 
 // Valores legacy en `public` que ya no son válidos contra el CHECK constraint
 // del schema nuevo (dato viejo que quedó de antes de que el enum se
@@ -96,56 +89,15 @@ const DEFERRED_FK_COLUMNS = {
   sales: ['converted_to_work_order_id'],
 };
 
-async function getTenantTables(sequelize) {
-  // JOIN contra information_schema.tables filtrando table_type='BASE TABLE':
-  // sin esto, las vistas con columna tenant_id (ej. v_product_prices_comparison,
-  // v_customers_with_price_lists) también aparecen, pero no existen como
-  // relación propia en el schema del tenant -> el DELETE/INSERT contra ellas
-  // revienta con "relation does not exist".
-  const [rows] = await sequelize.query(`
-    SELECT c.table_name
-    FROM information_schema.columns c
-    JOIN information_schema.tables t
-      ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-    WHERE c.table_schema = 'public' AND c.column_name = 'tenant_id'
-      AND t.table_type = 'BASE TABLE'
-  `);
-  return rows.map(r => r.table_name).filter(t => !PUBLIC_ONLY_TABLES.has(t));
-}
-
-async function topoSort(sequelize, tables) {
-  const tableSet = new Set(tables);
-  const [fkRows] = await sequelize.query(`
-    SELECT
-      tc.table_name AS child,
-      ccu.table_name AS parent
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.constraint_column_usage ccu
-      ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
-  `);
-
-  const deps = new Map(tables.map(t => [t, new Set()]));
-  for (const { child, parent } of fkRows) {
-    if (tableSet.has(child) && tableSet.has(parent) && child !== parent) {
-      deps.get(child).add(parent);
-    }
-  }
-
-  const sorted = [];
-  const visited = new Set();
-  function visit(t, stack = new Set()) {
-    if (visited.has(t)) return;
-    if (stack.has(t)) return; // ciclo -> lo dejamos, se resuelve con FKs diferibles
-    stack.add(t);
-    for (const dep of deps.get(t) || []) visit(dep, stack);
-    stack.delete(t);
-    visited.add(t);
-    sorted.push(t);
-  }
-  for (const t of tables) visit(t);
-  return sorted;
-}
+// El descubrimiento de tablas (directas por tenant_id propio + indirectas
+// resueltas por FK transitiva, ej. customer_return_items -> sale_items) y el
+// orden topológico ahora viven en tenantScopedTables.js, compartido con
+// cleanupTenantPublicData.js y tenantPurgeService.js -- ver ese archivo para
+// el porqué (bug de FK que dejaba tablas indirectas sin migrar ni limpiar).
+//
+// NOTA sobre vistas: discoverTenantTables ya filtra table_type='BASE TABLE'
+// al buscar las directas, así que vistas con columna tenant_id (ej.
+// v_product_prices_comparison) no entran acá.
 
 async function migrateTenantData(slug, tenantId) {
   const schemaName = schemaNameFor(slug);
@@ -156,8 +108,12 @@ async function migrateTenantData(slug, tenantId) {
   });
 
   try {
-    const tables = await getTenantTables(sequelize);
-    const ordered = await topoSort(sequelize, tables);
+    const { directTables, indirectTables, resolutionChains } = await discoverTenantTables(sequelize);
+    const indirectSet = new Set(indirectTables);
+    if (indirectTables.length) {
+      console.log(`ℹ️  Tablas indirectas detectadas (sin tenant_id propio, resueltas por FK): ${indirectTables.join(', ')}`);
+    }
+    const ordered = await tablesInOrder(sequelize, [...directTables, ...indirectTables]);
     console.log(`Orden de copiado (${ordered.length} tablas):`, ordered.join(', '));
 
     const report = [];
@@ -201,7 +157,14 @@ async function migrateTenantData(slug, tenantId) {
     // INSERT de abajo solo repone filas con tenant_id = este tenant. Un
     // DELETE sin filtro borraría el catálogo global y nunca lo repondría.
     for (const table of [...ordered].reverse()) {
-      await sequelize.query(`DELETE FROM "${schemaName}"."${table}" WHERE tenant_id IS NOT NULL`);
+      if (indirectSet.has(table)) {
+        // No tiene tenant_id propio ni acá ni en public -- pero el schema
+        // completo pertenece a un solo tenant, así que borrar sin filtro es
+        // seguro (equivalente a "todas las filas de esta tabla en este schema").
+        await sequelize.query(`DELETE FROM "${schemaName}"."${table}"`);
+      } else {
+        await sequelize.query(`DELETE FROM "${schemaName}"."${table}" WHERE tenant_id IS NOT NULL`);
+      }
     }
 
     for (const table of ordered) {
@@ -230,30 +193,44 @@ async function migrateTenantData(slug, tenantId) {
       // tipo del schema DESTINO explícito. Las columnas en DEFERRED_FK_COLUMNS se
       // insertan como NULL (se rellenan después, una vez las dos tablas del ciclo
       // ya tienen todas sus filas).
+      const isIndirect = indirectSet.has(table);
       const valueTransforms = COLUMN_VALUE_TRANSFORMS[table] || {};
+      // Para indirectas, calificar cada columna simple con el alias t0 del
+      // JOIN (buildIndirectSourceSql arma el FROM/JOIN sobre ese alias).
+      const colRef = (name) => (isIndirect ? `t0."${name}"` : `"${name}"`);
       const selectExprs = cols.map(c => {
         if (deferredCols.has(c.column_name)) return 'NULL';
         if (valueTransforms[c.column_name]) return valueTransforms[c.column_name];
         return c.data_type === 'USER-DEFINED'
-          ? `"${c.column_name}"::text::"${schemaName}"."${c.udt_name}"`
-          : `"${c.column_name}"`;
+          ? `${colRef(c.column_name)}::text::"${schemaName}"."${c.udt_name}"`
+          : colRef(c.column_name);
       }).join(', ');
 
-      const [[{ count: sourceCount }]] = await sequelize.query(
-        `SELECT count(*) FROM "public"."${table}" WHERE tenant_id = :tenantId`,
-        { replacements: { tenantId } }
-      );
+      const [[{ count: sourceCount }]] = isIndirect
+        ? await sequelize.query(buildIndirectCountSql(table, resolutionChains, 'public'), { replacements: { tenantId } })
+        : await sequelize.query(
+            `SELECT count(*) FROM "public"."${table}" WHERE tenant_id = :tenantId`,
+            { replacements: { tenantId } }
+          );
 
       if (Number(sourceCount) === 0) {
         report.push({ table, source: 0, copied: 0, ok: true });
         continue;
       }
 
-      await sequelize.query(
-        `INSERT INTO "${schemaName}"."${table}" (${colNames})
-         SELECT ${selectExprs} FROM "public"."${table}" WHERE tenant_id = :tenantId`,
-        { replacements: { tenantId } }
-      );
+      if (isIndirect) {
+        await sequelize.query(
+          `INSERT INTO "${schemaName}"."${table}" (${colNames})
+           ${buildIndirectSourceSql(table, resolutionChains, selectExprs)}`,
+          { replacements: { tenantId } }
+        );
+      } else {
+        await sequelize.query(
+          `INSERT INTO "${schemaName}"."${table}" (${colNames})
+           SELECT ${selectExprs} FROM "public"."${table}" WHERE tenant_id = :tenantId`,
+          { replacements: { tenantId } }
+        );
+      }
 
       const [[{ count: destCount }]] = await sequelize.query(
         `SELECT count(*) FROM "${schemaName}"."${table}"`

@@ -25,44 +25,19 @@
 
 const { sequelize } = require('../config/database');
 const Tenant = require('../models/auth/Tenant');
+const {
+  discoverTenantTables,
+  tablesInOrder,
+  buildIndirectDeleteSql,
+} = require('../scripts/tenantScopedTables');
 
-async function getTenantScopedTables() {
-  const [rows] = await sequelize.query(`
-    SELECT table_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public' AND column_name = 'tenant_id'
-  `);
-  return rows.map((r) => r.table_name);
-}
-
-// Orden topológico por FKs, pero invertido: para BORRAR hay que eliminar
-// primero los HIJOS (los que referencian a otra tabla), no los padres.
-async function tablesInDeleteOrder(tables) {
-  const tableSet = new Set(tables);
-  const [fkRows] = await sequelize.query(`
-    SELECT tc.table_name AS child, ccu.table_name AS parent
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.constraint_column_usage ccu
-      ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
-  `);
-  const deps = new Map(tables.map((t) => [t, new Set()]));
-  for (const { child, parent } of fkRows) {
-    if (tableSet.has(child) && tableSet.has(parent) && child !== parent) deps.get(child).add(parent);
-  }
-  const sorted = [];
-  const visited = new Set();
-  function visit(t, stack = new Set()) {
-    if (visited.has(t) || stack.has(t)) return;
-    stack.add(t);
-    for (const dep of deps.get(t) || []) visit(dep, stack);
-    stack.delete(t);
-    visited.add(t);
-    sorted.push(t);
-  }
-  for (const t of tables) visit(t);
-  return sorted.reverse(); // hijos primero
-}
+// El descubrimiento de tablas (directas + indirectas por FK transitiva) vive
+// en scripts/tenantScopedTables.js, compartido con migrateTenantData.js y
+// cleanupTenantPublicData.js. Antes, este servicio solo veía tablas con
+// tenant_id propio -- una tabla como customer_return_items (relacionada solo
+// vía sale_items.sale_item_id) quedaba sin borrar de public, y el DELETE de
+// sale_items reventaba con violación de FK exactamente igual que en
+// cleanupTenantPublicData.js.
 
 /**
  * Borra permanentemente un tenant: schema dedicado (si existe) + todas las
@@ -92,16 +67,22 @@ async function purgeTenant(tenantId, { reason = 'manual', triggeredBy = null } =
   // El listado de tablas + orden de borrado se calcula ANTES de abrir la
   // transacción (son solo lecturas de information_schema, no hace falta
   // que compitan con los locks del borrado).
-  const tables = await getTenantScopedTables();
-  const orderedTables = await tablesInDeleteOrder(tables);
+  const { directTables, indirectTables, resolutionChains } = await discoverTenantTables(sequelize);
+  const indirectSet = new Set(indirectTables);
+  const orderedTables = await tablesInOrder(sequelize, [...directTables, ...indirectTables], { forDelete: true });
 
   const transaction = await sequelize.transaction();
   try {
     for (const table of orderedTables) {
-      const [, meta] = await sequelize.query(
-        `DELETE FROM "public"."${table}" WHERE tenant_id = :tenantId`,
-        { replacements: { tenantId: id }, transaction }
-      );
+      const [, meta] = indirectSet.has(table)
+        ? await sequelize.query(
+            buildIndirectDeleteSql(table, resolutionChains, 'public'),
+            { replacements: { tenantId: id }, transaction }
+          )
+        : await sequelize.query(
+            `DELETE FROM "public"."${table}" WHERE tenant_id = :tenantId`,
+            { replacements: { tenantId: id }, transaction }
+          );
       const rowCount = meta?.rowCount ?? 0;
       if (rowCount > 0) report.publicTablesPurged.push({ table, rows: rowCount });
     }
