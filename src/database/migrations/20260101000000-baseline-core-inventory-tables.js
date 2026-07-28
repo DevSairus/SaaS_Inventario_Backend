@@ -50,12 +50,11 @@
 // ============================================================================
 
 const SQL_UP = `
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
 
 -- CATEGORÍAS DE PRODUCTOS
 CREATE TABLE IF NOT EXISTS categories (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     name VARCHAR(100) NOT NULL,
     description TEXT,
@@ -72,7 +71,7 @@ CREATE INDEX IF NOT EXISTS idx_categories_active ON categories(tenant_id, is_act
 
 -- BODEGAS/ALMACENES
 CREATE TABLE IF NOT EXISTS warehouses (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     name VARCHAR(100) NOT NULL,
     code VARCHAR(20) NOT NULL,
@@ -93,7 +92,7 @@ CREATE INDEX IF NOT EXISTS idx_warehouses_main ON warehouses(tenant_id, is_main)
 
 -- PROVEEDORES
 CREATE TABLE IF NOT EXISTS suppliers (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     business_name VARCHAR(255) NOT NULL,
     trade_name VARCHAR(255),
@@ -131,7 +130,7 @@ CREATE INDEX IF NOT EXISTS idx_suppliers_business_name ON suppliers USING gin(to
 
 -- PRODUCTOS
 CREATE TABLE IF NOT EXISTS products (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     sku VARCHAR(100) NOT NULL,
     barcode VARCHAR(100),
@@ -201,7 +200,7 @@ CREATE INDEX IF NOT EXISTS idx_products_type ON products(product_type);
 
 -- STOCK POR BODEGA
 CREATE TABLE IF NOT EXISTS product_warehouse_stock (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     warehouse_id UUID NOT NULL REFERENCES warehouses(id) ON DELETE CASCADE,
@@ -225,7 +224,7 @@ CREATE INDEX IF NOT EXISTS idx_product_warehouse_stock_warehouse ON product_ware
 
 -- FACTURAS DE COMPRA
 CREATE TABLE IF NOT EXISTS purchases (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     purchase_number VARCHAR(50) NOT NULL,
     invoice_number VARCHAR(100),
@@ -274,7 +273,7 @@ CREATE INDEX IF NOT EXISTS idx_purchases_number ON purchases(purchase_number);
 
 -- DETALLES DE COMPRA
 CREATE TABLE IF NOT EXISTS purchase_details (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     purchase_id UUID NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
     line_number INTEGER NOT NULL,
@@ -302,7 +301,7 @@ CREATE INDEX IF NOT EXISTS idx_purchase_details_product ON purchase_details(prod
 
 -- MOVIMIENTOS DE INVENTARIO
 CREATE TABLE IF NOT EXISTS inventory_movements (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     movement_number VARCHAR(50) NOT NULL,
     movement_type VARCHAR(30) NOT NULL CHECK (movement_type IN (
@@ -351,7 +350,7 @@ CREATE INDEX IF NOT EXISTS idx_movements_status ON inventory_movements(status);
 
 -- ALERTAS DE STOCK
 CREATE TABLE IF NOT EXISTS stock_alerts (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     warehouse_id UUID REFERENCES warehouses(id) ON DELETE CASCADE,
