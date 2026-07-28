@@ -147,6 +147,15 @@ const Tenant = sequelize.define('Tenant', {
     }
   },
 
+  // Schema dedicado (arquitectura schema-per-tenant). NULL = tenant todavía
+  // en modo legado (public + tenant_id). Ver src/middleware/tenant.js y
+  // src/config/registerTenantSchemaHooks.js.
+  schema_name: {
+    type: DataTypes.STRING,
+    allowNull: true,
+    unique: true
+  },
+
   // Estado
   is_active: {
     type: DataTypes.BOOLEAN,

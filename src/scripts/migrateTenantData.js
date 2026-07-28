@@ -49,6 +49,26 @@ const COLUMN_VALUE_TRANSFORMS = {
     // '' repetidos para el mismo tenant lo violan. NULL sí puede repetirse
     // bajo UNIQUE -> normalizar '' a NULL preserva la semántica real.
     barcode: `NULLIF("barcode", '')`,
+    // El check constraint de `unit_of_measure` en `public` es más laxo que el
+    // del baseline: acepta sinónimos en español (cargados por UI/import en
+    // algún momento) además de las abreviaturas canónicas. El schema nuevo
+    // sólo valida las abreviaturas -> remapear cada sinónimo a su canónica.
+    unit_of_measure: `CASE "unit_of_measure"
+      WHEN 'unidad' THEN 'unit' WHEN 'unidades' THEN 'unit' WHEN 'pieza' THEN 'unit' WHEN 'piezas' THEN 'unit'
+      WHEN 'kilo' THEN 'kg' WHEN 'kilos' THEN 'kg' WHEN 'kilogramo' THEN 'kg' WHEN 'kilogramos' THEN 'kg'
+      WHEN 'gramo' THEN 'g' WHEN 'gramos' THEN 'g'
+      WHEN 'libra' THEN 'lb' WHEN 'libras' THEN 'lb'
+      WHEN 'onza' THEN 'oz' WHEN 'onzas' THEN 'oz'
+      WHEN 'litro' THEN 'l' WHEN 'litros' THEN 'l'
+      WHEN 'mililitro' THEN 'ml' WHEN 'mililitros' THEN 'ml'
+      WHEN 'galon' THEN 'gal' WHEN 'galones' THEN 'gal'
+      WHEN 'metro' THEN 'm' WHEN 'metros' THEN 'm'
+      WHEN 'centimetro' THEN 'cm' WHEN 'centimetros' THEN 'cm'
+      WHEN 'pie' THEN 'ft' WHEN 'pies' THEN 'ft'
+      WHEN 'caja' THEN 'box' WHEN 'cajas' THEN 'box'
+      WHEN 'paquete' THEN 'pack' WHEN 'paquetes' THEN 'pack'
+      WHEN 'docena' THEN 'dozen' WHEN 'docenas' THEN 'dozen'
+      ELSE "unit_of_measure" END`,
   },
 };
 

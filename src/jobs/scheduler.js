@@ -43,6 +43,24 @@ const JOBS = [
       return [...sync, ...suspendidos];
     },
   },
+  {
+    name: 'tenant-auto-purge',
+    schedule: '0 3 * * *', // 3:00am hora Colombia
+    run: async () => {
+      // Política: a los 30 días de cancelado un contrato se borran los
+      // datos y la empresa. Es IRREVERSIBLE (dropea el schema del tenant),
+      // así que queda apagado por defecto hasta activarlo a propósito con
+      // ENABLE_TENANT_AUTOPURGE=true una vez validado en un ambiente de
+      // pruebas. El borrado manual desde el superadmin (DELETE /tenants/:id)
+      // no depende de esta bandera.
+      if (process.env.ENABLE_TENANT_AUTOPURGE !== 'true') {
+        logger.log('⏸️  [tenant-auto-purge] Desactivado (activar con ENABLE_TENANT_AUTOPURGE=true)');
+        return [];
+      }
+      const { purgeExpiredCancelledTenants } = require('../services/tenantPurgeService');
+      return purgeExpiredCancelledTenants({ graceDays: 30 });
+    },
+  },
 ];
 
 function iniciarScheduler() {
