@@ -50,7 +50,13 @@ async function provisionTenantSchema(slug) {
     dialect: 'postgres',
     dialectOptions: {
       ssl: { require: true, rejectUnauthorized: false },
-      options: `-c search_path="${schemaName}",public`,
+      // SOLO el schema del tenant, SIN ",public" de respaldo. Con public
+      // en el search_path, Postgres resuelve "IF NOT EXISTS" y nombres
+      // sin calificar recorriendo TODO el path -> encuentra las tablas
+      // ya existentes en public (sequelize_migrations, categories, etc.)
+      // y las trata como si ya existieran en el tenant, sin crear nada
+      // nuevo. Quitando public de acá se elimina esa ambigüedad.
+      options: `-c search_path="${schemaName}"`,
     },
     logging: false,
     pool: { max: 1, min: 1, idle: 10000 },
@@ -88,7 +94,11 @@ async function provisionTenantSchema(slug) {
         },
       },
       context: queryInterface,
-      storage: new SequelizeStorage({ sequelize, tableName: 'sequelize_migrations' }),
+      storage: new SequelizeStorage({
+        sequelize,
+        tableName: 'sequelize_migrations',
+        schema: schemaName, // defensa adicional: aunque el search_path fallara, esto lo fuerza explícito
+      }),
       logger: console,
     });
 
