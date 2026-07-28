@@ -13,21 +13,21 @@ module.exports = {
     const transaction = await queryInterface.sequelize.transaction();
     try {
       await queryInterface.sequelize.query(`
-        ALTER TABLE subscription_plans
+        ALTER TABLE "public"."subscription_plans"
           ADD COLUMN IF NOT EXISTS modules JSONB NOT NULL DEFAULT '[]'::jsonb,
           ADD COLUMN IF NOT EXISTS max_products INTEGER NOT NULL DEFAULT 100,
           ADD COLUMN IF NOT EXISTS max_warehouses INTEGER NOT NULL DEFAULT 1;
       `, { transaction });
 
       await queryInterface.sequelize.query(`
-        ALTER TABLE tenants
-          ADD COLUMN IF NOT EXISTS plan_id UUID REFERENCES subscription_plans(id) ON DELETE SET NULL,
+        ALTER TABLE "public"."tenants"
+          ADD COLUMN IF NOT EXISTS plan_id UUID REFERENCES "public"."subscription_plans"(id) ON DELETE SET NULL,
           ADD COLUMN IF NOT EXISTS modules_enabled JSONB NOT NULL DEFAULT '[]'::jsonb,
           ADD COLUMN IF NOT EXISTS modules_disabled JSONB NOT NULL DEFAULT '[]'::jsonb;
       `, { transaction });
 
       await queryInterface.sequelize.query(
-        `CREATE INDEX IF NOT EXISTS tenants_plan_id_idx ON tenants (plan_id)`,
+        `CREATE INDEX IF NOT EXISTS tenants_plan_id_idx ON "public"."tenants" (plan_id)`,
         { transaction }
       );
 
@@ -35,7 +35,7 @@ module.exports = {
       // el día del deploy. Los módulos "reservados" (accounting, ai_assistant)
       // no se incluyen porque no existe funcionalidad detrás todavía.
       await queryInterface.sequelize.query(`
-        UPDATE tenants
+        UPDATE "public"."tenants"
         SET modules_enabled = '["workshop","sales","inventory","receivables","treasury"]'::jsonb
         WHERE modules_enabled = '[]'::jsonb;
       `, { transaction });
@@ -43,11 +43,11 @@ module.exports = {
       // plan_id: se toma de la suscripción más reciente en estado trial/active,
       // si existe. Si no hay ninguna, queda NULL (moduleAccess lo tolera).
       await queryInterface.sequelize.query(`
-        UPDATE tenants t
+        UPDATE "public"."tenants" t
         SET plan_id = sub.plan_id
         FROM (
           SELECT DISTINCT ON (tenant_id) tenant_id, plan_id
-          FROM tenant_subscriptions
+          FROM "public"."tenant_subscriptions"
           WHERE status IN ('trial', 'active')
           ORDER BY tenant_id, created_at DESC
         ) sub
@@ -68,7 +68,7 @@ module.exports = {
 
       for (const [slug, modules] of Object.entries(planModules)) {
         await queryInterface.sequelize.query(`
-          UPDATE subscription_plans
+          UPDATE "public"."subscription_plans"
           SET modules = :modules::jsonb
           WHERE slug = :slug AND modules = '[]'::jsonb;
         `, {
@@ -86,13 +86,13 @@ module.exports = {
 
   down: async (queryInterface) => {
     await queryInterface.sequelize.query(`
-      ALTER TABLE tenants
+      ALTER TABLE "public"."tenants"
         DROP COLUMN IF EXISTS plan_id,
         DROP COLUMN IF EXISTS modules_enabled,
         DROP COLUMN IF EXISTS modules_disabled;
     `);
     await queryInterface.sequelize.query(`
-      ALTER TABLE subscription_plans
+      ALTER TABLE "public"."subscription_plans"
         DROP COLUMN IF EXISTS modules,
         DROP COLUMN IF EXISTS max_products,
         DROP COLUMN IF EXISTS max_warehouses;

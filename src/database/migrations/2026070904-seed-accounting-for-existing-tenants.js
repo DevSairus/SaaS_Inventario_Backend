@@ -3,8 +3,16 @@
 const { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS } = require('../../data/puc-colombia-standard');
 
 module.exports = {
-  up: async (queryInterface) => {
-    const [tenants] = await queryInterface.sequelize.query(`SELECT id FROM tenants`);
+  up: async (queryInterface, Sequelize, context) => {
+    // Bajo aprovisionamiento por-schema (context.tenantId presente), este
+    // schema es de UN SOLO tenant -> filtrar, o quedaríamos sembrando el plan
+    // de cuentas de TODOS los tenants del sistema dentro del schema de este.
+    const [tenants] = context?.tenantId
+      ? await queryInterface.sequelize.query(
+          `SELECT id FROM "public"."tenants" WHERE id = :tenantId`,
+          { replacements: { tenantId: context.tenantId } }
+        )
+      : await queryInterface.sequelize.query(`SELECT id FROM "public"."tenants"`);
 
     for (const tenant of tenants) {
       const [[{ count }]] = await queryInterface.sequelize.query(

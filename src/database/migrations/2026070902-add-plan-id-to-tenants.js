@@ -2,7 +2,7 @@
 
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    const existingColumns = await queryInterface.describeTable('tenants');
+    const existingColumns = await queryInterface.describeTable('tenants', { schema: 'public' });
 
     if (!existingColumns.plan_id) {
       await queryInterface.addColumn('tenants', 'plan_id', {
@@ -15,7 +15,7 @@ module.exports = {
         onUpdate: 'CASCADE',
         onDelete: 'SET NULL',
         comment: 'Fuente de verdad del plan efectivo del tenant (independiente del estado de tenant_subscriptions)',
-      });
+      }, { schema: 'public' });
     }
 
     if (!existingColumns.modules_enabled) {
@@ -24,7 +24,7 @@ module.exports = {
         allowNull: false,
         defaultValue: [],
         comment: 'Módulos habilitados manualmente para este tenant además de los de su plan (override puntual)',
-      });
+      }, { schema: 'public' });
     }
 
     if (!existingColumns.modules_disabled) {
@@ -33,23 +33,23 @@ module.exports = {
         allowNull: false,
         defaultValue: [],
         comment: 'Módulos del plan bloqueados manualmente para este tenant (override puntual)',
-      });
+      }, { schema: 'public' });
     }
 
-    const existingIndexes = await queryInterface.showIndex('tenants');
+    const existingIndexes = await queryInterface.showIndex('tenants', { schema: 'public' });
     if (!existingIndexes.some(i => i.name === 'tenants_plan_id_idx' || (i.fields || []).some(f => f.attribute === 'plan_id'))) {
-      await queryInterface.addIndex('tenants', ['plan_id']);
+      await queryInterface.addIndex('tenants', ['plan_id'], { schema: 'public' });
     }
 
     // ── Backfill ──────────────────────────────────────────────────────
     // 1) Tomar el plan desde la suscripción más reciente (tenant_subscriptions),
     //    que es la fuente real hoy usada por el flujo de superadmin.
     await queryInterface.sequelize.query(`
-      UPDATE tenants t
+      UPDATE "public"."tenants" t
       SET plan_id = sub.plan_id
       FROM (
         SELECT DISTINCT ON (tenant_id) tenant_id, plan_id
-        FROM tenant_subscriptions
+        FROM "public"."tenant_subscriptions"
         ORDER BY tenant_id, created_at DESC
       ) sub
       WHERE sub.tenant_id = t.id
@@ -59,9 +59,9 @@ module.exports = {
     // 2) Para los que no tengan suscripción registrada, matchear por el
     //    string legacy tenants.plan contra subscription_plans.slug.
     await queryInterface.sequelize.query(`
-      UPDATE tenants t
+      UPDATE "public"."tenants" t
       SET plan_id = sp.id
-      FROM subscription_plans sp
+      FROM "public"."subscription_plans" sp
       WHERE t.plan_id IS NULL
         AND sp.slug = t.plan
     `);
@@ -71,18 +71,18 @@ module.exports = {
     //    "ilimitado" que ya tenía checkLimits.js para planes desconocidos,
     //    para no bloquear a nadie por accidente en la migración.
     await queryInterface.sequelize.query(`
-      UPDATE tenants t
+      UPDATE "public"."tenants" t
       SET plan_id = sp.id
-      FROM subscription_plans sp
+      FROM "public"."subscription_plans" sp
       WHERE t.plan_id IS NULL
         AND sp.slug = 'enterprise'
     `);
   },
 
   down: async (queryInterface) => {
-    await queryInterface.removeIndex('tenants', ['plan_id']);
-    await queryInterface.removeColumn('tenants', 'modules_disabled');
-    await queryInterface.removeColumn('tenants', 'modules_enabled');
-    await queryInterface.removeColumn('tenants', 'plan_id');
+    await queryInterface.removeIndex('tenants', ['plan_id'], { schema: 'public' });
+    await queryInterface.removeColumn('tenants', 'modules_disabled', { schema: 'public' });
+    await queryInterface.removeColumn('tenants', 'modules_enabled', { schema: 'public' });
+    await queryInterface.removeColumn('tenants', 'plan_id', { schema: 'public' });
   },
 };

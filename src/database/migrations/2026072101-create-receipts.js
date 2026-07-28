@@ -7,7 +7,7 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS receipts (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           branch_id UUID NOT NULL REFERENCES branches(id) ON DELETE RESTRICT ON UPDATE CASCADE,
 
           receipt_number VARCHAR(50) NOT NULL,
@@ -28,7 +28,7 @@ module.exports = {
           voided_at TIMESTAMP WITH TIME ZONE,
           voided_reason TEXT,
 
-          created_by UUID REFERENCES users(id),
+          created_by UUID REFERENCES "public"."users"(id),
 
           created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()

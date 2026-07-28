@@ -16,7 +16,7 @@ module.exports = {
 
       // ── customer_returns ──────────────────────────────────────────────
       await queryInterface.sequelize.query(
-        `ALTER TABLE customer_returns ADD COLUMN IF NOT EXISTS rejected_by UUID REFERENCES users(id)`,
+        `ALTER TABLE customer_returns ADD COLUMN IF NOT EXISTS rejected_by UUID REFERENCES "public"."users"(id)`,
         { transaction }
       );
       await queryInterface.sequelize.query(

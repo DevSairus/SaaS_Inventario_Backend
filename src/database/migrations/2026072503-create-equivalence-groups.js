@@ -8,10 +8,10 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS product_equivalence_groups (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           name VARCHAR(150) NOT NULL,
           notes TEXT,
-          created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+          created_by UUID REFERENCES "public"."users"(id) ON DELETE SET NULL,
           created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
         );
@@ -21,7 +21,7 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS product_equivalence_group_members (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           group_id UUID NOT NULL REFERENCES product_equivalence_groups(id) ON DELETE CASCADE ON UPDATE CASCADE,
           product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE ON UPDATE CASCADE,
           role VARCHAR(20) NOT NULL DEFAULT 'equivalente',

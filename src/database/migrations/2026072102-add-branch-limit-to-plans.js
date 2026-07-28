@@ -10,7 +10,7 @@
 // ningún cobro/factura automático — eso no existe hoy en el sistema).
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    const existingColumns = await queryInterface.describeTable('subscription_plans');
+    const existingColumns = await queryInterface.describeTable('subscription_plans', { schema: 'public' });
 
     if (!existingColumns.max_branches) {
       await queryInterface.addColumn('subscription_plans', 'max_branches', {
@@ -18,7 +18,7 @@ module.exports = {
         allowNull: false,
         defaultValue: 1,
         comment: 'Número máximo de sedes activas. -1 = ilimitado',
-      });
+      }, { schema: 'public' });
     }
 
     if (!existingColumns.allow_extra_branches) {
@@ -27,7 +27,7 @@ module.exports = {
         allowNull: false,
         defaultValue: false,
         comment: 'Si true, se puede exceder max_branches (sobrecargo facturable manualmente en vez de bloqueo)',
-      });
+      }, { schema: 'public' });
     }
 
     if (!existingColumns.extra_branch_price) {
@@ -36,7 +36,7 @@ module.exports = {
         allowNull: false,
         defaultValue: 0,
         comment: 'Precio mensual sugerido por cada sede que exceda max_branches (solo si allow_extra_branches)',
-      });
+      }, { schema: 'public' });
     }
 
     // Seed de los planes legacy (mismo criterio que 2026070901): free/basic/
@@ -53,7 +53,7 @@ module.exports = {
 
     for (const p of legacyBranchLimits) {
       await queryInterface.sequelize.query(
-        `UPDATE subscription_plans
+        `UPDATE "public"."subscription_plans"
          SET max_branches = :max_branches,
              allow_extra_branches = :allow_extra_branches,
              extra_branch_price = :extra_branch_price
@@ -64,8 +64,8 @@ module.exports = {
   },
 
   down: async (queryInterface) => {
-    await queryInterface.removeColumn('subscription_plans', 'extra_branch_price');
-    await queryInterface.removeColumn('subscription_plans', 'allow_extra_branches');
-    await queryInterface.removeColumn('subscription_plans', 'max_branches');
+    await queryInterface.removeColumn('subscription_plans', 'extra_branch_price', { schema: 'public' });
+    await queryInterface.removeColumn('subscription_plans', 'allow_extra_branches', { schema: 'public' });
+    await queryInterface.removeColumn('subscription_plans', 'max_branches', { schema: 'public' });
   },
 };

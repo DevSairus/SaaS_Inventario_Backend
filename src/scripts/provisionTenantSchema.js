@@ -34,9 +34,20 @@ async function provisionTenantSchema(slug) {
     logging: false,
     pool: { max: 1, min: 0 },
   });
+  let tenantId;
   try {
     await bootstrapSequelize.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
     console.log(`✅ Schema "${schemaName}" listo`);
+
+    // Necesario para que las migraciones de backfill (sede principal,
+    // asignación usuario-sede, etc.) puedan filtrar por ESTE tenant y no
+    // arrastren filas de todos los tenants existentes en public.tenants.
+    const [[tenant]] = await bootstrapSequelize.query(
+      `SELECT id FROM public.tenants WHERE slug = :slug`,
+      { replacements: { slug } }
+    );
+    if (!tenant) throw new Error(`Tenant "${slug}" no existe en public.tenants`);
+    tenantId = tenant.id;
   } finally {
     await bootstrapSequelize.close();
   }
@@ -59,6 +70,19 @@ async function provisionTenantSchema(slug) {
       // nuevo. Quitando public de acá se elimina esa ambigüedad.
       options: `-c search_path="${schemaName}"`,
     },
+    // CRÍTICO: queryInterface.addColumn/removeColumn/addIndex/addConstraint/
+    // describeTable/showIndex/changeColumn NO respetan search_path -- Sequelize
+    // los resuelve vía extractTableDetails(), que cuando no recibe un schema
+    // explícito cae SIEMPRE a `sequelize.options.schema || "public"`, sin
+    // mirar el search_path de la conexión. Sin esto, cualquier migración que
+    // use esas funciones de conveniencia (la gran mayoría) termina alterando
+    // silenciosamente las tablas de "public" (con datos reales de producción)
+    // en vez de las del schema de este tenant. Las migraciones que sí quieren
+    // tocar una tabla compartida (tenants/users/subscription_plans a propósito)
+    // ya pasan `{ schema: 'public' }` explícito, que sigue ganando sobre este
+    // default. Solo el SQL crudo (sequelize.query) y createTable/dropTable con
+    // nombre de tabla simple ignoran esto y siguen dependiendo del search_path.
+    schema: schemaName,
     logging: false,
     pool: { max: 1, min: 1, idle: 10000 },
   });
@@ -88,8 +112,15 @@ async function provisionTenantSchema(slug) {
     // "20260202120200-create-transfers.js"). Al ordenar alfabéticamente
     // tal cual, cae primero que todo -> intenta crear una FK hacia
     // "purchases"/"suppliers" antes de que existan en un schema fresco.
+    // "YYYYMMDDHHMMSS-create-customer-returns.js" nunca tuvo su timestamp real
+    // puesto -> ordena al final (Y > cualquier dígito), pero
+    // "2026070611-fix-full-schema-audit.js" hace ADD COLUMN IF NOT EXISTS
+    // sobre `customer_returns`, que en un schema nuevo todavía no existe.
+    // Solo depende de sales/customers/sale_items/products (baselines), así
+    // que la reordenamos justo después de los baselines.
     const SORT_KEY_OVERRIDES = {
       '0260202120100-create-supplier-returns.js': '20260202120100-create-supplier-returns.js',
+      'YYYYMMDDHHMMSS-create-customer-returns.js': '20260103000000-create-customer-returns.js',
     };
 
     const files = fs
@@ -119,8 +150,8 @@ async function provisionTenantSchema(slug) {
         }
         return {
           name,
-          up: async () => migration.up(queryInterface, SequelizeLib),
-          down: async () => migration.down(queryInterface, SequelizeLib),
+          up: async () => migration.up(queryInterface, SequelizeLib, { tenantId, schemaName, slug }),
+          down: async () => migration.down(queryInterface, SequelizeLib, { tenantId, schemaName, slug }),
         };
       }),
       context: queryInterface,

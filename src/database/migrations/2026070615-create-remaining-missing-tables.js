@@ -8,16 +8,16 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS product_commission_settlements (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           settlement_number VARCHAR(50) NOT NULL,
-          user_id UUID NOT NULL REFERENCES users(id),
+          user_id UUID NOT NULL REFERENCES "public"."users"(id),
           date_from DATE,
           date_to DATE,
           commission_percentage DECIMAL(5,2) NOT NULL,
           base_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
           commission_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
           notes TEXT,
-          created_by UUID NOT NULL REFERENCES users(id),
+          created_by UUID NOT NULL REFERENCES "public"."users"(id),
           created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
         );
@@ -74,7 +74,7 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS tenant_mercadopago_config (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL UNIQUE REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL UNIQUE REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           access_token TEXT NOT NULL,
           public_key VARCHAR(255) NOT NULL,
           test_mode BOOLEAN DEFAULT true,

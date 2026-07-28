@@ -6,12 +6,12 @@ module.exports = {
     try {
       // Eliminar el constraint viejo
       await queryInterface.sequelize.query(`
-        ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+        ALTER TABLE "public"."users" DROP CONSTRAINT IF EXISTS users_role_check;
       `, { transaction });
 
       // Crear el constraint actualizado con todos los roles del modelo Sequelize
       await queryInterface.sequelize.query(`
-        ALTER TABLE users ADD CONSTRAINT users_role_check
+        ALTER TABLE "public"."users" ADD CONSTRAINT users_role_check
         CHECK (role IN ('super_admin', 'admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician', 'support'));
       `, { transaction });
 
@@ -24,10 +24,10 @@ module.exports = {
 
   down: async (queryInterface) => {
     await queryInterface.sequelize.query(`
-      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+      ALTER TABLE "public"."users" DROP CONSTRAINT IF EXISTS users_role_check;
     `);
     await queryInterface.sequelize.query(`
-      ALTER TABLE users ADD CONSTRAINT users_role_check
+      ALTER TABLE "public"."users" ADD CONSTRAINT users_role_check
       CHECK (role IN ('super_admin', 'admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'));
     `);
   },

@@ -7,7 +7,7 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS product_vehicle_applications (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE ON UPDATE CASCADE,
           vehicle_type VARCHAR(30),
           brand VARCHAR(100) NOT NULL,

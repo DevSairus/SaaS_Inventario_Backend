@@ -10,15 +10,25 @@
 // desde el formulario de edición del vehículo.
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    await queryInterface.addColumn('vehicles', 'vehicle_type', {
-      type: Sequelize.ENUM('automovil', 'camioneta', 'motocicleta', 'camion', 'otro'),
-      allowNull: false,
-      defaultValue: 'automovil',
-      comment: 'Tipo de vehículo: automovil, camioneta, motocicleta, camion, otro',
-    });
-    await queryInterface.addIndex('vehicles', ['tenant_id', 'vehicle_type'], {
-      name: 'vehicles_tenant_vehicle_type_idx',
-    });
+    // Guard de idempotencia: algunos schemas (p.ej. los aprovisionados desde
+    // el baseline de ventas antes de que este archivo se corrigiera) ya
+    // traen la columna/índice creados de fábrica.
+    const existingColumns = await queryInterface.describeTable('vehicles');
+    if (!existingColumns.vehicle_type) {
+      await queryInterface.addColumn('vehicles', 'vehicle_type', {
+        type: Sequelize.ENUM('automovil', 'camioneta', 'motocicleta', 'camion', 'otro'),
+        allowNull: false,
+        defaultValue: 'automovil',
+        comment: 'Tipo de vehículo: automovil, camioneta, motocicleta, camion, otro',
+      });
+    }
+
+    const existingIndexes = await queryInterface.showIndex('vehicles');
+    if (!existingIndexes.some((i) => i.name === 'vehicles_tenant_vehicle_type_idx')) {
+      await queryInterface.addIndex('vehicles', ['tenant_id', 'vehicle_type'], {
+        name: 'vehicles_tenant_vehicle_type_idx',
+      });
+    }
   },
 
   down: async (queryInterface) => {

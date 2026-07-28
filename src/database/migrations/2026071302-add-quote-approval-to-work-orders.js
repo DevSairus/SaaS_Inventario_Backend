@@ -9,7 +9,7 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS work_order_quote_requests (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
           work_order_id UUID NOT NULL REFERENCES work_orders(id) ON DELETE CASCADE,
           status VARCHAR(20) NOT NULL DEFAULT 'enviada' CHECK (status IN ('enviada', 'respondida')),
           sent_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),

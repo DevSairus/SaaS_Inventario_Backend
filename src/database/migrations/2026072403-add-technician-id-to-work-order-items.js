@@ -6,7 +6,7 @@
 module.exports = {
   up: async (queryInterface) => {
     await queryInterface.sequelize.query(
-      `ALTER TABLE work_order_items ADD COLUMN IF NOT EXISTS technician_id UUID REFERENCES users(id) ON DELETE SET NULL`
+      `ALTER TABLE work_order_items ADD COLUMN IF NOT EXISTS technician_id UUID REFERENCES "public"."users"(id) ON DELETE SET NULL`
     );
   },
 

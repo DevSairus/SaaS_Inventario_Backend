@@ -1,7 +1,7 @@
 'use strict';
 
 module.exports = {
-  up: async (queryInterface, Sequelize) => {
+  up: async (queryInterface, Sequelize, context) => {
     const transaction = await queryInterface.sequelize.transaction();
     try {
       // ============= 1. TABLA BRANCHES (Sedes) =============
@@ -164,6 +164,12 @@ module.exports = {
 
       // ============= 7. BACKFILL: crear "Sede Principal" para cada tenant existente =============
       // Crea una branch por tenant, tomando datos de contacto del propio tenant.
+      //
+      // Bajo aprovisionamiento por-schema (context.tenantId presente), este
+      // schema es de UN SOLO tenant -> filtrar, o quedaríamos con una branch
+      // por CADA tenant del sistema mezclada en el schema de este tenant.
+      // Sin context (corrida clásica contra la BD compartida vieja), se
+      // mantiene el comportamiento original: todos los tenants existentes.
       await queryInterface.sequelize.query(`
         INSERT INTO branches (id, tenant_id, code, name, address, city, phone, email, is_main, is_active, created_at, updated_at)
         SELECT
@@ -179,8 +185,9 @@ module.exports = {
           true,
           NOW(),
           NOW()
-        FROM tenants t;
-      `, { transaction });
+        FROM "public"."tenants" t
+        ${context?.tenantId ? 'WHERE t.id = :tenantId' : ''};
+      `, { transaction, replacements: context?.tenantId ? { tenantId: context.tenantId } : {} });
 
       // Vincula cada warehouse existente marcado is_main a la Sede Principal de su tenant.
       // Si un tenant no tiene warehouse is_main, toma la primera bodega activa.

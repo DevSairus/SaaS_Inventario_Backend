@@ -9,11 +9,15 @@
 // como selector simple aquí, no como FK.
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    await queryInterface.addColumn('sales', 'vehicle_type', {
-      type: Sequelize.STRING(20),
-      allowNull: true,
-      comment: 'automovil | camioneta | motocicleta | camion | otro — solo relevante si document_type=cotizacion y hay diagrama de intervención asociado',
-    });
+    // Guard: algunos schemas ya traen esta columna de fábrica (baseline).
+    const existingColumns = await queryInterface.describeTable('sales');
+    if (!existingColumns.vehicle_type) {
+      await queryInterface.addColumn('sales', 'vehicle_type', {
+        type: Sequelize.STRING(20),
+        allowNull: true,
+        comment: 'automovil | camioneta | motocicleta | camion | otro — solo relevante si document_type=cotizacion y hay diagrama de intervención asociado',
+      });
+    }
   },
 
   down: async (queryInterface) => {

@@ -11,8 +11,15 @@ const NEW_MAPPINGS = {
 };
 
 module.exports = {
-  up: async (queryInterface) => {
-    const [tenants] = await queryInterface.sequelize.query(`SELECT id FROM tenants`);
+  up: async (queryInterface, Sequelize, context) => {
+    // Bajo aprovisionamiento por-schema (context.tenantId presente), filtrar
+    // a este tenant -- ver nota equivalente en 2026070904.
+    const [tenants] = context?.tenantId
+      ? await queryInterface.sequelize.query(
+          `SELECT id FROM "public"."tenants" WHERE id = :tenantId`,
+          { replacements: { tenantId: context.tenantId } }
+        )
+      : await queryInterface.sequelize.query(`SELECT id FROM "public"."tenants"`);
 
     for (const tenant of tenants) {
       for (const [eventType, code] of Object.entries(NEW_MAPPINGS)) {

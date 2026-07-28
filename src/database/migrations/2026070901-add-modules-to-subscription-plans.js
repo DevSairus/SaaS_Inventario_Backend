@@ -2,7 +2,7 @@
 
 module.exports = {
   up: async (queryInterface, Sequelize) => {
-    const existingColumns = await queryInterface.describeTable('subscription_plans');
+    const existingColumns = await queryInterface.describeTable('subscription_plans', { schema: 'public' });
 
     if (!existingColumns.modules) {
       await queryInterface.addColumn('subscription_plans', 'modules', {
@@ -10,7 +10,7 @@ module.exports = {
         allowNull: false,
         defaultValue: [],
         comment: 'Lista de slugs de módulos habilitados para este plan (ej: ["workshop","sales","inventory"])',
-      });
+      }, { schema: 'public' });
     }
 
     if (!existingColumns.max_products) {
@@ -19,7 +19,7 @@ module.exports = {
         allowNull: false,
         defaultValue: 100,
         comment: 'Número máximo de productos activos. -1 = ilimitado',
-      });
+      }, { schema: 'public' });
     }
 
     if (!existingColumns.max_warehouses) {
@@ -28,7 +28,7 @@ module.exports = {
         allowNull: false,
         defaultValue: 1,
         comment: 'Número máximo de bodegas activas. -1 = ilimitado',
-      });
+      }, { schema: 'public' });
     }
 
     // ── Seed / actualización de los planes legacy que hoy viven hardcodeados
@@ -62,13 +62,13 @@ module.exports = {
 
     for (const p of legacyPlans) {
       const [existing] = await queryInterface.sequelize.query(
-        `SELECT id FROM subscription_plans WHERE slug = :slug LIMIT 1`,
+        `SELECT id FROM "public"."subscription_plans" WHERE slug = :slug LIMIT 1`,
         { replacements: { slug: p.slug }, type: queryInterface.sequelize.QueryTypes.SELECT }
       );
 
       if (existing) {
         await queryInterface.sequelize.query(
-          `UPDATE subscription_plans
+          `UPDATE "public"."subscription_plans"
            SET modules = :modules::jsonb,
                max_products = :max_products,
                max_warehouses = :max_warehouses
@@ -84,7 +84,7 @@ module.exports = {
         );
       } else {
         await queryInterface.sequelize.query(
-          `INSERT INTO subscription_plans
+          `INSERT INTO "public"."subscription_plans"
              (id, name, slug, monthly_price, yearly_price, features, modules,
               max_users, max_clients, max_products, max_warehouses, max_invoices_per_month,
               is_active, sort_order, trial_days, created_at, updated_at)
@@ -113,8 +113,8 @@ module.exports = {
   },
 
   down: async (queryInterface) => {
-    await queryInterface.removeColumn('subscription_plans', 'max_warehouses');
-    await queryInterface.removeColumn('subscription_plans', 'max_products');
-    await queryInterface.removeColumn('subscription_plans', 'modules');
+    await queryInterface.removeColumn('subscription_plans', 'max_warehouses', { schema: 'public' });
+    await queryInterface.removeColumn('subscription_plans', 'max_products', { schema: 'public' });
+    await queryInterface.removeColumn('subscription_plans', 'modules', { schema: 'public' });
   },
 };

@@ -178,8 +178,7 @@ CREATE TABLE IF NOT EXISTS dian_resolutions (
     "is_test" boolean DEFAULT false,
     "notes" text,
     "created_at" timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    "updated_at" timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    "branch_id" uuid
+    "updated_at" timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS inventory_adjustment_items (
@@ -393,7 +392,6 @@ CREATE TABLE IF NOT EXISTS sales (
     "reteica_amount" numeric(15,2) DEFAULT 0,
     "total_retentions" numeric(15,2) DEFAULT 0,
     "tax_breakdown" jsonb DEFAULT '[]'::jsonb,
-    "branch_id" uuid,
     "payment_terms" integer,
     "vehicle_type" character varying(20),
     "converted_to_work_order_id" uuid
@@ -421,8 +419,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
     "soat_number" character varying(50),
     "soat_expiry" date,
     "tecnomecanica_number" character varying(50),
-    "tecnomecanica_expiry" date,
-    "vehicle_type" enum_vehicles_vehicle_type NOT NULL DEFAULT 'automovil'::enum_vehicles_vehicle_type
+    "tecnomecanica_expiry" date
 );
 
 CREATE TABLE IF NOT EXISTS work_order_items (
@@ -445,8 +442,7 @@ CREATE TABLE IF NOT EXISTS work_order_items (
     "updated_at" timestamp with time zone DEFAULT now(),
     "technician_id" uuid,
     "approval_status" character varying(20) NOT NULL DEFAULT 'aprobado'::character varying,
-    "rejection_reason" character varying(255),
-    "quote_request_id" uuid
+    "rejection_reason" character varying(255)
 );
 
 CREATE TABLE IF NOT EXISTS work_orders (
@@ -536,7 +532,6 @@ ALTER TABLE customers ADD CONSTRAINT "customers_tenant_id_fkey" FOREIGN KEY (ten
 ALTER TABLE customers ADD CONSTRAINT "customers_customer_type_check" CHECK (((customer_type)::text = ANY (ARRAY[('individual'::character varying)::text, ('company'::character varying)::text])));
 ALTER TABLE dian_events ADD CONSTRAINT "dian_events_sale_id_fkey" FOREIGN KEY (sale_id) REFERENCES sales(id) ON DELETE SET NULL;
 ALTER TABLE dian_events ADD CONSTRAINT "dian_events_tenant_id_fkey" FOREIGN KEY (tenant_id) REFERENCES "public"."tenants"(id) ON DELETE CASCADE;
-ALTER TABLE dian_resolutions ADD CONSTRAINT "dian_resolutions_branch_id_fkey" FOREIGN KEY (branch_id) REFERENCES branches(id) ON UPDATE CASCADE ON DELETE RESTRICT;
 ALTER TABLE dian_resolutions ADD CONSTRAINT "dian_resolutions_tenant_id_fkey" FOREIGN KEY (tenant_id) REFERENCES "public"."tenants"(id) ON DELETE CASCADE;
 ALTER TABLE dian_resolutions ADD CONSTRAINT "dian_resolutions_document_type_check" CHECK (((document_type)::text = ANY ((ARRAY['invoice'::character varying, 'credit_note'::character varying, 'debit_note'::character varying])::text[])));
 ALTER TABLE inventory_adjustment_items ADD CONSTRAINT "inventory_adjustment_items_adjustment_id_fkey" FOREIGN KEY (adjustment_id) REFERENCES inventory_adjustments(id) ON DELETE CASCADE;
@@ -573,7 +568,6 @@ ALTER TABLE sale_items ADD CONSTRAINT "sale_items_sale_id_fkey" FOREIGN KEY (sal
 ALTER TABLE sale_items ADD CONSTRAINT "sale_items_technician_id_fkey" FOREIGN KEY (technician_id) REFERENCES "public"."users"(id) ON DELETE SET NULL;
 ALTER TABLE sale_items ADD CONSTRAINT "sale_items_tenant_id_fkey" FOREIGN KEY (tenant_id) REFERENCES "public"."tenants"(id) ON DELETE CASCADE;
 ALTER TABLE sales ADD CONSTRAINT "tenant_sale_number_unique" UNIQUE (tenant_id, sale_number);
-ALTER TABLE sales ADD CONSTRAINT "sales_branch_id_fkey" FOREIGN KEY (branch_id) REFERENCES branches(id) ON UPDATE CASCADE ON DELETE RESTRICT;
 ALTER TABLE sales ADD CONSTRAINT "sales_converted_to_work_order_id_fkey" FOREIGN KEY (converted_to_work_order_id) REFERENCES work_orders(id) ON UPDATE CASCADE ON DELETE SET NULL;
 ALTER TABLE sales ADD CONSTRAINT "sales_created_by_fkey" FOREIGN KEY (created_by) REFERENCES "public"."users"(id);
 ALTER TABLE sales ADD CONSTRAINT "sales_customer_id_fkey" FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL;
@@ -584,7 +578,6 @@ ALTER TABLE vehicles ADD CONSTRAINT "vehicles_customer_id_fkey" FOREIGN KEY (cus
 ALTER TABLE vehicles ADD CONSTRAINT "vehicles_tenant_id_fkey" FOREIGN KEY (tenant_id) REFERENCES "public"."tenants"(id);
 ALTER TABLE vehicles ADD CONSTRAINT "vehicles_fuel_type_check" CHECK (((fuel_type)::text = ANY ((ARRAY['gasolina'::character varying, 'diesel'::character varying, 'gas'::character varying, 'hibrido'::character varying, 'electrico'::character varying, 'otro'::character varying])::text[])));
 ALTER TABLE work_order_items ADD CONSTRAINT "work_order_items_product_id_fkey" FOREIGN KEY (product_id) REFERENCES products(id);
-ALTER TABLE work_order_items ADD CONSTRAINT "work_order_items_quote_request_id_fkey" FOREIGN KEY (quote_request_id) REFERENCES work_order_quote_requests(id) ON DELETE SET NULL;
 ALTER TABLE work_order_items ADD CONSTRAINT "work_order_items_technician_id_fkey" FOREIGN KEY (technician_id) REFERENCES "public"."users"(id) ON DELETE SET NULL;
 ALTER TABLE work_order_items ADD CONSTRAINT "work_order_items_work_order_id_fkey" FOREIGN KEY (work_order_id) REFERENCES work_orders(id) ON DELETE CASCADE;
 ALTER TABLE work_order_items ADD CONSTRAINT "work_order_items_approval_status_check" CHECK (((approval_status)::text = ANY ((ARRAY['pendiente'::character varying, 'aprobado'::character varying, 'rechazado'::character varying])::text[])));
@@ -664,11 +657,9 @@ CREATE INDEX idx_sales_vehicle_plate ON sales USING btree (vehicle_plate) WHERE 
 CREATE INDEX idx_vehicles_customer ON vehicles USING btree (customer_id);
 CREATE INDEX idx_vehicles_plate ON vehicles USING btree (tenant_id, plate);
 CREATE INDEX idx_vehicles_tenant ON vehicles USING btree (tenant_id);
-CREATE INDEX vehicles_tenant_vehicle_type_idx ON vehicles USING btree (tenant_id, vehicle_type);
 CREATE INDEX idx_work_order_items_order ON work_order_items USING btree (work_order_id);
 CREATE INDEX idx_work_order_items_product ON work_order_items USING btree (product_id);
 CREATE INDEX idx_work_order_items_technician_id ON work_order_items USING btree (technician_id);
-CREATE INDEX work_order_items_quote_request_idx ON work_order_items USING btree (quote_request_id);
 CREATE INDEX idx_work_orders_customer ON work_orders USING btree (customer_id);
 CREATE INDEX idx_work_orders_share_token ON work_orders USING btree (share_token);
 CREATE INDEX idx_work_orders_tenant_status ON work_orders USING btree (tenant_id, status);

@@ -1,11 +1,11 @@
 'use strict';
 
 module.exports = {
-  async up(queryInterface, Sequelize) {
+  async up(queryInterface, Sequelize, context) {
     const q = queryInterface.sequelize;
 
     // ═══ TENANT ═══
-    await q.query(`ALTER TABLE tenants ADD COLUMN IF NOT EXISTS tax_config JSONB DEFAULT '{}'`);
+    await q.query(`ALTER TABLE "public"."tenants" ADD COLUMN IF NOT EXISTS tax_config JSONB DEFAULT '{}'`);
 
     // ═══ CUSTOMER ═══
     await q.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS retention_config JSONB DEFAULT '{}'`);
@@ -16,14 +16,23 @@ module.exports = {
     // ═══ PRODUCT ═══
     await q.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS tax_config JSONB DEFAULT '{}'`);
 
-    // Migrar datos existentes de Product a tax_config
-    await q.query(`
-      UPDATE products SET tax_config = jsonb_build_object(
-        'iva', jsonb_build_object('enabled', COALESCE(has_tax, true), 'rate', COALESCE(tax_percentage, 19)),
-        'inc', jsonb_build_object('enabled', false, 'rate', 0),
-        'ica', jsonb_build_object('enabled', false, 'rate', 0)
-      ) WHERE tax_config IS NULL OR tax_config = '{}'
-    `);
+    // Migrar datos existentes de Product a tax_config -- solo aplica a
+    // schemas que todavía tengan las columnas legacy has_tax/tax_percentage
+    // (schemas nuevos aprovisionados desde el baseline nunca las tuvieron).
+    // describeTable() cae a "public" por defecto si no se le pasa schema
+    // explícito (aunque el search_path de la conexión sea otro) -> hay que
+    // pasarle el schema del tenant, o esto revisa las columnas de la tabla
+    // equivocada (public.products en vez de la de este tenant).
+    const productColumns = await queryInterface.describeTable('products', context?.schemaName ? { schema: context.schemaName } : undefined);
+    if (productColumns.has_tax || productColumns.tax_percentage) {
+      await q.query(`
+        UPDATE products SET tax_config = jsonb_build_object(
+          'iva', jsonb_build_object('enabled', COALESCE(has_tax, true), 'rate', COALESCE(tax_percentage, 19)),
+          'inc', jsonb_build_object('enabled', false, 'rate', 0),
+          'ica', jsonb_build_object('enabled', false, 'rate', 0)
+        ) WHERE tax_config IS NULL OR tax_config = '{}'
+      `);
+    }
 
     // ═══ SALE ITEM ═══
     const saleItemCols = [
@@ -92,7 +101,7 @@ module.exports = {
       await q.query(`ALTER TABLE sale_items DROP COLUMN IF EXISTS "${col}"`);
       await q.query(`ALTER TABLE purchase_items DROP COLUMN IF EXISTS "${col}"`);
     }
-    await q.query(`ALTER TABLE tenants DROP COLUMN IF EXISTS tax_config`);
+    await q.query(`ALTER TABLE "public"."tenants" DROP COLUMN IF EXISTS tax_config`);
     await q.query(`ALTER TABLE customers DROP COLUMN IF EXISTS retention_config`);
     await q.query(`ALTER TABLE suppliers DROP COLUMN IF EXISTS retention_config`);
     await q.query(`ALTER TABLE products DROP COLUMN IF EXISTS tax_config`);

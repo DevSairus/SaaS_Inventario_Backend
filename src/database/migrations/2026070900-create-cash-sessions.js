@@ -7,7 +7,7 @@ module.exports = {
       await queryInterface.sequelize.query(`
         CREATE TABLE IF NOT EXISTS cash_sessions (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE ON UPDATE CASCADE,
+          tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE ON UPDATE CASCADE,
           branch_id UUID NOT NULL REFERENCES branches(id) ON DELETE RESTRICT ON UPDATE CASCADE,
 
           session_date DATE NOT NULL,
@@ -15,14 +15,14 @@ module.exports = {
 
           opening_amount DECIMAL(15,2) NOT NULL DEFAULT 0,
           opening_notes TEXT,
-          opened_by UUID NOT NULL REFERENCES users(id),
+          opened_by UUID NOT NULL REFERENCES "public"."users"(id),
           opened_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
 
           expected_amounts JSONB NOT NULL DEFAULT '{}'::jsonb,
           counted_amounts JSONB NOT NULL DEFAULT '{}'::jsonb,
           differences JSONB NOT NULL DEFAULT '{}'::jsonb,
           closing_notes TEXT,
-          closed_by UUID REFERENCES users(id),
+          closed_by UUID REFERENCES "public"."users"(id),
           closed_at TIMESTAMP WITH TIME ZONE,
 
           created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
