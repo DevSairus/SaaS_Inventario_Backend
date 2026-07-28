@@ -24,30 +24,48 @@ function schemaNameFor(slug) {
 
 async function provisionTenantSchema(slug) {
   const schemaName = schemaNameFor(slug);
-  const sequelize = new Sequelize(DATABASE_URL, {
+
+  // Paso 1: crear el schema con una conexión aparte y de un solo uso,
+  // usando search_path por defecto (public) — no depende de nada.
+  const bootstrapSequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
     dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
     logging: false,
-    // CRÍTICO: con pool > 1, cada .query() puede tomar una conexión
-    // DISTINTA del pool, y el SET search_path de abajo solo aplica a la
-    // conexión que lo ejecutó. Con pool max:1 garantizamos que TODO este
-    // proceso (CREATE SCHEMA, SET search_path, y las 63 migraciones)
-    // corre sobre la misma conexión física.
+    pool: { max: 1, min: 0 },
+  });
+  try {
+    await bootstrapSequelize.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
+    console.log(`✅ Schema "${schemaName}" listo`);
+  } finally {
+    await bootstrapSequelize.close();
+  }
+
+  // Paso 2: nueva conexión donde el search_path se fija como PARÁMETRO
+  // DE ARRANQUE de la conexión Postgres (no como un `SET` posterior).
+  // Así, sin importar qué pieza interna de Sequelize/Umzug dispare cada
+  // query, o si el pool abre más de una conexión física, TODAS nacen ya
+  // con este search_path -> no hay forma de que una query "se escape"
+  // hacia public por accidente.
+  const sequelize = new Sequelize(DATABASE_URL, {
+    dialect: 'postgres',
+    dialectOptions: {
+      ssl: { require: true, rejectUnauthorized: false },
+      options: `-c search_path="${schemaName}",public`,
+    },
+    logging: false,
     pool: { max: 1, min: 1, idle: 10000 },
   });
 
   try {
-    await sequelize.query(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
-    console.log(`✅ Schema "${schemaName}" listo`);
-
-    // Con pool max:1, este search_path se mantiene para todas las
-    // queries siguientes en este proceso (misma conexión física).
-    await sequelize.query(`SET search_path TO "${schemaName}", public`);
+    // Diagnóstico: confirmar que ESTA conexión efectivamente ve el search_path esperado
+    const [[{ current_search_path }]] = await sequelize.query('SHOW search_path AS current_search_path');
+    console.log(`ℹ️  search_path efectivo de la conexión: ${current_search_path}`);
 
     const migrationsPath = path
       .join(__dirname, '..', 'database', 'migrations', '*.js')
       .split(path.sep)
       .join('/');
+    console.log(`ℹ️  Buscando migraciones en: ${migrationsPath}`);
 
     const queryInterface = sequelize.getQueryInterface();
     const SequelizeLib = require('sequelize');
@@ -68,19 +86,26 @@ async function provisionTenantSchema(slug) {
         },
       },
       context: queryInterface,
-      // Tabla de control DE ESTE SCHEMA (queda dentro de tenant_<slug>
-      // porque search_path ya está seteado)
       storage: new SequelizeStorage({ sequelize, tableName: 'sequelize_migrations' }),
       logger: console,
     });
 
+    const allMigrations = await umzug.migrations();
+    console.log(`ℹ️  Archivos de migración encontrados en total: ${allMigrations.length}`);
+    if (allMigrations.length === 0) {
+      throw new Error(
+        `No se encontró NINGÚN archivo de migración en "${migrationsPath}". ` +
+        `Esto es un problema de path/glob, no de search_path. Revisa que la ` +
+        `carpeta exista con ese nombre exacto dentro del contenedor.`
+      );
+    }
+
+    const pending = await umzug.pending();
+    console.log(`ℹ️  Migraciones pendientes para "${schemaName}": ${pending.length}`);
+
     const executed = await umzug.up();
     console.log(`✅ ${executed.length} migraciones aplicadas en "${schemaName}"`);
 
-    // Verificación de sanidad: si esto vuelve a fallar en silencio
-    // (ej. alguien quita el pool max:1 sin darse cuenta), que truene acá
-    // con un mensaje claro en vez de dejar que migrateTenantData reviente
-    // después con un "relation does not exist" confuso.
     const [[{ count: tableCount }]] = await sequelize.query(`
       SELECT count(*) FROM information_schema.tables
       WHERE table_schema = '${schemaName}' AND table_type = 'BASE TABLE'
@@ -88,8 +113,7 @@ async function provisionTenantSchema(slug) {
     if (Number(tableCount) === 0) {
       throw new Error(
         `El schema "${schemaName}" quedó sin tablas después de correr migraciones. ` +
-        `Muy probablemente el search_path no se mantuvo entre queries (revisa que ` +
-        `pool.max siga en 1). No continúes con migrateTenantData hasta resolver esto.`
+        `search_path efectivo era: ${current_search_path}. Revisa el log de arriba.`
       );
     }
     console.log(`✅ Verificado: ${tableCount} tablas existen en "${schemaName}"`);
