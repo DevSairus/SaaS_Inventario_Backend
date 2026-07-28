@@ -15,7 +15,7 @@ module.exports = {
     await queryInterface.addColumn('fiscal_periods', 'reopened_by', {
       type: Sequelize.UUID,
       allowNull: true,
-      references: { model: 'users', key: 'id' },
+      references: { model: { tableName: 'users', schema: 'public' }, key: 'id' },
     });
     await queryInterface.addColumn('fiscal_periods', 'reopen_reason', {
       type: Sequelize.TEXT,

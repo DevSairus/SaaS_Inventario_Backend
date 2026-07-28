@@ -11,7 +11,7 @@ module.exports = {
       tenant_id: {
         type: Sequelize.UUID,
         allowNull: false,
-        references: { model: 'tenants', key: 'id' },
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' },
         onDelete: 'CASCADE'
       },
       purchase_id: {
@@ -50,7 +50,7 @@ module.exports = {
       resolved_by: {
         type: Sequelize.UUID,
         allowNull: true,
-        references: { model: 'users', key: 'id' },
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' },
         onDelete: 'SET NULL'
       },
       resolution_notes: { type: Sequelize.TEXT, allowNull: true },

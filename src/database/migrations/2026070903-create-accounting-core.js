@@ -7,7 +7,7 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       code: { type: Sequelize.STRING(20), allowNull: false },
       name: { type: Sequelize.STRING(150), allowNull: false },
@@ -33,13 +33,13 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       year: { type: Sequelize.INTEGER, allowNull: false },
       month: { type: Sequelize.INTEGER, allowNull: false },
       status: { type: Sequelize.STRING(10), allowNull: false, defaultValue: 'open' }, // open | closed
       closed_at: { type: Sequelize.DATE, allowNull: true },
-      closed_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+      closed_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
       created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
       updated_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
     });
@@ -50,7 +50,7 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       branch_id: { type: Sequelize.UUID, allowNull: true, references: { model: 'branches', key: 'id' } },
       entry_number: { type: Sequelize.STRING(50), allowNull: false },
@@ -65,10 +65,10 @@ module.exports = {
       status: { type: Sequelize.STRING(10), allowNull: false, defaultValue: 'draft' }, // draft | posted | voided
       total_debit: { type: Sequelize.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
       total_credit: { type: Sequelize.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
-      created_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
-      posted_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+      created_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
+      posted_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
       posted_at: { type: Sequelize.DATE, allowNull: true },
-      voided_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+      voided_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
       voided_at: { type: Sequelize.DATE, allowNull: true },
       void_reason: { type: Sequelize.TEXT, allowNull: true },
       created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
@@ -106,7 +106,7 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       event_type: { type: Sequelize.STRING(60), allowNull: false, comment: 'ej: sale_revenue_product, expense_category:arriendo' },
       account_id: {

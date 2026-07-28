@@ -14,7 +14,7 @@ module.exports = {
         id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
         tenant_id: {
           type: Sequelize.UUID, allowNull: true,
-          references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+          references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
           comment: 'NULL = biblioteca compartida global; con valor = diagrama propio de un taller',
         },
         vehicle_type: {
@@ -80,7 +80,7 @@ module.exports = {
         },
         marked_by: {
           type: Sequelize.UUID, allowNull: true,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL',
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL',
         },
         marked_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
         created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },

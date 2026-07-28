@@ -9,7 +9,7 @@ module.exports = {
         type: Sequelize.UUID,
         allowNull: true, // se backfillea abajo; se deja nullable por seguridad
         references: {
-          model: 'subscription_plans',
+          model: { tableName: 'subscription_plans', schema: 'public' },
           key: 'id',
         },
         onUpdate: 'CASCADE',

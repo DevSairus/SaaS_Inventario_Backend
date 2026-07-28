@@ -11,7 +11,7 @@ module.exports = {
       tenant_id: {
         type: Sequelize.UUID,
         allowNull: false,
-        references: { model: 'tenants', key: 'id' },
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' },
         onUpdate: 'CASCADE',
         onDelete: 'RESTRICT'
       },
@@ -75,17 +75,17 @@ module.exports = {
       created_by: {
         type: Sequelize.UUID,
         allowNull: true,
-        references: { model: 'users', key: 'id' }
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }
       },
       sent_by: {
         type: Sequelize.UUID,
         allowNull: true,
-        references: { model: 'users', key: 'id' }
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }
       },
       received_by: {
         type: Sequelize.UUID,
         allowNull: true,
-        references: { model: 'users', key: 'id' }
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }
       },
       created_at: {
         type: Sequelize.DATE,

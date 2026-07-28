@@ -14,7 +14,7 @@ module.exports = {
         tenant_id: {
           type: Sequelize.UUID,
           allowNull: false,
-          references: { model: 'tenants', key: 'id' },
+          references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' },
           onUpdate: 'CASCADE',
           onDelete: 'CASCADE'
         },
@@ -46,7 +46,7 @@ module.exports = {
         manager_id: {
           type: Sequelize.UUID,
           allowNull: true,
-          references: { model: 'users', key: 'id' },
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' },
           onUpdate: 'CASCADE',
           onDelete: 'SET NULL'
         },
@@ -90,7 +90,7 @@ module.exports = {
         user_id: {
           type: Sequelize.UUID,
           allowNull: false,
-          references: { model: 'users', key: 'id' },
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' },
           onUpdate: 'CASCADE',
           onDelete: 'CASCADE'
         },

@@ -34,11 +34,11 @@ module.exports = {
         id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
         tenant_id: {
           type: Sequelize.UUID, allowNull: false,
-          references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+          references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
         },
         created_by: {
           type: Sequelize.UUID, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
         },
         subject: { type: Sequelize.STRING(255), allowNull: false },
         category: { type: Sequelize.STRING(100), allowNull: true },
@@ -52,7 +52,7 @@ module.exports = {
         },
         assigned_agent_id: {
           type: Sequelize.UUID, allowNull: true,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL',
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL',
         },
         first_response_at: { type: Sequelize.DATE, allowNull: true },
         resolved_at: { type: Sequelize.DATE, allowNull: true },
@@ -75,7 +75,7 @@ module.exports = {
         },
         author_id: {
           type: Sequelize.UUID, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
         },
         is_internal_note: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: false },
         message: { type: Sequelize.TEXT, allowNull: false },
@@ -109,15 +109,15 @@ module.exports = {
         },
         agent_id: {
           type: Sequelize.UUID, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
         },
         tenant_id: {
           type: Sequelize.UUID, allowNull: false,
-          references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+          references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
         },
         user_id: {
           type: Sequelize.UUID, allowNull: false,
-          references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
+          references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'RESTRICT',
         },
         mode: {
           type: Sequelize.STRING(20), allowNull: false, defaultValue: 'view_only',

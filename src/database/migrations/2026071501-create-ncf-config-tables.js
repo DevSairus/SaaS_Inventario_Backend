@@ -26,7 +26,7 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false, unique: true,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       facturacion_centralizada_activa: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: false },
       tipo_documento: { type: Sequelize.ENUM('NIT', 'CC', 'CE'), defaultValue: 'NIT' },

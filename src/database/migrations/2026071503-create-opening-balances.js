@@ -6,7 +6,7 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       branch_id: { type: Sequelize.UUID, allowNull: true, references: { model: 'branches', key: 'id' } },
       type: {
@@ -36,9 +36,9 @@ module.exports = {
       },
       status: { type: Sequelize.STRING(10), allowNull: false, defaultValue: 'active' }, // active | voided
       voided_at: { type: Sequelize.DATE, allowNull: true },
-      voided_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+      voided_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
       void_reason: { type: Sequelize.TEXT, allowNull: true },
-      created_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+      created_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
       created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
       updated_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.NOW },
     });

@@ -11,11 +11,11 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       user_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       branch_id: { type: Sequelize.UUID, allowNull: true, references: { model: 'branches', key: 'id' } },
       title: { type: Sequelize.STRING(150), allowNull: true },
@@ -39,7 +39,7 @@ module.exports = {
       // mensajes directamente sin JOIN, igual que el resto del esquema.
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       role: {
         type: Sequelize.STRING(10), allowNull: false,

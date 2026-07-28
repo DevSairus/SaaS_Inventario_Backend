@@ -12,7 +12,7 @@ module.exports = {
       id: { type: Sequelize.UUID, defaultValue: Sequelize.UUIDV4, primaryKey: true },
       tenant_id: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'tenants', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'tenants', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       conversation_id: {
         type: Sequelize.UUID, allowNull: true,
@@ -20,7 +20,7 @@ module.exports = {
       },
       created_by: {
         type: Sequelize.UUID, allowNull: false,
-        references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE',
       },
       branch_id: { type: Sequelize.UUID, allowNull: true, references: { model: 'branches', key: 'id' } },
       action_type: {
@@ -35,7 +35,7 @@ module.exports = {
       },
       reviewed_by: {
         type: Sequelize.UUID, allowNull: true,
-        references: { model: 'users', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL',
+        references: { model: { tableName: 'users', schema: 'public' }, key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL',
       },
       reviewed_at: { type: Sequelize.DATE, allowNull: true },
       executed_at: { type: Sequelize.DATE, allowNull: true },

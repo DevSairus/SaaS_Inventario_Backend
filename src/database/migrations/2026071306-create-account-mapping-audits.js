@@ -15,7 +15,7 @@ module.exports = {
       event_type: { type: Sequelize.STRING(60), allowNull: false },
       previous_account_id: { type: Sequelize.UUID, allowNull: true, references: { model: 'chart_of_accounts', key: 'id' } },
       new_account_id: { type: Sequelize.UUID, allowNull: false, references: { model: 'chart_of_accounts', key: 'id' } },
-      changed_by: { type: Sequelize.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+      changed_by: { type: Sequelize.UUID, allowNull: true, references: { model: { tableName: 'users', schema: 'public' }, key: 'id' } },
       created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.fn('NOW') },
     });
     await queryInterface.addIndex('account_mapping_audits', ['tenant_id', 'event_type']);

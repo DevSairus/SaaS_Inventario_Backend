@@ -13,7 +13,7 @@ module.exports = {
         type: Sequelize.UUID,
         allowNull: false,
         references: {
-          model: 'tenants',
+          model: { tableName: 'tenants', schema: 'public' },
           key: 'id'
         },
         onUpdate: 'CASCADE',
@@ -81,7 +81,7 @@ module.exports = {
         type: Sequelize.UUID,
         allowNull: true,
         references: {
-          model: 'users',
+          model: { tableName: 'users', schema: 'public' },
           key: 'id'
         }
       },
@@ -89,7 +89,7 @@ module.exports = {
         type: Sequelize.UUID,
         allowNull: true,
         references: {
-          model: 'users',
+          model: { tableName: 'users', schema: 'public' },
           key: 'id'
         }
       },
@@ -101,7 +101,7 @@ module.exports = {
         type: Sequelize.UUID,
         allowNull: true,
         references: {
-          model: 'users',
+          model: { tableName: 'users', schema: 'public' },
           key: 'id'
         }
       },
