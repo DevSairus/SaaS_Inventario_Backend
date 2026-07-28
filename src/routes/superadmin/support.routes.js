@@ -1,13 +1,13 @@
 /* eslint-disable indent */
 const express = require('express');
 const router = express.Router();
-const { authMiddleware } = require('../middleware/auth');
-const { checkPermission } = require('../middleware/checkPermission');
-const { denyImpersonation } = require('../middleware/denyImpersonation');
+const { authMiddleware } = require('../../middleware/auth');
+const { checkPermission } = require('../../middleware/checkPermission');
+const { denyImpersonation } = require('../../middleware/denyImpersonation');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const audit = require('../utils/audit');
+const audit = require('../../utils/audit');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
@@ -19,15 +19,15 @@ const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
 // inofensivo: solo re-decodifica el mismo token).
 router.use(authMiddleware, denyImpersonation);
 
-const Tenant = require('../models/Tenant');
-const User = require('../models/User');
-const Invoice = require('../models/billing/Invoice');
-const TenantSubscription = require('../models/subscriptions/TenantSubscription');
-const SubscriptionPlan = require('../models/subscriptions/SubscriptionPlan');
-const SubscriptionInvoice = require('../models/subscriptions/SubscriptionInvoice');
-const SuperAdminMercadoPagoConfig = require('../models/payments/SuperAdminMercadoPagoConfig');
-const { MODULES_CATALOG } = require('../config/modules.catalog');
-const { invalidateModulesCache, invalidateAllModulesCache, getEffectiveModulesForTenantId } = require('../services/moduleAccess');
+const Tenant = require('../../models/Tenant');
+const User = require('../../models/User');
+const Invoice = require('../../models/billing/Invoice');
+const TenantSubscription = require('../../models/subscriptions/TenantSubscription');
+const SubscriptionPlan = require('../../models/subscriptions/SubscriptionPlan');
+const SubscriptionInvoice = require('../../models/subscriptions/SubscriptionInvoice');
+const SuperAdminMercadoPagoConfig = require('../../models/payments/SuperAdminMercadoPagoConfig');
+const { MODULES_CATALOG } = require('../../config/modules.catalog');
+const { invalidateModulesCache, invalidateAllModulesCache, getEffectiveModulesForTenantId } = require('../../services/moduleAccess');
 
 // ============================================
 // GESTIÓN DE TENANTS
@@ -192,7 +192,7 @@ router.get(
         } 
       });
       const totalInvoices = await Invoice.count({ where: { tenant_id: id } });
-      const Branch = require('../models/Branch');
+      const Branch = require('../../models/Branch');
       const totalBranches = await Branch.count({ where: { tenant_id: id, is_active: true } });
 
       const subscription = tenant.subscriptions && tenant.subscriptions[0];
@@ -280,7 +280,7 @@ router.post(
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
     try {
-      const { runMigrations } = require('../database/migrator');
+      const { runMigrations } = require('../../database/migrator');
       const executed = await runMigrations();
       res.json({
         success: true,
@@ -359,7 +359,7 @@ router.post(
       );
 
       // 3b. Plan de cuentas PUC estándar + mapeos contables por defecto
-      const { seedChartOfAccountsForTenant } = require('../services/accounting/accountingSeed.service');
+      const { seedChartOfAccountsForTenant } = require('../../services/accounting/accountingSeed.service');
       await seedChartOfAccountsForTenant(tenant.id, transaction);
 
       // 4. Crear admin
@@ -486,7 +486,7 @@ router.delete(
         });
       }
 
-      const { purgeTenant } = require('../services/tenantPurgeService');
+      const { purgeTenant } = require('../../services/tenantPurgeService');
       const report = await purgeTenant(id, {
         reason: reason || 'manual_superadmin',
         triggeredBy: req.user?.id || null,
@@ -1156,7 +1156,7 @@ router.get(
       let revenueByMonth = revenueByMonthEstimado;
       let revenueIsEstimate = true;
       try {
-        const ncfClient = require('../services/ncf/ncfClient');
+        const ncfClient = require('../../services/ncf/ncfClient');
         const config = await ncfClient.getConfig();
         if (config?.is_active) {
           const real = await ncfClient.obtenerFacturacionMensual(24);
@@ -1416,7 +1416,7 @@ router.get(
     try {
       const { tenantId } = req.params;
 
-      const TenantMercadoPagoConfig = require('../models/payments/TenantMercadoPagoConfig');
+      const TenantMercadoPagoConfig = require('../../models/payments/TenantMercadoPagoConfig');
 
       const config = await TenantMercadoPagoConfig.findOne({
         where: { tenant_id: tenantId },
@@ -1451,7 +1451,7 @@ router.post(
         return res.status(400).json({ error: 'Faltan datos requeridos' });
       }
 
-      const TenantMercadoPagoConfig = require('../models/payments/TenantMercadoPagoConfig');
+      const TenantMercadoPagoConfig = require('../../models/payments/TenantMercadoPagoConfig');
 
       // Buscar configuración existente
       let config = await TenantMercadoPagoConfig.findOne({
@@ -1500,7 +1500,7 @@ router.delete(
     try {
       const { tenantId } = req.params;
 
-      const TenantMercadoPagoConfig = require('../models/payments/TenantMercadoPagoConfig');
+      const TenantMercadoPagoConfig = require('../../models/payments/TenantMercadoPagoConfig');
 
       const deleted = await TenantMercadoPagoConfig.destroy({
         where: { tenant_id: tenantId },
@@ -1666,7 +1666,7 @@ router.get(
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
     try {
-      const NcfConfig = require('../models/payments/NcfConfig');
+      const NcfConfig = require('../../models/payments/NcfConfig');
 
       let config = await NcfConfig.findOne();
       if (!config) {
@@ -1710,7 +1710,7 @@ router.post(
         return res.status(400).json({ error: 'ncf_base_url es requerido' });
       }
 
-      const NcfConfig = require('../models/payments/NcfConfig');
+      const NcfConfig = require('../../models/payments/NcfConfig');
       let config = await NcfConfig.findOne();
 
       const updates = { ncf_base_url };
@@ -1755,7 +1755,7 @@ router.delete(
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
     try {
-      const NcfConfig = require('../models/payments/NcfConfig');
+      const NcfConfig = require('../../models/payments/NcfConfig');
       const config = await NcfConfig.findOne();
 
       if (!config) {
@@ -1788,7 +1788,7 @@ router.post(
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
     try {
-      const ncfClient = require('../services/ncf/ncfClient');
+      const ncfClient = require('../../services/ncf/ncfClient');
       const result = await ncfClient.probarConexion();
       res.json({ success: result.ok, ...result });
     } catch (error) {
@@ -1809,7 +1809,7 @@ router.get(
   checkPermission('superadmin.view_all'),
   async (req, res) => {
     try {
-      const Tenant = require('../models/Tenant');
+      const Tenant = require('../../models/Tenant');
       const tenants = await Tenant.findAll({
         where: { is_active: true },
         attributes: [
@@ -1847,7 +1847,7 @@ router.post(
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
     try {
-      const ncfSyncService = require('../services/ncf/ncfSyncService');
+      const ncfSyncService = require('../../services/ncf/ncfSyncService');
       const resultados = await ncfSyncService.sincronizarTodosLosTenants({ forzar: !!req.body?.forzar });
 
       res.json({
@@ -2202,7 +2202,7 @@ router.post(
 // GESTIÓN DE PERMISOS DE ROLES
 // ============================================
 
-const permissionsController = require('../controllers/permissions.controller');
+const permissionsController = require('../../controllers/permissions.controller');
 
 // GET /permissions/role/:role - Obtener permisos de un rol
 router.get(
