@@ -9,6 +9,7 @@ const {
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
+const { getCurrentSchema } = require('../../config/tenantContext');
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -190,9 +191,14 @@ const getById = async (req, res) => {
     });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
-    // Sequelize puede no incluir columnas JSONB añadidas post-creación — forzar con raw query
+    // Sequelize puede no incluir columnas JSONB añadidas post-creación — forzar con raw query.
+    // OJO: antes esto era `FROM work_orders` sin calificar schema -- siempre
+    // resolvía contra "public", así que para tenants ya cortados esta fila
+    // nunca existía ahí y checklist_in quedaba silenciosamente en {} (sin
+    // error visible, la página cargaba igual con el resto de datos del ORM).
+    const schema = getCurrentSchema() || 'public';
     const rows = await sequelize.query(
-      'SELECT checklist_in FROM work_orders WHERE id = :id',
+      `SELECT checklist_in FROM "${schema}"."work_orders" WHERE id = :id`,
       { replacements: { id: req.params.id }, type: sequelize.QueryTypes.SELECT }
     );
 
@@ -865,18 +871,13 @@ const sendQuoteRequest = async (req, res) => {
       { where: { id: pendingItems.map(i => i.id) }, transaction }
     );
 
-    // Reusar/crear share_token de la OT (mismo patrón que generateShareToken/sendWhatsApp)
-    const rows = await sequelize.query(
-      'SELECT share_token FROM work_orders WHERE id = :id',
-      { replacements: { id: order.id }, type: sequelize.QueryTypes.SELECT, transaction }
-    );
-    let token = rows[0]?.share_token;
+    // Reusar/crear share_token de la OT (mismo patrón que generateShareToken/sendWhatsApp).
+    // `order` ya viene del ORM (schema-aware) -- evita el SQL crudo sin
+    // calificar schema que antes siempre resolvía contra "public".
+    let token = order.share_token;
     if (!token) {
       token = require('crypto').randomUUID();
-      await sequelize.query(
-        'UPDATE work_orders SET share_token = :token WHERE id = :id',
-        { replacements: { token, id: order.id }, type: sequelize.QueryTypes.UPDATE, transaction }
-      );
+      await order.update({ share_token: token }, { transaction });
     }
 
     const customer = await Customer.findOne({ where: { id: order.customer_id }, transaction });
@@ -1549,8 +1550,9 @@ async function getOrderWithTenant(id, tenant_id) {
 
   if (order) {
     // Inyectar checklist_in con raw query (Sequelize omite JSONB agregado post-migración)
+    const schema = getCurrentSchema() || 'public';
     const rows = await sequelize.query(
-      'SELECT checklist_in FROM work_orders WHERE id = :id',
+      `SELECT checklist_in FROM "${schema}"."work_orders" WHERE id = :id`,
       { replacements: { id }, type: sequelize.QueryTypes.SELECT }
     );
     const data = order.toJSON();
@@ -1619,9 +1621,14 @@ const updateChecklist = async (req, res) => {
     const order = await WorkOrder.findOne({ where: { id, tenant_id } });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
-    // Raw SQL para evitar problemas de Sequelize con JSONB
+    // Raw SQL para evitar problemas de Sequelize con JSONB. OJO: antes esto
+    // era `UPDATE work_orders` sin calificar schema -- para un tenant ya
+    // cortado, el UPDATE afectaba 0 filas en "public" SIN error (una fila
+    // que no matchea no es un fallo de SQL), así que el endpoint respondía
+    // success:true pero el checklist nunca se guardaba de verdad.
+    const schema = getCurrentSchema() || 'public';
     await sequelize.query(
-      `UPDATE work_orders SET checklist_in = :data::jsonb WHERE id = :id AND tenant_id = :tenant_id`,
+      `UPDATE "${schema}"."work_orders" SET checklist_in = :data::jsonb WHERE id = :id AND tenant_id = :tenant_id`,
       {
         replacements: {
           data: JSON.stringify(req.body),
@@ -1730,28 +1737,17 @@ const generateShareToken = async (req, res) => {
     });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
-    // Usar raw query para leer/escribir share_token — la columna puede no existir en BD
-    let token;
-    try {
-      const rows = await sequelize.query(
-        'SELECT share_token FROM work_orders WHERE id = :id',
-        { replacements: { id: req.params.id }, type: sequelize.QueryTypes.SELECT }
-      );
-      token = rows[0]?.share_token;
-    } catch {
-      // Columna no existe aún en la BD
-      return res.status(503).json({
-        success: false,
-        message: 'La función de compartir OT requiere una actualización de la base de datos. Ejecuta el script de migración.',
-      });
-    }
-
+    // OJO: antes esto era SQL crudo sin calificar schema (`FROM work_orders`),
+    // que siempre resolvía contra "public" sin importar el tenant -- para
+    // tenants ya cortados a su propio schema, esa fila no existe ahí, así
+    // que share_token nunca se leía ni se escribía de verdad (el endpoint
+    // igual devolvía success:true con un token que no quedaba guardado en
+    // ningún lado). Usar el `order` que ya trajo el ORM (schema-aware, ver
+    // registerTenantSchemaHooks.js) evita el problema por completo.
+    let token = order.share_token;
     if (!token) {
       token = require('crypto').randomUUID();
-      await sequelize.query(
-        'UPDATE work_orders SET share_token = :token WHERE id = :id',
-        { replacements: { token, id: req.params.id }, type: sequelize.QueryTypes.UPDATE }
-      );
+      await order.update({ share_token: token });
     }
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
@@ -1982,20 +1978,18 @@ const sendWhatsApp = async (req, res) => {
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
 
-    // Obtener o crear share token
-    const rows = await sequelize.query(
-      'SELECT share_token FROM work_orders WHERE id = :id AND tenant_id = :tenant_id',
-      { replacements: { id, tenant_id }, type: sequelize.QueryTypes.SELECT }
-    );
-    if (!rows.length) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    // Obtener o crear share token. OJO: antes esto era SQL crudo sin
+    // calificar schema (`FROM work_orders`), que siempre resolvía contra
+    // "public" -- para tenants ya cortados esa fila no existe ahí, así que
+    // siempre daba "Orden no encontrada". El ORM (WorkOrder.findOne) sí es
+    // schema-aware (ver registerTenantSchemaHooks.js).
+    const wo = await WorkOrder.findOne({ where: { id, tenant_id } });
+    if (!wo) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
-    let token = rows[0].share_token;
+    let token = wo.share_token;
     if (!token) {
       token = require('crypto').randomUUID();
-      await sequelize.query(
-        'UPDATE work_orders SET share_token = :token WHERE id = :id',
-        { replacements: { token, id }, type: sequelize.QueryTypes.UPDATE }
-      );
+      await wo.update({ share_token: token });
     }
 
     // Datos del cliente y la orden
