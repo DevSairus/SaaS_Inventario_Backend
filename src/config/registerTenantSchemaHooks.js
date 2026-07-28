@@ -1,12 +1,36 @@
 // src/config/registerTenantSchemaHooks.js
 //
-// Registra hooks globales en Sequelize para que TODAS las queries
-// (findAll, findOne, create, update, destroy, bulkCreate, count, etc.)
-// se ejecuten automáticamente contra el schema del tenant actual,
-// sin tocar controllers ni services existentes.
+// Hace que TODAS las queries (findAll, findOne, create, update, destroy,
+// bulkCreate, count, includes/joins, etc.) de los modelos de tenant se
+// ejecuten automáticamente contra el schema del tenant actual, sin tocar
+// controllers ni services existentes.
 //
-// IMPORTANTE: para queries con `include` (joins), cada modelo incluido
-// también necesita el schema seteado -> lo resolvemos recursivamente.
+// VERSIÓN ANTERIOR (rota): usaba hooks (beforeFind/beforeCreate/...) que
+// mutaban `options.schema`. Sequelize v6 NUNCA lee `options.schema` para
+// resolver el nombre de tabla de una query normal -- `Model.getTableName()`
+// (lib/model.js) ignora sus argumentos y siempre llama a
+// `queryGenerator.addSchema(this)`, que lee `this._schema` (una propiedad
+// del MODELO, no de las opciones de la query). Por eso, tras cortar un
+// tenant, la app seguía leyendo/escribiendo en `public` sin que nada avisara
+// del error -- los hooks corrían pero no tenían ningún efecto real. Solo
+// `applySchemaToIncludes` (que sí llamaba a `model.schema(schema)`) hacía
+// algo, y solo para modelos incluidos vía `include`, no para la query
+// principal ni para create/update/destroy directos.
+//
+// FIX: en vez de mutar options, se reemplaza `_schema` en cada modelo de
+// tenant por una propiedad dinámica (get/set) que resuelve
+// `getCurrentSchema()` en el momento en que Sequelize la lee -- es decir,
+// justo al armar el SQL de cada query, dentro del mismo contexto async del
+// request (AsyncLocalStorage, ver tenantContext.js). Como TODOS los `include`
+// de una query normal apuntan a la MISMA clase de modelo (no a un clon),
+// heredan el mismo comportamiento dinámico automáticamente -- ya no hace
+// falta re-resolver includes a mano.
+//
+// El setter conserva el comportamiento original de `Model.schema(x)` (usado
+// internamente por Sequelize en asociaciones belongsToMany con `{ schema }`
+// explícito): sigue produciendo un schema FIJO en el clon, en vez de dinámico,
+// guardándolo en una propiedad propia (`_fixedSchema`) que el getter prioriza
+// sobre el contexto del request.
 
 const { getCurrentSchema } = require('./tenantContext');
 
@@ -24,54 +48,27 @@ const PUBLIC_SCHEMA_MODELS = new Set([
   'UserAnnouncementView',
 ]);
 
-function applySchemaToIncludes(includes, schema) {
-  if (!includes) return;
-  const list = Array.isArray(includes) ? includes : [includes];
-  for (const inc of list) {
-    if (!inc || !inc.model) continue;
-    if (!PUBLIC_SCHEMA_MODELS.has(inc.model.name)) {
-      inc.model = inc.model.schema(schema);
-    }
-    if (inc.include) applySchemaToIncludes(inc.include, schema);
-  }
-}
-
-function withTenantSchema(options) {
-  const schema = getCurrentSchema();
-  if (!schema) return options; // rutas sin tenant (superadmin, login) -> comportamiento normal
-
-  options = options || {};
-  options.schema = schema;
-  if (options.include) applySchemaToIncludes(options.include, schema);
-  return options;
-}
-
 function registerTenantSchemaHooks(sequelize) {
-  const hookNames = [
-    'beforeFind',
-    'beforeCount',
-    'beforeBulkCreate',
-    'beforeCreate',
-    'beforeUpdate',
-    'beforeBulkUpdate',
-    'beforeDestroy',
-    'beforeBulkDestroy',
-    'beforeUpsert',
-    'beforeSave',
-  ];
-
   for (const modelName in sequelize.models) {
-    const model = sequelize.models[modelName];
     if (PUBLIC_SCHEMA_MODELS.has(modelName)) continue; // se quedan en public siempre
 
-    for (const hookName of hookNames) {
-      model.addHook(hookName, (instanceOrOptions, options) => {
-        // beforeCreate/beforeUpdate/beforeSave reciben (instance, options)
-        const opts = options || instanceOrOptions;
-        withTenantSchema(opts);
-      });
-    }
+    const model = sequelize.models[modelName];
+    Object.defineProperty(model, '_schema', {
+      configurable: true,
+      get() {
+        // `this` es el receptor real de la lectura (el modelo base O un
+        // clon creado por `.schema(x)`) -- así el fijo gana sobre el
+        // dinámico solo en el clon que lo pidió explícitamente.
+        if (Object.prototype.hasOwnProperty.call(this, '_fixedSchema')) {
+          return this._fixedSchema;
+        }
+        return getCurrentSchema();
+      },
+      set(value) {
+        Object.defineProperty(this, '_fixedSchema', { value, writable: true, configurable: true });
+      },
+    });
   }
 }
 
-module.exports = { registerTenantSchemaHooks, withTenantSchema, PUBLIC_SCHEMA_MODELS };
+module.exports = { registerTenantSchemaHooks, PUBLIC_SCHEMA_MODELS };
