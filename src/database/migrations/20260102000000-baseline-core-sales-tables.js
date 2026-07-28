@@ -39,7 +39,6 @@
 // ============================================================================
 
 const SQL_UP = `
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
 DO $$ BEGIN
   CREATE TYPE enum_sales_document_type AS ENUM ('remision', 'factura', 'cotizacion', 'nota_credito', 'nota_debito');
@@ -64,7 +63,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- ── TABLAS ──────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS audit_logs (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid,
     "user_id" uuid,
     "action" character varying(100) NOT NULL,
@@ -104,7 +103,7 @@ CREATE TABLE IF NOT EXISTS commission_settlements (
 );
 
 CREATE TABLE IF NOT EXISTS customer_price_lists (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "customer_id" uuid NOT NULL,
     "price_list_id" uuid NOT NULL,
@@ -119,7 +118,7 @@ CREATE TABLE IF NOT EXISTS customer_price_lists (
 );
 
 CREATE TABLE IF NOT EXISTS customers (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "customer_type" character varying(20) DEFAULT 'individual'::character varying,
     "first_name" character varying(100),
@@ -148,7 +147,7 @@ CREATE TABLE IF NOT EXISTS customers (
 );
 
 CREATE TABLE IF NOT EXISTS dian_events (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "sale_id" uuid,
     "event_type" character varying(50) NOT NULL,
@@ -164,7 +163,7 @@ CREATE TABLE IF NOT EXISTS dian_events (
 );
 
 CREATE TABLE IF NOT EXISTS dian_resolutions (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "resolution_number" character varying(50) NOT NULL,
     "resolution_date" date NOT NULL,
@@ -212,7 +211,7 @@ CREATE TABLE IF NOT EXISTS inventory_adjustments (
 );
 
 CREATE TABLE IF NOT EXISTS invoices (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "invoice_number" character varying(50) NOT NULL,
     "customer_name" character varying(255) NOT NULL,
@@ -237,7 +236,7 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 
 CREATE TABLE IF NOT EXISTS price_list_categories (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "price_list_id" uuid NOT NULL,
     "category_id" uuid NOT NULL,
@@ -246,7 +245,7 @@ CREATE TABLE IF NOT EXISTS price_list_categories (
 );
 
 CREATE TABLE IF NOT EXISTS price_lists (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "code" character varying(50) NOT NULL,
     "name" character varying(100) NOT NULL,
@@ -269,7 +268,7 @@ CREATE TABLE IF NOT EXISTS price_lists (
 );
 
 CREATE TABLE IF NOT EXISTS product_prices (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "product_id" uuid NOT NULL,
     "price_list_id" uuid NOT NULL,
@@ -286,7 +285,7 @@ CREATE TABLE IF NOT EXISTS product_prices (
 );
 
 CREATE TABLE IF NOT EXISTS purchase_details (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "purchase_id" uuid NOT NULL,
     "line_number" integer NOT NULL,
@@ -310,7 +309,7 @@ CREATE TABLE IF NOT EXISTS purchase_details (
 );
 
 CREATE TABLE IF NOT EXISTS sale_items (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "sale_id" uuid NOT NULL,
     "product_id" uuid,
@@ -337,7 +336,7 @@ CREATE TABLE IF NOT EXISTS sale_items (
 );
 
 CREATE TABLE IF NOT EXISTS sales (
-    "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
+    "id" uuid NOT NULL DEFAULT gen_random_uuid(),
     "tenant_id" uuid NOT NULL,
     "sale_number" character varying(50) NOT NULL,
     "document_type" enum_sales_document_type,
