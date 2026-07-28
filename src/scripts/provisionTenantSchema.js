@@ -12,6 +12,7 @@ require('dotenv').config();
 const { Sequelize } = require('sequelize');
 const { Umzug, SequelizeStorage } = require('umzug');
 const path = require('path');
+const fs = require('fs');
 
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 // OJO: usar la URL DIRECTA de Neon (no la "-pooler"), porque este script
@@ -69,30 +70,59 @@ async function provisionTenantSchema(slug) {
     );
     console.log(`ℹ️  search_path efectivo de la conexión: ${current_search_path}`);
 
-    const migrationsPath = path
-      .join(__dirname, '..', 'database', 'migrations', '*.js')
-      .split(path.sep)
-      .join('/');
-    console.log(`ℹ️  Buscando migraciones en: ${migrationsPath}`);
+    const migrationsDir = path.join(__dirname, '..', 'database', 'migrations');
+    console.log(`ℹ️  Buscando migraciones en: ${migrationsDir}`);
 
     const queryInterface = sequelize.getQueryInterface();
     const SequelizeLib = require('sequelize');
 
+    // CORRECCIÓN DE ORDEN: no tocamos ningún archivo en disco (renombrarlo
+    // rompería el migrator normal de producción, que ya tiene esta
+    // migración registrada con su nombre actual y correría addIndex()
+    // de nuevo contra public, donde esos índices ya existen -> error).
+    // En vez de eso, corregimos el ORDEN DE EJECUCIÓN únicamente para
+    // este proceso de aprovisionamiento, vía un sort-key explícito.
+    //
+    // "0260202120100-create-supplier-returns.js" le falta el "2" inicial
+    // (debería ser "20260202120100...", justo antes de
+    // "20260202120200-create-transfers.js"). Al ordenar alfabéticamente
+    // tal cual, cae primero que todo -> intenta crear una FK hacia
+    // "purchases"/"suppliers" antes de que existan en un schema fresco.
+    const SORT_KEY_OVERRIDES = {
+      '0260202120100-create-supplier-returns.js': '20260202120100-create-supplier-returns.js',
+    };
+
+    const files = fs
+      .readdirSync(migrationsDir)
+      .filter((f) => f.endsWith('.js'))
+      .sort((a, b) => {
+        const keyA = SORT_KEY_OVERRIDES[a] || a;
+        const keyB = SORT_KEY_OVERRIDES[b] || b;
+        return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+      });
+
+    console.log(`ℹ️  Archivos de migración encontrados en total: ${files.length}`);
+    if (files.length === 0) {
+      throw new Error(
+        `No se encontró NINGÚN archivo de migración en "${migrationsDir}". ` +
+        `Esto es un problema de path, no de search_path. Revisa que la ` +
+        `carpeta exista con ese nombre exacto dentro del contenedor.`
+      );
+    }
+
     const umzug = new Umzug({
-      migrations: {
-        glob: migrationsPath,
-        resolve: ({ name, path: filePath }) => {
-          const migration = require(filePath);
-          if (typeof migration.up !== 'function') {
-            return { name, up: async () => {}, down: async () => {} };
-          }
-          return {
-            name,
-            up: async () => migration.up(queryInterface, SequelizeLib),
-            down: async () => migration.down(queryInterface, SequelizeLib),
-          };
-        },
-      },
+      migrations: files.map((name) => {
+        const filePath = path.join(migrationsDir, name);
+        const migration = require(filePath);
+        if (typeof migration.up !== 'function') {
+          return { name, up: async () => {}, down: async () => {} };
+        }
+        return {
+          name,
+          up: async () => migration.up(queryInterface, SequelizeLib),
+          down: async () => migration.down(queryInterface, SequelizeLib),
+        };
+      }),
       context: queryInterface,
       storage: new SequelizeStorage({
         sequelize,
@@ -101,16 +131,6 @@ async function provisionTenantSchema(slug) {
       }),
       logger: console,
     });
-
-    const allMigrations = await umzug.migrations();
-    console.log(`ℹ️  Archivos de migración encontrados en total: ${allMigrations.length}`);
-    if (allMigrations.length === 0) {
-      throw new Error(
-        `No se encontró NINGÚN archivo de migración en "${migrationsPath}". ` +
-        `Esto es un problema de path/glob, no de search_path. Revisa que la ` +
-        `carpeta exista con ese nombre exacto dentro del contenedor.`
-      );
-    }
 
     const pending = await umzug.pending();
     console.log(`ℹ️  Migraciones pendientes para "${schemaName}": ${pending.length}`);
