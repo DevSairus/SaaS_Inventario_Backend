@@ -42,7 +42,7 @@
 //
 //   pg_dump --schema-only --no-owner --no-privileges \
 //     -t purchases -t suppliers -t products -t categories \
-//     -t warehouses -t product_warehouse_stock -t purchase_details \
+//     -t warehouses -t product_warehouse_stock -t purchase_items \
 //     -t inventory_movements -t stock_alerts \
 //     "$DATABASE_URL_DIRECT" > baseline_real.sql
 //
@@ -272,7 +272,17 @@ CREATE INDEX IF NOT EXISTS idx_purchases_payment_status ON purchases(payment_sta
 CREATE INDEX IF NOT EXISTS idx_purchases_number ON purchases(purchase_number);
 
 -- DETALLES DE COMPRA
-CREATE TABLE IF NOT EXISTS purchase_details (
+-- NOTA: schema.sql llama a esta tabla "purchase_details", pero el modelo
+-- real (src/models/inventory/PurchaseItem.js) y las migraciones que la
+-- tocan (2026070302-add-multi-tax-system.js,
+-- 2026070611-fix-full-schema-audit.js) usan "purchase_items" — schema.sql
+-- quedó desactualizado acá, se sigue el modelo. Las columnas
+-- inc_rate/inc_amount/ica_rate/ica_amount/subtotal/total/updated_at NO
+-- se incluyen a propósito: esas dos migraciones posteriores las agregan
+-- con ADD COLUMN IF NOT EXISTS (con sus tipos exactos, p.ej. ica_rate es
+-- DECIMAL(5,4) ahí, no (5,2)) — mejor dejarlas crearlas que arriesgarse
+-- a duplicarlas con un tipo distinto.
+CREATE TABLE IF NOT EXISTS purchase_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     purchase_id UUID NOT NULL REFERENCES purchases(id) ON DELETE CASCADE,
@@ -283,21 +293,21 @@ CREATE TABLE IF NOT EXISTS purchase_details (
     product_barcode VARCHAR(100),
     quantity DECIMAL(15,4) NOT NULL,
     received_quantity DECIMAL(15,4) DEFAULT 0,
-    unit_of_measure VARCHAR(20) NOT NULL,
+    unit_of_measure VARCHAR(20) NOT NULL DEFAULT 'unit',
     unit_cost DECIMAL(15,4) NOT NULL,
     tax_rate DECIMAL(5,2) DEFAULT 0,
     tax_amount DECIMAL(15,2) DEFAULT 0,
     discount_percentage DECIMAL(5,2) DEFAULT 0,
     discount_amount DECIMAL(15,2) DEFAULT 0,
     line_total DECIMAL(15,2) NOT NULL,
-    batch_number VARCHAR(50),
+    batch_number VARCHAR(100),
     expiration_date DATE,
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_purchase_details_tenant ON purchase_details(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_purchase_details_purchase ON purchase_details(purchase_id);
-CREATE INDEX IF NOT EXISTS idx_purchase_details_product ON purchase_details(product_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_items_tenant ON purchase_items(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_items_purchase ON purchase_items(purchase_id);
+CREATE INDEX IF NOT EXISTS idx_purchase_items_product ON purchase_items(product_id);
 
 -- MOVIMIENTOS DE INVENTARIO
 CREATE TABLE IF NOT EXISTS inventory_movements (
@@ -379,7 +389,7 @@ CREATE INDEX IF NOT EXISTS idx_stock_alerts_created ON stock_alerts(created_at D
 const SQL_DOWN = `
 DROP TABLE IF EXISTS stock_alerts CASCADE;
 DROP TABLE IF EXISTS inventory_movements CASCADE;
-DROP TABLE IF EXISTS purchase_details CASCADE;
+DROP TABLE IF EXISTS purchase_items CASCADE;
 DROP TABLE IF EXISTS purchases CASCADE;
 DROP TABLE IF EXISTS product_warehouse_stock CASCADE;
 DROP TABLE IF EXISTS products CASCADE;
