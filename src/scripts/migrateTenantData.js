@@ -89,6 +89,62 @@ const DEFERRED_FK_COLUMNS = {
   sales: ['converted_to_work_order_id'],
 };
 
+// Columnas que existen en el schema del tenant (por el baseline crudo que usa
+// provisionTenantSchema.js) pero NO existen en `public` -- no porque alguien
+// las haya borrado, sino porque `CREATE TABLE IF NOT EXISTS` es un no-op
+// cuando la tabla ya existía en `public` desde antes, con una estructura más
+// vieja que nunca tuvo esa columna. El baseline sí la trae porque ahí crea
+// la tabla desde cero. No hay valor real que copiar -- hay que generarlo.
+// Cada función corre una vez DESPUÉS de insertar todas las filas de esa
+// tabla (permite usar window functions/agregados sobre el propio destino).
+//
+// `tenant_id` es un caso aparte y se maneja siempre automático (ver más
+// abajo): cualquier tabla indirecta con tenant_id en el schema pero no en
+// public lo recibe del parámetro `tenantId` sin necesidad de listarla acá.
+const GENERATED_COLUMNS = {
+  purchase_items: {
+    // No existe ni remotamente en public.purchase_items -- se reconstruye
+    // como la posición relativa dentro de su compra (orden de captura) vía
+    // ROW_NUMBER(). No es "el" line_number original (nunca existió en
+    // public), pero preserva un orden estable y consistente por compra.
+    line_number: (schemaName) => `
+      UPDATE "${schemaName}"."purchase_items" pi
+      SET line_number = sub.rn
+      FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY purchase_id ORDER BY created_at, id) AS rn
+        FROM "${schemaName}"."purchase_items"
+      ) sub
+      WHERE pi.id = sub.id
+    `,
+    // product_name/product_sku son snapshots del producto al momento de la
+    // compra (denormalizados). public.purchase_items nunca los tuvo -- se
+    // reconstruyen desde el estado ACTUAL de products (product_id ya se
+    // copió tal cual, y products se migra antes por el orden topológico).
+    // No es "el nombre que tenía en ese momento" (eso no existe en public),
+    // pero es la mejor aproximación disponible.
+    product_name: (schemaName) => `
+      UPDATE "${schemaName}"."purchase_items" pi
+      SET product_name = p.name
+      FROM "${schemaName}"."products" p
+      WHERE pi.product_id = p.id
+    `,
+    product_sku: (schemaName) => `
+      UPDATE "${schemaName}"."purchase_items" pi
+      SET product_sku = p.sku
+      FROM "${schemaName}"."products" p
+      WHERE pi.product_id = p.id
+    `,
+    // line_total es el nombre viejo de lo que public ya trackea como "total"
+    // (columna agregada después junto a subtotal, ver comentario en el
+    // CREATE TABLE del baseline). "total" ya se copia 1:1 por passthrough
+    // normal (existe en ambos schemas) antes de que este backfill corra.
+    line_total: (schemaName) => `
+      UPDATE "${schemaName}"."purchase_items"
+      SET line_total = COALESCE(total, 0)
+    `,
+  },
+};
+
 // El descubrimiento de tablas (directas por tenant_id propio + indirectas
 // resueltas por FK transitiva, ej. customer_return_items -> sale_items) y el
 // orden topológico ahora viven en tenantScopedTables.js, compartido con
@@ -179,7 +235,7 @@ async function migrateTenantData(slug, tenantId) {
       // puede tener más columnas que el schema del tenant recién aprovisionado
       // -> copiar solo la intersección, no asumir paridad total.
       const [destColRows] = await sequelize.query(`
-        SELECT column_name FROM information_schema.columns
+        SELECT column_name, is_nullable, column_default FROM information_schema.columns
         WHERE table_schema = '${schemaName}' AND table_name = '${table}'
       `);
       const destColSet = new Set(destColRows.map(r => r.column_name));
@@ -198,7 +254,7 @@ async function migrateTenantData(slug, tenantId) {
       // Para indirectas, calificar cada columna simple con el alias t0 del
       // JOIN (buildIndirectSourceSql arma el FROM/JOIN sobre ese alias).
       const colRef = (name) => (isIndirect ? `t0."${name}"` : `"${name}"`);
-      const selectExprs = cols.map(c => {
+      let selectExprs = cols.map(c => {
         if (deferredCols.has(c.column_name)) return 'NULL';
         if (valueTransforms[c.column_name]) return valueTransforms[c.column_name];
         return c.data_type === 'USER-DEFINED'
@@ -218,18 +274,71 @@ async function migrateTenantData(slug, tenantId) {
         continue;
       }
 
+      // Columnas que existen en destino pero no en `cols` (osea, no en
+      // `public` en absoluto -- no es un tema de filtrado, la columna no
+      // está). tenant_id se rellena siempre con el parámetro; las listadas
+      // en GENERATED_COLUMNS se insertan NULL y se generan después; el resto
+      // se deja NULL si es nullable, o revienta explícito si es NOT NULL sin
+      // estrategia conocida (mejor eso que un 23502 críptico de Postgres).
+      let finalColNames = colNames;
+      let finalSelectExprs = selectExprs;
+      const pendingBackfills = [];
+      const relaxedForGenerated = [];
+      for (const destCol of destColRows) {
+        const name = destCol.column_name;
+        if (cols.some((c) => c.column_name === name)) continue; // ya cubierta normal
+
+        if (name === 'tenant_id') {
+          finalColNames += `, "tenant_id"`;
+          finalSelectExprs += `, :tenantId`;
+          continue;
+        }
+
+        const generator = GENERATED_COLUMNS[table]?.[name];
+        if (generator) {
+          finalColNames += `, "${name}"`;
+          finalSelectExprs += `, NULL`;
+          if (destCol.is_nullable === 'NO') relaxedForGenerated.push(name);
+          pendingBackfills.push(generator(schemaName));
+          continue;
+        }
+
+        if (destCol.is_nullable === 'YES') continue; // se deja NULL, no rompe nada
+
+        // NOT NULL pero con DEFAULT propio (ej. unit_of_measure DEFAULT
+        // 'unit') -- no listar la columna en el INSERT y dejar que Postgres
+        // aplique su default, en vez de tratarla como error.
+        if (destCol.column_default) continue;
+
+        throw new Error(
+          `"${table}"."${name}" es NOT NULL en "${schemaName}" pero no existe en "public" ` +
+          `y no tiene estrategia en GENERATED_COLUMNS (migrateTenantData.js). Hay que decidir ` +
+          `a mano cómo poblarla antes de poder migrar esta tabla.`
+        );
+      }
+      for (const name of relaxedForGenerated) {
+        await sequelize.query(`ALTER TABLE "${schemaName}"."${table}" ALTER COLUMN "${name}" DROP NOT NULL`);
+      }
+
       if (isIndirect) {
         await sequelize.query(
-          `INSERT INTO "${schemaName}"."${table}" (${colNames})
-           ${buildIndirectSourceSql(table, resolutionChains, selectExprs)}`,
+          `INSERT INTO "${schemaName}"."${table}" (${finalColNames})
+           ${buildIndirectSourceSql(table, resolutionChains, finalSelectExprs)}`,
           { replacements: { tenantId } }
         );
       } else {
         await sequelize.query(
-          `INSERT INTO "${schemaName}"."${table}" (${colNames})
-           SELECT ${selectExprs} FROM "public"."${table}" WHERE tenant_id = :tenantId`,
+          `INSERT INTO "${schemaName}"."${table}" (${finalColNames})
+           SELECT ${finalSelectExprs} FROM "public"."${table}" WHERE tenant_id = :tenantId`,
           { replacements: { tenantId } }
         );
+      }
+
+      for (const backfillSql of pendingBackfills) {
+        await sequelize.query(backfillSql);
+      }
+      for (const name of relaxedForGenerated) {
+        await sequelize.query(`ALTER TABLE "${schemaName}"."${table}" ALTER COLUMN "${name}" SET NOT NULL`);
       }
 
       const [[{ count: destCount }]] = await sequelize.query(

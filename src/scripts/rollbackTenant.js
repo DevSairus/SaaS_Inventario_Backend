@@ -16,59 +16,32 @@
 // no detecta deletes). Para pruebas con un tenant demo de corta duración
 // esto normalmente no aplica; si migraste borrados reales, revisa
 // manualmente o considera restaurar desde un branch de Neon en su lugar.
+//
+// El descubrimiento de tablas (directas por tenant_id propio + indirectas
+// resueltas por FK transitiva, ej. customer_return_items -> sale_items) vive
+// en tenantScopedTables.js, compartido con migrateTenantData.js y
+// cleanupTenantPublicData.js -- antes este script tenía su propia lista
+// (solo columna tenant_id) y se saltaba las indirectas sin avisar, dejándolas
+// desincronizadas de public tras un rollback. Como el schema completo de un
+// tenant le pertenece a él en exclusiva, las indirectas no necesitan filtro
+// de tenant_id de ningún lado (ni en el schema origen ni en public destino)
+// -- ver tenantScopedTables.js para el porqué.
 
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
 const { schemaNameFor } = require('./provisionTenantSchema');
+const { discoverTenantTables, tablesInOrder } = require('./tenantScopedTables');
 
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 
-const PUBLIC_ONLY_TABLES = new Set([
-  'tenants', 'users', 'subscription_plans', 'tenant_subscriptions',
-  'subscription_invoices', 'super_admin_mercadopago_config',
-  'permissions', 'role_permissions', 'announcements',
-  'user_announcement_views', 'sequelize_migrations', 'SequelizeMeta',
-]);
-
-async function getTenantTables(sequelize) {
-  const [rows] = await sequelize.query(`
-    SELECT table_name
-    FROM information_schema.columns
-    WHERE table_schema = 'public' AND column_name = 'tenant_id'
-  `);
-  return rows.map(r => r.table_name).filter(t => !PUBLIC_ONLY_TABLES.has(t));
-}
-
-async function topoSort(sequelize, tables) {
-  const tableSet = new Set(tables);
-  const [fkRows] = await sequelize.query(`
-    SELECT tc.table_name AS child, ccu.table_name AS parent
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.constraint_column_usage ccu
-      ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
-  `);
-  const deps = new Map(tables.map(t => [t, new Set()]));
-  for (const { child, parent } of fkRows) {
-    if (tableSet.has(child) && tableSet.has(parent) && child !== parent) deps.get(child).add(parent);
-  }
-  const sorted = [];
-  const visited = new Set();
-  function visit(t, stack = new Set()) {
-    if (visited.has(t) || stack.has(t)) return;
-    stack.add(t);
-    for (const dep of deps.get(t) || []) visit(dep, stack);
-    stack.delete(t);
-    visited.add(t);
-    sorted.push(t);
-  }
-  for (const t of tables) visit(t);
-  return sorted;
-}
-
 async function syncBackToPublic(sequelize, schemaName, tenantId) {
-  const tables = await getTenantTables(sequelize);
-  const ordered = await topoSort(sequelize, tables);
+  const { directTables, indirectTables } = await discoverTenantTables(sequelize);
+  if (indirectTables.length) {
+    console.log(`ℹ️  Tablas indirectas detectadas (sin tenant_id propio, resueltas por FK): ${indirectTables.join(', ')}`);
+  }
+  // Orden de INSERT (padres antes que hijos) -- mismo grafo de FKs que usa
+  // migrateTenantData.js para copiar en la dirección contraria.
+  const ordered = await tablesInOrder(sequelize, [...directTables, ...indirectTables]);
   const report = [];
 
   for (const table of ordered) {
@@ -80,13 +53,31 @@ async function syncBackToPublic(sequelize, schemaName, tenantId) {
     `);
     const pk = pkRows[0]?.column_name || 'id';
 
-    const [cols] = await sequelize.query(`
-      SELECT column_name FROM information_schema.columns
+    // `public` es el destino final -- solo tiene sentido escribir columnas
+    // que existan ahí. El schema del tenant puede tener columnas nuevas que
+    // public todavía no tiene (ver comentario de intersección en
+    // migrateTenantData.js); se ignoran acá, no hay dónde ponerlas.
+    const [publicCols] = await sequelize.query(`
+      SELECT column_name, data_type, udt_name FROM information_schema.columns
       WHERE table_schema = 'public' AND table_name = '${table}'
       ORDER BY ordinal_position
     `);
+    const [schemaColRows] = await sequelize.query(`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_schema = '${schemaName}' AND table_name = '${table}'
+    `);
+    const schemaColSet = new Set(schemaColRows.map(r => r.column_name));
+    const cols = publicCols.filter(c => schemaColSet.has(c.column_name));
+
     const colNames = cols.map(c => `"${c.column_name}"`);
     const colList = colNames.join(', ');
+    // Los tipos ENUM son por-schema (mismo problema que migrateTenantData.js
+    // al copiar en la dirección contraria): castear vía texto contra el tipo
+    // del schema DESTINO (public) explícito.
+    const selectExprs = cols.map(c => c.data_type === 'USER-DEFINED'
+      ? `"${c.column_name}"::text::"public"."${c.udt_name}"`
+      : `"${c.column_name}"`
+    ).join(', ');
     const updateSet = colNames
       .filter(c => c !== `"${pk}"`)
       .map(c => `${c} = EXCLUDED.${c}`)
@@ -101,9 +92,9 @@ async function syncBackToPublic(sequelize, schemaName, tenantId) {
       continue;
     }
 
-    const [result] = await sequelize.query(
+    await sequelize.query(
       `INSERT INTO "public"."${table}" (${colList})
-       SELECT ${colList} FROM "${schemaName}"."${table}"
+       SELECT ${selectExprs} FROM "${schemaName}"."${table}"
        ON CONFLICT ("${pk}") DO UPDATE SET ${updateSet}`
     );
 

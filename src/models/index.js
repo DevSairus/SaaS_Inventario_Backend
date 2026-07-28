@@ -1,4 +1,5 @@
 const { sequelize } = require('../config/database');
+const { registerTenantSchemaHooks } = require('../config/registerTenantSchemaHooks');
 
 // Autenticación
 const Tenant = require('./auth/Tenant');
@@ -545,6 +546,13 @@ RemoteSupportSession.belongsTo(User, { foreignKey: 'agent_id', as: 'agent' });
 User.hasMany(RemoteSupportSession, { foreignKey: 'agent_id', as: 'agent_remote_sessions' });
 RemoteSupportSession.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(RemoteSupportSession, { foreignKey: 'user_id', as: 'client_remote_sessions' });
+
+// Debe correr DESPUÉS de que todos los modelos/asociaciones ya se registraron
+// en sequelize.models -- de lo contrario los hooks no se agregan a ninguno.
+// Sin esto, tenantMiddleware marca el schema del tenant en el contexto pero
+// ninguna query de Sequelize lo termina usando (ver comentario en
+// src/config/registerTenantSchemaHooks.js).
+registerTenantSchemaHooks(sequelize);
 
 module.exports = {
   sequelize,
