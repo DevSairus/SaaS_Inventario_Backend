@@ -26,7 +26,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const MIGRATIONS_DIR = path.join(__dirname, '..', 'src', 'database', 'migrations');
+// Usa el directorio DESDE DONDE SE EJECUTA el comando (la raíz del repo
+// backend, ej. D:\Desarrollo\Pitbox\backend), no la carpeta donde vive
+// este archivo — así no importa si lo guardaste en scripts/ o en
+// src/scripts/, mientras lo corras parado en la raíz del repo.
+const MIGRATIONS_DIR = path.join(process.cwd(), 'src', 'database', 'migrations');
 const WRITE = process.argv.includes('--write');
 
 // Tablas que se quedan en `public` y por lo tanto necesitan calificación
