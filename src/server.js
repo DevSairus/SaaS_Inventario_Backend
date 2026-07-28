@@ -156,6 +156,7 @@ const supplierReturnsRoutes         = require('./routes/inventory/supplierReturn
 const transfersRoutes               = require('./routes/inventory/transfers.routes');
 const internalConsumptionsRoutes    = require('./routes/inventory/internalConsumptions.routes');
 const customerReturnsRoutes         = require('./routes/sales/customerReturns.routes');
+const saleWorkshopDiagnosisRoutes   = require('./routes/sales/workshopDiagnosis.routes');
 
 // Anuncios
 const announcementsRoutes           = require('./routes/announcements.routes');
@@ -234,6 +235,9 @@ app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware,
 
 // ── Ventas (genéricas — después de las específicas) ──
 app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, salesRoutes);
+// Mapa de intervención + conversión a OT en cotizaciones — mismo prefijo
+// /api/sales, pero solo para tenants con el módulo Taller activo.
+app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('workshop'), saleWorkshopDiagnosisRoutes);
 app.use('/api/customers',                      authMiddleware, tenantMiddleware, customersRoutes);
 app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
 app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);

@@ -131,6 +131,15 @@ const WorkOrder = sequelize.define('WorkOrder', {
     onDelete: 'SET NULL',
     comment: 'Remisión generada al entregar'
   },
+  // Cotización de origen (distinta de sale_id de arriba) — si esta OT nació
+  // de convertir una cotización, no de crearse directamente.
+  quote_sale_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'sales', key: 'id' },
+    onDelete: 'SET NULL',
+    comment: 'Cotización desde la que se convirtió esta OT, si aplica'
+  },
   // Abonos / pagos parciales recibidos antes de la remisión final
   paid_amount: {
     type: DataTypes.DECIMAL(15, 2),

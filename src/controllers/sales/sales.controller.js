@@ -165,6 +165,7 @@ const create = async (req, res) => {
       payment_method,
       notes,
       vehicle_plate,
+      vehicle_type,
       mileage,
       document_type = null,
       sale_date,
@@ -376,6 +377,9 @@ const create = async (req, res) => {
       if (vehicle_plate && vehicle_plate.trim()) {
         saleData.vehicle_plate = vehicle_plate.trim().toUpperCase();
       }
+      if (vehicle_type && vehicle_type.trim()) {
+        saleData.vehicle_type = vehicle_type.trim();
+      }
       if (mileage !== undefined && mileage !== null && mileage !== '') {
         const parsedMileage = parseInt(mileage);
         if (!isNaN(parsedMileage)) saleData.mileage = parsedMileage;
@@ -484,6 +488,9 @@ const update = async (req, res) => {
     if ('vehicle_plate' in updateData) {
       updateData.vehicle_plate = updateData.vehicle_plate?.trim()
         ? updateData.vehicle_plate.trim().toUpperCase() : null;
+    }
+    if ('vehicle_type' in updateData) {
+      updateData.vehicle_type = updateData.vehicle_type?.trim() || null;
     }
     if ('mileage' in updateData) {
       const parsed = parseInt(updateData.mileage);

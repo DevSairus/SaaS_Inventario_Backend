@@ -68,6 +68,17 @@ const Sale = sequelize.define('Sale', {
     allowNull: true,
     comment: 'Color del vehículo',
   },
+  vehicle_type: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    comment: 'automovil | camioneta | motocicleta | camion | otro — solo si hay diagrama de intervención asociado',
+  },
+  converted_to_work_order_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'work_orders', key: 'id' },
+    comment: 'OT generada al convertir esta cotización, si ya fue convertida',
+  },
   // ── Kilometraje ───────────────────────────────────────────
   mileage: {
     type: DataTypes.INTEGER,

@@ -69,6 +69,7 @@ const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSet
 // ✅ NUEVO - Diagramas interactivos de intervención (fase 3)
 const DiagramTemplate = require('./workshop/DiagramTemplate');
 const WorkOrderDiagnosisMark = require('./workshop/WorkOrderDiagnosisMark');
+const SaleDiagnosisMark = require('./sales/SaleDiagnosisMark');
 
 // ✅ NUEVO - Catálogo normalizado de vehículos (Fase 6)
 const VehicleBrand = require('./workshop/VehicleBrand');
@@ -413,6 +414,21 @@ WorkOrderDiagnosisMark.belongsTo(Product, { foreignKey: 'suggested_product_id', 
 WorkOrderDiagnosisMark.belongsTo(WorkOrderItem, { foreignKey: 'generated_item_id', as: 'generated_item' });
 WorkOrderDiagnosisMark.belongsTo(User, { foreignKey: 'marked_by', as: 'marked_by_user' });
 
+// SaleDiagnosisMark ↔ Sale / DiagramTemplate / Product / User (espejo de arriba, para cotizaciones)
+SaleDiagnosisMark.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+Sale.hasMany(SaleDiagnosisMark, { foreignKey: 'sale_id', as: 'diagnosis_marks' });
+SaleDiagnosisMark.belongsTo(DiagramTemplate, { foreignKey: 'diagram_template_id', as: 'diagram_template' });
+DiagramTemplate.hasMany(SaleDiagnosisMark, { foreignKey: 'diagram_template_id', as: 'sale_marks' });
+SaleDiagnosisMark.belongsTo(Product, { foreignKey: 'suggested_product_id', as: 'suggested_product' });
+SaleDiagnosisMark.belongsTo(SaleItem, { foreignKey: 'generated_item_id', as: 'generated_item' });
+SaleDiagnosisMark.belongsTo(User, { foreignKey: 'marked_by', as: 'marked_by_user' });
+
+// Conversión cotización → OT (quote_sale_id es distinto del sale_id ya
+// existente en WorkOrder, que es la remisión generada al CERRAR la OT)
+WorkOrder.belongsTo(Sale, { foreignKey: 'quote_sale_id', as: 'quote_sale' });
+Sale.hasOne(WorkOrder, { foreignKey: 'quote_sale_id', as: 'work_order_from_quote' });
+Sale.belongsTo(WorkOrder, { foreignKey: 'converted_to_work_order_id', as: 'converted_work_order' });
+
 // WorkOrderItem ↔ User (técnico responsable del ítem)
 WorkOrderItem.belongsTo(User, { foreignKey: 'technician_id', as: 'item_technician' });
 User.hasMany(WorkOrderItem, { foreignKey: 'technician_id', as: 'work_order_items_assigned' });
@@ -579,6 +595,7 @@ module.exports = {
   ProductCommissionSettlementItem,
   DiagramTemplate,
   WorkOrderDiagnosisMark,
+  SaleDiagnosisMark,
   DianResolution,
   DianEvent,
   Expense,
