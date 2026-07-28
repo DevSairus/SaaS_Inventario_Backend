@@ -59,11 +59,26 @@ async function getDirectTenantTables(sequelize) {
 }
 
 /**
- * @returns {Promise<{directTables: string[], indirectTables: string[], resolutionChains: Map<string, Array<{column:string, parentTable:string, parentColumn:string}>>}>}
+ * @returns {Promise<{directTables: string[], indirectTables: string[], resolutionChains: Map<string, Array<Array<{column:string, parentTable:string, parentColumn:string}>>>}>}
  *
- * resolutionChains[table] es la cadena de saltos (1 o más) para llegar desde
- * `table` hasta una tabla directa. Ej: customer_return_items ->
- *   [{ column: 'sale_item_id', parentTable: 'sale_items', parentColumn: 'id' }]
+ * resolutionChains[table] es la lista de TODAS las cadenas de saltos posibles
+ * (cada cadena, 1 o más saltos) para llegar desde `table` hasta una tabla
+ * directa. Casi siempre hay una sola. Ej: customer_return_items ->
+ *   [ [{ column: 'sale_item_id', parentTable: 'sale_items', parentColumn: 'id' }] ]
+ *
+ * OJO -- por qué es una LISTA de cadenas y no una sola: algunas tablas son
+ * polimórficas, con más de una FK nullable que puede llevar al tenant según
+ * el tipo de fila (ej. commission_settlement_items tiene `sale_id` Y
+ * `work_order_id`, cada fila usa una U OTRA, nunca ambas). Elegir una sola
+ * cadena (la versión vieja de esta función tomaba la primera en orden
+ * alfabético) deja huérfanas las filas que usan la columna no elegida --
+ * bug real: en producción TODAS las filas de commission_settlement_items
+ * usaban work_order_id (sale_id siempre NULL), pero se había elegido la
+ * cadena por sale_id -> el conteo/borrado por tenant nunca las veía, y
+ * cleanupTenantPublicData.js/tenantPurgeService.js reventaban después al
+ * borrar work_orders por la FK que dejaban sin limpiar. Guardar todas las
+ * cadenas y combinarlas con OR (ver buildIndirectExistsSql) cubre ambos
+ * casos sin adivinar cuál usa cada fila.
  */
 async function discoverTenantTables(sequelize) {
   const directTables = await getDirectTenantTables(sequelize);
@@ -83,26 +98,30 @@ async function discoverTenantTables(sequelize) {
 
   // Punto fijo: cada vuelta puede resolver tablas que dependen de otras
   // recién resueltas en la vuelta anterior (cadenas de más de un salto).
+  // A diferencia de la versión anterior, NO se detiene en el primer FK que
+  // resuelve -- junta TODOS los que resuelven, para no perder filas de
+  // tablas polimórficas (ver comentario de arriba).
   let changed = true;
   while (changed) {
     changed = false;
     for (const [child, fks] of byChild.entries()) {
       if (resolved.has(child)) continue;
-      // Orden determinista si hay más de un camino válido (ej.
-      // customer_return_items tiene sale_item_id Y product_id, los dos
-      // terminan en una tabla con tenant_id).
-      const sortedFks = [...fks].sort((a, b) => a.child_column.localeCompare(b.child_column));
-      for (const fk of sortedFks) {
-        if (resolved.has(fk.parent_table)) {
-          const parentChain = resolutionChains.get(fk.parent_table) || [];
-          resolutionChains.set(child, [
-            { column: fk.child_column, parentTable: fk.parent_table, parentColumn: fk.parent_column },
-            ...parentChain,
-          ]);
-          resolved.add(child);
-          changed = true;
-          break;
+      const chains = [];
+      for (const fk of fks) {
+        if (!resolved.has(fk.parent_table)) continue;
+        const hop = { column: fk.child_column, parentTable: fk.parent_table, parentColumn: fk.parent_column };
+        // [[]] = el padre ya es una tabla directa (cadena vacía, este hop
+        // alcanza sola). Si el padre a su vez es indirecto con varias
+        // cadenas propias, cada una se combina con este hop.
+        const parentChains = resolutionChains.get(fk.parent_table) || [[]];
+        for (const parentChain of parentChains) {
+          chains.push([hop, ...parentChain]);
         }
+      }
+      if (chains.length) {
+        resolutionChains.set(child, chains);
+        resolved.add(child);
+        changed = true;
       }
     }
   }
@@ -135,36 +154,44 @@ async function tablesInOrder(sequelize, tables, { forDelete = false } = {}) {
   return forDelete ? sorted.reverse() : sorted;
 }
 
-/** SELECT count(*) de una tabla indirecta filtrando por el tenant_id "prestado". */
-function buildIndirectCountSql(table, resolutionChains, schema) {
-  const chain = resolutionChains.get(table);
-  if (!chain) throw new Error(`No hay cadena de resolución para "${table}"`);
-  let sql = `SELECT count(*) FROM "${schema}"."${table}" t0`;
-  let prevAlias = 't0';
-  chain.forEach((step, i) => {
-    const alias = `t${i + 1}`;
-    sql += ` JOIN "${schema}"."${step.parentTable}" ${alias} ON ${prevAlias}."${step.column}" = ${alias}."${step.parentColumn}"`;
+/**
+ * EXISTS correlacionado para UNA cadena, anclado en `outerAlias` (la fila de
+ * la tabla indirecta que se está evaluando). El primer salto se correlaciona
+ * contra `outerAlias`; los siguientes (si la cadena tiene más de un hop)
+ * encadenan entre sí, y el último exige `tenant_id = :tenantId`.
+ */
+function buildIndirectExistsSql(chain, schema, outerAlias) {
+  const [firstHop, ...restHops] = chain;
+  let sql = `EXISTS (SELECT 1 FROM "${schema}"."${firstHop.parentTable}" c0`;
+  let prevAlias = 'c0';
+  restHops.forEach((hop, i) => {
+    const alias = `c${i + 1}`;
+    sql += ` JOIN "${schema}"."${hop.parentTable}" ${alias} ON ${prevAlias}."${hop.column}" = ${alias}."${hop.parentColumn}"`;
     prevAlias = alias;
   });
-  sql += ` WHERE ${prevAlias}."tenant_id" = :tenantId`;
+  sql += ` WHERE ${outerAlias}."${firstHop.column}" = c0."${firstHop.parentColumn}" AND ${prevAlias}."tenant_id" = :tenantId)`;
   return sql;
+}
+
+/**
+ * Combina TODAS las cadenas de un `resolutionChains.get(table)` con OR --
+ * necesario para tablas polimórficas donde distintas filas resuelven el
+ * tenant por columnas distintas (ver comentario en discoverTenantTables).
+ */
+function buildIndirectOrExistsSql(table, resolutionChains, schema, outerAlias) {
+  const chains = resolutionChains.get(table);
+  if (!chains || !chains.length) throw new Error(`No hay cadena de resolución para "${table}"`);
+  return chains.map((chain) => buildIndirectExistsSql(chain, schema, outerAlias)).join('\n     OR ');
+}
+
+/** SELECT count(*) de una tabla indirecta filtrando por el tenant_id "prestado". */
+function buildIndirectCountSql(table, resolutionChains, schema) {
+  return `SELECT count(*) FROM "${schema}"."${table}" t0 WHERE ${buildIndirectOrExistsSql(table, resolutionChains, schema, 't0')}`;
 }
 
 /** DELETE de una tabla indirecta en `schema`, filtrando por el tenant_id "prestado". */
 function buildIndirectDeleteSql(table, resolutionChains, schema) {
-  const chain = resolutionChains.get(table);
-  if (!chain) throw new Error(`No hay cadena de resolución para "${table}"`);
-  const usingParts = [];
-  const whereParts = [];
-  let prevAlias = 't0';
-  chain.forEach((step, i) => {
-    const alias = `t${i + 1}`;
-    usingParts.push(`"${schema}"."${step.parentTable}" ${alias}`);
-    whereParts.push(`t0."${step.column}" = ${alias}."${step.parentColumn}"`);
-    prevAlias = alias;
-  });
-  whereParts.push(`${prevAlias}."tenant_id" = :tenantId`);
-  return `DELETE FROM "${schema}"."${table}" t0 USING ${usingParts.join(', ')} WHERE ${whereParts.join(' AND ')}`;
+  return `DELETE FROM "${schema}"."${table}" t0 WHERE ${buildIndirectOrExistsSql(table, resolutionChains, schema, 't0')}`;
 }
 
 /**
@@ -173,17 +200,7 @@ function buildIndirectDeleteSql(table, resolutionChains, schema) {
  * columnas simples (las transformadas/casteadas se pasan tal cual).
  */
 function buildIndirectSourceSql(table, resolutionChains, selectExprs) {
-  const chain = resolutionChains.get(table);
-  if (!chain) throw new Error(`No hay cadena de resolución para "${table}"`);
-  let sql = `SELECT ${selectExprs} FROM "public"."${table}" t0`;
-  let prevAlias = 't0';
-  chain.forEach((step, i) => {
-    const alias = `t${i + 1}`;
-    sql += ` JOIN "public"."${step.parentTable}" ${alias} ON ${prevAlias}."${step.column}" = ${alias}."${step.parentColumn}"`;
-    prevAlias = alias;
-  });
-  sql += ` WHERE ${prevAlias}."tenant_id" = :tenantId`;
-  return sql;
+  return `SELECT ${selectExprs} FROM "public"."${table}" t0 WHERE ${buildIndirectOrExistsSql(table, resolutionChains, 'public', 't0')}`;
 }
 
 module.exports = {
