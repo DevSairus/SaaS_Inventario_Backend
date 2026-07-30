@@ -288,8 +288,11 @@ const createAdjustment = async (req, res) => {
     // Crear items del ajuste
     const adjustmentItems = [];
     for (const item of items) {
-      const product = await Product.findByPk(item.product_id, { transaction: t });
-      
+      const product = await Product.findOne({
+        where: { id: item.product_id, tenant_id },
+        transaction: t
+      });
+
       if (!product) {
         await t.rollback();
         return res.status(404).json({
@@ -299,6 +302,14 @@ const createAdjustment = async (req, res) => {
       }
 
       const quantity = parseFloat(item.quantity);
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        await t.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Cantidad inválida para el producto ${product.name}. Debe ser un número mayor a cero`
+        });
+      }
+
       const unit_cost = parseFloat(item.unit_cost || product.average_cost || 0);
       const total_cost = quantity * unit_cost;
 
@@ -424,8 +435,11 @@ const updateAdjustment = async (req, res) => {
 
       // Crear nuevos items
       for (const item of items) {
-        const product = await Product.findByPk(item.product_id, { transaction: t });
-        
+        const product = await Product.findOne({
+          where: { id: item.product_id, tenant_id },
+          transaction: t
+        });
+
         if (!product) {
           await t.rollback();
           return res.status(404).json({
@@ -435,6 +449,14 @@ const updateAdjustment = async (req, res) => {
         }
 
         const quantity = parseFloat(item.quantity);
+        if (!Number.isFinite(quantity) || quantity <= 0) {
+          await t.rollback();
+          return res.status(400).json({
+            success: false,
+            message: `Cantidad inválida para el producto ${product.name}. Debe ser un número mayor a cero`
+          });
+        }
+
         const unit_cost = parseFloat(item.unit_cost || product.average_cost || 0);
         const total_cost = quantity * unit_cost;
 

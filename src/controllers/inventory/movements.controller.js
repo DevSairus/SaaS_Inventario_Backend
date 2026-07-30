@@ -307,9 +307,12 @@ const createMovement = async (movementData, transaction) => {
     notes
   } = movementData;
 
-  // Obtener el producto
-  const product = await Product.findByPk(product_id, { transaction });
-  
+  // Obtener el producto (con lock para evitar lecturas/escrituras concurrentes de current_stock)
+  const product = await Product.findByPk(product_id, {
+    lock: transaction ? transaction.LOCK.UPDATE : undefined,
+    transaction
+  });
+
   if (!product) {
     throw new Error('Producto no encontrado');
   }
