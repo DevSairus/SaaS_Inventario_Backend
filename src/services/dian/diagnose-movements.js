@@ -1,6 +1,6 @@
 // Script de diagnóstico para verificar movimientos de inventario
 require('dotenv').config();
-const { sequelize } = require('../../src/config/database');
+const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 
 // Herramienta de diagnóstico manual (node services/dian/diagnose-movements.js),
@@ -84,7 +84,7 @@ async function diagnosticar() {
     // Tenants y sus schemas viven siempre en public, sin importar el modo
     // de cada tenant -- esto no cambia con schema-per-tenant.
     const tenants = await sequelize.query(
-      'SELECT id, name, schema_name FROM public.tenants ORDER BY name ASC',
+      'SELECT id, company_name AS name, schema_name FROM public.tenants ORDER BY company_name ASC',
       { type: QueryTypes.SELECT }
     );
     console.log('\n📊 Tenants en el sistema:');
