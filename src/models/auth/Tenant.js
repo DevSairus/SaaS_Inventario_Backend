@@ -208,6 +208,20 @@ const Tenant = sequelize.define('Tenant', {
     allowNull: true,
   },
 
+  // Fase 5 (visibilidad operativa) del plan de schema-per-tenant.
+  cutover_last_attempt_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  cutover_last_status: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+  },
+  cutover_last_error: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  },
+
   created_at: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW

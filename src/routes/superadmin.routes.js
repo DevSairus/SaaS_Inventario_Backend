@@ -9,6 +9,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const audit = require('../utils/audit');
 const { cutoverTenant } = require('../scripts/cutoverTenant');
+const { rollbackTenant } = require('../scripts/rollbackTenant');
+const { cleanupTenantPublicData } = require('../scripts/cleanupTenantPublicData');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
@@ -138,6 +140,45 @@ router.get(
     } catch (error) {
       console.error('Error fetching tenants:', error);
       res.status(500).json({ error: 'Error al obtener tenants' });
+    }
+  }
+);
+
+// IMPORTANTE: esta ruta va ANTES de GET /tenants/:id -- si no, Express
+// matchea "migration-status" contra ese :id primero (mismo método, mismo
+// número de segmentos, registrado antes) y esta nunca se alcanza.
+// GET /tenants/migration-status -- listado de tenants con su estado de
+// corte (schema_name o "legado") y el resultado del último intento de
+// cutover, para no depender de acceso a consola en producción.
+router.get(
+  '/tenants/migration-status',
+  authMiddleware,
+  checkPermission('superadmin.view_all'),
+  async (req, res) => {
+    try {
+      const tenants = await Tenant.findAll({
+        attributes: [
+          'id', 'slug', 'business_name', 'schema_name',
+          'cutover_last_attempt_at', 'cutover_last_status', 'cutover_last_error',
+        ],
+        order: [['business_name', 'ASC']],
+      });
+
+      res.json({
+        tenants: tenants.map((t) => ({
+          id: t.id,
+          slug: t.slug,
+          business_name: t.business_name,
+          status: t.schema_name ? 'migrado' : 'legado',
+          schema_name: t.schema_name,
+          cutover_last_attempt_at: t.cutover_last_attempt_at,
+          cutover_last_status: t.cutover_last_status,
+          cutover_last_error: t.cutover_last_error,
+        })),
+      });
+    } catch (error) {
+      console.error('Error obteniendo estado de migración de tenants:', error);
+      res.status(500).json({ error: 'Error al obtener el estado de migración', details: error.message });
     }
   }
 );
@@ -395,9 +436,26 @@ router.post(
       // Este era el único punto de creación de tenants que le faltaba esta
       // llamada (routes/superadmin.routes.js es el router real montado en
       // server.js; el controller viejo que sí la tenía nunca estuvo enrutado).
-      cutoverTenant(tenant.slug).catch((err) => {
-        console.error(`Error aprovisionando schema para tenant "${tenant.slug}":`, err);
-      });
+      cutoverTenant(tenant.slug)
+        .then(() => {
+          tenant.update({
+            cutover_last_attempt_at: new Date(),
+            cutover_last_status: 'success',
+            cutover_last_error: null,
+          }).catch((err) => {
+            console.error(`No se pudo guardar el estado de cutover exitoso para "${tenant.slug}":`, err);
+          });
+        })
+        .catch((err) => {
+          console.error(`Error aprovisionando schema para tenant "${tenant.slug}":`, err);
+          tenant.update({
+            cutover_last_attempt_at: new Date(),
+            cutover_last_status: 'failed',
+            cutover_last_error: String(err && err.message ? err.message : err).slice(0, 4000),
+          }).catch((updateErr) => {
+            console.error(`Además, no se pudo guardar el error de cutover para "${tenant.slug}":`, updateErr);
+          });
+        });
     } catch (error) {
       await transaction.rollback();
       console.error('Error creating tenant:', error);
@@ -2288,6 +2346,111 @@ router.put(
   authMiddleware,
   checkPermission('superadmin.manage_all'),
   permissionsController.updateRolePermissions
+);
+
+// ============================================
+// MIGRACIÓN SCHEMA-PER-TENANT -- VISIBILIDAD OPERATIVA (Fase 5, continuación)
+// ============================================
+// El GET de estado (/tenants/migration-status) vive arriba, ANTES de
+// GET /tenants/:id, para que Express no lo confunda con ese :id. Las
+// acciones (POST) de acá abajo no tienen ese problema porque su forma
+// exacta (/tenants/:slug/cutover, etc.) no colisiona con ninguna ruta
+// registrada antes.
+
+// POST /tenants/:slug/cutover -- dispara (o reintenta) el corte a schema
+// dedicado. Síncrono a propósito acá (a diferencia del alta automática):
+// quien aprieta el botón en el panel quiere saber el resultado, no
+// enterarse después por otro canal.
+router.post(
+  '/tenants/:slug/cutover',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    const { slug } = req.params;
+    try {
+      const tenant = await Tenant.findOne({ where: { slug } });
+      if (!tenant) return res.status(404).json({ error: `Tenant "${slug}" no existe` });
+      if (tenant.schema_name) {
+        return res.status(400).json({ error: `Tenant "${slug}" ya está migrado (schema_name="${tenant.schema_name}")` });
+      }
+
+      await cutoverTenant(slug);
+      await tenant.reload();
+      await tenant.update({
+        cutover_last_attempt_at: new Date(),
+        cutover_last_status: 'success',
+        cutover_last_error: null,
+      });
+
+      res.json({ success: true, slug, schema_name: tenant.schema_name });
+    } catch (error) {
+      console.error(`Error en cutover manual de "${slug}":`, error);
+      await Tenant.update(
+        {
+          cutover_last_attempt_at: new Date(),
+          cutover_last_status: 'failed',
+          cutover_last_error: String(error && error.message ? error.message : error).slice(0, 4000),
+        },
+        { where: { slug } }
+      );
+      res.status(500).json({ error: 'Error al cortar el tenant a schema dedicado', details: error.message });
+    }
+  }
+);
+
+// POST /tenants/:slug/rollback -- body opcional: { dropSchema: boolean }
+router.post(
+  '/tenants/:slug/rollback',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    const { slug } = req.params;
+    const dropSchema = req.body?.dropSchema === true;
+    try {
+      const tenant = await Tenant.findOne({ where: { slug } });
+      if (!tenant) return res.status(404).json({ error: `Tenant "${slug}" no existe` });
+      if (!tenant.schema_name) {
+        return res.status(400).json({ error: `Tenant "${slug}" ya está en modo legado` });
+      }
+
+      await rollbackTenant(slug, { dropSchema });
+      res.json({ success: true, slug, dropSchema });
+    } catch (error) {
+      console.error(`Error en rollback manual de "${slug}":`, error);
+      res.status(500).json({ error: 'Error al revertir el tenant a modo legado', details: error.message });
+    }
+  }
+);
+
+// POST /tenants/:slug/cleanup -- body opcional: { execute: boolean }.
+// Sin `execute`, corre en dry-run (no borra nada, solo reporta qué
+// borraría) -- mismo comportamiento por defecto que el script de consola.
+router.post(
+  '/tenants/:slug/cleanup',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    const { slug } = req.params;
+    const execute = req.body?.execute === true;
+    try {
+      const tenant = await Tenant.findOne({ where: { slug } });
+      if (!tenant) return res.status(404).json({ error: `Tenant "${slug}" no existe` });
+      if (!tenant.schema_name) {
+        return res.status(400).json({ error: `Tenant "${slug}" está en modo legado, no hay datos de public que limpiar todavía` });
+      }
+
+      const report = await cleanupTenantPublicData(
+        Tenant.sequelize,
+        { id: tenant.id, slug: tenant.slug, schema_name: tenant.schema_name },
+        { execute }
+      );
+
+      res.json({ success: true, slug, execute, report });
+    } catch (error) {
+      console.error(`Error en cleanup manual de "${slug}":`, error);
+      res.status(500).json({ error: 'Error al limpiar datos legados de public', details: error.message });
+    }
+  }
 );
 
 module.exports = router;
