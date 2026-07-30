@@ -100,37 +100,23 @@ async function provisionTenantSchema(slug) {
     const queryInterface = sequelize.getQueryInterface();
     const SequelizeLib = require('sequelize');
 
-    // CORRECCIÓN DE ORDEN: no tocamos ningún archivo en disco (renombrarlo
-    // rompería el migrator normal de producción, que ya tiene esta
-    // migración registrada con su nombre actual y correría addIndex()
-    // de nuevo contra public, donde esos índices ya existen -> error).
-    // En vez de eso, corregimos el ORDEN DE EJECUCIÓN únicamente para
-    // este proceso de aprovisionamiento, vía un sort-key explícito.
-    //
-    // "0260202120100-create-supplier-returns.js" le falta el "2" inicial
-    // (debería ser "20260202120100...", justo antes de
-    // "20260202120200-create-transfers.js"). Al ordenar alfabéticamente
-    // tal cual, cae primero que todo -> intenta crear una FK hacia
-    // "purchases"/"suppliers" antes de que existan en un schema fresco.
-    // "YYYYMMDDHHMMSS-create-customer-returns.js" nunca tuvo su timestamp real
-    // puesto -> ordena al final (Y > cualquier dígito), pero
-    // "2026070611-fix-full-schema-audit.js" hace ADD COLUMN IF NOT EXISTS
-    // sobre `customer_returns`, que en un schema nuevo todavía no existe.
-    // Solo depende de sales/customers/sale_items/products (baselines), así
-    // que la reordenamos justo después de los baselines.
-    const SORT_KEY_OVERRIDES = {
-      '0260202120100-create-supplier-returns.js': '20260202120100-create-supplier-returns.js',
-      'YYYYMMDDHHMMSS-create-customer-returns.js': '20260103000000-create-customer-returns.js',
-    };
-
+    // Los dos archivos que antes necesitaban esta corrección de orden
+    // ("0260202120100-create-supplier-returns.js" y
+    // "YYYYMMDDHHMMSS-create-customer-returns.js") ya fueron renombrados a
+    // timestamps cronológicos reales -- ver
+    // 20260202120100-create-supplier-returns.js y
+    // 20260103000000-create-customer-returns.js. El orden alfabético simple
+    // ya coincide con el orden de dependencias, así que ya no hace falta
+    // ningún override manual acá. IMPORTANTE: este rename requiere renombrar
+    // también la fila correspondiente en `sequelize_migrations` (en public Y
+    // en cada schema de tenant ya provisionado) antes de desplegar -- ver
+    // src/database/migrations/RENAME-sequelize-migrations-rows.sql -- si no,
+    // el migrator los va a tratar como pendientes y va a intentar correrlos
+    // de nuevo.
     const files = fs
       .readdirSync(migrationsDir)
       .filter((f) => f.endsWith('.js'))
-      .sort((a, b) => {
-        const keyA = SORT_KEY_OVERRIDES[a] || a;
-        const keyB = SORT_KEY_OVERRIDES[b] || b;
-        return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
-      });
+      .sort();
 
     console.log(`ℹ️  Archivos de migración encontrados en total: ${files.length}`);
     if (files.length === 0) {

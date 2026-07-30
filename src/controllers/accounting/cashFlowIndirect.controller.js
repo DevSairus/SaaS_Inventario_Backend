@@ -25,6 +25,7 @@
 
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { fetchIncomeStatementForRange } = require('./financialReports.controller');
 const { generateCashFlowIndirectExcel } = require('../../services/accounting/reportsExcel.service');
 const { generateCashFlowIndirectPDF } = require('../../services/accounting/reportsPdf.service');
@@ -45,13 +46,16 @@ function classify(code, accountType) {
 // Saldo acumulado (débito-crédito crudo) de cada cuenta activo/pasivo/patrimonio
 // hasta una fecha de corte (inclusive), en una sola pasada.
 async function accountBalancesAsOf(tenantId, asOf, branchId) {
+  // Sin calificar schema, esto siempre leía "public" -- ídem el resto de
+  // los reportes financieros.
+  const schema = getCurrentSchema() || 'public';
   const rows = await sequelize.query(
     `SELECT a.id, a.code, a.name, a.account_type,
             COALESCE(SUM(l.debit), 0) AS total_debit,
             COALESCE(SUM(l.credit), 0) AS total_credit
-     FROM chart_of_accounts a
-     JOIN journal_entry_lines l ON l.account_id = a.id
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."chart_of_accounts" a
+     JOIN "${schema}"."journal_entry_lines" l ON l.account_id = a.id
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE a.tenant_id = :tenantId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'

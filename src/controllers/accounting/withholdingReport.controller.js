@@ -20,6 +20,7 @@
 
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { generateWithholdingExcel } = require('../../services/accounting/reportsExcel.service');
 const { generateWithholdingPDF } = require('../../services/accounting/reportsPdf.service');
 
@@ -35,12 +36,15 @@ async function fetchWithholding(req) {
     throw err;
   }
 
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema el reporte salía vacío sin error visible.
+  const schema = getCurrentSchema() || 'public';
   const rows = await sequelize.query(
     `SELECT s.id, s.sale_number, s.sale_date, s.subtotal, s.tax_amount, s.total_amount,
             s.retefuente_rate, s.retefuente_amount, s.reteica_rate, s.reteica_amount,
             c.id AS customer_id, c.business_name, c.first_name, c.last_name, c.tax_id AS customer_tax_id
-     FROM sales s
-     JOIN customers c ON c.id = s.customer_id
+     FROM "${schema}"."sales" s
+     JOIN "${schema}"."customers" c ON c.id = s.customer_id
      WHERE s.tenant_id = :tenantId
        AND s.status = 'completed'
        AND s.sale_date BETWEEN :from AND :to

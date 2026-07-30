@@ -115,18 +115,58 @@ async function checkAlertsForProducts(product_ids, tenant_id) {
 /**
  * Verificar alertas de TODOS los productos (todos los tenants).
  * Pensado como red de seguridad para un cron job periódico.
+ *
+ * Corre fuera de cualquier request HTTP, así que no hay contexto de tenant
+ * (AsyncLocalStorage) disponible por defecto -- sin esto, esta función
+ * siempre terminaba leyendo solo `public.products` (Sequelize cae al
+ * search_path por defecto de la conexión cuando no hay schema activo), así
+ * que para cualquier tenant ya cortado a su propio schema, sus productos
+ * quedaban completamente invisibles para el chequeo de alertas, en
+ * silencio -- no error, simplemente 0 alertas generadas.
  */
 async function checkAllStockAlerts() {
-  const products = await Product.findAll({
-    where: { min_stock: { [Op.not]: null, [Op.gt]: 0 } },
-    attributes: ['id', 'tenant_id']
-  });
+  const { Tenant } = require('../models');
+  const { runWithTenantSchema } = require('../config/tenantContext');
 
-  for (const product of products) {
-    await checkAlertsForProduct(product.id, product.tenant_id);
+  const tenants = await Tenant.findAll({ attributes: ['id', 'schema_name'] });
+  let totalChecked = 0;
+
+  // Tenants en modo legado (schema_name null): sus productos siguen en
+  // `public`, se pueden revisar todos juntos filtrando por sus tenant_id.
+  const legacyTenantIds = tenants.filter((t) => !t.schema_name).map((t) => t.id);
+  if (legacyTenantIds.length > 0) {
+    const legacyProducts = await Product.findAll({
+      where: { tenant_id: legacyTenantIds, min_stock: { [Op.not]: null, [Op.gt]: 0 } },
+      attributes: ['id', 'tenant_id']
+    });
+    for (const product of legacyProducts) {
+      await checkAlertsForProduct(product.id, product.tenant_id);
+    }
+    totalChecked += legacyProducts.length;
   }
 
-  return { products_checked: products.length };
+  // Tenants ya cortados a su propio schema: cada uno necesita correr dentro
+  // de su propio runWithTenantSchema para que los modelos (Product,
+  // StockAlert) resuelvan contra el schema correcto.
+  const schemaTenants = tenants.filter((t) => t.schema_name);
+  for (const tenant of schemaTenants) {
+    try {
+      await runWithTenantSchema(tenant.schema_name, async () => {
+        const products = await Product.findAll({
+          where: { tenant_id: tenant.id, min_stock: { [Op.not]: null, [Op.gt]: 0 } },
+          attributes: ['id', 'tenant_id']
+        });
+        for (const product of products) {
+          await checkAlertsForProduct(product.id, product.tenant_id);
+        }
+        totalChecked += products.length;
+      });
+    } catch (error) {
+      console.error(`Error revisando alertas de stock para tenant "${tenant.schema_name}":`, error.message);
+    }
+  }
+
+  return { products_checked: totalChecked, tenants_checked: tenants.length };
 }
 
 /**

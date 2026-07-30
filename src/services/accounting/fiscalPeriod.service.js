@@ -132,7 +132,12 @@ async function closeFiscalYear(tenantId, year, userId) {
   const { FiscalPeriod, JournalEntry } = require('../../models');
   const { QueryTypes } = require('sequelize');
   const { sequelize } = require('../../config/database');
+  const { getCurrentSchema } = require('../../config/tenantContext');
   const { createDraftEntry, postEntry, getMappedAccountId } = require('./journalEntry.service');
+  // Sin calificar schema, las dos queries de este cierre siempre leían
+  // "public" -- para un tenant ya cortado a su propio schema el cierre
+  // anual quedaba mal calculado (o vacío) sin error visible.
+  const schema = getCurrentSchema() || 'public';
 
   // 1. Diciembre debe existir y estar abierto.
   let december = await FiscalPeriod.findOne({ where: { tenant_id: tenantId, year, month: 12 } });
@@ -184,8 +189,8 @@ async function closeFiscalYear(tenantId, year, userId) {
     // 3. Reclasifica el saldo que haya quedado de un cierre anterior.
     const [[priorResult]] = await sequelize.query(
       `SELECT COALESCE(SUM(l.credit - l.debit), 0) AS balance
-       FROM journal_entry_lines l
-       JOIN journal_entries e ON e.id = l.entry_id
+       FROM "${schema}"."journal_entry_lines" l
+       JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
        WHERE e.tenant_id = :tenantId AND e.status = 'posted'
          AND l.account_id = :accountId AND e.entry_date < :closeDate`,
       { replacements: { tenantId, accountId: currentYearResultAccountId, closeDate }, type: QueryTypes.SELECT, transaction: t }
@@ -208,9 +213,9 @@ async function closeFiscalYear(tenantId, year, userId) {
       `SELECT a.id AS account_id, a.account_type,
               COALESCE(SUM(l.debit), 0) AS total_debit,
               COALESCE(SUM(l.credit), 0) AS total_credit
-       FROM chart_of_accounts a
-       JOIN journal_entry_lines l ON l.account_id = a.id
-       JOIN journal_entries e ON e.id = l.entry_id
+       FROM "${schema}"."chart_of_accounts" a
+       JOIN "${schema}"."journal_entry_lines" l ON l.account_id = a.id
+       JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
        WHERE a.tenant_id = :tenantId AND e.status = 'posted' AND e.entry_date <= :closeDate
          AND a.account_type IN ('ingreso', 'gasto', 'costo')
        GROUP BY a.id, a.account_type

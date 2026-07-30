@@ -333,6 +333,23 @@ if (!isVercel) {
         console.error('[Migrator] Error ejecutando migraciones:', err.message);
       }
 
+      // Propagar esas mismas migraciones a cada schema de tenant ya
+      // cortado (schema-per-tenant) -- sin esto, runMigrations() de arriba
+      // solo deja `public` al día y cada tenant migrado se va desalineando
+      // con cada release nueva. Desactivable con
+      // ENABLE_TENANT_SCHEMA_MIGRATIONS=false (ej. para correrlo aparte a
+      // mano en vez de en cada arranque, si el número de tenants crece
+      // demasiado para hacerlo en cada deploy).
+      if (process.env.ENABLE_TENANT_SCHEMA_MIGRATIONS !== 'false') {
+        try {
+          const { migrateAllTenantSchemas } = require('./scripts/migrateAllTenantSchemas');
+          const result = await migrateAllTenantSchemas();
+          console.log(`[Migrator] Schemas de tenant: ${result.ok.length}/${result.total} al día` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
+        } catch (err) {
+          console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
+        }
+      }
+
       // Siembrar diagramas base si no existen (o actualizar si cambiaron)
       try {
         const { seedDiagramTemplates } = require('./services/seedDiagramTemplates');
@@ -365,6 +382,17 @@ if (!isVercel) {
       await runMigrations();
     } catch (err) {
       console.error('[Migrator] Error ejecutando migraciones:', err.message);
+    }
+    // Propagar a cada schema de tenant ya cortado -- ver comentario en la
+    // rama Railway/local más arriba.
+    if (process.env.ENABLE_TENANT_SCHEMA_MIGRATIONS !== 'false') {
+      try {
+        const { migrateAllTenantSchemas } = require('./scripts/migrateAllTenantSchemas');
+        const result = await migrateAllTenantSchemas();
+        console.log(`[Migrator] Schemas de tenant: ${result.ok.length}/${result.total} al día` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
+      } catch (err) {
+        console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
+      }
     }
     // Siembrar diagramas base
     try {

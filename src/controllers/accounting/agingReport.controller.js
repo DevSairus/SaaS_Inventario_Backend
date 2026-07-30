@@ -18,6 +18,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { AccountMapping } = require('../../models');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { generateAgingExcel } = require('../../services/accounting/reportsExcel.service');
 const { generateAgingPDF } = require('../../services/accounting/reportsPdf.service');
 
@@ -96,11 +97,15 @@ async function fetchAging(req) {
   // Naturaleza crédito para proveedores (pasivo): net = credit - debit.
   const netExpr = type === 'customer' ? '(l.debit - l.credit)' : '(l.credit - l.debit)';
 
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema el reporte de cartera/CxP salía vacío sin
+  // error visible.
+  const schema = getCurrentSchema() || 'public';
   const rows = await sequelize.query(
     `SELECT l.third_party_id, e.entry_date AS date, e.entry_number, e.description AS entry_description,
             l.description AS line_description, ${netExpr} AS net
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE l.account_id = :accountId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'

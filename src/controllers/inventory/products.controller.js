@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { Product, Category } = require('../../models/inventory');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 
@@ -15,6 +16,13 @@ const getProductStats = async (req, res) => {
     const tenantFilter = whereClause.tenant_id
       ? 'AND tenant_id = :tenantId'
       : '';
+    // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+    // cortado a su propio schema las estadísticas salían en cero sin error
+    // visible. NOTA: para super_admin (sin tenant_id, estadísticas globales)
+    // esto sigue siendo una limitación real -- solo cuenta lo que haya en
+    // `schema`, no agrega across todos los schemas de tenant; agregar de
+    // verdad requiere iterar todos los schemas, que queda fuera de este fix.
+    const schema = getCurrentSchema() || 'public';
     const [agg] = await sequelize.query(
       `SELECT
          COUNT(*)                                                              AS total,
@@ -27,7 +35,7 @@ const getProductStats = async (req, res) => {
                           AND current_stock <= 0)                             AS out_of_stock,
          COALESCE(SUM(CASE WHEN is_active
                       THEN current_stock * average_cost ELSE 0 END), 0)      AS inventory_value
-       FROM products
+       FROM "${schema}"."products"
        WHERE 1=1 ${tenantFilter}`,
       {
         replacements: whereClause.tenant_id ? { tenantId: whereClause.tenant_id } : {},

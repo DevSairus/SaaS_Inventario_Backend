@@ -2,6 +2,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { AccountMapping } = require('../../models');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   generateLibroIvaExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -24,11 +25,14 @@ function generatedByName(req) {
 
 async function fetchAccountMovements(tenantId, accountId, { from, to, branchId }) {
   if (!accountId) return [];
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema el Libro de IVA salía vacío sin error visible.
+  const schema = getCurrentSchema() || 'public';
   return sequelize.query(
     `SELECT e.id AS entry_id, e.entry_number, e.entry_date, e.description AS entry_description, e.source_type,
             l.debit, l.credit, l.description AS line_description
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE l.account_id = :accountId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'

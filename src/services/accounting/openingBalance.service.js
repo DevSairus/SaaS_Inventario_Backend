@@ -252,15 +252,20 @@ async function createInventoryOpeningBalance(tenantId, params, userId, transacti
  */
 async function getBridgeAccountStatus(tenantId, transaction) {
   const { sequelize } = require('../../config/database');
+  const { getCurrentSchema } = require('../../config/tenantContext');
 
   const suspenseAccountId = await getMappedAccountId(tenantId, 'opening_balance_suspense', transaction);
 
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema el estado de la cuenta puente salía en cero
+  // sin error visible, aunque hubiera saldo real.
+  const schema = getCurrentSchema() || 'public';
   const [[row]] = await sequelize.query(
     `SELECT
        COALESCE(SUM(l.debit), 0) AS total_debit,
        COALESCE(SUM(l.credit), 0) AS total_credit
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE l.account_id = :accountId AND e.status = 'posted'`,
     { replacements: { accountId: suspenseAccountId }, transaction }
   );

@@ -46,6 +46,15 @@ const PUBLIC_SCHEMA_MODELS = new Set([
   'RolePermission',
   'Announcement',
   'UserAnnouncementView',
+  // Fila única de config del sistema (API key/secret frente al Núcleo
+  // Central de Facturación de ESC DataCore) -- no es dato de tenant, es
+  // config a nivel de Pitbox completo. No estaba en esta lista; hoy no
+  // causaba error porque nadie la consulta dentro de una request de
+  // tenant (solo desde superadmin y desde el cron ncf-sync, ninguno de
+  // los dos pasa por el middleware de tenant), pero si algún día se lee
+  // desde un contexto de tenant sin darse cuenta, terminaría apuntando
+  // al `ncf_config` vacío de ese schema en vez de la fila real de public.
+  'NcfConfig',
 ]);
 
 function registerTenantSchemaHooks(sequelize) {

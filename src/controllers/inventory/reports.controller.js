@@ -1,6 +1,10 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { getCurrentSchema } = require('../../config/tenantContext');
+// Sin calificar schema, las 7 queries de este archivo siempre leían "public"
+// -- para un tenant ya cortado a su propio schema, todos estos reportes de
+// inventario salían vacíos (o en cero) sin ningún error visible.
 
 // ── Helpers de seguridad para parámetros de query ────────────────────────────
 const isValidDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) && !isNaN(Date.parse(d));
@@ -46,10 +50,12 @@ exports.getMovementsByMonth = async (req, res) => {
     const branchFilter = branch_id ? `AND warehouse_id = :branchWarehouseId` : '';
     const branchFilterWithAlias = branch_id ? `AND im.warehouse_id = :branchWarehouseId` : '';
 
+    const schema = getCurrentSchema() || 'public';
+
     let branchWarehouseId = null;
     if (branch_id) {
       const [warehouseRow] = await sequelize.query(
-        `SELECT id FROM warehouses WHERE tenant_id = :tenantId AND branch_id = :branchId LIMIT 1`,
+        `SELECT id FROM "${schema}"."warehouses" WHERE tenant_id = :tenantId AND branch_id = :branchId LIMIT 1`,
         { replacements: { tenantId, branchId: branch_id }, type: QueryTypes.SELECT }
       );
       // Si la sede no tiene bodega asociada, usamos un id inexistente para
@@ -67,7 +73,7 @@ exports.getMovementsByMonth = async (req, res) => {
         direction,
         SUM(quantity)::numeric as total_quantity,
         COUNT(*)::integer as total_movements
-      FROM inventory_movements
+      FROM "${schema}"."inventory_movements"
       WHERE tenant_id = :tenantId
         AND ${dateFilter}
         ${branchFilter}
@@ -81,8 +87,8 @@ exports.getMovementsByMonth = async (req, res) => {
         TO_CHAR(im.movement_date, 'YYYY-MM') as month,
         im.direction,
         SUM(im.quantity * p.average_cost)::numeric as total_value
-      FROM inventory_movements im
-      INNER JOIN products p ON im.product_id = p.id
+      FROM "${schema}"."inventory_movements" im
+      INNER JOIN "${schema}"."products" p ON im.product_id = p.id
       WHERE im.tenant_id = :tenantId
         AND ${dateFilterWithAlias}
         ${branchFilterWithAlias}
@@ -168,6 +174,7 @@ exports.getMovementsByMonth = async (req, res) => {
 exports.getValuation = async (req, res) => {
   try {
     const tenantId = req.user.tenant_id;
+    const schema = getCurrentSchema() || 'public';
 
     const query = `
       SELECT 
@@ -176,8 +183,8 @@ exports.getValuation = async (req, res) => {
         COUNT(p.id)::integer as product_count,
         COALESCE(SUM(p.current_stock), 0)::numeric as total_stock,
         COALESCE(SUM(p.current_stock * p.sale_price), 0)::numeric as total_value
-      FROM categories c
-      LEFT JOIN products p ON c.id = p.category_id AND p.tenant_id = :tenantId
+      FROM "${schema}"."categories" c
+      LEFT JOIN "${schema}"."products" p ON c.id = p.category_id AND p.tenant_id = :tenantId
       WHERE c.tenant_id = :tenantId
       GROUP BY c.id, c.name
       ORDER BY total_value DESC
@@ -234,6 +241,7 @@ exports.getProfitReport = async (req, res) => {
   try {
     const { months, from_date, to_date, limit = 100 } = req.query;
     const tenantId = req.user.tenant_id;
+    const schema = getCurrentSchema() || 'public';
 
     // Para roles no-admin, se ignora el branch_id de query y se fuerza la
     // sede autorizada del usuario (ver utils/branchFilter.js).
@@ -281,10 +289,10 @@ exports.getProfitReport = async (req, res) => {
           END,
           2
         )::numeric as margin_percentage
-      FROM products p
-      INNER JOIN sale_items si ON p.id = si.product_id
-      INNER JOIN sales s ON si.sale_id = s.id
-      LEFT JOIN categories c ON p.category_id = c.id
+      FROM "${schema}"."products" p
+      INNER JOIN "${schema}"."sale_items" si ON p.id = si.product_id
+      INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
+      LEFT JOIN "${schema}"."categories" c ON p.category_id = c.id
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
         AND ${dateFilter}
@@ -309,9 +317,9 @@ exports.getProfitReport = async (req, res) => {
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
         COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
         COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as total_profit
-      FROM products p
-      INNER JOIN sale_items si ON p.id = si.product_id
-      INNER JOIN sales s ON si.sale_id = s.id
+      FROM "${schema}"."products" p
+      INNER JOIN "${schema}"."sale_items" si ON p.id = si.product_id
+      INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
         AND ${dateFilter}
@@ -379,6 +387,7 @@ exports.getRotationReport = async (req, res) => {
   try {
     const { months = 3, from_date, to_date } = req.query;
     const tenantId = req.user.tenant_id;
+    const schema = getCurrentSchema() || 'public';
 
     // Para roles no-admin, se ignora el branch_id de query y se fuerza la
     // sede autorizada del usuario (ver utils/branchFilter.js).
@@ -423,16 +432,16 @@ exports.getRotationReport = async (req, res) => {
           WHEN COALESCE(SUM(si.quantity), 0) / NULLIF(p.current_stock, 0) > 1 THEN 'Media rotación'
           ELSE 'Baja rotación'
         END as rotation_status
-      FROM products p
-      LEFT JOIN sale_items si ON p.id = si.product_id
+      FROM "${schema}"."products" p
+      LEFT JOIN "${schema}"."sale_items" si ON p.id = si.product_id
         AND si.sale_id IN (
-          SELECT id FROM sales
+          SELECT id FROM "${schema}"."sales"
           WHERE tenant_id = :tenantId
             AND status IN ('completed')
             AND ${dateFilter.replace('s.sale_date', 'sale_date')}
             ${branchFilter}
         )
-      LEFT JOIN categories c ON p.category_id = c.id
+      LEFT JOIN "${schema}"."categories" c ON p.category_id = c.id
       WHERE p.tenant_id = :tenantId
         AND p.product_type != 'service'
       GROUP BY p.id, p.name, p.sku, c.name, p.current_stock, p.min_stock

@@ -1,6 +1,7 @@
 // backend/src/controllers/accounting/libroDiario.controller.js
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   generateLibroDiarioExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -46,14 +47,18 @@ async function fetchLibroDiario(req) {
     throw err;
   }
 
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema (schema-per-tenant) la query no encontraba
+  // nada y el Libro Diario salía vacío sin ningún error visible.
+  const schema = getCurrentSchema() || 'public';
   const rows = await sequelize.query(
     `SELECT e.id AS entry_id, e.entry_number, e.entry_date, e.description AS entry_description,
             e.source_type, e.branch_id,
             l.id AS line_id, l.account_id, a.code AS account_code, a.name AS account_name,
             l.debit, l.credit, l.description AS line_description, l.third_party_id, l.line_order
-     FROM journal_entries e
-     JOIN journal_entry_lines l ON l.entry_id = e.id
-     JOIN chart_of_accounts a ON a.id = l.account_id
+     FROM "${schema}"."journal_entries" e
+     JOIN "${schema}"."journal_entry_lines" l ON l.entry_id = e.id
+     JOIN "${schema}"."chart_of_accounts" a ON a.id = l.account_id
      WHERE e.tenant_id = :tenantId
        AND e.status = 'posted'
        AND e.entry_date BETWEEN :from AND :to

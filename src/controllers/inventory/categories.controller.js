@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { Category } = require('../../models/inventory');
 
 /**
@@ -396,8 +397,12 @@ const deleteCategoryPermanently = async (req, res) => {
     }
 
     // Verificar si tiene productos asociados
+    // Sin calificar schema, esto siempre miraba "public" -- para un tenant ya
+    // cortado a su propio schema, podía borrar una categoría con productos
+    // asociados (el conteo daba 0 aunque sí tuviera productos en su schema).
+    const schema = getCurrentSchema() || 'public';
     const [products] = await sequelize.query(`
-      SELECT COUNT(*) as count FROM products WHERE category_id = :category_id
+      SELECT COUNT(*) as count FROM "${schema}"."products" WHERE category_id = :category_id
     `, {
       replacements: { category_id: id }
     });

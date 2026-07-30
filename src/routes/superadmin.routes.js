@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const audit = require('../utils/audit');
+const { cutoverTenant } = require('../scripts/cutoverTenant');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
@@ -383,6 +384,20 @@ router.post(
 
       await transaction.commit();
       res.status(201).json({ tenant });
+
+      // Aprovisiona el schema dedicado (schema-per-tenant) en background --
+      // no bloquea la respuesta del alta, que ya se envió arriba. Un tenant
+      // recién creado no tiene filas propias en las tablas compartidas, así
+      // que el paso de copia de datos es prácticamente instantáneo. Si esto
+      // falla, el tenant queda funcionando en el modelo legado (schema_name
+      // null, datos en public) sin impacto visible para el usuario -- se
+      // puede reintentar a mano con `node src/scripts/cutoverTenant.js <slug>`.
+      // Este era el único punto de creación de tenants que le faltaba esta
+      // llamada (routes/superadmin.routes.js es el router real montado en
+      // server.js; el controller viejo que sí la tenía nunca estuvo enrutado).
+      cutoverTenant(tenant.slug).catch((err) => {
+        console.error(`Error aprovisionando schema para tenant "${tenant.slug}":`, err);
+      });
     } catch (error) {
       await transaction.rollback();
       console.error('Error creating tenant:', error);

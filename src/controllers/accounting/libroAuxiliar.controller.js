@@ -2,6 +2,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { Customer, Supplier } = require('../../models');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   generateLibroAuxiliarExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -65,14 +66,19 @@ async function fetchLibroAuxiliar(req) {
     ? (thirdParty.business_name || thirdParty.full_name || [thirdParty.first_name, thirdParty.last_name].filter(Boolean).join(' '))
     : (thirdParty.business_name || thirdParty.name);
 
+  // Sin calificar schema, estas dos queries siempre leían "public" -- para
+  // un tenant ya cortado a su propio schema (schema-per-tenant) el Libro
+  // Auxiliar salía vacío sin ningún error visible.
+  const schema = getCurrentSchema() || 'public';
+
   // Saldo inicial: todo lo contabilizado (posted) ANTES de `from` para este
   // tercero, con el mismo signo por naturaleza de cuenta que Libro Mayor.
   const [openingRow] = await sequelize.query(
     `SELECT
        COALESCE(SUM(CASE WHEN a.account_type IN ('activo','gasto','costo') THEN l.debit - l.credit ELSE l.credit - l.debit END), 0) AS balance
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
-     JOIN chart_of_accounts a ON a.id = l.account_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
+     JOIN "${schema}"."chart_of_accounts" a ON a.id = l.account_id
      WHERE l.third_party_id = :thirdPartyId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'
@@ -88,9 +94,9 @@ async function fetchLibroAuxiliar(req) {
             e.source_type, e.branch_id,
             l.id AS line_id, l.account_id, a.code AS account_code, a.name AS account_name, a.account_type,
             l.debit, l.credit, l.description AS line_description
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
-     JOIN chart_of_accounts a ON a.id = l.account_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
+     JOIN "${schema}"."chart_of_accounts" a ON a.id = l.account_id
      WHERE l.third_party_id = :thirdPartyId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'

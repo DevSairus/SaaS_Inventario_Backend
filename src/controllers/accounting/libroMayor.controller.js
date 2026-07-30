@@ -2,6 +2,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { ChartOfAccount } = require('../../models');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   generateLibroMayorExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -60,13 +61,18 @@ async function fetchLibroMayor(req) {
 
   const isDebitNature = DEBIT_NATURE.has(account.account_type);
 
+  // Sin calificar schema, estas dos queries siempre leían "public" -- para
+  // un tenant ya cortado a su propio schema (schema-per-tenant) el Libro
+  // Mayor salía vacío sin ningún error visible.
+  const schema = getCurrentSchema() || 'public';
+
   // Saldo inicial: todo lo contabilizado (posted) ANTES de `from`, con el
   // mismo filtro de sede que el resto del rango, para que el saldo inicial
   // sea consistente con lo que se está mostrando/exportando.
   const [openingRow] = await sequelize.query(
     `SELECT COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE l.account_id = :accountId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'
@@ -84,8 +90,8 @@ async function fetchLibroMayor(req) {
     `SELECT e.id AS entry_id, e.entry_number, e.entry_date, e.description AS entry_description,
             e.source_type, e.branch_id,
             l.id AS line_id, l.debit, l.credit, l.description AS line_description, l.third_party_id
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE l.account_id = :accountId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'

@@ -19,6 +19,7 @@ const {
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const logger = require('../../config/logger');
+const { getCurrentSchema } = require('../../config/tenantContext');
 
 // ── Número DEV único con advisory lock ───────────────────────────────────────
 async function generateReturnNumber(tenant_id, transaction) {
@@ -32,9 +33,13 @@ async function generateReturnNumber(tenant_id, transaction) {
     { replacements: { lock_key: `customer_return_${tenant_id}` }, transaction }
   );
 
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema podía repetir un return_number ya usado en
+  // su schema, sin ningún error visible.
+  const schema = getCurrentSchema() || 'public';
   const [result] = await sequelize.query(
     `SELECT MAX(CAST(SPLIT_PART(return_number, '-', 3) AS INTEGER)) AS max_num
-     FROM customer_returns WHERE return_number LIKE :prefix`,
+     FROM "${schema}"."customer_returns" WHERE return_number LIKE :prefix`,
     { replacements: { prefix: `${prefix}%` }, type: sequelize.QueryTypes.SELECT, transaction }
   );
 

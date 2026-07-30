@@ -1,5 +1,6 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   generateTrialBalanceExcel,
   generateBalanceGeneralExcel,
@@ -32,13 +33,16 @@ async function fetchTrialBalance(req) {
     throw err;
   }
 
+  // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+  // cortado a su propio schema el reporte salía vacío sin error visible.
+  const schema = getCurrentSchema() || 'public';
   const rows = await sequelize.query(
     `SELECT a.id, a.code, a.name, a.account_type,
             COALESCE(SUM(l.debit), 0)  AS total_debit,
             COALESCE(SUM(l.credit), 0) AS total_credit
-     FROM chart_of_accounts a
-     JOIN journal_entry_lines l ON l.account_id = a.id
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."chart_of_accounts" a
+     JOIN "${schema}"."journal_entry_lines" l ON l.account_id = a.id
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE a.tenant_id = :tenantId
        AND e.tenant_id = :tenantId
        AND e.status = 'posted'
@@ -78,13 +82,18 @@ async function fetchBalanceGeneral(req) {
     const asOf = req.query.as_of || new Date().toISOString().slice(0, 10);
     const branch_id = req.query.branch_id || null;
 
+    // Sin calificar schema, estas dos queries siempre leían "public" -- para
+    // un tenant ya cortado a su propio schema el balance salía vacío sin
+    // error visible.
+    const schema = getCurrentSchema() || 'public';
+
     const rows = await sequelize.query(
       `SELECT a.id, a.code, a.name, a.account_type,
               COALESCE(SUM(l.debit), 0)  AS total_debit,
               COALESCE(SUM(l.credit), 0) AS total_credit
-       FROM chart_of_accounts a
-       JOIN journal_entry_lines l ON l.account_id = a.id
-       JOIN journal_entries e ON e.id = l.entry_id
+       FROM "${schema}"."chart_of_accounts" a
+       JOIN "${schema}"."journal_entry_lines" l ON l.account_id = a.id
+       JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
        WHERE a.tenant_id = :tenantId
          AND e.status = 'posted'
          AND e.entry_date <= :asOf
@@ -102,9 +111,9 @@ async function fetchBalanceGeneral(req) {
       `SELECT
          COALESCE(SUM(CASE WHEN a.account_type = 'ingreso' THEN l.credit - l.debit ELSE 0 END), 0) AS revenue,
          COALESCE(SUM(CASE WHEN a.account_type IN ('gasto','costo') THEN l.debit - l.credit ELSE 0 END), 0) AS expenses
-       FROM chart_of_accounts a
-       JOIN journal_entry_lines l ON l.account_id = a.id
-       JOIN journal_entries e ON e.id = l.entry_id
+       FROM "${schema}"."chart_of_accounts" a
+       JOIN "${schema}"."journal_entry_lines" l ON l.account_id = a.id
+       JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
        WHERE a.tenant_id = :tenantId AND e.status = 'posted' AND e.entry_date <= :asOf
          AND (:branchId::uuid IS NULL OR e.branch_id = :branchId::uuid)`,
       { replacements: { tenantId: req.tenant_id, asOf, branchId: branch_id }, type: QueryTypes.SELECT }
@@ -161,13 +170,16 @@ async function fetchIncomeStatementForRange(tenantId, { from, to, branchId } = {
       throw err;
     }
 
+    // Sin calificar schema, esto siempre leía "public" -- ídem el resto de
+    // los reportes financieros.
+    const schema = getCurrentSchema() || 'public';
     const rows = await sequelize.query(
       `SELECT a.id, a.code, a.name, a.account_type,
               COALESCE(SUM(l.credit - l.debit), 0) AS net_credit,
               COALESCE(SUM(l.debit - l.credit), 0) AS net_debit
-       FROM chart_of_accounts a
-       JOIN journal_entry_lines l ON l.account_id = a.id
-       JOIN journal_entries e ON e.id = l.entry_id
+       FROM "${schema}"."chart_of_accounts" a
+       JOIN "${schema}"."journal_entry_lines" l ON l.account_id = a.id
+       JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
        WHERE a.tenant_id = :tenantId
          AND e.status = 'posted'
          AND e.entry_date BETWEEN :from AND :to

@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { Product, ProductVehicleApplication } = require('../../models/inventory');
 const VehicleBrand = require('../../models/workshop/VehicleBrand');
 const VehicleLine = require('../../models/workshop/VehicleLine');
@@ -185,10 +186,14 @@ const getBrandsAndLines = async (req, res) => {
     }
 
     // Fallback: DISTINCT desde product_vehicle_applications
+    // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
+    // cortado a su propio schema, el fallback de marcas/líneas salía vacío
+    // sin error visible.
+    const schema = getCurrentSchema() || 'public';
     const tenantFilter = tenantId ? `WHERE pva.tenant_id = '${tenantId}'` : '';
     const results = await sequelize.query(`
       SELECT DISTINCT brand, line
-      FROM product_vehicle_applications pva
+      FROM "${schema}"."product_vehicle_applications" pva
       ${tenantFilter}
       ORDER BY brand ASC, line ASC
     `, { type: sequelize.QueryTypes.SELECT });

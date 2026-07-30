@@ -9,6 +9,7 @@ const {
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const { getCurrentSchema } = require('../../config/tenantContext');
 
 /**
  * Generar número de devolución único.
@@ -19,17 +20,27 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
  * Recibe la transacción activa para que el advisory lock sea efectivo:
  * si se llama sin transacción, el SELECT ve datos committed pero no ve lo que
  * la propia transacción bloqueada aún no ha committed.
+ *
+ * NOTA schema-per-tenant: la unicidad "global" que describe el comentario de
+ * abajo era válida cuando todos los tenants compartían `public.customer_returns`.
+ * Con schema-per-tenant cada tenant migrado tiene su propia tabla en su propio
+ * schema (mismo constraint único, ahora aislado por tenant) -- calificar el
+ * schema aquí no rompe esa unicidad, la vuelve "única por tenant", que es lo
+ * correcto una vez los datos están físicamente separados. Sin calificar,
+ * esto siempre leía "public" y podía repetir un número ya usado en el schema
+ * real del tenant, sin ningún error visible.
  */
 const generateReturnNumber = async (tenant_id, transaction) => {
   const year = new Date().getFullYear();
   const prefix = `DEV-${year}-`;
+  const schema = getCurrentSchema() || 'public';
 
   // IMPORTANTE: El unique constraint de la DB es GLOBAL (solo columna return_number, sin tenant_id).
   // Si filtramos por tenant_id, no vemos los numeros de otros tenants y colisionamos con ellos.
   // La query busca el MAX global del año para garantizar unicidad en toda la DB.
   const [result] = await sequelize.query(
     `SELECT MAX(CAST(SPLIT_PART(return_number, '-', 3) AS INTEGER)) AS max_num
-     FROM customer_returns
+     FROM "${schema}"."customer_returns"
      WHERE return_number LIKE :prefix`,
     {
       replacements: { prefix: `${prefix}%` },

@@ -9,7 +9,34 @@ const {
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
-const { getCurrentSchema } = require('../../config/tenantContext');
+const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
+
+// Los endpoints PÚBLICOS (sin autenticación: getPublicOrder, respondQuoteRequest)
+// no tienen tenantMiddleware -- nadie les setea el schema del tenant antes de
+// llegar acá, porque no hay JWT del que sacarlo. share_token sí es un UUID
+// único a nivel global, así que se puede resolver a qué schema pertenece
+// probando primero "public" (tenants legado) y, si no aparece ahí, cada
+// schema de un tenant ya cortado -- son pocos, y esto solo corre cuando un
+// cliente abre el link de WhatsApp, no en cada request normal del taller.
+async function resolveWorkOrderSchemaByToken(token) {
+  const [publicRows] = await sequelize.query(
+    'SELECT id FROM "public"."work_orders" WHERE share_token = :token LIMIT 1',
+    { replacements: { token } }
+  );
+  if (publicRows[0]) return { orderId: publicRows[0].id, schemaName: null };
+
+  const [tenants] = await sequelize.query(
+    'SELECT schema_name FROM "public"."tenants" WHERE schema_name IS NOT NULL'
+  );
+  for (const { schema_name } of tenants) {
+    const [rows] = await sequelize.query(
+      `SELECT id FROM "${schema_name}"."work_orders" WHERE share_token = :token LIMIT 1`,
+      { replacements: { token } }
+    );
+    if (rows[0]) return { orderId: rows[0].id, schemaName: schema_name };
+  }
+  return null;
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -964,29 +991,38 @@ const applyApprovedItems = async (req, res) => {
  * reintento, o reabrir un link viejo).
  */
 const respondQuoteRequest = async (req, res) => {
+  const { token, quoteRequestId } = req.params;
+  const { approvals, approved_by_name, approved_by_document } = req.body;
+
+  if (!approved_by_name || !approved_by_document) {
+    return res.status(400).json({ success: false, message: 'Nombre y documento son requeridos para responder' });
+  }
+  if (!Array.isArray(approvals) || approvals.length === 0) {
+    return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión' });
+  }
+
+  // Resolver a qué schema pertenece esta OT ANTES de abrir la transacción --
+  // mismo problema que getPublicOrder: sin esto, todo el resto asumía
+  // "public" y nunca encontraba nada para un tenant ya cortado.
+  let resolved;
+  try {
+    resolved = await resolveWorkOrderSchemaByToken(token);
+  } catch {
+    return res.status(503).json({ success: false, message: 'Función no disponible aún' });
+  }
+  if (!resolved) {
+    return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
+  }
+
+  return runWithTenantSchema(resolved.schemaName, () =>
+    respondQuoteRequestBody({ orderId: resolved.orderId, quoteRequestId, approvals, approved_by_name, approved_by_document, req, res })
+  );
+};
+
+async function respondQuoteRequestBody({ orderId, quoteRequestId, approvals, approved_by_name, approved_by_document, req, res }) {
   const transaction = await sequelize.transaction();
   try {
-    const { token, quoteRequestId } = req.params;
-    const { approvals, approved_by_name, approved_by_document } = req.body;
-
-    if (!approved_by_name || !approved_by_document) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Nombre y documento son requeridos para responder' });
-    }
-    if (!Array.isArray(approvals) || approvals.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión' });
-    }
-
-    const rows = await sequelize.query(
-      'SELECT id FROM work_orders WHERE share_token = :token LIMIT 1',
-      { replacements: { token }, type: sequelize.QueryTypes.SELECT, transaction }
-    );
-    const order = rows[0];
-    if (!order) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
-    }
+    const order = { id: orderId };
 
     // Bloqueo total: si la ronda ya fue respondida, no se acepta un segundo envío.
     const quoteRequest = await WorkOrderQuoteRequest.findOne({
@@ -1036,10 +1072,10 @@ const respondQuoteRequest = async (req, res) => {
     res.json({ success: true, message: 'Respuesta registrada correctamente' });
   } catch (error) {
     await transaction.rollback();
-    logger.error('Error en respondQuoteRequest:', error);
+    logger.error('Error en respondQuoteRequestBody:', error);
     res.status(500).json({ success: false, message: 'Error al procesar la respuesta' });
   }
-};
+}
 
 // ── GENERATE REMISION ─────────────────────────────────────────────────────────
 
@@ -1782,22 +1818,34 @@ const getPublicOrder = async (req, res) => {
   try {
     const { token } = req.params;
 
-    // Primero buscar el ID de la OT por share_token con raw query (columna puede no existir)
-    let orderId;
+    // Resolver primero A QUÉ SCHEMA pertenece esta OT (ver
+    // resolveWorkOrderSchemaByToken) -- sin esto, todo lo que sigue asumía
+    // "public" a secas y nunca encontraba nada para un tenant ya cortado.
+    let resolved;
     try {
-      const rows = await sequelize.query(
-        'SELECT id FROM work_orders WHERE share_token = :token LIMIT 1',
-        { replacements: { token }, type: sequelize.QueryTypes.SELECT }
-      );
-      orderId = rows[0]?.id;
+      resolved = await resolveWorkOrderSchemaByToken(token);
     } catch {
       return res.status(503).json({ success: false, message: 'Función no disponible aún' });
     }
 
-    if (!orderId) {
+    if (!resolved) {
       return res.status(404).json({ success: false, message: 'Orden no encontrada o enlace inválido' });
     }
+    const { orderId, schemaName } = resolved;
 
+    return runWithTenantSchema(schemaName, () => getPublicOrderBody(orderId, res));
+  } catch (error) {
+    logger.error('Error en getPublicOrder:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener orden' });
+  }
+};
+
+// Cuerpo real de getPublicOrder, corriendo ya dentro del schema correcto
+// (ver runWithTenantSchema arriba) -- todas las queries ORM de acá para
+// abajo (WorkOrder, WorkOrderQuoteRequest, WorkOrderDiagnosisMark) resuelven
+// solas contra ese schema vía el getter dinámico de registerTenantSchemaHooks.js.
+async function getPublicOrderBody(orderId, res) {
+  try {
     const order = await WorkOrder.findOne({
       where: { id: orderId },
       attributes: WO_SAFE_ATTRS,
@@ -1965,10 +2013,10 @@ const getPublicOrder = async (req, res) => {
 
     res.json({ success: true, data: publicData });
   } catch (error) {
-    logger.error('Error en getPublicOrder:', error);
+    logger.error('Error en getPublicOrderBody:', error);
     res.status(500).json({ success: false, message: 'Error al obtener orden' });
   }
-};
+}
 
 // Enviar enlace OT por WhatsApp (wa.me)
 // Genera un enlace wa.me con el estado de la OT pre-cargado.

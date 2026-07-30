@@ -373,9 +373,14 @@ exports.getWorkshopKPIs = async (req, res) => {
     // Tiempo promedio de resolución (días) - últimas 30 OTs entregadas
     const { sequelize } = require('../config/database');
     const { QueryTypes } = require('sequelize');
+    // OJO: sin calificar schema, esto siempre resolvía contra "public" --
+    // para un tenant ya cortado a su propio schema, la query no encontraba
+    // nada y avg_resolution_days quedaba en 0 sin ningún error visible.
+    const { getCurrentSchema } = require('../config/tenantContext');
+    const schema = getCurrentSchema() || 'public';
     const avgTime = await sequelize.query(`
       SELECT ROUND(AVG(EXTRACT(EPOCH FROM (delivered_at - created_at)) / 86400), 1) as avg_days
-      FROM work_orders
+      FROM "${schema}"."work_orders"
       WHERE tenant_id = :tenantId
         AND status = 'entregado'
         AND delivered_at IS NOT NULL

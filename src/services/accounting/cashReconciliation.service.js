@@ -28,6 +28,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
+const { getCurrentSchema } = require('../../config/tenantContext');
 
 // Eventos cuyo account_mapping apunta a una cuenta de caja o bancos —
 // son exactamente las cuentas que se debitan/acreditan cuando entra o sale
@@ -95,12 +96,17 @@ async function getAccountingCashFlow(tenantId, { from_date, to_date, branch_id }
 
   // Movimientos ya posteados, por día — esto es lo que cuenta como
   // "verdad contable" hoy mismo (mismo criterio que financialReports.controller.js).
+  //
+  // Sin calificar schema, estas dos queries siempre leían "public" -- para
+  // un tenant ya cortado a su propio schema la conciliación salía vacía sin
+  // error visible.
+  const schema = getCurrentSchema() || 'public';
   const postedRows = await sequelize.query(
     `SELECT e.entry_date::text AS date,
             COALESCE(SUM(l.debit), 0)  AS total_in,
             COALESCE(SUM(l.credit), 0) AS total_out
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE e.tenant_id = :tenantId
        AND l.account_id IN (:accountIds)
        AND e.status = 'posted'
@@ -131,8 +137,8 @@ async function getAccountingCashFlow(tenantId, { from_date, to_date, branch_id }
     `SELECT COALESCE(SUM(l.debit), 0)  AS total_in,
             COALESCE(SUM(l.credit), 0) AS total_out,
             COUNT(DISTINCT e.id)       AS entries
-     FROM journal_entry_lines l
-     JOIN journal_entries e ON e.id = l.entry_id
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE e.tenant_id = :tenantId
        AND l.account_id IN (:accountIds)
        AND e.status = 'draft'

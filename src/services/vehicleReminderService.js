@@ -86,27 +86,23 @@ async function sendReminder(vehicle, customer, type, daysLeft, workshopName, res
   }
 }
 
-async function runVehicleReminders() {
+// Procesa vehículos + envío de recordatorios para un conjunto de tenants que
+// ya están en el schema activo en este momento (public, o el de un tenant
+// puntual dentro de runWithTenantSchema). Se reutiliza tanto para el lote
+// legado (varios tenants a la vez, todos en public) como para cada tenant
+// ya cortado a su propio schema (uno a la vez).
+async function processVehicleReminders(tenantList, targetDates, results) {
   const Vehicle  = require('../models/workshop/Vehicle');
   const Customer = require('../models/sales/Customer');
-  const Tenant   = require('../models/auth/Tenant');
 
-  const results = { sent: 0, skipped: 0, errors: 0, details: [], skippedDetails: [] };
+  const tenantIds = tenantList.map((t) => t.id);
+  if (tenantIds.length === 0) return;
 
-  // Construir fechas target en zona horaria de Colombia (UTC-5)
-  // Se usa toISOString() + slice para evitar problemas de conversión local
-  const targetDates = REMINDER_DAYS.map(days => {
-    const d = new Date();
-    d.setDate(d.getDate() + days);
-    // Ajuste a medianoche UTC-5 (Colombia) para comparar con fechas DATEONLY de Postgres
-    const bogota = new Date(d.toLocaleString('en-US', { timeZone: 'America/Bogota' }));
-    return bogota.toISOString().slice(0, 10);
-  });
-
-  console.log(`🔔 [REMINDER] Verificando vencimientos para: ${targetDates.join(', ')}`);
+  const tenantMap = Object.fromEntries(tenantList.map((t) => [t.id, t.company_name]));
 
   const vehicles = await Vehicle.findAll({
     where: {
+      tenant_id: tenantIds,
       is_active: true,
       [Op.or]: [
         { soat_expiry:          { [Op.in]: targetDates } },
@@ -122,11 +118,6 @@ async function runVehicleReminders() {
   });
 
   console.log(`🔔 [REMINDER] Vehículos encontrados: ${vehicles.length}`);
-
-  // Precargar tenants únicos para evitar N+1
-  const tenantIds  = [...new Set(vehicles.map(v => v.tenant_id))];
-  const tenants    = await Tenant.findAll({ where: { id: tenantIds }, attributes: ['id', 'company_name'] });
-  const tenantMap  = Object.fromEntries(tenants.map(t => [t.id, t.company_name]));
 
   for (const vehicle of vehicles) {
     const customer     = vehicle.customer;
@@ -160,6 +151,45 @@ async function runVehicleReminders() {
     if (tecnoDate && targetDates.includes(tecnoDate)) {
       const daysLeft = REMINDER_DAYS.find(d => targetDates[REMINDER_DAYS.indexOf(d)] === tecnoDate);
       await sendReminder(vehicle, customer, 'tecnomecanica', daysLeft, workshopName, results);
+    }
+  }
+}
+
+async function runVehicleReminders() {
+  const Tenant = require('../models/auth/Tenant');
+  const { runWithTenantSchema } = require('../config/tenantContext');
+
+  const results = { sent: 0, skipped: 0, errors: 0, details: [], skippedDetails: [] };
+
+  // Construir fechas target en zona horaria de Colombia (UTC-5)
+  // Se usa toISOString() + slice para evitar problemas de conversión local
+  const targetDates = REMINDER_DAYS.map(days => {
+    const d = new Date();
+    d.setDate(d.getDate() + days);
+    // Ajuste a medianoche UTC-5 (Colombia) para comparar con fechas DATEONLY de Postgres
+    const bogota = new Date(d.toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+    return bogota.toISOString().slice(0, 10);
+  });
+
+  console.log(`🔔 [REMINDER] Verificando vencimientos para: ${targetDates.join(', ')}`);
+
+  // Antes esta función hacía una sola consulta de Vehicle.findAll sin
+  // contexto de tenant -- fuera de un request HTTP eso siempre resolvía
+  // contra `public.vehicles`, así que los vehículos de cualquier tenant ya
+  // cortado a su propio schema quedaban invisibles para los recordatorios,
+  // en silencio. Ahora se recorre cada tenant en su schema correspondiente.
+  const allTenants = await Tenant.findAll({ attributes: ['id', 'schema_name', 'company_name'] });
+
+  const legacyTenants = allTenants.filter((t) => !t.schema_name);
+  await processVehicleReminders(legacyTenants, targetDates, results);
+
+  const schemaTenants = allTenants.filter((t) => t.schema_name);
+  for (const tenant of schemaTenants) {
+    try {
+      await runWithTenantSchema(tenant.schema_name, () => processVehicleReminders([tenant], targetDates, results));
+    } catch (err) {
+      results.errors++;
+      console.error(`❌ [REMINDER] Error procesando tenant "${tenant.schema_name}":`, err.message);
     }
   }
 
