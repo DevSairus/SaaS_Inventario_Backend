@@ -2068,6 +2068,45 @@ router.delete(
 );
 
 /**
+ * PATCH /api/v1/superadmin/tenants/:tenantId/users/:userId/toggle-status
+ * Reactivar (o volver a desactivar) un usuario de un tenant. El DELETE de
+ * arriba solo desactiva -- sin esto no había forma de revertirlo desde el
+ * panel de superadmin.
+ */
+router.patch(
+  '/tenants/:tenantId/users/:userId/toggle-status',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const user = await User.findByPk(userId);
+
+      if (!user) {
+        return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
+      }
+
+      if (user.role === 'super_admin') {
+        return res.status(403).json({ success: false, message: 'No se puede cambiar el estado de un super admin' });
+      }
+
+      const newStatus = !user.is_active;
+      await user.update({ is_active: newStatus });
+
+      res.json({
+        success: true,
+        message: `Usuario ${newStatus ? 'reactivado' : 'desactivado'} exitosamente`,
+        data: { user: { id: user.id, is_active: newStatus } },
+      });
+    } catch (error) {
+      console.error('Error cambiando estado del usuario:', error);
+      res.status(500).json({ success: false, message: 'Error al cambiar estado del usuario', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
+    }
+  }
+);
+
+/**
  * PUT /api/v1/superadmin/tenants/:tenantId/users/:userId/role
  * Cambiar el rol de un usuario
  */
