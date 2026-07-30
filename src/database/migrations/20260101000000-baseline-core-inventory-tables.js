@@ -305,6 +305,18 @@ CREATE TABLE IF NOT EXISTS purchase_items (
     notes TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- purchase_items ya existía en la BD compartida original, pero sin
+-- tenant_id (nunca hizo falta ahí porque no había índice ni FK que lo
+-- exigiera). CREATE TABLE IF NOT EXISTS de arriba es un no-op para esa
+-- tabla, así que hay que agregar la columna a mano antes de indexarla.
+ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS tenant_id UUID;
+UPDATE purchase_items pi
+   SET tenant_id = p.tenant_id
+  FROM purchases p
+ WHERE pi.purchase_id = p.id
+   AND pi.tenant_id IS NULL;
+
 CREATE INDEX IF NOT EXISTS idx_purchase_items_tenant ON purchase_items(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_purchase_items_purchase ON purchase_items(purchase_id);
 CREATE INDEX IF NOT EXISTS idx_purchase_items_product ON purchase_items(product_id);
@@ -359,30 +371,34 @@ CREATE INDEX IF NOT EXISTS idx_movements_reference ON inventory_movements(refere
 CREATE INDEX IF NOT EXISTS idx_movements_status ON inventory_movements(status);
 
 -- ALERTAS DE STOCK
+-- NOTA: schema.sql (de donde salió el resto de este archivo) describe un
+-- diseño que ningún modelo ni código real usa. src/models/StockAlert.js
+-- (el que sí usa toda la app) espera severity/status/alert_date/
+-- resolved_date/min_stock/max_stock -- exactamente lo que ya existe en la
+-- BD vieja real -- y no warehouse_id/threshold_stock/message/priority/
+-- is_resolved/expiration_date. Se sigue el modelo real, no schema.sql.
 CREATE TABLE IF NOT EXISTS stock_alerts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES "public"."tenants"(id) ON DELETE CASCADE,
     product_id UUID NOT NULL REFERENCES products(id) ON DELETE CASCADE,
-    warehouse_id UUID REFERENCES warehouses(id) ON DELETE CASCADE,
-    alert_type VARCHAR(20) NOT NULL CHECK (alert_type IN ('low_stock', 'out_of_stock', 'overstock', 'expiring_soon', 'expired')),
-    current_stock DECIMAL(15,4),
-    threshold_stock DECIMAL(15,4),
-    message TEXT,
-    priority VARCHAR(20) DEFAULT 'medium' CHECK (priority IN ('low', 'medium', 'high', 'critical')),
-    is_resolved BOOLEAN DEFAULT FALSE,
-    resolved_at TIMESTAMP,
+    alert_type VARCHAR(50) NOT NULL CHECK (alert_type IN ('low_stock', 'out_of_stock', 'overstock')),
+    severity VARCHAR(20) NOT NULL DEFAULT 'warning' CHECK (severity IN ('info', 'warning', 'critical')),
+    current_stock DECIMAL(15,2) NOT NULL,
+    min_stock DECIMAL(15,2),
+    max_stock DECIMAL(15,2),
+    status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'resolved', 'ignored')),
+    alert_date TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    resolved_date TIMESTAMP,
     resolved_by UUID REFERENCES "public"."users"(id),
     resolution_notes TEXT,
-    expiration_date DATE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_stock_alerts_tenant ON stock_alerts(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_stock_alerts_product ON stock_alerts(product_id);
-CREATE INDEX IF NOT EXISTS idx_stock_alerts_warehouse ON stock_alerts(warehouse_id);
 CREATE INDEX IF NOT EXISTS idx_stock_alerts_type ON stock_alerts(alert_type);
-CREATE INDEX IF NOT EXISTS idx_stock_alerts_resolved ON stock_alerts(is_resolved);
-CREATE INDEX IF NOT EXISTS idx_stock_alerts_priority ON stock_alerts(priority);
+CREATE INDEX IF NOT EXISTS idx_stock_alerts_status ON stock_alerts(status);
+CREATE INDEX IF NOT EXISTS idx_stock_alerts_severity ON stock_alerts(severity);
 CREATE INDEX IF NOT EXISTS idx_stock_alerts_created ON stock_alerts(created_at DESC);
 `;
 
