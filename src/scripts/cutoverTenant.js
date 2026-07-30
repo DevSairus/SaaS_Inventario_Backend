@@ -18,13 +18,14 @@ require('dotenv').config();
 const { Sequelize } = require('sequelize');
 const { provisionTenantSchema } = require('./provisionTenantSchema');
 const { migrateTenantData } = require('./migrateTenantData');
+const { directDbDialectOptions } = require('./_directDbSsl');
 
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 
 async function cutoverTenant(slug) {
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
-    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
+    dialectOptions: directDbDialectOptions(DATABASE_URL),
     logging: false,
   });
 

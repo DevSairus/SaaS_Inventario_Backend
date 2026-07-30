@@ -28,6 +28,7 @@
 // -- ver tenantScopedTables.js para el porqué.
 
 require('dotenv').config();
+const { directDbDialectOptions } = require('./_directDbSsl');
 const { Sequelize } = require('sequelize');
 const { schemaNameFor } = require('./provisionTenantSchema');
 const { discoverTenantTables, tablesInOrder } = require('./tenantScopedTables');
@@ -109,7 +110,7 @@ async function rollbackTenant(slug, { dropSchema = false } = {}) {
   const schemaName = schemaNameFor(slug);
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
-    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
+    dialectOptions: directDbDialectOptions(DATABASE_URL),
     logging: false,
   });
 

@@ -22,6 +22,7 @@
 // y este script se niega a tocarlo).
 
 require('dotenv').config();
+const { directDbDialectOptions } = require('./_directDbSsl');
 const { Sequelize } = require('sequelize');
 const { schemaNameFor } = require('./provisionTenantSchema');
 const {
@@ -117,7 +118,7 @@ async function cleanupTenantPublicData(sequelize, { id: tenantId, slug, schema_n
 async function run(slugOrAll, { execute = false } = {}) {
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
-    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
+    dialectOptions: directDbDialectOptions(DATABASE_URL),
     logging: false,
   });
 

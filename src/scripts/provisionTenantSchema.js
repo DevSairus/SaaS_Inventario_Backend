@@ -13,6 +13,7 @@ const { Sequelize } = require('sequelize');
 const { Umzug, SequelizeStorage } = require('umzug');
 const path = require('path');
 const fs = require('fs');
+const { directDbDialectOptions } = require('./_directDbSsl');
 
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 // OJO: usar la URL DIRECTA de Neon (no la "-pooler"), porque este script
@@ -30,7 +31,7 @@ async function provisionTenantSchema(slug) {
   // usando search_path por defecto (public) — no depende de nada.
   const bootstrapSequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
-    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
+    dialectOptions: directDbDialectOptions(DATABASE_URL),
     logging: false,
     pool: { max: 1, min: 0 },
   });
@@ -61,7 +62,7 @@ async function provisionTenantSchema(slug) {
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
     dialectOptions: {
-      ssl: { require: true, rejectUnauthorized: false },
+      ...directDbDialectOptions(DATABASE_URL),
       // SOLO el schema del tenant, SIN ",public" de respaldo. Con public
       // en el search_path, Postgres resuelve "IF NOT EXISTS" y nombres
       // sin calificar recorriendo TODO el path -> encuentra las tablas

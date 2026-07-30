@@ -19,6 +19,7 @@
 // vía un topological sort sobre information_schema.
 
 require('dotenv').config();
+const { directDbDialectOptions } = require('./_directDbSsl');
 const { Sequelize } = require('sequelize');
 const { schemaNameFor } = require('./provisionTenantSchema');
 const { discoverTenantTables, tablesInOrder, buildIndirectSourceSql, buildIndirectCountSql } = require('./tenantScopedTables');
@@ -62,6 +63,14 @@ const COLUMN_VALUE_TRANSFORMS = {
       WHEN 'paquete' THEN 'pack' WHEN 'paquetes' THEN 'pack'
       WHEN 'docena' THEN 'dozen' WHEN 'docenas' THEN 'dozen'
       ELSE "unit_of_measure" END`,
+  },
+  customers: {
+    // Filas legacy en `public` tienen customer_type = 'business', valor que
+    // ya no es válido contra el CHECK constraint del schema nuevo (solo
+    // acepta 'individual'/'company'). 'business' siempre implicó una razón
+    // social (tiene business_name/tax_id de empresa), así que el mapeo
+    // correcto es 'company', no 'individual'.
+    customer_type: `CASE WHEN "customer_type" = 'business' THEN 'company' ELSE "customer_type" END`,
   },
 };
 
@@ -159,7 +168,7 @@ async function migrateTenantData(slug, tenantId) {
   const schemaName = schemaNameFor(slug);
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
-    dialectOptions: { ssl: { require: true, rejectUnauthorized: false } },
+    dialectOptions: directDbDialectOptions(DATABASE_URL),
     logging: false,
   });
 
@@ -235,17 +244,24 @@ async function migrateTenantData(slug, tenantId) {
       // puede tener más columnas que el schema del tenant recién aprovisionado
       // -> copiar solo la intersección, no asumir paridad total.
       const [destColRows] = await sequelize.query(`
-        SELECT column_name, is_nullable, column_default FROM information_schema.columns
+        SELECT column_name, is_nullable, column_default, data_type, udt_name FROM information_schema.columns
         WHERE table_schema = '${schemaName}' AND table_name = '${table}'
       `);
       const destColSet = new Set(destColRows.map(r => r.column_name));
+      const destColInfo = new Map(destColRows.map(r => [r.column_name, r]));
       const cols = allCols.filter(c => destColSet.has(c.column_name));
       const deferredCols = new Set([...(DEFERRED_FK_COLUMNS[table] || []), ...(REMAPPED_FK_COLUMNS[table] || [])]);
       const colNames = cols.map(c => `"${c.column_name}"`).join(', ');
       // Los tipos ENUM de Postgres son por-schema: aunque public.vehicles.vehicle_type
       // y tenant_x.vehicles.vehicle_type se llamen igual (enum_vehicles_vehicle_type),
       // son tipos distintos (OID distinto) y Postgres no castea implícitamente entre
-      // ellos. Para columnas USER-DEFINED (enum), forzar el cast vía texto contra el
+      // ellos. El cast se decide por el tipo del DESTINO, no el de `public`: hay
+      // columnas (ej. sales.document_type) que en `public` quedaron como
+      // varchar/texto plano (nunca se migró ese schema legado a enum) pero en el
+      // baseline del tenant nuevo sí se crean como ENUM -- si se mirara solo el
+      // tipo de origen, ese caso no calificaba para cast y el INSERT reventaba
+      // con "column is of type X but expression is of type character varying".
+      // Para columnas USER-DEFINED en destino, forzar el cast vía texto contra el
       // tipo del schema DESTINO explícito. Las columnas en DEFERRED_FK_COLUMNS se
       // insertan como NULL (se rellenan después, una vez las dos tablas del ciclo
       // ya tienen todas sus filas).
@@ -257,8 +273,9 @@ async function migrateTenantData(slug, tenantId) {
       let selectExprs = cols.map(c => {
         if (deferredCols.has(c.column_name)) return 'NULL';
         if (valueTransforms[c.column_name]) return valueTransforms[c.column_name];
-        return c.data_type === 'USER-DEFINED'
-          ? `${colRef(c.column_name)}::text::"${schemaName}"."${c.udt_name}"`
+        const destInfo = destColInfo.get(c.column_name);
+        return destInfo.data_type === 'USER-DEFINED'
+          ? `${colRef(c.column_name)}::text::"${schemaName}"."${destInfo.udt_name}"`
           : colRef(c.column_name);
       }).join(', ');
 
