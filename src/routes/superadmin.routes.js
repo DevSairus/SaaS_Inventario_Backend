@@ -485,6 +485,7 @@ router.delete(
         await transaction.rollback();
         return res.status(404).json({ error: 'Empresa no encontrada' });
       }
+      const { schema_name: schemaName } = tenant;
 
       // Eliminar en orden para respetar FK constraints
       // 1. Usuarios del tenant
@@ -493,10 +494,25 @@ router.delete(
       // 2. Suscripciones
       await TenantSubscription.destroy({ where: { tenant_id: id }, transaction });
 
-      // 3. El tenant mismo (el resto de tablas deben tener ON DELETE CASCADE)
+      // 3. El tenant mismo (el resto de tablas tienen ON DELETE CASCADE
+      // desde la migración 2026072704-fix-tenant-cascade-deletes.js)
       await Tenant.destroy({ where: { id }, transaction });
 
       await transaction.commit();
+
+      // 4. Si el tenant ya vivía en su propio schema (schema-per-tenant),
+      // el borrado de arriba solo limpió las filas legadas de `public` --
+      // el schema dedicado con los datos reales queda huérfano si no se
+      // dropea acá. No puede ir dentro de la misma transacción (DROP
+      // SCHEMA no es transaccional de forma útil junto con las queries
+      // anteriores y no debe bloquear la respuesta si falla).
+      if (schemaName) {
+        Tenant.sequelize
+          .query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
+          .catch((err) => {
+            console.error(`Error dropeando schema "${schemaName}" del tenant eliminado:`, err);
+          });
+      }
 
       res.json({
         success: true,
