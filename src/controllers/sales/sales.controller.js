@@ -171,6 +171,7 @@ const create = async (req, res) => {
       sale_date,
       due_date,
       payment_terms,
+      opportunity_id = null,
     } = req.body;
 
     let finalCustomerId = customer_id;
@@ -418,6 +419,49 @@ const create = async (req, res) => {
     );
 
     await transaction.commit();
+
+    // ── CRM: si esta cotización nace de una Opportunity del pipeline, la
+    // etapa avanza automáticamente (no bloquea la respuesta — mismo
+    // criterio que el asiento contable async de más abajo).
+    // Fase B.4 volvió las etapas configurables por tenant (CrmPipelineStage),
+    // así que acá no se puede asumir que existan las keys fijas 'cotizado'/
+    // 'ganado'/'perdido' — se resuelven contra la configuración real del
+    // tenant, con 'cotizado' como default (así queda para los tenants que
+    // no tocaron el embudo de fábrica) y fallback a la siguiente etapa
+    // abierta si el tenant la renombró o la eliminó.
+    if (opportunity_id && document_type === 'cotizacion') {
+      setImmediate(async () => {
+        try {
+          const { Opportunity } = require('../../models');
+          const { loadStageMap } = require('../../utils/crmPipelineStages');
+          const opportunity = await Opportunity.findOne({ where: { id: opportunity_id, tenant_id: tenantId } });
+          if (!opportunity) return;
+
+          const stageMap = await loadStageMap(tenantId);
+          const currentStage = stageMap[opportunity.stage];
+          const updateData = { quote_sale_id: sale.id };
+
+          // Solo se mueve de etapa si sigue abierta — una oportunidad ya
+          // ganada/perdida no se reabre por generar una cotización aparte.
+          if (currentStage && currentStage.stage_type === 'open') {
+            const quotedStage = stageMap['cotizado'] && stageMap['cotizado'].stage_type === 'open'
+              ? stageMap['cotizado']
+              : Object.values(stageMap)
+                  .filter(s => s.stage_type === 'open' && s.sort_order > currentStage.sort_order)
+                  .sort((a, b) => a.sort_order - b.sort_order)[0];
+
+            if (quotedStage) {
+              updateData.stage = quotedStage.key;
+              updateData.stage_changed_at = new Date();
+            }
+          }
+
+          await opportunity.update(updateData);
+        } catch (err) {
+          logger.warn(`[crm] Error vinculando cotización ${sale.sale_number} a oportunidad ${opportunity_id}: ${err.message}`);
+        }
+      });
+    }
 
     // ── DIAN: disparar envío asíncrono para facturas (no bloquea response) ──
     if (document_type === 'factura') {
@@ -797,8 +841,36 @@ const confirm = async (req, res) => {
         updateData.payment_history = payment_history;
       }
 
+      const wasQuote = sale.document_type === 'cotizacion';
       await sale.update(updateData, { transaction });
       await transaction.commit();
+
+      // ── CRM: si la cotización tenía una Opportunity vinculada, al
+      // confirmarse como factura/remisión (dejó de ser cotización) la
+      // oportunidad se marca ganada. No bloquea la respuesta.
+      // Fase B.4 — 'ganado' se resuelve contra CrmPipelineStage del tenant
+      // (stage_type='won'), no como key fija (ver mismo fix en la creación
+      // de la cotización, más arriba en este archivo).
+      if (wasQuote && finalDocType !== 'cotizacion') {
+        setImmediate(async () => {
+          try {
+            const { Opportunity } = require('../../models');
+            const { loadStageMap, keysByType } = require('../../utils/crmPipelineStages');
+            const opportunity = await Opportunity.findOne({ where: { quote_sale_id: sale.id, tenant_id: tenantId } });
+            if (!opportunity) return;
+
+            const stageMap = await loadStageMap(tenantId);
+            if (stageMap[opportunity.stage]?.stage_type === 'won') return; // ya está ganada
+
+            const wonStage = Object.values(stageMap).find(s => s.stage_type === 'won');
+            if (wonStage) {
+              await opportunity.update({ stage: wonStage.key, stage_changed_at: new Date() });
+            }
+          } catch (err) {
+            logger.warn(`[crm] Error marcando oportunidad como ganada para venta ${sale.id}: ${err.message}`);
+          }
+        });
+      }
 
       // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
       // Una cotización NO es una venta real todavía — no debe tocar el libro

@@ -248,6 +248,7 @@ const create = async (req, res) => {
     const {
       vehicle_id, customer_id, technician_id, warehouse_id,
       mileage_in, problem_description, promised_at, notes,
+      opportunity_id = null,
     } = req.body;
 
     if (!vehicle_id) {
@@ -298,6 +299,44 @@ const create = async (req, res) => {
 
     await transaction.commit();
 
+    // ── CRM (C.3): si esta OT nace de una Opportunity del pipeline, se
+    // vincula y la etapa avanza — mismo patrón/criterio que C.2 en
+    // sales.controller.js#create: no bloquea la respuesta, resuelve la
+    // etapa contra la configuración real del tenant (CrmPipelineStage,
+    // Fase B.4) en vez de asumir una key fija, y solo se mueve si la
+    // oportunidad sigue abierta.
+    if (opportunity_id) {
+      setImmediate(async () => {
+        try {
+          const { Opportunity } = require('../../models');
+          const { loadStageMap } = require('../../utils/crmPipelineStages');
+          const opportunity = await Opportunity.findOne({ where: { id: opportunity_id, tenant_id } });
+          if (!opportunity) return;
+
+          const stageMap = await loadStageMap(tenant_id);
+          const currentStage = stageMap[opportunity.stage];
+          const updateData = { work_order_id: order.id };
+
+          if (currentStage && currentStage.stage_type === 'open') {
+            const quotedStage = stageMap['cotizado'] && stageMap['cotizado'].stage_type === 'open'
+              ? stageMap['cotizado']
+              : Object.values(stageMap)
+                  .filter(s => s.stage_type === 'open' && s.sort_order > currentStage.sort_order)
+                  .sort((a, b) => a.sort_order - b.sort_order)[0];
+
+            if (quotedStage) {
+              updateData.stage = quotedStage.key;
+              updateData.stage_changed_at = new Date();
+            }
+          }
+
+          await opportunity.update(updateData);
+        } catch (err) {
+          logger.warn(`[crm] Error vinculando OT ${order.order_number} a oportunidad ${opportunity_id}: ${err.message}`);
+        }
+      });
+    }
+
     const full = await WorkOrder.findByPk(order.id, {
       include: [
         { model: Vehicle,  as: 'vehicle' },
@@ -311,6 +350,168 @@ const create = async (req, res) => {
     await transaction.rollback();
     logger.error('Error creando OT:', error);
     res.status(500).json({ success: false, message: 'Error al crear la orden' });
+  }
+};
+
+// ── CONVERTIR COTIZACIÓN EN OT (CRM Fase 1) ─────────────────────────────────
+//
+// Puente formal entre CRM/Ventas y Taller: una Sale con document_type=
+// 'cotizacion' se convierte en WorkOrder. Solo disponible si el tenant tiene
+// el módulo 'workshop' (gate a nivel de ruta con requireModule) y la
+// cotización trae datos de vehículo — sin eso no hay nada que convertir.
+// Conversión única e irreversible: sale.converted_to_work_order_id actúa
+// de guard (ver migración 2026072703-add-quote-to-work-order-conversion.js).
+const convertQuoteToWorkOrder = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { saleId } = req.params;
+
+    const sale = await Sale.findOne({
+      where: { id: saleId, tenant_id },
+      include: [{ model: SaleItem, as: 'items' }],
+      transaction,
+    });
+
+    if (!sale) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
+    if (sale.document_type !== 'cotizacion') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Solo se pueden convertir documentos de tipo cotización' });
+    }
+    if (sale.converted_to_work_order_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Esta cotización ya fue convertida a una Orden de Trabajo' });
+    }
+    if (!sale.vehicle_plate) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'La cotización no tiene datos de vehículo; no se puede convertir a OT' });
+    }
+
+    // Buscar o crear el vehículo a partir de los datos (texto libre) que
+    // trae la cotización — Sale no tiene vehicle_id, WorkOrder sí lo exige.
+    const plate = sale.vehicle_plate.toUpperCase().trim();
+    let vehicle = await Vehicle.findOne({ where: { tenant_id, plate }, transaction });
+    if (!vehicle) {
+      vehicle = await Vehicle.create({
+        tenant_id,
+        customer_id: sale.customer_id || null,
+        plate,
+        vehicle_type: sale.vehicle_type || 'automovil',
+        brand: sale.vehicle_brand || null,
+        model: sale.vehicle_model || null,
+        year: sale.vehicle_year || null,
+        color: sale.vehicle_color || null,
+      }, { transaction });
+    } else if (sale.customer_id && !vehicle.customer_id) {
+      // Mismo criterio que create(): si el vehículo no tenía propietario, se
+      // vincula ahora en vez de dejarlo huérfano.
+      await vehicle.update({ customer_id: sale.customer_id }, { transaction });
+    }
+
+    const order_number = await generateOrderNumber(tenant_id, transaction);
+
+    const order = await WorkOrder.create({
+      tenant_id,
+      order_number,
+      vehicle_id: vehicle.id,
+      customer_id: sale.customer_id || null,
+      warehouse_id: sale.warehouse_id || null,
+      mileage_in: sale.mileage || null,
+      quote_sale_id: sale.id,
+      discount_amount: sale.discount_amount || 0,
+      notes: sale.notes || null,
+      created_by: req.user.id,
+      received_at: new Date(),
+    }, { transaction });
+
+    // Copiar ítems de la cotización. Los de tipo 'product' descuentan
+    // inventario ahora (antes, como cotización, no tenían nada reservado) —
+    // mismo mecanismo que addItem() para no duplicar lógica de stock.
+    for (const saleItem of sale.items || []) {
+      const item_type = saleItem.item_type === 'product' ? 'repuesto'
+        : saleItem.item_type === 'service' ? 'servicio'
+        : 'free_line';
+
+      const item = await WorkOrderItem.create({
+        tenant_id,
+        work_order_id: order.id,
+        item_type,
+        product_id: saleItem.product_id,
+        product_name: saleItem.product_name,
+        product_sku: saleItem.product_sku,
+        quantity: saleItem.quantity,
+        unit_price: saleItem.unit_price,
+        tax_percentage: saleItem.tax_percentage,
+        tax_amount: saleItem.tax_amount,
+        subtotal: saleItem.subtotal,
+        total: saleItem.total,
+        notes: saleItem.notes,
+        approval_status: 'aprobado',
+      }, { transaction });
+
+      if (item_type === 'repuesto' && saleItem.product_id) {
+        const product = await Product.findOne({ where: { id: saleItem.product_id, tenant_id }, transaction });
+        if (product?.track_inventory) {
+          const qty = parseFloat(saleItem.quantity);
+          if (parseFloat(product.current_stock) < qty) {
+            await transaction.rollback();
+            return res.status(400).json({
+              success: false,
+              message: `Stock insuficiente para convertir: "${product.name}". Disponible: ${product.current_stock}`,
+            });
+          }
+          await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
+        }
+      }
+    }
+
+    const items = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
+    const { subtotal, tax_amount } = calcTotals(items);
+    const disc = parseFloat(order.discount_amount) || 0;
+    await order.update({ subtotal, tax_amount, total_amount: subtotal + tax_amount - disc }, { transaction });
+
+    await sale.update({ converted_to_work_order_id: order.id }, { transaction });
+
+    // Trazabilidad CRM: queda registrada como interacción automática en el
+    // timeline del cliente, si tiene uno identificado. Y si la cotización
+    // tenía una Opportunity vinculada, se marca ganada con el work_order_id.
+    if (sale.customer_id) {
+      const { CustomerInteraction, Opportunity } = require('../../models');
+      await CustomerInteraction.create({
+        tenant_id,
+        customer_id: sale.customer_id,
+        user_id: req.user.id,
+        type: 'nota',
+        outcome: 'positivo',
+        summary: `Cotización ${sale.sale_number} convertida a Orden de Trabajo ${order_number}`,
+        related_sale_id: sale.id,
+        related_work_order_id: order.id,
+      }, { transaction });
+
+      const opportunity = await Opportunity.findOne({ where: { quote_sale_id: sale.id, tenant_id }, transaction });
+      if (opportunity && opportunity.stage !== 'ganado') {
+        await opportunity.update({ stage: 'ganado', stage_changed_at: new Date(), work_order_id: order.id }, { transaction });
+      }
+    }
+
+    await transaction.commit();
+
+    const full = await WorkOrder.findByPk(order.id, {
+      include: [
+        { model: Vehicle,  as: 'vehicle' },
+        { model: Customer, as: 'customer' },
+        { model: WorkOrderItem, as: 'items' },
+      ],
+    });
+
+    res.status(201).json({ success: true, message: 'Cotización convertida a Orden de Trabajo', data: full });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error convirtiendo cotización a OT:', error);
+    res.status(500).json({ success: false, message: 'Error al convertir la cotización' });
   }
 };
 
@@ -2066,4 +2267,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

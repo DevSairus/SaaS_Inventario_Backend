@@ -978,6 +978,20 @@ router.put(
         return res.status(404).json({ error: 'Suscripción no encontrada' });
       }
       await subscription.update({ status: req.body.status });
+
+      // El login (auth.controller.js) y tenantMiddleware validan acceso
+      // contra tenants.subscription_status, NO contra tenant_subscriptions
+      // -- si no se sincroniza acá, el tenant queda con acceso bloqueado (o
+      // indebidamente abierto) aunque este endpoint reporte éxito.
+      // 'past_due' no es un valor válido en tenants.subscription_status
+      // (solo trial/active/suspended/cancelled) -- durante ese estado el
+      // acceso sigue normal (gracia), así que se mapea a 'active'.
+      const tenantSyncStatus = req.body.status === 'past_due' ? 'active' : req.body.status;
+      await Tenant.update(
+        { subscription_status: tenantSyncStatus },
+        { where: { id: req.params.tenantId } }
+      );
+
       res.json({ subscription });
     } catch (error) {
       res.status(500).json({ error: 'Error al cambiar estado' });
@@ -1010,6 +1024,16 @@ router.post(
         next_billing_date: newTrialEnd,
         current_period_end: newTrialEnd,
       });
+
+      // Igual que en change-subscription-status: tenants.trial_ends_at es
+      // lo que de verdad chequea el login/tenantMiddleware, no
+      // tenant_subscriptions -- y extender el trial implica reactivar el
+      // acceso si el tenant estaba suspendido por vencimiento previo.
+      await Tenant.update(
+        { trial_ends_at: newTrialEnd, subscription_status: 'trial' },
+        { where: { id: req.params.tenantId } }
+      );
+
       res.json({ subscription });
     } catch (error) {
       res.status(500).json({ error: 'Error al extender trial' });
@@ -1035,6 +1059,14 @@ router.put(
         next_billing_date: req.body.trial_ends_at,
         current_period_end: req.body.trial_ends_at,
       });
+
+      // Ver nota en extend-trial: tenants.trial_ends_at es la columna que
+      // valida el acceso, hay que mantenerla en sincro con la suscripción.
+      await Tenant.update(
+        { trial_ends_at: req.body.trial_ends_at, subscription_status: 'trial' },
+        { where: { id: req.params.tenantId } }
+      );
+
       res.json({ subscription });
     } catch (error) {
       res.status(500).json({ error: 'Error al establecer fecha' });
@@ -1947,6 +1979,166 @@ router.post(
     } catch (error) {
       console.error('Error sincronizando tenants con NCF:', error);
       res.status(500).json({ error: error.message || 'Error al sincronizar con el Núcleo' });
+    }
+  }
+);
+
+// ============================================
+// INTEGRACIÓN CON META (Facebook/Instagram Lead Ads, WhatsApp Cloud API)
+// ============================================
+// meta_config es un singleton -- la App de Meta que Pitbox registró, usada
+// para el OAuth de "cuenta propia" de cualquier tenant y como App/página
+// compartida del modo "servicio Pitbox". Ver models/payments/MetaConfig.js.
+
+/**
+ * GET /api/v1/superadmin/meta-config
+ */
+router.get(
+  '/meta-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const MetaConfig = require('../models/payments/MetaConfig');
+      let config = await MetaConfig.findOne();
+      if (!config) config = await MetaConfig.create({});
+
+      res.json({
+        success: true,
+        config: {
+          id: config.id,
+          app_id: config.app_id || null,
+          has_app_secret: !!config.app_secret,
+          has_webhook_verify_token: !!config.webhook_verify_token,
+          shared_page_id: config.shared_page_id || null,
+          shared_waba_id: config.shared_waba_id || null,
+          has_shared_system_user_token: !!config.shared_system_user_token,
+          is_active: config.is_active,
+          last_test_at: config.last_test_at,
+          last_test_ok: config.last_test_ok,
+          last_test_message: config.last_test_message,
+          webhook_url_a_configurar_en_meta: `${process.env.BACKEND_PUBLIC_URL || 'https://TU-DOMINIO-PITBOX'}/api/webhooks/meta`,
+        },
+      });
+    } catch (error) {
+      console.error('Error fetching Meta config:', error);
+      res.status(500).json({ error: 'Error al obtener configuración de Meta' });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/meta-config
+ * Los secretos solo se sobreescriben si vienen en el body (nunca se
+ * devuelven en el GET) -- mismo criterio que /ncf-config.
+ */
+router.post(
+  '/meta-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { app_id, app_secret, webhook_verify_token, shared_page_id, shared_waba_id, shared_system_user_token, is_active } = req.body;
+
+      const MetaConfig = require('../models/payments/MetaConfig');
+      let config = await MetaConfig.findOne();
+
+      const updates = {};
+      if (app_id !== undefined) updates.app_id = app_id;
+      if (app_secret) updates.app_secret = app_secret;
+      if (webhook_verify_token) updates.webhook_verify_token = webhook_verify_token;
+      if (shared_page_id !== undefined) updates.shared_page_id = shared_page_id;
+      if (shared_waba_id !== undefined) updates.shared_waba_id = shared_waba_id;
+      if (shared_system_user_token) updates.shared_system_user_token = shared_system_user_token;
+      if (is_active !== undefined) updates.is_active = is_active;
+
+      if (config) {
+        await config.update(updates);
+      } else {
+        config = await MetaConfig.create(updates);
+      }
+
+      res.json({ success: true, message: 'Configuración de Meta guardada correctamente' });
+    } catch (error) {
+      console.error('Error saving Meta config:', error);
+      res.status(500).json({ error: 'Error al guardar configuración de Meta', details: error.message });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/meta-config/probar-conexion
+ */
+router.post(
+  '/meta-config/probar-conexion',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const metaClient = require('../services/meta/metaClient');
+      const result = await metaClient.probarConexion();
+      res.json({ success: result.ok, ...result });
+    } catch (error) {
+      console.error('Error probando conexión con Meta:', error);
+      res.status(500).json({ error: 'Error al probar la conexión', details: error.message });
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/meta-config/tenants
+ * Estado de la conexión de Meta de todos los tenants -- para ver de un
+ * vistazo quién está en modo propio/compartido y a quién le falta mapear
+ * formularios de Lead Ads en modo compartido.
+ */
+router.get(
+  '/meta-config/tenants',
+  authMiddleware,
+  checkPermission('superadmin.view_all'),
+  async (req, res) => {
+    try {
+      const TenantMetaConfig = require('../models/payments/TenantMetaConfig');
+      const configs = await TenantMetaConfig.findAll({
+        include: [{ model: Tenant, as: 'tenant', attributes: ['id', 'company_name', 'business_name'] }],
+        order: [['updated_at', 'DESC']],
+      });
+      res.json({ success: true, configs });
+    } catch (error) {
+      console.error('Error listing tenant Meta configs:', error);
+      res.status(500).json({ error: 'Error al listar las conexiones de Meta' });
+    }
+  }
+);
+
+/**
+ * PUT /api/v1/superadmin/meta-config/tenants/:tenantId/lead-forms
+ * Asigna manualmente qué IDs de formulario de Lead Ads (bajo la página
+ * compartida) le pertenecen a este tenant -- solo aplica en modo 'pitbox'.
+ * Body: { form_ids: ['123', '456'] }
+ */
+router.put(
+  '/meta-config/tenants/:tenantId/lead-forms',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { form_ids } = req.body;
+      if (!Array.isArray(form_ids)) {
+        return res.status(400).json({ error: 'form_ids debe ser un array de strings' });
+      }
+
+      const TenantMetaConfig = require('../models/payments/TenantMetaConfig');
+      const config = await TenantMetaConfig.findOne({ where: { tenant_id: req.params.tenantId } });
+      if (!config) return res.status(404).json({ error: 'Este tenant no tiene una conexión de Meta iniciada' });
+      if (config.provider_mode !== 'pitbox') {
+        return res.status(400).json({ error: 'Este tenant no está en modo "servicio Pitbox" -- el mapeo de formularios no aplica' });
+      }
+
+      await config.update({ pitbox_lead_form_ids: form_ids });
+      res.json({ success: true, message: 'Formularios asignados correctamente', config });
+    } catch (error) {
+      console.error('Error asignando formularios de Meta:', error);
+      res.status(500).json({ error: 'Error al asignar los formularios' });
     }
   }
 );

@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const ctrl = require('../../controllers/workshop/workOrders.controller');
+const { checkAccountOwnership } = require('../../middleware/checkAccountOwnership');
+const { checkRole } = require('../../middleware/auth');
+const { requireModule } = require('../../middleware/checkModule');
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -17,10 +20,16 @@ router.get('/productivity', ctrl.productivity);
 router.get('/', ctrl.list);
 router.get('/:id/pdf', ctrl.generatePDF);
 router.get('/:id', ctrl.getById);
-router.post('/', ctrl.create);
+router.post('/', checkAccountOwnership, ctrl.create);
 router.put('/:id', ctrl.update);
 router.patch('/:id/status', ctrl.changeStatus);
 router.patch('/:id/checklist', ctrl.updateChecklist);
+
+// Convertir cotización (sales.document_type='cotizacion') en OT — solo
+// tenants con módulo Taller (ya validado a nivel de app.use en server.js,
+// pero se repite acá el checkRole porque no toda persona con acceso a
+// Taller debería poder cerrar cotizaciones ajenas de venta).
+router.post('/from-quote/:saleId', requireModule('workshop'), checkRole('seller', 'technician', 'manager', 'admin', 'super_admin'), ctrl.convertQuoteToWorkOrder);
 
 // Ítems
 router.post('/:id/items', ctrl.addItem);

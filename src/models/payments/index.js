@@ -7,9 +7,13 @@
 const SuperAdminMercadoPagoConfig = require('./SuperAdminMercadoPagoConfig');
 const TenantMercadoPagoConfig = require('./TenantMercadoPagoConfig');
 const NcfConfig = require('./NcfConfig');
+const MetaConfig = require('./MetaConfig');
+const TenantMetaConfig = require('./TenantMetaConfig');
 
 module.exports = {
   SuperAdminMercadoPagoConfig,
   TenantMercadoPagoConfig,
   NcfConfig,
+  MetaConfig,
+  TenantMetaConfig,
 };

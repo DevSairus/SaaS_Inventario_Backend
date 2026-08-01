@@ -11,6 +11,21 @@ const MODULES_CATALOG = [
   { key: 'treasury', label: 'Tesorería', dependsOn: ['sales', 'inventory'], reserved: false },
   { key: 'accounting', label: 'Contabilidad', dependsOn: ['treasury', 'sales', 'inventory'], reserved: false },
   { key: 'ai_assistant', label: 'NEXA (Asistente IA)', dependsOn: [], reserved: false },
+  // CRM: núcleo (pipeline, interacciones, vista 360°) sirve a cualquier
+  // vertical; la conversión cotización→OT se especializa cuando además
+  // 'workshop' está activo (ver workOrders.controller.js: convertQuoteToWorkOrder).
+  { key: 'crm', label: 'CRM', dependsOn: ['sales'], reserved: false },
+  // Integración de leads de Meta (Facebook/Instagram Lead Ads) dentro del
+  // pipeline del CRM. Costo separado del CRM base porque en modo "servicio
+  // Pitbox" (sin cuenta propia de Meta) hay infraestructura compartida de
+  // por medio -- ver TenantMetaConfig.provider_mode.
+  { key: 'crm_meta_leads', label: 'CRM: Integración con Meta', dependsOn: ['crm'], reserved: false },
+  // Módulo Ensambladora -- operación diaria del centro autorizado (CSA/PDV)
+  // sincronizada con el Core Ensambladora (sistema independiente, ver
+  // ensambladora-vehiculos-diseno.md). Depende de 'workshop' porque extiende
+  // el patrón WorkOrder para alistamiento/entrega/revisión/garantía (que a su
+  // vez ya trae 'sales' e 'inventory' por dependencia transitiva).
+  { key: 'ensambladora', label: 'Ensambladora', dependsOn: ['workshop'], reserved: false },
 ];
 
 const MODULES_BY_KEY = MODULES_CATALOG.reduce((acc, m) => {

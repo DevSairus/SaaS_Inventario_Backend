@@ -79,6 +79,35 @@ const Customer = sequelize.define('Customer', {
     type: DataTypes.BOOLEAN,
     defaultValue: true,
   },
+  // ── CRM (Fase 1) ────────────────────────────────────────────
+  owner_user_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'users', key: 'id' },
+    onDelete: 'SET NULL',
+    comment: 'Asesor/vendedor dueño de la cuenta (informativo salvo que is_assigned_account=true)',
+  },
+  is_assigned_account: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    comment: 'Si es true, solo owner_user_id (o manager/admin) puede cotizar/vender/abrir OT para este cliente',
+  },
+  lifecycle_stage: {
+    type: DataTypes.ENUM('prospecto', 'activo', 'inactivo', 'en_riesgo', 'perdido'),
+    allowNull: true,
+    comment: 'Calculado por job nocturno a partir de compras e interacciones',
+  },
+  last_interaction_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    comment: 'Desnormalizado desde CustomerInteraction para ordenar listados sin JOIN',
+  },
+  next_vehicle_service_due: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+    comment: 'Solo aplica con módulo Taller activo — desnormalizado desde Vehicle/WorkOrder',
+  },
 }, {
   tableName: 'customers',
   timestamps: true,
@@ -88,6 +117,8 @@ const Customer = sequelize.define('Customer', {
     { fields: ['tenant_id'] },
     { fields: ['tenant_id', 'is_active'] },
     { fields: ['tenant_id', 'tax_id'], unique: true },
+    { fields: ['tenant_id', 'owner_user_id'] },
+    { fields: ['tenant_id', 'lifecycle_stage'] },
   ],
 });
 

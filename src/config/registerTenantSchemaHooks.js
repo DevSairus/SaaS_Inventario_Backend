@@ -55,6 +55,18 @@ const PUBLIC_SCHEMA_MODELS = new Set([
   // desde un contexto de tenant sin darse cuenta, terminaría apuntando
   // al `ncf_config` vacío de ese schema en vez de la fila real de public.
   'NcfConfig',
+  // Integración con Meta -- igual razón que NcfConfig: un webhook entrante
+  // todavía no sabe a qué tenant pertenece (se resuelve por page_id/waba_id/
+  // form_id), así que TenantMetaConfig tiene que ser consultable sin haber
+  // fijado antes el schema de ningún tenant. Ver TenantMetaConfig.js.
+  'MetaConfig',
+  'TenantMetaConfig',
+  // Sincronización con el Core Ensambladora -- mismo motivo que TenantMetaConfig:
+  // un evento entrante en /api/webhooks/ensambladora/sync/inbound todavía no
+  // sabe a qué tenant pertenece, se resuelve por X-Api-Key ANTES de poder fijar
+  // el search_path del tenant. Ver ensambladora/EnsambladoraSyncCredential.js.
+  'EnsambladoraSyncCredential',
+  'EnsambladoraEventoSync',
 ]);
 
 function registerTenantSchemaHooks(sequelize) {

@@ -53,6 +53,8 @@ const SubscriptionInvoice = require('./subscriptions/SubscriptionInvoice');
 const SuperAdminMercadoPagoConfig = require('./payments/SuperAdminMercadoPagoConfig');
 const TenantMercadoPagoConfig = require('./payments/TenantMercadoPagoConfig');
 const NcfConfig = require('./payments/NcfConfig');
+const MetaConfig = require('./payments/MetaConfig');
+const TenantMetaConfig = require('./payments/TenantMetaConfig');
 
 // ✅ NUEVO - Sistema de Anuncios
 const Announcement = require('./Announcement');
@@ -71,6 +73,31 @@ const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSet
 const DiagramTemplate = require('./workshop/DiagramTemplate');
 const WorkOrderDiagnosisMark = require('./workshop/WorkOrderDiagnosisMark');
 const SaleDiagnosisMark = require('./sales/SaleDiagnosisMark');
+
+// ✅ NUEVO - CRM (Fase 1)
+const CustomerInteraction = require('./crm/CustomerInteraction');
+// ✅ NUEVO - CRM (Fase 2)
+const Opportunity = require('./crm/Opportunity');
+const FollowUpTask = require('./crm/FollowUpTask');
+const CustomerTag = require('./crm/CustomerTag');
+const CustomerTagAssignment = require('./crm/CustomerTagAssignment');
+// ✅ NUEVO - CRM (Fase B.3 / B.4)
+const CrmPipelineStage = require('./crm/CrmPipelineStage');
+const CrmLossReason = require('./crm/CrmLossReason');
+const CrmMessageTemplate = require('./crm/CrmMessageTemplate');
+// ✅ NUEVO - CRM (Fase C.1) — motor de automatizaciones configurables
+const CrmAutomationRule = require('./crm/CrmAutomationRule');
+const CrmAutomationRuleLog = require('./crm/CrmAutomationRuleLog');
+
+// ✅ NUEVO - Módulo Ensambladora (sincronización con Core Ensambladora, Fase 0)
+const EnsambladoraSyncCredential = require('./ensambladora/EnsambladoraSyncCredential');
+const EnsambladoraEventoSync = require('./ensambladora/EnsambladoraEventoSync');
+// ✅ NUEVO - Módulo Ensambladora, Fase 1 (cache local de vehículos consultados)
+const VehiculoCache = require('./ensambladora/VehiculoCache');
+// ✅ NUEVO - Módulo Ensambladora, Fase 2 (ciclo de vida: venta, alistamiento, entrega)
+const EnsambladoraVenta = require('./ensambladora/EnsambladoraVenta');
+const EnsambladoraOrdenAlistamiento = require('./ensambladora/EnsambladoraOrdenAlistamiento');
+const EnsambladoraOrdenEntrega = require('./ensambladora/EnsambladoraOrdenEntrega');
 
 // ✅ NUEVO - Catálogo normalizado de vehículos (Fase 6)
 const VehicleBrand = require('./workshop/VehicleBrand');
@@ -201,6 +228,12 @@ TenantSubscription.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'subscriptionPlan' });
 SubscriptionPlan.hasMany(Tenant, { foreignKey: 'plan_id', as: 'tenants' });
 
+// Módulo Ensambladora — credenciales y outbox/inbox de sincronización
+Tenant.hasOne(EnsambladoraSyncCredential, { foreignKey: 'tenant_id', as: 'ensambladora_credential' });
+EnsambladoraSyncCredential.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(EnsambladoraEventoSync, { foreignKey: 'tenant_id', as: 'ensambladora_eventos_sync' });
+EnsambladoraEventoSync.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
 // ── Contabilidad ──────────────────────────────────────────────────
 Tenant.hasMany(ChartOfAccount, { foreignKey: 'tenant_id', as: 'chart_of_accounts' });
 ChartOfAccount.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -247,6 +280,9 @@ Invoice.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 
 TenantMercadoPagoConfig.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.hasOne(TenantMercadoPagoConfig, { foreignKey: 'tenant_id', as: 'mercadopago_config' });
+
+TenantMetaConfig.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasOne(TenantMetaConfig, { foreignKey: 'tenant_id', as: 'meta_config' });
 
 Permission.hasMany(RolePermission, { foreignKey: 'permission_id', as: 'role_permissions' });
 RolePermission.belongsTo(Permission, { foreignKey: 'permission_id', as: 'permission' });
@@ -430,6 +466,43 @@ WorkOrder.belongsTo(Sale, { foreignKey: 'quote_sale_id', as: 'quote_sale' });
 Sale.hasOne(WorkOrder, { foreignKey: 'quote_sale_id', as: 'work_order_from_quote' });
 Sale.belongsTo(WorkOrder, { foreignKey: 'converted_to_work_order_id', as: 'converted_work_order' });
 
+// ── CRM (Fase 1) ─────────────────────────────────────────────────────────────
+// Customer ↔ User (asesor/vendedor dueño de la cuenta)
+Customer.belongsTo(User, { foreignKey: 'owner_user_id', as: 'owner' });
+User.hasMany(Customer, { foreignKey: 'owner_user_id', as: 'owned_customers' });
+
+// CustomerInteraction ↔ Customer / User / Sale / WorkOrder
+Customer.hasMany(CustomerInteraction, { foreignKey: 'customer_id', as: 'interactions' });
+CustomerInteraction.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+CustomerInteraction.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+CustomerInteraction.belongsTo(Sale, { foreignKey: 'related_sale_id', as: 'related_sale' });
+CustomerInteraction.belongsTo(WorkOrder, { foreignKey: 'related_work_order_id', as: 'related_work_order' });
+
+// ── CRM (Fase 2) — pipeline, seguimiento y segmentación ──────────────────────
+Customer.hasMany(Opportunity, { foreignKey: 'customer_id', as: 'opportunities' });
+Opportunity.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Opportunity.belongsTo(User, { foreignKey: 'owner_user_id', as: 'owner' });
+Opportunity.belongsTo(Sale, { foreignKey: 'quote_sale_id', as: 'quote_sale' });
+Sale.hasOne(Opportunity, { foreignKey: 'quote_sale_id', as: 'opportunity' });
+Opportunity.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+Opportunity.hasMany(FollowUpTask, { foreignKey: 'opportunity_id', as: 'follow_up_tasks' });
+
+Customer.hasMany(FollowUpTask, { foreignKey: 'customer_id', as: 'follow_up_tasks' });
+FollowUpTask.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+FollowUpTask.belongsTo(Opportunity, { foreignKey: 'opportunity_id', as: 'opportunity' });
+FollowUpTask.belongsTo(User, { foreignKey: 'assigned_to_user_id', as: 'assigned_to' });
+FollowUpTask.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'created_by' });
+
+Customer.belongsToMany(CustomerTag, { through: CustomerTagAssignment, foreignKey: 'customer_id', otherKey: 'customer_tag_id', as: 'tags' });
+CustomerTag.belongsToMany(Customer, { through: CustomerTagAssignment, foreignKey: 'customer_tag_id', otherKey: 'customer_id', as: 'customers' });
+
+// ── CRM (Fase C.1) — motor de automatizaciones ────────────────────────────
+CrmAutomationRule.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'created_by' });
+CrmAutomationRule.belongsTo(User, { foreignKey: 'last_round_robin_user_id', as: 'last_round_robin_user' });
+CrmAutomationRule.hasMany(CrmAutomationRuleLog, { foreignKey: 'automation_rule_id', as: 'logs' });
+CrmAutomationRuleLog.belongsTo(CrmAutomationRule, { foreignKey: 'automation_rule_id', as: 'rule' });
+CrmAutomationRuleLog.belongsTo(Opportunity, { foreignKey: 'opportunity_id', as: 'opportunity' });
+
 // WorkOrderItem ↔ User (técnico responsable del ítem)
 WorkOrderItem.belongsTo(User, { foreignKey: 'technician_id', as: 'item_technician' });
 User.hasMany(WorkOrderItem, { foreignKey: 'technician_id', as: 'work_order_items_assigned' });
@@ -579,6 +652,8 @@ module.exports = {
   SuperAdminMercadoPagoConfig,
   TenantMercadoPagoConfig,
   NcfConfig,
+  MetaConfig,
+  TenantMetaConfig,
   Customer,
   Sale,
   SaleItem,
@@ -627,4 +702,20 @@ module.exports = {
   RemoteSupportSession,
   VehicleBrand,
   VehicleLine,
+  CustomerInteraction,
+  Opportunity,
+  FollowUpTask,
+  CustomerTag,
+  CustomerTagAssignment,
+  CrmPipelineStage,
+  CrmLossReason,
+  CrmMessageTemplate,
+  CrmAutomationRule,
+  CrmAutomationRuleLog,
+  EnsambladoraSyncCredential,
+  EnsambladoraEventoSync,
+  VehiculoCache,
+  EnsambladoraVenta,
+  EnsambladoraOrdenAlistamiento,
+  EnsambladoraOrdenEntrega,
 };

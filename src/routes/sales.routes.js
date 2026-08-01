@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const salesController = require('../controllers/sales/sales.controller');
 const voidSale        = require('../controllers/sales/voidSale');
+const { checkAccountOwnership } = require('../middleware/checkAccountOwnership');
 
 // Estadísticas (debe ir antes de /:id)
 router.get('/stats', salesController.getStats);
@@ -10,7 +11,9 @@ router.get('/stats', salesController.getStats);
 // CRUD de ventas
 router.get('/',    salesController.getAll);
 router.get('/:id', salesController.getById);
-router.post('/',   salesController.create);
+// checkAccountOwnership: no bloquea nada salvo que el customer_id sea una
+// cuenta marcada explícitamente como asignada a otro asesor (§5-bis CRM).
+router.post('/',   checkAccountOwnership, salesController.create);
 router.put('/:id', salesController.update);
 router.delete('/:id', salesController.delete);
 

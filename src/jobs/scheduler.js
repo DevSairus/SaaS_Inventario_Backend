@@ -26,6 +26,24 @@ const JOBS = [
     },
   },
   {
+    name: 'crm-lifecycle',
+    schedule: '30 5 * * *', // 5:30am hora Colombia — antes de que arranque operación
+    run: async () => {
+      const { runCrmLifecycleJob } = require('../services/crmLifecycleService');
+      const result = await runCrmLifecycleJob();
+      return [result]; // envuelto en array para que el log de "elementos" del scheduler tenga sentido
+    },
+  },
+  {
+    name: 'crm-automation-rules',
+    schedule: '*/30 * * * *', // cada 30 min -- una regla tipo "sin contactar hace 2h" pierde sentido si solo se revisa una vez al día
+    run: async () => {
+      const { runPollingRules } = require('../services/crmAutomationEngine');
+      const result = await runPollingRules();
+      return [result];
+    },
+  },
+  {
     name: 'stock-alerts',
     schedule: '0 * * * *', // cada hora en punto (no depende de timezone)
     run: async () => {

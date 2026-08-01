@@ -157,6 +157,16 @@ const transfersRoutes               = require('./routes/inventory/transfers.rout
 const internalConsumptionsRoutes    = require('./routes/inventory/internalConsumptions.routes');
 const customerReturnsRoutes         = require('./routes/sales/customerReturns.routes');
 const saleWorkshopDiagnosisRoutes   = require('./routes/sales/workshopDiagnosis.routes');
+const crmCustomers360Routes         = require('./routes/crm/customers360.routes');
+const crmOpportunitiesRoutes        = require('./routes/crm/opportunities.routes');
+const crmFollowupsRoutes            = require('./routes/crm/followups.routes');
+const crmTagsRoutes                 = require('./routes/crm/tags.routes');
+const crmDashboardRoutes            = require('./routes/crm/dashboard.routes');
+const crmMetaIntegrationRoutes      = require('./routes/crm/metaIntegration.routes');
+const crmPipelineStagesRoutes       = require('./routes/crm/pipelineStages.routes');
+const crmLossReasonsRoutes          = require('./routes/crm/lossReasons.routes');
+const crmMessageTemplatesRoutes     = require('./routes/crm/messageTemplates.routes');
+const crmAutomationRulesRoutes      = require('./routes/crm/automationRules.routes');
 
 // Anuncios
 const announcementsRoutes           = require('./routes/announcements.routes');
@@ -181,7 +191,12 @@ const cronRoutes                    = require('./routes/cron.routes');
 const whatsappRoutes  = require('./routes/whatsapp.routes');
 const publicPdfRoutes = require('./routes/publicPdf.routes');
 const ncfWebhookRoutes = require('./routes/ncfWebhook.routes');
+const metaWebhookRoutes = require('./routes/metaWebhook.routes');
 const dianRoutes                    = require('./routes/dian.routes');
+const ensambladoraSyncRoutes        = require('./routes/ensambladora/sync.routes');
+const ensambladoraEventsRoutes      = require('./routes/ensambladora/events.routes');
+const ensambladoraVehiculosRoutes   = require('./routes/ensambladora/vehiculos.routes');
+const ensambladoraCicloVidaRoutes   = require('./routes/ensambladora/ciclovida.routes');
 
 // Rate limiting global
 app.use('/api/', generalLimiter);
@@ -198,6 +213,8 @@ app.use('/api/public/pdf', publicPdfRoutes);
 app.use('/api/superadmin', authMiddleware, superadminRoutes);
 app.use('/api/superadmin/support', authMiddleware, superadminSupportRoutes);
 app.use('/api/webhooks/ncf', ncfWebhookRoutes);
+app.use('/api/webhooks/meta', metaWebhookRoutes);
+app.use('/api/webhooks/ensambladora/sync', ensambladoraSyncRoutes);
 
 // ── Anuncios (sin tenant) ──
 app.use('/api/announcements', authMiddleware, announcementsRoutes);
@@ -239,6 +256,18 @@ app.use('/api/sales',                          authMiddleware, tenantMiddleware,
 // /api/sales, pero solo para tenants con el módulo Taller activo.
 app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('workshop'), saleWorkshopDiagnosisRoutes);
 app.use('/api/customers',                      authMiddleware, tenantMiddleware, customersRoutes);
+// CRM (Fase 1): interacciones, vista 360°, asignación de cuenta. Núcleo
+// genérico — no depende de Taller (ver módulo 'crm' en modules.catalog.js).
+app.use('/api/crm/customers',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmCustomers360Routes);
+app.use('/api/crm/opportunities',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmOpportunitiesRoutes);
+app.use('/api/crm/followups',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmFollowupsRoutes);
+app.use('/api/crm/tags',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmTagsRoutes);
+app.use('/api/crm/dashboard',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmDashboardRoutes);
+app.use('/api/crm/meta-integration',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm_meta_leads'), crmMetaIntegrationRoutes);
+app.use('/api/crm/pipeline-stages',            authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmPipelineStagesRoutes);
+app.use('/api/crm/loss-reasons',                authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmLossReasonsRoutes);
+app.use('/api/crm/message-templates',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmMessageTemplatesRoutes);
+app.use('/api/crm/automation-rules',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmAutomationRulesRoutes);
 app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
 app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);
 app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), expensesRoutes);
@@ -265,6 +294,9 @@ app.use('/api/dian',                           authMiddleware, tenantMiddleware,
 // de cuentas — no había segregación de funciones.
 app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, requireModule('accounting'), checkRole('admin', 'super_admin', 'manager', 'accountant'), accountingRoutes);
 app.use('/api/ai-assistant',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ai_assistant'), aiAssistantRoutes);
+app.use('/api/ensambladora/sync',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraEventsRoutes);
+app.use('/api/ensambladora/vehiculos',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraVehiculosRoutes);
+app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraCicloVidaRoutes);
 
 const path = require('path');
 // /uploads/logos eliminado — logos ahora en Cloudinary (Vercel stateless)
