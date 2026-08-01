@@ -13,17 +13,23 @@ module.exports = {
       DECLARE
         udt text;
       BEGIN
+        -- table_schema = current_schema() es obligatorio: sin él, esta consulta
+        -- matchea el "opportunities.source" de CUALQUIER schema visible (schema-
+        -- per-tenant), así que en un tenant que todavía no tiene la tabla podía
+        -- leer el udt_name de OTRO tenant y luego intentar "ALTER TYPE" sobre un
+        -- tipo que no existe en el search_path de este tenant.
         SELECT udt_name INTO udt
         FROM information_schema.columns
-        WHERE table_name = 'opportunities' AND column_name = 'source';
+        WHERE table_schema = current_schema() AND table_name = 'opportunities' AND column_name = 'source';
 
-        IF udt NOT IN ('varchar', 'text', 'bpchar') THEN
+        IF udt IS NOT NULL AND udt NOT IN ('varchar', 'text', 'bpchar') THEN
           IF NOT EXISTS (
             SELECT 1 FROM pg_enum e
             JOIN pg_type t ON t.oid = e.enumtypid
-            WHERE t.typname = udt AND e.enumlabel = 'meta_ads'
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = current_schema() AND t.typname = udt AND e.enumlabel = 'meta_ads'
           ) THEN
-            EXECUTE format('ALTER TYPE %I ADD VALUE %L', udt, 'meta_ads');
+            EXECUTE format('ALTER TYPE %I.%I ADD VALUE %L', current_schema(), udt, 'meta_ads');
           END IF;
         END IF;
       END $$;
