@@ -382,6 +382,18 @@ if (!isVercel) {
         }
       }
 
+      // Reconciliar plan de cuentas + mappings contables (incluye la cuenta
+      // puente de saldos iniciales) para todos los tenants, viejos y nuevos --
+      // ver reconcileAccountingSeed.js para por qué esto no puede depender
+      // solo de una migración one-shot.
+      try {
+        const { reconcileAccountingSeedAllTenants } = require('./scripts/reconcileAccountingSeed');
+        const result = await reconcileAccountingSeedAllTenants();
+        console.log(`[AccountingSeed] Tenants revisados: ${result.ok.length}/${result.total}` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
+      } catch (err) {
+        console.error('[AccountingSeed] Error reconciliando plan de cuentas:', err.message);
+      }
+
       // Siembrar diagramas base si no existen (o actualizar si cambiaron)
       try {
         const { seedDiagramTemplates } = require('./services/seedDiagramTemplates');
@@ -425,6 +437,15 @@ if (!isVercel) {
       } catch (err) {
         console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
       }
+    }
+    // Reconciliar plan de cuentas + mappings contables -- ver comentario en
+    // la rama Railway/local más arriba.
+    try {
+      const { reconcileAccountingSeedAllTenants } = require('./scripts/reconcileAccountingSeed');
+      const result = await reconcileAccountingSeedAllTenants();
+      console.log(`[AccountingSeed] Tenants revisados: ${result.ok.length}/${result.total}` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
+    } catch (err) {
+      console.error('[AccountingSeed] Error reconciliando plan de cuentas:', err.message);
     }
     // Siembrar diagramas base
     try {

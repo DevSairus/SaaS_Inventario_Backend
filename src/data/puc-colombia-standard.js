@@ -68,6 +68,13 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '360505', name: 'Utilidad del Ejercicio', type: 'patrimonio', parent_code: '36', accepts_entries: true },
   { code: '37', name: 'Resultados de Ejercicios Anteriores', type: 'patrimonio', parent_code: '3', accepts_entries: false },
   { code: '370505', name: 'Utilidades Acumuladas', type: 'patrimonio', parent_code: '37', accepts_entries: true },
+  // Cuenta puente usada solo mientras se cargan los saldos iniciales de
+  // apertura (cartera/proveedores/cuentas/inventario) -- ver
+  // services/accounting/openingBalance.service.js. Cada saldo inicial se
+  // contabiliza contra esta cuenta y se cierra manualmente cuando ya se
+  // cargaron todos los saldos (bridge-status/close).
+  { code: '38', name: 'Superávit de Capital', type: 'patrimonio', parent_code: '3', accepts_entries: false },
+  { code: '380505', name: 'Cuenta Puente — Saldos de Apertura', type: 'patrimonio', parent_code: '38', accepts_entries: true },
 
   // ══════════════ CLASE 4 — INGRESOS ══════════════
   { code: '4', name: 'INGRESOS', type: 'ingreso', parent_code: null, accepts_entries: false },
@@ -145,6 +152,8 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   // del año (ingresos - costos - gastos) a patrimonio.
   year_end_result: '360505',        // Utilidad del Ejercicio (año que se está cerrando)
   year_end_accumulated: '370505',   // Utilidades Acumuladas (años anteriores ya cerrados)
+
+  opening_balance_suspense: '380505', // Cuenta puente para saldos iniciales (cartera, cuentas, inventario)
 };
 
 module.exports = { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS };
