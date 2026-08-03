@@ -14,6 +14,7 @@
 const axios = require('axios');
 const crypto = require('crypto');
 const MetaConfig = require('../../models/payments/MetaConfig');
+const TenantMetaConfig = require('../../models/payments/TenantMetaConfig');
 const logger = require('../../config/logger') || console;
 
 const GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v19.0';
@@ -118,19 +119,42 @@ async function getLeadDetails(leadgenId, pageAccessToken) {
 }
 
 /**
+ * Página (id de Facebook) que administra un App propia de tenant o el App
+ * compartido de Pitbox -- resuelve con qué App Secret hay que verificar la
+ * firma de un webhook entrante, ANTES de confiar en el body. Cada tenant en
+ * modo "own" con su propia App recibe los webhooks de su propia página
+ * firmados con SU app_secret, no con el de Pitbox -- por eso no alcanza un
+ * único secret global (a diferencia del modo "pitbox", que sí comparte
+ * página y App con todos los tenants en ese modo).
+ */
+async function resolveAppSecretForPage(pageId) {
+  if (pageId) {
+    const tenantConfig = await TenantMetaConfig.findOne({
+      where: { provider_mode: 'own', own_page_id: pageId },
+    });
+    if (tenantConfig?.own_app_secret) {
+      return { appSecret: tenantConfig.own_app_secret, source: 'own' };
+    }
+  }
+  const config = await getConfig();
+  if (config?.app_secret) return { appSecret: config.app_secret, source: 'pitbox' };
+  return { appSecret: null, source: null };
+}
+
+/**
  * Verifica la firma `X-Hub-Signature-256: sha256=<hex>` que Meta manda en
  * cada webhook, calculada como HMAC-SHA256 del body crudo usando el App
- * Secret. Mismo patrón que ncfClient.verificarFirmaWebhook.
+ * Secret correspondiente (ver resolveAppSecretForPage -- el caller ya lo
+ * resolvió antes de llamar acá). Mismo patrón que ncfClient.verificarFirmaWebhook.
  */
-async function verificarFirmaWebhook(rawBody, signatureHeader) {
-  const config = await getConfig();
-  if (!config?.app_secret) {
-    logger.warn('[Meta] app_secret no configurado -- se omite verificación (inseguro, solo dev)');
+async function verificarFirmaWebhook(rawBody, signatureHeader, appSecret) {
+  if (!appSecret) {
+    logger.warn('[Meta] no se pudo resolver ningún app_secret -- se omite verificación (inseguro, solo dev)');
     return true;
   }
   if (!signatureHeader || !signatureHeader.startsWith('sha256=')) return false;
 
-  const expected = crypto.createHmac('sha256', config.app_secret).update(rawBody).digest('hex');
+  const expected = crypto.createHmac('sha256', appSecret).update(rawBody).digest('hex');
   const received = signatureHeader.slice('sha256='.length);
   const a = Buffer.from(expected);
   const b = Buffer.from(received);
@@ -140,16 +164,26 @@ async function verificarFirmaWebhook(rawBody, signatureHeader) {
 
 /**
  * Handshake GET que Meta hace UNA vez al configurar la suscripción del
- * webhook en el dashboard de la App (hub.mode=subscribe, hub.verify_token,
- * hub.challenge). Hay que devolver hub.challenge tal cual si el token
- * coincide con el guardado en MetaConfig.
+ * webhook en el dashboard de cada App (hub.mode=subscribe, hub.verify_token,
+ * hub.challenge). El handshake no trae ningún identificador de tenant/página,
+ * solo el token -- hay que aceptarlo si coincide con el de Pitbox (modo
+ * "pitbox") O con el que cualquier tenant registró en SU propia App (modo
+ * "own"). Hay que devolver hub.challenge tal cual si coincide con alguno.
  */
 async function verificarHandshake({ mode, verifyToken, challenge }) {
-  if (mode !== 'subscribe') return null;
+  if (mode !== 'subscribe' || !verifyToken) return null;
+
   const config = await getConfig();
-  if (!config?.webhook_verify_token) return null;
-  if (verifyToken !== config.webhook_verify_token) return null;
-  return challenge;
+  if (config?.webhook_verify_token && verifyToken === config.webhook_verify_token) {
+    return challenge;
+  }
+
+  const tenantConfig = await TenantMetaConfig.findOne({
+    where: { provider_mode: 'own', own_webhook_verify_token: verifyToken },
+  });
+  if (tenantConfig) return challenge;
+
+  return null;
 }
 
 async function probarConexion() {
@@ -185,6 +219,7 @@ module.exports = {
   listManagedPages,
   listLeadForms,
   getLeadDetails,
+  resolveAppSecretForPage,
   verificarFirmaWebhook,
   verificarHandshake,
   probarConexion,

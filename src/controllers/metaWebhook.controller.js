@@ -143,14 +143,22 @@ async function procesarLead({ leadgenId, formId, tenantConfig }) {
 async function handleWebhook(req, res) {
   const signature = req.headers['x-hub-signature-256'];
   const rawBody = req.rawBody;
+  const payload = req.body;
 
-  const valid = await metaClient.verificarFirmaWebhook(rawBody, signature);
+  // Un tenant en modo "own" con App propia firma sus webhooks con SU
+  // app_secret, no con el de Pitbox -- hay que resolver cuál usar según la
+  // página del primer entry ANTES de verificar (ver resolveAppSecretForPage).
+  // Todo un mismo request viene de una sola App, así que alcanza con el
+  // primer entry para elegir el secret candidato.
+  const firstPageId = payload?.entry?.[0]?.id;
+  const { appSecret } = await metaClient.resolveAppSecretForPage(firstPageId);
+
+  const valid = await metaClient.verificarFirmaWebhook(rawBody, signature, appSecret);
   if (!valid) {
     logger.warn('[Meta Webhook] Firma inválida, se ignora la notificación');
     return res.status(200).json({ received: true, ignored: true });
   }
 
-  const payload = req.body;
   if (payload?.object !== 'page') {
     return res.status(200).json({ received: true, ignored: true });
   }

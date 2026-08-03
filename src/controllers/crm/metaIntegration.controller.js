@@ -1,6 +1,8 @@
 // backend/src/controllers/crm/metaIntegration.controller.js
 // Conexión del tenant con Meta -- dos modos, ver TenantMetaConfig.js:
-//   'own'    -- OAuth contra la página/WABA propia del tenant.
+//   'own'    -- OAuth contra la App/página propia del tenant. El tenant trae
+//               su propia App de Meta for Developers (own_app_id/own_app_secret)
+//               -- no depende de que Pitbox tenga una App configurada.
 //   'pitbox' -- opt-in al App/página compartida de Pitbox; el mapeo de
 //               qué formularios de Lead Ads le pertenecen lo completa
 //               soporte/superadmin a mano (ver superadmin.routes.js),
@@ -30,6 +32,8 @@ const getStatus = async (req, res) => {
       data: {
         provider_mode: config.provider_mode,
         is_active: config.is_active,
+        own_app_id: config.own_app_id || null,
+        has_own_app_secret: !!config.own_app_secret,
         own_page_name: config.own_page_name || null,
         own_page_id: config.own_page_id || null,
         has_own_token: !!config.own_access_token,
@@ -47,16 +51,35 @@ const getStatus = async (req, res) => {
 
 // Devuelve la URL del diálogo OAuth de Meta -- el frontend redirige al
 // usuario ahí (window.location.href = url), no es un fetch de background.
+// El modo "own" usa la App de Meta PROPIA del tenant (own_app_id/own_app_secret),
+// no la App global de Pitbox -- por eso primero guarda esas credenciales
+// (si vienen en el body, ej. primera conexión) y arma la URL con su appId.
 const startOwnConnection = async (req, res) => {
   try {
-    const metaConfig = await metaClient.getConfig();
-    if (!metaConfig?.app_id) {
-      return res.status(400).json({ success: false, message: 'Pitbox todavía no tiene una App de Meta configurada -- contacta a soporte.' });
+    const { own_app_id, own_app_secret, own_webhook_verify_token } = req.body || {};
+
+    const [config] = await TenantMetaConfig.findOrCreate({ where: { tenant_id: req.tenant_id } });
+
+    const appId = own_app_id || config.own_app_id;
+    const appSecret = own_app_secret || config.own_app_secret;
+    if (!appId || !appSecret) {
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan el App ID y/o el App Secret de tu App de Meta for Developers.',
+      });
+    }
+
+    if (own_app_id || own_app_secret || own_webhook_verify_token) {
+      await config.update({
+        own_app_id: own_app_id || config.own_app_id,
+        own_app_secret: own_app_secret || config.own_app_secret,
+        own_webhook_verify_token: own_webhook_verify_token || config.own_webhook_verify_token,
+      });
     }
 
     const state = jwt.sign({ tenant_id: req.tenant_id, purpose: 'meta_oauth' }, JWT_SECRET, { expiresIn: '15m' });
     const url = metaClient.buildOAuthUrl({
-      appId: metaConfig.app_id,
+      appId,
       redirectUri: `${BACKEND_PUBLIC_URL}${CALLBACK_PATH}`,
       state,
     });
@@ -91,10 +114,14 @@ const handleOwnCallback = async (req, res) => {
   }
 
   try {
-    const metaConfig = await metaClient.getConfig();
+    const [config] = await TenantMetaConfig.findOrCreate({ where: { tenant_id: tenantId } });
+    if (!config.own_app_id || !config.own_app_secret) {
+      return redirectKo('Faltan las credenciales de tu App de Meta, intenta conectar de nuevo');
+    }
+
     const { access_token: userToken, expires_in } = await metaClient.exchangeCodeForLongLivedToken({
-      appId: metaConfig.app_id,
-      appSecret: metaConfig.app_secret,
+      appId: config.own_app_id,
+      appSecret: config.own_app_secret,
       redirectUri: `${BACKEND_PUBLIC_URL}${CALLBACK_PATH}`,
       code,
     });
@@ -107,7 +134,6 @@ const handleOwnCallback = async (req, res) => {
     // común (un tenant chico con una sola página).
     const page = pages[0];
 
-    const [config] = await TenantMetaConfig.findOrCreate({ where: { tenant_id: tenantId } });
     await config.update({
       provider_mode: 'own',
       is_active: true,

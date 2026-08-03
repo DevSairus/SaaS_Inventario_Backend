@@ -46,7 +46,21 @@ const TenantMetaConfig = sequelize.define(
     },
 
     // ── Modo "own" -- credenciales OAuth propias del tenant ────────────────
-    own_app_id: { type: DataTypes.STRING(100), allowNull: true },
+    own_app_id: {
+      type: DataTypes.STRING(100),
+      allowNull: true,
+      comment: 'App ID de la App de Meta for Developers propia del tenant (registrada por el tenant, no por Pitbox)',
+    },
+    own_app_secret: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      comment: 'App Secret de la App propia del tenant -- se usa para el intercambio OAuth (code -> token) y para verificar la firma de los webhooks que llegan bajo su own_page_id',
+    },
+    own_webhook_verify_token: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+      comment: 'Verify token que el tenant configuró en el producto Webhooks de SU App -- necesario porque el handshake de Meta no trae ningún identificador de tenant/página, solo el token',
+    },
     own_page_id: { type: DataTypes.STRING(100), allowNull: true },
     own_page_name: { type: DataTypes.STRING(255), allowNull: true },
     own_waba_id: { type: DataTypes.STRING(100), allowNull: true },
