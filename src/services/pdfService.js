@@ -191,15 +191,20 @@ const generateSalePDF = async (res, sale, tenant) => {
           sale.vehicle_color ? `(${sale.vehicle_color})` : null,
         ].filter(Boolean).join(' ');
         if (vehicleDesc) {
-          doc.font('Helvetica').fontSize(8).fillColor(darkGray).text(vehicleDesc, VX, vy, { width: VW });
-          vy += 11;
+          doc.font('Helvetica').fontSize(8).fillColor(darkGray);
+          doc.text(vehicleDesc, VX, vy, { width: VW });
+          vy += doc.heightOfString(vehicleDesc, { width: VW }) + 2;
         }
         if (sale.mileage) {
-          doc.font('Helvetica').fontSize(8).fillColor(gray).text(`Km: ${sale.mileage.toLocaleString('es-CO')}`, VX, vy, { width: VW });
-          vy += 11;
+          const kmLine = `Km: ${sale.mileage.toLocaleString('es-CO')}`;
+          doc.font('Helvetica').fontSize(8).fillColor(gray);
+          doc.text(kmLine, VX, vy, { width: VW });
+          vy += doc.heightOfString(kmLine, { width: VW }) + 2;
         }
         if (sale.technician_name) {
-          doc.font('Helvetica').fontSize(8).fillColor(gray).text(`Técnico: ${sale.technician_name}`, VX, vy, { width: VW });
+          const techLine = `Técnico: ${sale.technician_name}`;
+          doc.font('Helvetica').fontSize(8).fillColor(gray);
+          doc.text(techLine, VX, vy, { width: VW });
         }
       } else {
         doc.font('Helvetica').fontSize(8).fillColor(border).text('—', VX, VY + 12);
