@@ -676,100 +676,138 @@ const addItem = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT cerrada' });
     }
 
-    const { product_id, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId, requires_approval } = req.body;
-    if (!product_id || !item_type || !quantity) {
+    const { product_id, product_name, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId, requires_approval } = req.body;
+    if (!item_type || !quantity) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
-    }
-
-    const product = await Product.findOne({ where: { id: product_id, tenant_id }, transaction });
-    if (!product) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, message: 'Producto no encontrado' });
-    }
-
-    // Validar combinación tipo/producto
-    if (item_type === 'repuesto' && product.product_type === 'service') {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Un producto de tipo servicio no puede ser "repuesto"' });
+      return res.status(400).json({ success: false, message: 'Tipo y cantidad son requeridos' });
     }
 
     // Cotización con aprobación del cliente: no descuenta inventario todavía,
     // así que tampoco tiene sentido bloquear por stock insuficiente ahora
     // mismo — puede llegar a reponerse antes de que el cliente apruebe.
     const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
-
-    // Validar stock si es repuesto físico
     const qty = parseFloat(quantity);
-    if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
-      const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
-      const alternatives = await getEquivalentsWithStock(product_id, tenant_id);
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Stock insuficiente. Disponible: ${product.current_stock}`,
-        alternatives
-      });
-    }
 
-    // Calcular importes — respetar price_includes_tax y has_tax
-    // Normalizar booleanos: Sequelize/PG puede devolver true/false/null/string/'true'/'false'
-    const toBool = (v, def = false) => {
-      if (v === true  || v === 'true'  || v === 1) return true;
-      if (v === false || v === 'false' || v === 0) return false;
-      return def;
-    };
+    let item;
 
-    const price           = parseFloat(unit_price) || parseFloat(product.base_price) || 0;
-    const taxPct          = parseFloat(tax_percentage ?? product.tax_percentage ?? 19);
-    const hasTax          = toBool(product.has_tax, true) && taxPct > 0;
-    const priceIncludesTax = toBool(product.price_includes_tax, false);
-
-    let subtotal, tax_amount;
-    if (!hasTax) {
-      // Producto exento de IVA
-      subtotal   = qty * price;
-      tax_amount = 0;
-    } else if (priceIncludesTax) {
-      // El precio ya incluye IVA — extraer el impuesto embebido
-      const totalBruto = qty * price;
-      subtotal   = Math.round(totalBruto / (1 + taxPct / 100));
-      tax_amount = totalBruto - subtotal;
-    } else {
-      // Precio no incluye IVA — sumarlo encima
-      subtotal   = qty * price;
-      tax_amount = Math.round(subtotal * (taxPct / 100));
-    }
-    const total = subtotal + tax_amount;
-
-    // Crear ítem
-    const item = await WorkOrderItem.create({
-      tenant_id,
-      work_order_id: order.id,
-      item_type,
-      product_id,
-      product_name: product.name,
-      product_sku:  product.sku,
-      quantity:     qty,
-      unit_price:   price,
-      tax_percentage: taxPct,
-      tax_amount,
-      subtotal,
-      total,
-      technician_id: itemTechnicianId || null,
-      approval_status: requiresApproval ? 'pendiente' : 'aprobado',
-    }, { transaction });
-
-    // Descontar inventario si es repuesto físico con track_inventory —
-    // salvo que requiera aprobación del cliente: en ese caso queda
-    // 'pendiente' sin tocar inventario hasta que se apruebe (ver
-    // applyApprovedItems), sea cual sea el momento de la OT en que se agregó.
-    if (!requiresApproval && item_type === 'repuesto' && product.track_inventory) {
-      try {
-        await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
-      } catch (stockError) {
+    if (item_type === 'free_line') {
+      // Línea libre ad-hoc: sin producto de catálogo, sin descuento de inventario.
+      if (!product_name || !product_name.trim()) {
         await transaction.rollback();
-        return res.status(400).json({ success: false, message: stockError.message });
+        return res.status(400).json({ success: false, message: 'La descripción de la línea libre es requerida' });
+      }
+
+      const price  = parseFloat(unit_price) || 0;
+      const taxPct = parseFloat(tax_percentage ?? 0);
+      const subtotal   = qty * price;
+      const tax_amount = taxPct > 0 ? Math.round(subtotal * (taxPct / 100)) : 0;
+      const total = subtotal + tax_amount;
+
+      item = await WorkOrderItem.create({
+        tenant_id,
+        work_order_id: order.id,
+        item_type,
+        product_id: null,
+        product_name: product_name.trim(),
+        product_sku: null,
+        quantity:     qty,
+        unit_price:   price,
+        tax_percentage: taxPct,
+        tax_amount,
+        subtotal,
+        total,
+        technician_id: itemTechnicianId || null,
+        approval_status: requiresApproval ? 'pendiente' : 'aprobado',
+      }, { transaction });
+    } else {
+      if (!product_id) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
+      }
+
+      const product = await Product.findOne({ where: { id: product_id, tenant_id }, transaction });
+      if (!product) {
+        await transaction.rollback();
+        return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+      }
+
+      // Validar combinación tipo/producto
+      if (item_type === 'repuesto' && product.product_type === 'service') {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'Un producto de tipo servicio no puede ser "repuesto"' });
+      }
+
+      // Validar stock si es repuesto físico
+      if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
+        const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
+        const alternatives = await getEquivalentsWithStock(product_id, tenant_id);
+        await transaction.rollback();
+        return res.status(400).json({
+          success: false,
+          message: `Stock insuficiente. Disponible: ${product.current_stock}`,
+          alternatives
+        });
+      }
+
+      // Calcular importes — respetar price_includes_tax y has_tax
+      // Normalizar booleanos: Sequelize/PG puede devolver true/false/null/string/'true'/'false'
+      const toBool = (v, def = false) => {
+        if (v === true  || v === 'true'  || v === 1) return true;
+        if (v === false || v === 'false' || v === 0) return false;
+        return def;
+      };
+
+      const price           = parseFloat(unit_price) || parseFloat(product.base_price) || 0;
+      const taxPct          = parseFloat(tax_percentage ?? product.tax_percentage ?? 19);
+      const hasTax          = toBool(product.has_tax, true) && taxPct > 0;
+      const priceIncludesTax = toBool(product.price_includes_tax, false);
+
+      let subtotal, tax_amount;
+      if (!hasTax) {
+        // Producto exento de IVA
+        subtotal   = qty * price;
+        tax_amount = 0;
+      } else if (priceIncludesTax) {
+        // El precio ya incluye IVA — extraer el impuesto embebido
+        const totalBruto = qty * price;
+        subtotal   = Math.round(totalBruto / (1 + taxPct / 100));
+        tax_amount = totalBruto - subtotal;
+      } else {
+        // Precio no incluye IVA — sumarlo encima
+        subtotal   = qty * price;
+        tax_amount = Math.round(subtotal * (taxPct / 100));
+      }
+      const total = subtotal + tax_amount;
+
+      // Crear ítem
+      item = await WorkOrderItem.create({
+        tenant_id,
+        work_order_id: order.id,
+        item_type,
+        product_id,
+        product_name: product.name,
+        product_sku:  product.sku,
+        quantity:     qty,
+        unit_price:   price,
+        tax_percentage: taxPct,
+        tax_amount,
+        subtotal,
+        total,
+        technician_id: itemTechnicianId || null,
+        approval_status: requiresApproval ? 'pendiente' : 'aprobado',
+      }, { transaction });
+
+      // Descontar inventario si es repuesto físico con track_inventory —
+      // salvo que requiera aprobación del cliente: en ese caso queda
+      // 'pendiente' sin tocar inventario hasta que se apruebe (ver
+      // applyApprovedItems), sea cual sea el momento de la OT en que se agregó.
+      if (!requiresApproval && item_type === 'repuesto' && product.track_inventory) {
+        try {
+          await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
+        } catch (stockError) {
+          await transaction.rollback();
+          return res.status(400).json({ success: false, message: stockError.message });
+        }
       }
     }
 
@@ -1291,6 +1329,7 @@ const generateSale = async (req, res) => {
         { model: WorkOrderItem, as: 'items' },
         { model: Vehicle,       as: 'vehicle' },
         { model: Customer,      as: 'customer' },
+        { model: User,          as: 'technician', attributes: ['id', 'first_name', 'last_name'], required: false },
       ],
       transaction,
     });
@@ -1363,6 +1402,10 @@ const generateSale = async (req, res) => {
       vehicle_year:     order.vehicle?.year  || null,
       vehicle_color:    order.vehicle?.color || null,
       mileage:          order.mileage_in || null,
+      technician_id:    order.technician_id || null,
+      technician_name:  order.technician
+        ? [order.technician.first_name, order.technician.last_name].filter(Boolean).join(' ')
+        : null,
       warehouse_id:     order.warehouse_id,
       subtotal:         order.subtotal,
       tax_amount:       order.tax_amount,

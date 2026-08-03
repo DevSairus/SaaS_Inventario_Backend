@@ -541,6 +541,17 @@ const update = async (req, res) => {
       updateData.mileage = isNaN(parsed) ? null : parsed;
     }
 
+    if ('technician_id' in updateData) {
+      if (updateData.technician_id) {
+        const technician = await User.findOne({ where: { id: updateData.technician_id, tenant_id: tenantId } });
+        updateData.technician_name = technician
+          ? [technician.first_name, technician.last_name].filter(Boolean).join(' ')
+          : null;
+      } else {
+        updateData.technician_name = null;
+      }
+    }
+
     if (updateData.customer_id) {
       const customer = await Customer.findOne({ where: { id: updateData.customer_id, tenant_id: tenantId } });
       if (customer) {

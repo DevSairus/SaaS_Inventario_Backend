@@ -192,6 +192,14 @@ const generateSalePDF = async (res, sale, tenant) => {
         ].filter(Boolean).join(' ');
         if (vehicleDesc) {
           doc.font('Helvetica').fontSize(8).fillColor(darkGray).text(vehicleDesc, VX, vy, { width: VW });
+          vy += 11;
+        }
+        if (sale.mileage) {
+          doc.font('Helvetica').fontSize(8).fillColor(gray).text(`Km: ${sale.mileage.toLocaleString('es-CO')}`, VX, vy, { width: VW });
+          vy += 11;
+        }
+        if (sale.technician_name) {
+          doc.font('Helvetica').fontSize(8).fillColor(gray).text(`Técnico: ${sale.technician_name}`, VX, vy, { width: VW });
         }
       } else {
         doc.font('Helvetica').fontSize(8).fillColor(border).text('—', VX, VY + 12);
