@@ -27,7 +27,14 @@ const generateSalePDF = async (res, sale, tenant) => {
   let bufferPromise = null;
 
   try {
-    const docType = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
+    const docType  = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
+    // Un borrador todavía no tiene document_type asignado (se elige recién al
+    // confirmar la venta, ver sales.controller.js) -- por eso siempre cae en
+    // el fallback DOCUMENT_TYPES.factura de arriba y mostraba "FACTURA" aunque
+    // el documento no fuera ni siquiera una factura todavía. Mientras esté en
+    // Borrador no debe mostrarse ningún tipo de documento fiscal como válido.
+    const isDraftDoc = (sale.status || 'draft') === 'draft';
+    const docTitle = isDraftDoc ? 'BORRADOR' : docType.title;
     // hide_remision_tax: oculta IVA en remisiones (activado por defecto)
     const hideRemisionTax = tenant?.features?.hide_remision_tax !== false
       ? (sale.document_type === 'remision')
@@ -148,7 +155,7 @@ const generateSalePDF = async (res, sale, tenant) => {
     const DX = MARGIN + INNER_W - DOC_W;
     const DW = DOC_W - 10;
 
-    doc.font('Helvetica-Bold').fontSize(17).fillColor(red).text(docType.title, DX, y + 10, { width: DW, align: 'center' });
+    doc.font('Helvetica-Bold').fontSize(17).fillColor(red).text(docTitle, DX, y + 10, { width: DW, align: 'center' });
     doc.font('Helvetica-Bold').fontSize(8).fillColor(darkGray).text(sale.sale_number, DX, y + 32, { width: DW, align: 'center' });
     doc.font('Helvetica').fontSize(7.5).fillColor(gray).text(formatDate(sale.sale_date), DX, y + 44, { width: DW, align: 'center' });
 
@@ -249,7 +256,10 @@ const generateSalePDF = async (res, sale, tenant) => {
 
     const cols = { desc: MARGIN, qty: 330, price: 390, total: 470 };
 
-    doc.rect(MARGIN, y, INNER_W, 22).fill(red);
+    // Encabezado con esquinas superiores redondeadas (el rect plano cubre
+    // la mitad inferior del redondeo para empatar con las filas de abajo)
+    doc.roundedRect(MARGIN, y, INNER_W, 22, 4).fill(red);
+    doc.rect(MARGIN, y + 11, INNER_W, 11).fill(red);
     doc.font('Helvetica-Bold').fontSize(8.5).fillColor(white)
       .text('DESCRIPCIÓN',     cols.desc + 6, y + 6)
       .text('CANT.',           cols.qty,       y + 6)
@@ -259,6 +269,7 @@ const generateSalePDF = async (res, sale, tenant) => {
     y += 24;
 
     const items = sale.SaleItems || sale.items || [];
+    const itemsTop = y;
     items.forEach((item, index) => {
       if (y > 620) { doc.addPage(); y = 40; }
       if (index % 2 === 0) doc.rect(MARGIN, y, INNER_W, 20).fill(lightBg);
@@ -277,6 +288,14 @@ const generateSalePDF = async (res, sale, tenant) => {
       doc.rect(MARGIN, y, INNER_W, 20).strokeColor(border).lineWidth(0.4).stroke();
       y += 20;
     });
+
+    // Recuadro exterior con esquinas redondeadas para toda la tabla
+    // (encabezado + filas), solo si no se paginó en medio de la tabla
+    const tableTop = itemsTop - 24;
+    if (items.length > 0 && y > tableTop) {
+      doc.roundedRect(MARGIN, tableTop, INNER_W, y - tableTop, 5)
+        .strokeColor(borderMd).lineWidth(0.6).stroke();
+    }
 
     /* ══════════════════════════════════════════════════════════
        OBSERVACIONES DE PAGO (izq) + TOTALES (der) — mismo nivel

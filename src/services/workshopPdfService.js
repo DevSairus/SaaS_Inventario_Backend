@@ -164,18 +164,29 @@ async function drawHeader(doc, tenant, title, subtitle, docNumber) {
     .filter(Boolean).slice(0, 3)
     .forEach(l => { doc.text(l, EX, ey, { width: EW }); ey += 11; });
 
-  // Tipo de doc (derecha)
+  // Tipo de doc (derecha) — el tamaño de fuente del título se reduce si no
+  // entra en una sola línea (ej. "ORDEN DE TRABAJO"), para que nunca se
+  // encime con el subtítulo de abajo.
   const DX = MARGIN + INNER - 155;
-  doc.font('Helvetica-Bold').fontSize(15).fillColor(C.primary)
-    .text(title, DX, y + 8, { width: 155, align: 'center' });
+  const DOC_BOX_W = 155;
+  doc.font('Helvetica-Bold');
+  let titleSize = 15;
+  while (titleSize > 10 && doc.fontSize(titleSize).widthOfString(title) > DOC_BOX_W - 8) {
+    titleSize -= 1;
+  }
+  doc.fontSize(titleSize).fillColor(C.primary)
+    .text(title, DX, y + 6, { width: DOC_BOX_W, align: 'center' });
+  const titleH = doc.heightOfString(title, { width: DOC_BOX_W, align: 'center' });
+  const subtitleY = y + 6 + titleH + 4;
   if (subtitle) {
     doc.font('Helvetica').fontSize(7.5).fillColor(C.gray)
-      .text(subtitle, DX, y + 28, { width: 155, align: 'center' });
+      .text(subtitle, DX, subtitleY, { width: DOC_BOX_W, align: 'center' });
   }
   if (docNumber) {
-    doc.roundedRect(DX, y + 40, 155, 22, 4).fill(C.primary);
+    const numY = (subtitle ? subtitleY + 12 : subtitleY) + 4;
+    doc.roundedRect(DX, numY, DOC_BOX_W, 22, 4).fill(C.primary);
     doc.font('Helvetica-Bold').fontSize(10).fillColor(C.white)
-      .text(docNumber, DX, y + 46, { width: 155, align: 'center' });
+      .text(docNumber, DX, numY + 6, { width: DOC_BOX_W, align: 'center' });
   }
 
   return y + 72 + 10; // retorna posición Y siguiente
@@ -607,8 +618,10 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
 
     const allItems   = order.items || [];
     // item_type real en WorkOrderItem: 'repuesto' | 'servicio' | 'mano_obra'
-    const laborItems = allItems.filter(i => i.item_type === 'mano_obra');
-    const lineItems  = allItems.filter(i => i.item_type !== 'mano_obra');
+    // 'servicio' y 'mano_obra' se totalizan juntos como mano de obra/servicios
+    // (mismo criterio que ya usa workOrders.controller.js para sus reportes)
+    const laborItems = allItems.filter(i => ['servicio', 'mano_obra'].includes(i.item_type));
+    const lineItems  = allItems.filter(i => !['servicio', 'mano_obra'].includes(i.item_type));
     const laborTotal = laborItems.reduce((s, i) => s + parseFloat(i.total || 0), 0);
 
     doc.rect(MARGIN, y, INNER, 20).fill(C.primary);

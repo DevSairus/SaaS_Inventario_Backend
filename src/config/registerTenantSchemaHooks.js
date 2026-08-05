@@ -46,6 +46,23 @@ const PUBLIC_SCHEMA_MODELS = new Set([
   'RolePermission',
   'Announcement',
   'UserAnnouncementView',
+  // Soporte técnico — SuperAdmin necesita ver los tickets de TODOS los
+  // tenants desde una sola bandeja (/api/superadmin/support no pasa por
+  // tenantMiddleware, así que su contexto de schema siempre es 'public').
+  // Si estos modelos se resolvieran al schema del tenant activo, los
+  // tickets creados por un tenant ya migrado a su propio schema quedarían
+  // invisibles para SuperAdmin (mismo bug que ya se vio con checklist_in
+  // en workOrders.controller.js, pero aquí sin raw query que lo tape).
+  'SupportTicket',
+  'SupportTicketMessage',
+  'SupportTicketAttachment',
+  // Acceso remoto de soporte: SuperAdmin crea la sesión (sin tenantMiddleware,
+  // schema 'public'), pero el cliente la consulta desde /api/support/... que
+  // SÍ pasa por tenantMiddleware -- si este modelo resolviera al schema del
+  // tenant, la sesión creada en 'public' nunca aparecería del lado del
+  // cliente (mismo bug que SupportTicket de arriba, "acceso remoto no
+  // funciona" para tenants ya migrados a su propio schema).
+  'RemoteSupportSession',
   // Fila única de config del sistema (API key/secret frente al Núcleo
   // Central de Facturación de ESC DataCore) -- no es dato de tenant, es
   // config a nivel de Pitbox completo. No estaba en esta lista; hoy no

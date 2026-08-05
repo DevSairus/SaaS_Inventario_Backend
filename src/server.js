@@ -352,6 +352,10 @@ if (!isVercel) {
   const { initTicketNotifications } = require('./services/ticketNotifications.socket');
   initTicketNotifications(io);
 
+  // Notificaciones en vivo de cotizaciones de OT aprobadas por el cliente
+  const { initQuoteNotifications } = require('./services/quoteNotifications.socket');
+  initQuoteNotifications(io);
+
   server.listen(PORT, async () => {
     console.log('Servidor corriendo en puerto ' + PORT);
     const connected = await testConnection();

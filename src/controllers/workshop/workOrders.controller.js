@@ -1304,9 +1304,22 @@ async function respondQuoteRequestBody({ orderId, quoteRequestId, approvals, app
 
     await transaction.commit();
 
-    // TODO: notificar al taller (wa.me / mismo mecanismo que accountsPayable
-    // / stockAlerts) — pendiente definir si es inmediato o basta con que el
-    // taller lo vea la próxima vez que entra a Pitbox.
+    // Notificar en vivo al taller (staff conectado al namespace /quotes)
+    try {
+      const { emitQuoteApproved } = require('../../services/quoteNotifications.socket');
+      const anyApproved = approvals.some(a => a.approved);
+      const anyRejected = approvals.some(a => !a.approved);
+      emitQuoteApproved(fullOrder.tenant_id, {
+        work_order_id: fullOrder.id,
+        order_number: fullOrder.order_number,
+        quote_request_id: quoteRequestId,
+        approved_by_name,
+        status: anyApproved && anyRejected ? 'parcial' : anyApproved ? 'aprobada' : 'rechazada',
+        total_amount: fullOrder.total_amount,
+      });
+    } catch (e) {
+      logger.error('Error emitiendo notificación de cotización aprobada:', e);
+    }
 
     res.json({ success: true, message: 'Respuesta registrada correctamente' });
   } catch (error) {

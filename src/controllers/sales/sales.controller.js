@@ -166,7 +166,11 @@ const create = async (req, res) => {
       notes,
       vehicle_plate,
       vehicle_type,
+      vehicle_brand,
+      vehicle_model,
+      vehicle_year,
       mileage,
+      technician_id,
       document_type = null,
       sale_date,
       due_date,
@@ -381,9 +385,29 @@ const create = async (req, res) => {
       if (vehicle_type && vehicle_type.trim()) {
         saleData.vehicle_type = vehicle_type.trim();
       }
+      if (vehicle_brand && vehicle_brand.trim()) {
+        saleData.vehicle_brand = vehicle_brand.trim();
+      }
+      if (vehicle_model && vehicle_model.trim()) {
+        saleData.vehicle_model = vehicle_model.trim();
+      }
+      if (vehicle_year !== undefined && vehicle_year !== null && vehicle_year !== '') {
+        const parsedYear = parseInt(vehicle_year);
+        if (!isNaN(parsedYear)) saleData.vehicle_year = parsedYear;
+      }
       if (mileage !== undefined && mileage !== null && mileage !== '') {
         const parsedMileage = parseInt(mileage);
         if (!isNaN(parsedMileage)) saleData.mileage = parsedMileage;
+      }
+    }
+
+    // Técnico asignado — igual que en update(), se resuelve el nombre desde
+    // User para no depender de un join en cada lectura/PDF posterior.
+    if (technician_id && uuidRegex.test(technician_id)) {
+      const technician = await User.findOne({ where: { id: technician_id, tenant_id: tenantId } });
+      if (technician) {
+        saleData.technician_id = technician.id;
+        saleData.technician_name = [technician.first_name, technician.last_name].filter(Boolean).join(' ');
       }
     }
 
