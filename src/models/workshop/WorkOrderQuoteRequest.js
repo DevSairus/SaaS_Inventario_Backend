@@ -49,6 +49,10 @@ const WorkOrderQuoteRequest = sequelize.define('WorkOrderQuoteRequest', {
     type: DataTypes.STRING(45),
     allowNull: true,
   },
+  staff_seen_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
 }, {
   tableName: 'work_order_quote_requests',
   timestamps: true,

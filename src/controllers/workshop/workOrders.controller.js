@@ -1107,6 +1107,74 @@ const generateItemsFromMarks = async (req, res) => {
  * el enlace de WhatsApp para enviarla — mismo patrón que sendWhatsApp/
  * generateShareToken (reusa share_token, wa.me).
  */
+/**
+ * GET /work-orders/quote-notifications/pending
+ * Bandeja de rondas de cotización respondidas por el cliente que el
+ * personal del taller todavía no ha visto. El aviso en vivo (socket
+ * /quotes, ver emitQuoteApproved) se pierde si nadie tenía la pantalla
+ * abierta en ese momento — esto reconstruye esa bandeja por consulta
+ * directa a `staff_seen_at`, sin depender del socket.
+ */
+const getPendingQuoteNotifications = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const quoteRequests = await WorkOrderQuoteRequest.findAll({
+      where: { tenant_id, status: 'respondida', staff_seen_at: null },
+      include: [
+        { model: WorkOrder, as: 'work_order', attributes: ['id', 'order_number'] },
+        { model: WorkOrderItem, as: 'items', attributes: ['id', 'approval_status', 'total'] },
+      ],
+      order: [['responded_at', 'DESC']],
+      limit: 20,
+    });
+
+    const data = quoteRequests.map(q => {
+      const items = q.items || [];
+      const anyApproved = items.some(i => i.approval_status === 'aprobado');
+      const anyRejected = items.some(i => i.approval_status === 'rechazado');
+      const status = anyApproved && anyRejected ? 'parcial' : anyApproved ? 'aprobada' : 'rechazada';
+      const total_amount = items
+        .filter(i => i.approval_status === 'aprobado')
+        .reduce((sum, i) => sum + parseFloat(i.total || 0), 0);
+      return {
+        id: q.id,
+        work_order_id: q.work_order_id,
+        order_number: q.work_order?.order_number,
+        approved_by_name: q.approved_by_name,
+        responded_at: q.responded_at,
+        status,
+        total_amount,
+      };
+    });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    logger.error('Error obteniendo notificaciones de cotización:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener notificaciones' });
+  }
+};
+
+/**
+ * POST /work-orders/quote-notifications/:quoteRequestId/seen
+ * Marca una ronda como vista por el taller — visto por tenant (no por
+ * usuario individual): quien la abra primero la saca de la bandeja para
+ * todos, igual que hoy el aviso en vivo llega a todo el staff conectado.
+ */
+const markQuoteNotificationSeen = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const [updated] = await WorkOrderQuoteRequest.update(
+      { staff_seen_at: new Date() },
+      { where: { id: req.params.quoteRequestId, tenant_id } }
+    );
+    if (!updated) return res.status(404).json({ success: false, message: 'Notificación no encontrada' });
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Error marcando notificación de cotización como vista:', error);
+    res.status(500).json({ success: false, message: 'Error al marcar la notificación' });
+  }
+};
+
 const sendQuoteRequest = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
@@ -2323,4 +2391,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

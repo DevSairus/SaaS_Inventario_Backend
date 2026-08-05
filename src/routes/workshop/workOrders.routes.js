@@ -17,6 +17,8 @@ const upload = multer({
 
 router.get('/report', ctrl.getReport);
 router.get('/productivity', ctrl.productivity);
+router.get('/quote-notifications/pending', ctrl.getPendingQuoteNotifications);
+router.post('/quote-notifications/:quoteRequestId/seen', ctrl.markQuoteNotificationSeen);
 router.get('/', ctrl.list);
 router.get('/:id/pdf', ctrl.generatePDF);
 router.get('/:id', ctrl.getById);
