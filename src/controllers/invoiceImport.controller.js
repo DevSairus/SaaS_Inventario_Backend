@@ -4,13 +4,33 @@ const { parseInvoiceXML, validateParsedData } = require('../services/invoiceXmlP
 const { Purchase, PurchaseItem, Product, Supplier, ProductSupplier } = require('../models/inventory');
 const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
+const { runWithTenantSchema } = require('../config/tenantContext');
 
 /**
  * Importar factura electrónica desde archivo ZIP
+ *
+ * El upload de archivo (multer/busboy, ver invoiceImport.routes.js) corre
+ * entre tenantMiddleware y este controller, y rompe la propagación del
+ * AsyncLocalStorage que tenantMiddleware usa para fijar el schema del
+ * tenant (ver tenantContext.js) -- para cuando este handler arranca,
+ * getCurrentSchema() ya da undefined, y todas las queries de acá abajo caen
+ * silenciosamente a `public` en vez del schema real del tenant (se vio con
+ * un tenant ya cortado: el insert de purchases fallaba con FK violation en
+ * branch_id porque buscaba en public.branches en vez de en su propio
+ * schema). Fix: re-fijar el contexto acá mismo con el schema_name que
+ * tenantMiddleware ya dejó en req.tenant, sin depender de que el ALS
+ * ambiental haya sobrevivido al upload.
  */
 const importInvoice = async (req, res) => {
+  if (req.tenant?.schema_name) {
+    return runWithTenantSchema(req.tenant.schema_name, () => importInvoiceInner(req, res));
+  }
+  return importInvoiceInner(req, res);
+};
+
+const importInvoiceInner = async (req, res) => {
   const transaction = await sequelize.transaction();
-  
+
   try {
     const tenant_id = req.user.tenant_id;
     const user_id = req.user.id;
@@ -175,8 +195,18 @@ const importInvoice = async (req, res) => {
 
 /**
  * Vista previa de factura
+ *
+ * Mismo problema de ALS roto por el upload que importInvoice (ver comentario
+ * arriba) -- se re-fija el schema acá también.
  */
 const previewInvoice = async (req, res) => {
+  if (req.tenant?.schema_name) {
+    return runWithTenantSchema(req.tenant.schema_name, () => previewInvoiceInner(req, res));
+  }
+  return previewInvoiceInner(req, res);
+};
+
+const previewInvoiceInner = async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
