@@ -86,14 +86,19 @@ const login = async (req, res) => {
       if (!tenant.is_active) {
         return res.status(403).json({
           success: false,
-          message: 'Acceso restringido. Contacte a soporte.'
+          message: 'Esta empresa fue desactivada. Contacta a soporte para más información.',
+          code: 'TENANT_INACTIVE'
         });
       }
 
+      // Mensajes distintos a propósito -- el usuario necesita saber SI PUEDE
+      // resolverlo pagando (suspendido/trial vencido) o si la cuenta ya no
+      // existe como tal (cancelada), no un "contacte a soporte" genérico
+      // que no dice si es por dinero, por decisión propia, o por un error.
       if (tenant.subscription_status === 'suspended') {
         return res.status(402).json({
           success: false,
-          message: 'Acceso restringido. Contacte a soporte.',
+          message: 'Tu suscripción está suspendida por falta de pago. Contacta a soporte para regularizar el pago y reactivar el servicio.',
           code: 'SUBSCRIPTION_SUSPENDED'
         });
       }
@@ -101,7 +106,7 @@ const login = async (req, res) => {
       if (tenant.subscription_status === 'cancelled') {
         return res.status(403).json({
           success: false,
-          message: 'Acceso restringido. Contacte a soporte.',
+          message: 'Tu suscripción fue cancelada. Contacta a soporte si querés reactivarla.',
           code: 'SUBSCRIPTION_CANCELLED'
         });
       }
@@ -110,7 +115,7 @@ const login = async (req, res) => {
         if (new Date() > new Date(tenant.trial_ends_at)) {
           return res.status(402).json({
             success: false,
-            message: 'Acceso restringido. Contacte a soporte.',
+            message: 'Tu período de prueba terminó. Contacta a soporte para activar tu suscripción y seguir usando el sistema.',
             code: 'TRIAL_EXPIRED'
           });
         }

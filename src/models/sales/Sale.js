@@ -159,6 +159,12 @@ const Sale = sequelize.define('Sale', {
   notes:          { type: DataTypes.TEXT },
   internal_notes: { type: DataTypes.TEXT },
   pdf_url:        { type: DataTypes.STRING(500) },
+  share_token: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    unique: true,
+    comment: 'Token persistente para el link público del PDF (cotización/factura/remisión) — mismo patrón que WorkOrder.share_token',
+  },
   // ── Técnico asignado (venta directa, sin orden de trabajo) ───────────
   technician_id: {
     type: DataTypes.UUID,

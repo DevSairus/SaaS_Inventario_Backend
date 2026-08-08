@@ -197,6 +197,10 @@ const ensambladoraSyncRoutes        = require('./routes/ensambladora/sync.routes
 const ensambladoraEventsRoutes      = require('./routes/ensambladora/events.routes');
 const ensambladoraVehiculosRoutes   = require('./routes/ensambladora/vehiculos.routes');
 const ensambladoraCicloVidaRoutes   = require('./routes/ensambladora/ciclovida.routes');
+const ensambladoraGarantiasRoutes   = require('./routes/ensambladora/garantias.routes');
+const ensambladoraLiquidacionesRoutes = require('./routes/ensambladora/liquidaciones.routes');
+const ensambladoraTecnicosRoutes    = require('./routes/ensambladora/tecnicos.routes');
+const ensambladoraRuntRoutes        = require('./routes/ensambladora/runt.routes');
 
 // Rate limiting global
 app.use('/api/', generalLimiter);
@@ -296,6 +300,10 @@ app.use('/api/accounting',                     authMiddleware, tenantMiddleware,
 app.use('/api/ai-assistant',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ai_assistant'), aiAssistantRoutes);
 app.use('/api/ensambladora/sync',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraEventsRoutes);
 app.use('/api/ensambladora/vehiculos',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraVehiculosRoutes);
+app.use('/api/ensambladora/garantias',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraGarantiasRoutes);
+app.use('/api/ensambladora/tecnicos',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraTecnicosRoutes);
+app.use('/api/ensambladora/runt',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraRuntRoutes);
+app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraLiquidacionesRoutes);
 app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraCicloVidaRoutes);
 
 const path = require('path');
@@ -386,18 +394,6 @@ if (!isVercel) {
         }
       }
 
-      // Reconciliar plan de cuentas + mappings contables (incluye la cuenta
-      // puente de saldos iniciales) para todos los tenants, viejos y nuevos --
-      // ver reconcileAccountingSeed.js para por qué esto no puede depender
-      // solo de una migración one-shot.
-      try {
-        const { reconcileAccountingSeedAllTenants } = require('./scripts/reconcileAccountingSeed');
-        const result = await reconcileAccountingSeedAllTenants();
-        console.log(`[AccountingSeed] Tenants revisados: ${result.ok.length}/${result.total}` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
-      } catch (err) {
-        console.error('[AccountingSeed] Error reconciliando plan de cuentas:', err.message);
-      }
-
       // Siembrar diagramas base si no existen (o actualizar si cambiaron)
       try {
         const { seedDiagramTemplates } = require('./services/seedDiagramTemplates');
@@ -441,15 +437,6 @@ if (!isVercel) {
       } catch (err) {
         console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
       }
-    }
-    // Reconciliar plan de cuentas + mappings contables -- ver comentario en
-    // la rama Railway/local más arriba.
-    try {
-      const { reconcileAccountingSeedAllTenants } = require('./scripts/reconcileAccountingSeed');
-      const result = await reconcileAccountingSeedAllTenants();
-      console.log(`[AccountingSeed] Tenants revisados: ${result.ok.length}/${result.total}` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
-    } catch (err) {
-      console.error('[AccountingSeed] Error reconciliando plan de cuentas:', err.message);
     }
     // Siembrar diagramas base
     try {

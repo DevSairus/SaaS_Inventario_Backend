@@ -25,16 +25,34 @@ const tenantMiddleware = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Empresa no encontrada' });
     }
     if (!tenant.is_active) {
-      return res.status(403).json({ success: false, message: 'Esta empresa ha sido desactivada. Contacte a soporte.' });
+      return res.status(403).json({ success: false, message: 'Esta empresa fue desactivada. Contacta a soporte para más información.', code: 'TENANT_INACTIVE' });
     }
+    // Mismos códigos y mensajes que auth.controller.js (login) -- esto es lo
+    // que dispara cuando una sesión YA ABIERTA sigue viva después de que el
+    // trial venció o la cuenta se suspendió por impago (el JWT no se
+    // invalida solo porque cambie subscription_status). El frontend
+    // (api/axios.js) intercepta estos códigos para cerrar la sesión con un
+    // mensaje claro en vez de dejar que cada endpoint falle por separado.
     if (tenant.subscription_status === 'suspended') {
-      return res.status(402).json({ success: false, message: 'Suscripción suspendida.', code: 'SUBSCRIPTION_SUSPENDED' });
+      return res.status(402).json({
+        success: false,
+        message: 'Tu suscripción está suspendida por falta de pago. Contacta a soporte para regularizar el pago y reactivar el servicio.',
+        code: 'SUBSCRIPTION_SUSPENDED',
+      });
     }
     if (tenant.subscription_status === 'cancelled') {
-      return res.status(403).json({ success: false, message: 'Suscripción cancelada.', code: 'SUBSCRIPTION_CANCELLED' });
+      return res.status(403).json({
+        success: false,
+        message: 'Tu suscripción fue cancelada. Contacta a soporte si querés reactivarla.',
+        code: 'SUBSCRIPTION_CANCELLED',
+      });
     }
     if (tenant.subscription_status === 'trial' && tenant.trial_ends_at && new Date() > new Date(tenant.trial_ends_at)) {
-      return res.status(402).json({ success: false, message: 'Período de prueba finalizado.', code: 'TRIAL_EXPIRED' });
+      return res.status(402).json({
+        success: false,
+        message: 'Tu período de prueba terminó. Contacta a soporte para activar tu suscripción y seguir usando el sistema.',
+        code: 'TRIAL_EXPIRED',
+      });
     }
 
     req.tenant_id = tenant.id;

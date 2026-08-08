@@ -59,6 +59,13 @@ const User = sequelize.define('User', {
     type: DataTypes.STRING,
     allowNull: true
   },
+  // Documento/cédula -- no todos los usuarios lo tienen cargado (se pide
+  // la primera vez que hace falta, ej. al vincular como técnico/asesor
+  // ante la Ensambladora, ver ensambladora/tecnicos.controller.js).
+  cedula: {
+    type: DataTypes.STRING,
+    allowNull: true
+  },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

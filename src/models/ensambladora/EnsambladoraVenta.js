@@ -12,6 +12,9 @@ const EnsambladoraVenta = sequelize.define(
     cliente_telefono: DataTypes.STRING,
     fecha_venta: { type: DataTypes.DATEONLY, allowNull: false },
     precio: DataTypes.DECIMAL(14, 2),
+    // Quién hizo la venta -- cédula del usuario logueado por defecto, o de
+    // quien elija un admin (ver useUsuarioTecnico.js del frontend).
+    vendedor_documento: DataTypes.STRING,
     sync_estado: {
       type: DataTypes.ENUM('pendiente', 'enviado', 'confirmado', 'error'),
       allowNull: false,

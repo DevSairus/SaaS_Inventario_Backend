@@ -6,7 +6,7 @@ const EnsambladoraOrdenAlistamiento = sequelize.define(
   'EnsambladoraOrdenAlistamiento',
   {
     id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-    vin: { type: DataTypes.STRING, allowNull: false },
+    vin: { type: DataTypes.STRING, allowNull: false, unique: true },
     responsable: DataTypes.STRING,
     fecha: { type: DataTypes.DATE, allowNull: false },
     checklist: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },

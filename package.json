@@ -4,7 +4,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "ensambladora:activate-test-tenant": "node src/scripts/ensambladora/activateTestTenant.js",
+    "ensambladora:send-test-event": "node src/scripts/ensambladora/sendTestEvent.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

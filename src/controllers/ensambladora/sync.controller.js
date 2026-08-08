@@ -1,5 +1,6 @@
 // backend/src/controllers/ensambladora/sync.controller.js
 const { EnsambladoraEventoSync } = require('../../models');
+const { reenviarEventoExistente } = require('../../services/ensambladora/syncOutboundClient');
 const logger = require('../../config/logger');
 
 /**
@@ -54,15 +55,20 @@ async function receiveInbound(req, res) {
 
 /**
  * GET /api/ensambladora/sync/events (autenticado, gated por requireModule)
- * Versión mínima del panel de monitoreo (Fase 8 lo formaliza) -- útil desde
- * ya para verificar en Fase 0 que los eventos de prueba quedaron registrados.
+ * Panel de monitoreo (Fase 8) -- filtros: estado, tipo_evento, direccion, revisado.
  */
 async function listEvents(req, res) {
   try {
+    const where = { tenant_id: req.tenant_id };
+    if (req.query.estado) where.estado = req.query.estado;
+    if (req.query.tipo_evento) where.tipo_evento = req.query.tipo_evento;
+    if (req.query.direccion) where.direccion = req.query.direccion;
+    if (req.query.revisado != null) where.revisado = req.query.revisado === 'true';
+
     const eventos = await EnsambladoraEventoSync.findAll({
-      where: { tenant_id: req.tenant_id },
+      where,
       order: [['created_at', 'DESC']],
-      limit: 50,
+      limit: 100,
     });
     res.json({ success: true, data: eventos });
   } catch (error) {
@@ -71,4 +77,53 @@ async function listEvents(req, res) {
   }
 }
 
-module.exports = { receiveInbound, listEvents };
+/**
+ * POST /api/ensambladora/sync/events/:id/reintentar
+ * Solo para eventos SALIENTES en estado "error" -- ver
+ * syncOutboundClient.js#reenviarEventoExistente para la limitación
+ * importante (solo sirve de verdad si el evento nunca llegó al Core).
+ */
+async function reintentarEvento(req, res) {
+  const evento = await EnsambladoraEventoSync.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id } });
+  if (!evento) {
+    return res.status(404).json({ success: false, code: 'evento_no_encontrado', message: 'No existe un evento con ese id' });
+  }
+  if (evento.direccion !== 'saliente') {
+    return res.status(400).json({ success: false, code: 'direccion_no_soportada', message: 'Solo se pueden reintentar eventos salientes' });
+  }
+  if (evento.estado !== 'error') {
+    return res.status(409).json({ success: false, code: 'estado_invalido', message: `El evento está en estado "${evento.estado}", no en error` });
+  }
+
+  const resultado = await reenviarEventoExistente(evento);
+
+  if (!resultado.ok) {
+    return res.status(502).json({
+      success: false,
+      code: 'reintento_fallido',
+      message: 'El reintento no se pudo confirmar con la Ensambladora',
+      data: evento,
+      error_core: resultado.error,
+    });
+  }
+
+  res.json({ success: true, data: evento });
+}
+
+/** POST /api/ensambladora/sync/events/:id/marcar-revisado -- body: { revisado_por } */
+async function marcarRevisado(req, res) {
+  const { revisado_por } = req.body || {};
+  if (!revisado_por) {
+    return res.status(400).json({ success: false, code: 'payload_invalido', message: 'revisado_por es obligatorio' });
+  }
+
+  const evento = await EnsambladoraEventoSync.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id } });
+  if (!evento) {
+    return res.status(404).json({ success: false, code: 'evento_no_encontrado', message: 'No existe un evento con ese id' });
+  }
+
+  await evento.update({ revisado: true, revisado_por, revisado_en: new Date() });
+  res.json({ success: true, data: evento });
+}
+
+module.exports = { receiveInbound, listEvents, reintentarEvento, marcarRevisado };

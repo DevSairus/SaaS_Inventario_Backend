@@ -2144,6 +2144,171 @@ router.put(
 );
 
 // ============================================
+// CONEXIÓN CON ENSAMBLADORA (Core Ensambladora -- sync CSA/PDV)
+// ============================================
+// El par api_key/hmac_secret se emite del lado del Core Ensambladora (panel
+// superadmin de ese sistema -- ver csaPdv.controller.js allá) y se pega acá;
+// este lado nunca genera secretos propios, solo los guarda y los usa para
+// firmar/verificar la sincronización. Reemplaza al script de consola
+// scripts/ensambladora/activateTestTenant.js. Mismo criterio que
+// /meta-config: los secretos nunca se devuelven completos en ningún GET.
+
+/**
+ * GET /api/v1/superadmin/ensambladora-config
+ * Listado de conexiones existentes -- una por tenant como máximo
+ * (EnsambladoraSyncCredential.tenant_id es unique).
+ */
+router.get(
+  '/ensambladora-config',
+  authMiddleware,
+  checkPermission('superadmin.view_all'),
+  async (req, res) => {
+    try {
+      const { EnsambladoraSyncCredential } = require('../models');
+      const credenciales = await EnsambladoraSyncCredential.findAll({
+        include: [{ model: Tenant, as: 'tenant', attributes: ['id', 'company_name', 'business_name', 'modules_enabled'] }],
+        order: [['updated_at', 'DESC']],
+      });
+
+      const data = credenciales.map((c) => ({
+        id: c.id,
+        tenant_id: c.tenant_id,
+        tenant: c.tenant ? { id: c.tenant.id, company_name: c.tenant.company_name, business_name: c.tenant.business_name } : null,
+        modulo_activo: (c.tenant?.modules_enabled || []).includes('ensambladora'),
+        csa_pdv_id_externo: c.csa_pdv_id_externo,
+        api_key_sufijo: c.api_key ? c.api_key.slice(-6) : null,
+        estado: c.estado,
+        creado_en: c.created_at,
+        actualizado_en: c.updated_at,
+      }));
+
+      res.json({ success: true, data });
+    } catch (error) {
+      console.error('Error listando conexiones de Ensambladora:', error);
+      res.status(500).json({ error: 'Error al listar las conexiones de Ensambladora' });
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/ensambladora-config/tenants-disponibles
+ * Lista liviana de tenants para el selector al conectar uno nuevo -- sin
+ * el paginado de GET /tenants (este panel lo usa un puñado de operadores
+ * internos, no hace falta).
+ */
+router.get(
+  '/ensambladora-config/tenants-disponibles',
+  authMiddleware,
+  checkPermission('superadmin.view_all'),
+  async (req, res) => {
+    try {
+      const tenants = await Tenant.findAll({
+        attributes: ['id', 'company_name', 'business_name'],
+        order: [['company_name', 'ASC']],
+      });
+      res.json({ success: true, tenants });
+    } catch (error) {
+      console.error('Error listando tenants disponibles:', error);
+      res.status(500).json({ error: 'Error al listar tenants' });
+    }
+  }
+);
+
+/**
+ * POST /api/v1/superadmin/ensambladora-config
+ * Da de alta la conexión de un tenant (o la reemplaza, si ya existía).
+ * Body: { tenant_id, api_key, hmac_secret, csa_pdv_id_externo?, activar_modulo? }
+ */
+router.post(
+  '/ensambladora-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { tenant_id, api_key, hmac_secret, csa_pdv_id_externo, activar_modulo } = req.body;
+      if (!tenant_id || !api_key || !hmac_secret) {
+        return res.status(400).json({ error: 'tenant_id, api_key y hmac_secret son obligatorios' });
+      }
+
+      const tenant = await Tenant.findByPk(tenant_id);
+      if (!tenant) return res.status(404).json({ error: 'Tenant no encontrado' });
+
+      const { EnsambladoraSyncCredential } = require('../models');
+      const [credencial] = await EnsambladoraSyncCredential.upsert({
+        tenant_id,
+        api_key,
+        hmac_secret,
+        csa_pdv_id_externo: csa_pdv_id_externo || null,
+        estado: 'activo',
+      });
+
+      if (activar_modulo) {
+        const modulesEnabled = new Set(tenant.modules_enabled || []);
+        modulesEnabled.add('ensambladora');
+        await tenant.update({ modules_enabled: [...modulesEnabled] });
+        invalidateModulesCache(tenant.id);
+      }
+
+      res.status(201).json({ success: true, message: 'Conexión guardada', id: credencial.id });
+    } catch (error) {
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        return res.status(409).json({ error: 'Ese api_key ya está en uso por otra conexión' });
+      }
+      console.error('Error guardando conexión de Ensambladora:', error);
+      res.status(500).json({ error: 'Error al guardar la conexión', details: error.message });
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/superadmin/ensambladora-config/:tenantId
+ * Edita una conexión existente -- todos los campos son opcionales. Mandar
+ * api_key/hmac_secret reemplaza el par vigente (ej. tras rotarlo del lado
+ * del Core Ensambladora).
+ */
+router.patch(
+  '/ensambladora-config/:tenantId',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { EnsambladoraSyncCredential } = require('../models');
+      const credencial = await EnsambladoraSyncCredential.findOne({ where: { tenant_id: req.params.tenantId } });
+      if (!credencial) return res.status(404).json({ error: 'Este tenant no tiene una conexión con Ensambladora' });
+
+      const { api_key, hmac_secret, csa_pdv_id_externo, estado, activar_modulo } = req.body;
+      if (estado !== undefined && !['activo', 'suspendido', 'revocado'].includes(estado)) {
+        return res.status(400).json({ error: 'estado debe ser activo, suspendido o revocado' });
+      }
+
+      const updates = {};
+      if (api_key) updates.api_key = api_key;
+      if (hmac_secret) updates.hmac_secret = hmac_secret;
+      if (csa_pdv_id_externo !== undefined) updates.csa_pdv_id_externo = csa_pdv_id_externo || null;
+      if (estado !== undefined) updates.estado = estado;
+      await credencial.update(updates);
+
+      if (activar_modulo !== undefined) {
+        const tenant = await Tenant.findByPk(req.params.tenantId);
+        const modulesEnabled = new Set(tenant.modules_enabled || []);
+        if (activar_modulo) modulesEnabled.add('ensambladora');
+        else modulesEnabled.delete('ensambladora');
+        await tenant.update({ modules_enabled: [...modulesEnabled] });
+        invalidateModulesCache(tenant.id);
+      }
+
+      res.json({ success: true, message: 'Conexión actualizada' });
+    } catch (error) {
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        return res.status(409).json({ error: 'Ese api_key ya está en uso por otra conexión' });
+      }
+      console.error('Error actualizando conexión de Ensambladora:', error);
+      res.status(500).json({ error: 'Error al actualizar la conexión', details: error.message });
+    }
+  }
+);
+
+// ============================================
 // GESTIÓN DE USUARIOS DE TENANTS
 // ============================================
 

@@ -42,16 +42,27 @@ const branchMiddleware = async (req, res, next) => {
           where: { id: requestedBranchId, tenant_id: req.tenant_id, is_active: true },
         });
         if (!branch) {
-          return res.status(404).json({ success: false, message: 'Sede no encontrada o inactiva' });
+          return res.status(404).json({ success: false, message: 'Sede no encontrada o inactiva', code: 'BRANCH_NOT_FOUND' });
         }
       } else {
-        // Sin sede solicitada: usar la sede principal del tenant
+        // Sin sede solicitada: usar la sede principal del tenant. Un tenant
+        // sin NINGUNA sede activa no es "ruta inexistente" (404) sino un
+        // tenant mal configurado -- antes devolvía 404 acá, indistinguible
+        // en los logs de un endpoint que de verdad no existe (nos pasó con
+        // /api/ensambladora/tecnicos: el módulo estaba activo, la ruta
+        // existía, y el 404 real salía de acá, antes de llegar a
+        // requireModule). 409 dice "tu request es válido pero el tenant
+        // tiene una precondición sin cumplir".
         branch = await Branch.findOne({
           where: { tenant_id: req.tenant_id, is_active: true },
           order: [['is_main', 'DESC'], ['created_at', 'ASC']],
         });
         if (!branch) {
-          return res.status(404).json({ success: false, message: 'Este tenant no tiene sedes configuradas' });
+          return res.status(409).json({
+            success: false,
+            message: 'Este tenant no tiene sedes configuradas',
+            code: 'NO_BRANCHES_CONFIGURED',
+          });
         }
       }
 

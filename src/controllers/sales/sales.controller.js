@@ -1404,7 +1404,7 @@ async function generateSaleNumber(tenant_id, document_type, transaction, exclude
   return `FAC-${year}-${sequence.toString().padStart(4, '0')}`;
 }
 
-// Enviar PDF por WhatsApp — enlace temporal JWT (sin Cloudinary)
+// Enviar PDF por WhatsApp — enlace persistente por venta (sin Cloudinary)
 const sendWhatsApp = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1430,13 +1430,13 @@ const sendWhatsApp = async (req, res) => {
     const TYPES = { factura: 'Factura', remision: 'Remisión', cotizacion: 'Cotización' };
     const docLabel = TYPES[sale.document_type] || 'Documento';
 
-    // Token JWT temporal (48h) — da acceso público al PDF sin sesión
-    const jwt = require('jsonwebtoken');
-    const token = jwt.sign(
-      { type: 'pdf_share', saleId: id, tenantId },
-      process.env.JWT_SECRET,
-      { expiresIn: '48h' }
-    );
+    // Token persistente — se genera una sola vez y se reutiliza siempre
+    // (mismo patrón que WorkOrder.share_token / generateShareToken).
+    let token = sale.share_token;
+    if (!token) {
+      token = require('crypto').randomUUID();
+      await sale.update({ share_token: token });
+    }
 
     const backendUrl = (process.env.BACKEND_URL || '').replace(/\/$/, '');
     const pdfUrl  = `${backendUrl}/api/public/pdf/${token}`;

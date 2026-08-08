@@ -98,6 +98,15 @@ const VehiculoCache = require('./ensambladora/VehiculoCache');
 const EnsambladoraVenta = require('./ensambladora/EnsambladoraVenta');
 const EnsambladoraOrdenAlistamiento = require('./ensambladora/EnsambladoraOrdenAlistamiento');
 const EnsambladoraOrdenEntrega = require('./ensambladora/EnsambladoraOrdenEntrega');
+// ✅ NUEVO - Módulo Ensambladora, Fase 3 (revisiones periódicas)
+const EnsambladoraOrdenRevision = require('./ensambladora/EnsambladoraOrdenRevision');
+// ✅ NUEVO - Módulo Ensambladora, Fase 4 (garantías)
+const EnsambladoraOrdenGarantia = require('./ensambladora/EnsambladoraOrdenGarantia');
+// ✅ NUEVO - Módulo Ensambladora, Fase 7 (técnicos/asesores, RUNT)
+const EnsambladoraTecnicoAsesor = require('./ensambladora/EnsambladoraTecnicoAsesor');
+const EnsambladoraRuntSolicitud = require('./ensambladora/EnsambladoraRuntSolicitud');
+// ✅ NUEVO - Módulo Ensambladora (cotización de moto no vendida)
+const EnsambladoraCotizacion = require('./ensambladora/EnsambladoraCotizacion');
 
 // ✅ NUEVO - Catálogo normalizado de vehículos (Fase 6)
 const VehicleBrand = require('./workshop/VehicleBrand');
@@ -718,4 +727,9 @@ module.exports = {
   EnsambladoraVenta,
   EnsambladoraOrdenAlistamiento,
   EnsambladoraOrdenEntrega,
+  EnsambladoraOrdenRevision,
+  EnsambladoraOrdenGarantia,
+  EnsambladoraTecnicoAsesor,
+  EnsambladoraRuntSolicitud,
+  EnsambladoraCotizacion,
 };

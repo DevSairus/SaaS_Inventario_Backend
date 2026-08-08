@@ -386,7 +386,7 @@ const createClient = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { first_name, last_name, phone, address, stratum, is_active, role } =
+    const { first_name, last_name, phone, address, stratum, cedula, is_active, role } =
       req.body;
 
     let where = { id };
@@ -416,6 +416,10 @@ const updateUser = async (req, res) => {
       address,
       stratum,
     };
+
+    if (cedula !== undefined) {
+      updateData.cedula = cedula;
+    }
 
     if (['admin', 'super_admin'].includes(req.user.role)) {
       if (is_active !== undefined) {
