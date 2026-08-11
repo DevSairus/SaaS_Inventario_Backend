@@ -207,6 +207,24 @@ async function createAppointmentBody({ tenant_id, branch_id, body, source, res }
     }, { transaction });
 
     await transaction.commit();
+
+    // Avisar en vivo al staff conectado (namespace /appointments) cuando la
+    // solicitud viene del cliente -- las creadas por el propio staff
+    // (walk-in/teléfono) no necesitan notificarse a sí mismas.
+    if (source === 'public') {
+      try {
+        const { emitNewAppointment } = require('../../services/appointmentNotifications.socket');
+        emitNewAppointment(tenant_id, {
+          id: appointment.id,
+          customer_name: appointment.customer_name,
+          scheduled_at: appointment.scheduled_at,
+          vehicle_plate: appointment.vehicle_plate,
+        });
+      } catch (e) {
+        logger.error('Error emitiendo notificación de nueva cita:', e);
+      }
+    }
+
     res.status(201).json({
       success: true,
       data: { id: appointment.id, share_token: appointment.share_token, scheduled_at: appointment.scheduled_at, status: appointment.status },

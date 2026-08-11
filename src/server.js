@@ -366,6 +366,10 @@ if (!isVercel) {
   const { initQuoteNotifications } = require('./services/quoteNotifications.socket');
   initQuoteNotifications(io);
 
+  // Notificaciones en vivo de nuevas solicitudes de cita de taller
+  const { initAppointmentNotifications } = require('./services/appointmentNotifications.socket');
+  initAppointmentNotifications(io);
+
   server.listen(PORT, async () => {
     console.log('Servidor corriendo en puerto ' + PORT);
     const connected = await testConnection();
