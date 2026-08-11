@@ -17,7 +17,7 @@ const { resolveBranchFilter } = require('../../utils/branchFilter');
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, limit = 50, offset = 0 } = req.query;
+    const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, limit = 50, offset = 0 } = req.query;
     // Cap de seguridad — evita requests que traigan miles de ventas en memoria
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
     const safeOffset = Math.max(0, parseInt(offset) || 0);
@@ -31,9 +31,22 @@ const getAll = async (req, res) => {
     const branch_id = resolveBranchFilter(req);
     if (branch_id) where.branch_id = branch_id;
 
-    if (status) where.status = status;
+    // Una venta nace en 'draft' con document_type=null (ver create() — el
+    // tipo de documento se elige recién al confirmar). Hasta ese momento es,
+    // en la práctica, una cotización: QuotesPage la necesita listada aunque
+    // nunca haya tenido document_type='cotizacion' explícito. `quote_view`
+    // trae borradores + cualquier venta ya tipada como cotización; el listado
+    // normal de Ventas, en cambio, no debe mostrar borradores (son
+    // cotizaciones, no ventas confirmadas) salvo que se pida un status puntual.
+    if (quote_view === 'true') {
+      where[Op.or] = [{ status: 'draft' }, { document_type: 'cotizacion' }];
+    } else {
+      if (status) where.status = status;
+      else where.status = { [Op.ne]: 'draft' };
+      if (document_type) where.document_type = document_type;
+    }
+    if (quote_status) where.quote_status = quote_status;
     if (customer_id) where.customer_id = customer_id;
-    if (document_type) where.document_type = document_type;
     if (dian_status) where.dian_status = dian_status;
 
     if (customer_name) {
@@ -1220,7 +1233,9 @@ const getStats = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
     const { from_date, to_date } = req.query;
-    const where = { tenant_id: tenantId };
+    // Los borradores son cotizaciones, no ventas confirmadas — no deben
+    // sumar en los totales de Ventas (mismo criterio que getAll/quote_view).
+    const where = { tenant_id: tenantId, status: { [Op.ne]: 'draft' } };
     if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
     else if (from_date) where.sale_date = { [Op.gte]: from_date };
     else if (to_date) where.sale_date = { [Op.lte]: to_date };
@@ -1404,6 +1419,54 @@ async function generateSaleNumber(tenant_id, document_type, transaction, exclude
   return `FAC-${year}-${sequence.toString().padStart(4, '0')}`;
 }
 
+// Genera (o reutiliza) el share_token de la venta y devuelve el enlace
+// público — mismo token que usa sendWhatsApp, pero sin requerir teléfono
+// del cliente ni disparar el mensaje. Permite copiar el link directamente
+// (botón "Copiar enlace" en SaleDetailPage).
+const generateShareLink = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenant_id;
+
+    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+
+    let token = sale.share_token;
+    const updates = {};
+    if (!token) {
+      token = require('crypto').randomUUID();
+      updates.share_token = token;
+    }
+    // Mismo criterio que el frontend (SaleDetailPage#isQuote): ventas antiguas
+    // sin document_type asignado se tratan como cotización.
+    const isQuote = !sale.document_type || sale.document_type === 'cotizacion';
+    if (isQuote && (!sale.quote_status || sale.quote_status === 'borrador')) {
+      updates.quote_status = 'enviada';
+    }
+    if (Object.keys(updates).length) {
+      await sale.update(updates);
+    }
+
+    // BACKEND_URL puede no estar seteado en algunos entornos -- si falta,
+    // se reconstruye desde el propio request en vez de dejar el link relativo.
+    const backendUrl = (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+    const pdfUrl = `${backendUrl}/api/public/pdf/${token}`;
+    const quoteUrl = isQuote ? `${frontendUrl}/public/quote/${token}` : null;
+
+    res.json({
+      success: true,
+      token,
+      url: quoteUrl || pdfUrl,
+      pdf_url: pdfUrl,
+      quote_url: quoteUrl,
+    });
+  } catch (error) {
+    logger.error('Error generando enlace de venta:', error);
+    res.status(500).json({ success: false, message: 'Error al generar el enlace' });
+  }
+};
+
 // Enviar PDF por WhatsApp — enlace persistente por venta (sin Cloudinary)
 const sendWhatsApp = async (req, res) => {
   try {
@@ -1428,19 +1491,40 @@ const sendWhatsApp = async (req, res) => {
     if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
 
     const TYPES = { factura: 'Factura', remision: 'Remisión', cotizacion: 'Cotización' };
-    const docLabel = TYPES[sale.document_type] || 'Documento';
+    const docLabel = TYPES[sale.document_type] || 'Cotización';
+    // Mismo criterio que generateShareLink/frontend: ventas antiguas sin
+    // document_type asignado se tratan como cotización.
+    const isQuote = !sale.document_type || sale.document_type === 'cotizacion';
 
     // Token persistente — se genera una sola vez y se reutiliza siempre
     // (mismo patrón que WorkOrder.share_token / generateShareToken).
     let token = sale.share_token;
+    const updates = {};
     if (!token) {
       token = require('crypto').randomUUID();
-      await sale.update({ share_token: token });
+      updates.share_token = token;
+    }
+    // Marca la cotización como "enviada" la primera vez que se comparte.
+    if (isQuote && (!sale.quote_status || sale.quote_status === 'borrador')) {
+      updates.quote_status = 'enviada';
+    }
+    if (Object.keys(updates).length) {
+      await sale.update(updates);
     }
 
-    const backendUrl = (process.env.BACKEND_URL || '').replace(/\/$/, '');
-    const pdfUrl  = `${backendUrl}/api/public/pdf/${token}`;
-    const caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Descarga tu documento:\n${pdfUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+    // BACKEND_URL puede no estar seteado en algunos entornos -- si falta,
+    // se reconstruye desde el propio request en vez de dejar el link relativo.
+    const backendUrl = (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const pdfUrl = `${backendUrl}/api/public/pdf/${token}`;
+
+    let caption;
+    if (isQuote) {
+      const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
+      const quoteUrl = `${frontendUrl}/public/quote/${token}`;
+      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Revisa y aprueba tu cotización aquí:\n${quoteUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+    } else {
+      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Descarga tu documento:\n${pdfUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+    }
 
     const result = await whatsappService.sendText(customerPhone, caption);
 
@@ -1456,6 +1540,145 @@ const sendWhatsApp = async (req, res) => {
   }
 };
 
+// Resuelve a qué tenant/schema pertenece un share_token de sales, buscando
+// primero en public.sales y luego en cada schema de tenant — mismo patrón
+// que resolveWorkOrderSchemaByToken (workOrders.controller.js). Compartido
+// entre publicPdf.routes.js y los endpoints públicos de cotización de abajo.
+async function resolveSaleSchemaByToken(token) {
+  const [publicRows] = await sequelize.query(
+    'SELECT id FROM "public"."sales" WHERE share_token = :token LIMIT 1',
+    { replacements: { token } }
+  );
+  if (publicRows[0]) return { saleId: publicRows[0].id, schemaName: null };
+
+  const [tenants] = await sequelize.query(
+    'SELECT schema_name FROM "public"."tenants" WHERE schema_name IS NOT NULL'
+  );
+  for (const { schema_name } of tenants) {
+    const [rows] = await sequelize.query(
+      `SELECT id FROM "${schema_name}"."sales" WHERE share_token = :token LIMIT 1`,
+      { replacements: { token } }
+    );
+    if (rows[0]) return { saleId: rows[0].id, schemaName: schema_name };
+  }
+  return null;
+}
+
+// GET /api/public/sales/:token — vista pública sin autenticación de una
+// cotización (usada por QuotePublicPage.jsx para mostrar detalle + botones
+// de aprobar/rechazar).
+const getPublicSale = async (req, res) => {
+  const { runWithTenantSchema } = require('../../config/tenantContext');
+  try {
+    const { token } = req.params;
+    let resolved;
+    try {
+      resolved = await resolveSaleSchemaByToken(token);
+    } catch {
+      return res.status(503).json({ success: false, message: 'Función no disponible aún' });
+    }
+    if (!resolved) {
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada o enlace inválido' });
+    }
+    return runWithTenantSchema(resolved.schemaName, () => getPublicSaleBody(resolved.saleId, res));
+  } catch (error) {
+    logger.error('[Cotización pública] Error:', error.message);
+    res.status(500).json({ success: false, message: 'Error obteniendo la cotización' });
+  }
+};
+
+async function getPublicSaleBody(saleId, res) {
+  const sale = await Sale.findOne({
+    where: { id: saleId },
+    include: [{ model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }] }],
+  });
+  if (!sale) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+
+  const tenant = await Tenant.findByPk(sale.tenant_id);
+  if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
+
+  const backendUrl = (process.env.BACKEND_URL || '').replace(/\/$/, '');
+
+  res.json({
+    success: true,
+    data: {
+      sale_number: sale.sale_number,
+      document_type: sale.document_type,
+      quote_status: sale.quote_status,
+      pdf_url: `${backendUrl}/api/public/pdf/${sale.share_token}`,
+      customer_name: sale.customer_name,
+      sale_date: sale.sale_date,
+      subtotal: sale.subtotal,
+      tax_amount: sale.tax_amount,
+      discount_amount: sale.discount_amount,
+      total_amount: sale.total_amount,
+      notes: sale.notes,
+      items: (sale.items || []).map(i => ({
+        product_name: i.product?.name || i.description,
+        quantity: i.quantity,
+        unit_price: i.unit_price,
+        total: i.total,
+      })),
+      quote_approved_by_name: sale.quote_approved_by_name,
+      quote_responded_at: sale.quote_responded_at,
+      tenant: { company_name: tenant.company_name },
+    },
+  });
+}
+
+// POST /api/public/sales/:token/respond — el cliente aprueba/rechaza la
+// cotización desde el link público. Sin autenticación; protegido por
+// quoteResponseLimiter en la ruta (backend/src/middleware/rateLimiter.js).
+const respondPublicQuote = async (req, res) => {
+  const { runWithTenantSchema } = require('../../config/tenantContext');
+  try {
+    const { token } = req.params;
+    const { approved, approved_by_name, approved_by_document } = req.body;
+
+    if (!approved_by_name || !approved_by_document) {
+      return res.status(400).json({ success: false, message: 'Nombre y documento son requeridos para responder' });
+    }
+    if (typeof approved !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión' });
+    }
+
+    let resolved;
+    try {
+      resolved = await resolveSaleSchemaByToken(token);
+    } catch {
+      return res.status(503).json({ success: false, message: 'Función no disponible aún' });
+    }
+    if (!resolved) {
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada o enlace inválido' });
+    }
+
+    return runWithTenantSchema(resolved.schemaName, () =>
+      respondPublicQuoteBody({ saleId: resolved.saleId, approved, approved_by_name, approved_by_document, req, res })
+    );
+  } catch (error) {
+    logger.error('[Cotización pública] Error respondiendo:', error.message);
+    res.status(500).json({ success: false, message: 'Error al procesar la respuesta' });
+  }
+};
+
+async function respondPublicQuoteBody({ saleId, approved, approved_by_name, approved_by_document, req, res }) {
+  const sale = await Sale.findByPk(saleId);
+  if (!sale) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+  if (sale.quote_status !== 'enviada') {
+    return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
+  }
+
+  await sale.update({
+    quote_status: approved ? 'aprobada' : 'rechazada',
+    quote_approved_by_name: approved_by_name,
+    quote_approved_by_document: approved_by_document,
+    quote_approved_ip: req.ip,
+    quote_responded_at: new Date(),
+  });
+
+  res.json({ success: true, message: 'Respuesta registrada correctamente' });
+}
+
 module.exports = {
   getAll,
   getById,
@@ -1469,5 +1692,9 @@ module.exports = {
   getStats,
   generatePDF,
   sendWhatsApp,
-  generatePaymentReceipt
+  generateShareLink,
+  generatePaymentReceipt,
+  resolveSaleSchemaByToken,
+  getPublicSale,
+  respondPublicQuote,
 };

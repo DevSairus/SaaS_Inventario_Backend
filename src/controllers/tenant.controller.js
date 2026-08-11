@@ -31,6 +31,7 @@ const getTenantConfig = async (req, res) => {
     const tenant = await Tenant.findByPk(tenantId, {
       attributes: [
         'id',
+        'slug',
         'company_name',
         'business_name',
         'tax_id',

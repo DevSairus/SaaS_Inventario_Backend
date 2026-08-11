@@ -146,6 +146,7 @@ const aiAssistantRoutes              = require('./routes/ai/aiAssistant.routes')
 const permissionsRoutes             = require('./routes/permissions.routes');
 const vehiclesRoutes                = require('./routes/workshop/vehicles.routes');
 const workOrdersRoutes              = require('./routes/workshop/workOrders.routes');
+const appointmentsRoutes            = require('./routes/workshop/appointments.routes');
 const commissionSettlementsRoutes   = require('./routes/workshop/commissionSettlements.routes');
 const runtRoutes                    = require('./routes/workshop/runt.routes');
 const diagramTemplatesRoutes        = require('./routes/workshop/diagramTemplates.routes');
@@ -233,6 +234,7 @@ app.use('/api/permissions', authMiddleware, permissionsRoutes);
 app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware, runtRoutes);
 app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware, vehiclesRoutes);
 app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, branchMiddleware, workOrdersRoutes);
+app.use('/api/workshop/appointments',          authMiddleware, tenantMiddleware, branchMiddleware, appointmentsRoutes);
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
 app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware, diagramTemplatesRoutes);
 

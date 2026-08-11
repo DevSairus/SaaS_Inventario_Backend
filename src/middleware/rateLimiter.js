@@ -318,6 +318,26 @@ const quoteResponseLimiter = rateLimit({
   },
 });
 
+/**
+ * Rate limiter para la reserva pública de citas de taller
+ * (POST /public/workshop/:slug/:branchId/appointments). Sin autenticación
+ * -- mismo criterio que quoteResponseLimiter: generoso para un cliente real
+ * (una reserva legítima), corta el abuso automatizado de slots.
+ */
+const appointmentBookingLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  keyGenerator: ipKey,
+  handler: (req, res) => {
+    logger.warn('Appointment booking rate limit exceeded', { ip: req.ip, path: req.path });
+    res.status(429).json({
+      success: false,
+      message: 'Demasiados intentos. Intenta de nuevo en un rato, o contacta al taller directamente',
+      retryAfter: 60,
+    });
+  },
+});
+
 module.exports = {
   generalLimiter,
   authLimiter,
@@ -330,4 +350,5 @@ module.exports = {
   createRoleBasedLimiter,
   aiChatLimiter,
   quoteResponseLimiter,
+  appointmentBookingLimiter,
 };

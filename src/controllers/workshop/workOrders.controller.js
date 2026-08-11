@@ -1155,6 +1155,95 @@ const getPendingQuoteNotifications = async (req, res) => {
 };
 
 /**
+ * GET /workshop/work-orders/quote-requests
+ * Listado transversal de rondas de cotización de todas las OTs del tenant —
+ * a diferencia de getPendingQuoteNotifications (solo respondidas y no
+ * vistas), este trae todas para poder mostrarlas junto a las cotizaciones
+ * de Ventas en QuotesPage.jsx. El status real ('enviada'/'aprobada'/
+ * 'rechazada'/'parcial') se deriva igual que en getPendingQuoteNotifications.
+ */
+const getWorkshopQuotes = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { status, from_date, to_date, customer_name, vehicle_plate, limit = 50, offset = 0 } = req.query;
+    const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
+    const safeOffset = Math.max(0, parseInt(offset) || 0);
+
+    const where = { tenant_id };
+    if (from_date && to_date) where.sent_at = { [Op.between]: [from_date, to_date] };
+    else if (from_date) where.sent_at = { [Op.gte]: from_date };
+    else if (to_date) where.sent_at = { [Op.lte]: to_date };
+
+    const quoteRequests = await WorkOrderQuoteRequest.findAll({
+      where,
+      include: [
+        {
+          model: WorkOrder, as: 'work_order',
+          attributes: ['id', 'order_number'],
+          include: [
+            { model: Vehicle,  as: 'vehicle',  attributes: ['id', 'plate'] },
+            { model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] },
+          ],
+        },
+        { model: WorkOrderItem, as: 'items', attributes: ['id', 'approval_status', 'total'] },
+      ],
+      order: [['sent_at', 'DESC']],
+    });
+
+    let data = quoteRequests.map(q => {
+      const items = q.items || [];
+      const anyApproved = items.some(i => i.approval_status === 'aprobado');
+      const anyRejected = items.some(i => i.approval_status === 'rechazado');
+      const derivedStatus = q.status === 'enviada'
+        ? 'enviada'
+        : (anyApproved && anyRejected ? 'parcial' : anyApproved ? 'aprobada' : 'rechazada');
+      const total_amount = items
+        .filter(i => i.approval_status === 'aprobado')
+        .reduce((sum, i) => sum + parseFloat(i.total || 0), 0);
+      const customer = q.work_order?.customer;
+      const customerName = customer
+        ? (customer.business_name || `${customer.first_name || ''} ${customer.last_name || ''}`.trim())
+        : null;
+
+      return {
+        id: q.id,
+        work_order_id: q.work_order_id,
+        order_number: q.work_order?.order_number,
+        vehicle_plate: q.work_order?.vehicle?.plate || null,
+        customer_name: customerName,
+        quote_status: derivedStatus,
+        sent_at: q.sent_at,
+        responded_at: q.responded_at,
+        approved_by_name: q.approved_by_name,
+        total_amount,
+      };
+    });
+
+    if (status) data = data.filter(q => q.quote_status === status);
+    if (customer_name) {
+      const needle = customer_name.toLowerCase();
+      data = data.filter(q => (q.customer_name || '').toLowerCase().includes(needle));
+    }
+    if (vehicle_plate) {
+      const needle = vehicle_plate.toLowerCase();
+      data = data.filter(q => (q.vehicle_plate || '').toLowerCase().includes(needle));
+    }
+
+    const total = data.length;
+    const paged = data.slice(safeOffset, safeOffset + safeLimit);
+
+    res.json({
+      success: true,
+      data: paged,
+      pagination: { total, limit: safeLimit, offset: safeOffset, hasMore: total > (safeOffset + safeLimit) },
+    });
+  } catch (error) {
+    logger.error('Error listando cotizaciones de OT:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener cotizaciones de taller' });
+  }
+};
+
+/**
  * POST /work-orders/quote-notifications/:quoteRequestId/seen
  * Marca una ronda como vista por el taller — visto por tenant (no por
  * usuario individual): quien la abra primero la saca de la bandeja para
@@ -2391,4 +2480,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

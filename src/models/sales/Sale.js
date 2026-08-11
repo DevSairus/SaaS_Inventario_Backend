@@ -165,6 +165,17 @@ const Sale = sequelize.define('Sale', {
     unique: true,
     comment: 'Token persistente para el link público del PDF (cotización/factura/remisión) — mismo patrón que WorkOrder.share_token',
   },
+  // ── Ciclo de vida de cotizaciones (document_type='cotizacion') ───────
+  quote_status: {
+    type: DataTypes.ENUM('borrador', 'enviada', 'aprobada', 'rechazada', 'vencida'),
+    allowNull: true,
+    defaultValue: null,
+    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza desde /public/quote/:token.',
+  },
+  quote_approved_by_name:     { type: DataTypes.STRING, allowNull: true },
+  quote_approved_by_document: { type: DataTypes.STRING, allowNull: true },
+  quote_approved_ip:          { type: DataTypes.STRING, allowNull: true },
+  quote_responded_at:         { type: DataTypes.DATE, allowNull: true },
   // ── Técnico asignado (venta directa, sin orden de trabajo) ───────────
   technician_id: {
     type: DataTypes.UUID,
@@ -233,6 +244,7 @@ const Sale = sequelize.define('Sale', {
   indexes: [
     { fields: ['tenant_id', 'sale_number'], unique: true },
     { fields: ['tenant_id', 'status'] },
+    { fields: ['tenant_id', 'quote_status'] },
     { fields: ['customer_id'] },
     { fields: ['tenant_id', 'due_date'] },
   ],

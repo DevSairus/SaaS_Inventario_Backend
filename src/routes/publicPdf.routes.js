@@ -12,31 +12,11 @@
 
 const express = require('express');
 const router  = express.Router();
-const { sequelize } = require('../config/database');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const { Sale, Customer, SaleItem, Product, Tenant, SaleDiagnosisMark, DiagramTemplate } = require('../models');
 const { generateSalePDFBuffer } = require('../services/pdfService');
+const { resolveSaleSchemaByToken } = require('../controllers/sales/sales.controller');
 const logger  = require('../config/logger');
-
-async function resolveSaleSchemaByToken(token) {
-  const [publicRows] = await sequelize.query(
-    'SELECT id FROM "public"."sales" WHERE share_token = :token LIMIT 1',
-    { replacements: { token } }
-  );
-  if (publicRows[0]) return { saleId: publicRows[0].id, schemaName: null };
-
-  const [tenants] = await sequelize.query(
-    'SELECT schema_name FROM "public"."tenants" WHERE schema_name IS NOT NULL'
-  );
-  for (const { schema_name } of tenants) {
-    const [rows] = await sequelize.query(
-      `SELECT id FROM "${schema_name}"."sales" WHERE share_token = :token LIMIT 1`,
-      { replacements: { token } }
-    );
-    if (rows[0]) return { saleId: rows[0].id, schemaName: schema_name };
-  }
-  return null;
-}
 
 // GET /api/public/pdf/:token
 router.get('/:token', async (req, res) => {

@@ -65,6 +65,8 @@ const Vehicle = require('./workshop/Vehicle');
 const WorkOrder = require('./workshop/WorkOrder');
 const WorkOrderItem = require('./workshop/WorkOrderItem');
 const WorkOrderQuoteRequest = require('./workshop/WorkOrderQuoteRequest');
+const WorkshopAppointmentConfig = require('./workshop/WorkshopAppointmentConfig');
+const WorkshopAppointment = require('./workshop/WorkshopAppointment');
 const CommissionSettlement = require('./workshop/CommissionSettlement');
 const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
 const ProductCommissionSettlement = require('./workshop/ProductCommissionSettlement');
@@ -444,6 +446,17 @@ WorkOrder.hasMany(WorkOrderQuoteRequest, { foreignKey: 'work_order_id', as: 'quo
 WorkOrderItem.belongsTo(WorkOrderQuoteRequest, { foreignKey: 'quote_request_id', as: 'quote_request' });
 WorkOrderQuoteRequest.hasMany(WorkOrderItem, { foreignKey: 'quote_request_id', as: 'items' });
 
+// WorkshopAppointmentConfig ↔ Branch
+WorkshopAppointmentConfig.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Branch.hasOne(WorkshopAppointmentConfig, { foreignKey: 'branch_id', as: 'appointment_config' });
+
+// WorkshopAppointment ↔ Branch / Customer / Vehicle / WorkOrder / User
+WorkshopAppointment.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+WorkshopAppointment.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+WorkshopAppointment.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+WorkshopAppointment.belongsTo(WorkOrder, { foreignKey: 'converted_to_work_order_id', as: 'work_order' });
+WorkshopAppointment.belongsTo(User, { foreignKey: 'confirmed_by', as: 'confirmed_by_user' });
+
 // WorkOrderItem ↔ Product
 WorkOrderItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(WorkOrderItem, { foreignKey: 'product_id', as: 'work_order_items' });
@@ -681,6 +694,8 @@ module.exports = {
   WorkOrder,
   WorkOrderItem,
   WorkOrderQuoteRequest,
+  WorkshopAppointmentConfig,
+  WorkshopAppointment,
   CommissionSettlement,
   CommissionSettlementItem,
   ProductCommissionSettlement,

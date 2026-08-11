@@ -27,6 +27,7 @@ router.post('/:id/void',          voidSale);              // ← anulación/devo
 // Documentos
 router.get( '/:id/pdf',            salesController.generatePDF);
 router.post('/:id/send-whatsapp',  salesController.sendWhatsApp);
+router.post('/:id/share-link',     salesController.generateShareLink);
 router.get( '/:id/payment-receipt', salesController.generatePaymentReceipt);
 
 module.exports = router;
