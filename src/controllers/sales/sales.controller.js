@@ -751,6 +751,9 @@ const confirm = async (req, res) => {
       const stockErrors = [];
       const productCache = {};
       for (const item of sale.items) {
+        // Ítem rechazado por el cliente al aprobar la cotización (ver
+        // respondPublicQuoteBody) — no se cobra ni descuenta inventario.
+        if (item.approval_status === 'rechazado') continue;
         if (item.item_type === 'service' || item.item_type === 'free_line') continue;
         if (!item.product_id) continue;
         const prodCheck = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
@@ -793,6 +796,7 @@ const confirm = async (req, res) => {
 
       // Crear movimientos de salida
       for (const item of sale.items) {
+        if (item.approval_status === 'rechazado') continue;
         if (item.item_type === 'service' || item.item_type === 'free_line') continue;
         if (item.product_id) {
           const product = productCache[item.product_id] || await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
@@ -1614,10 +1618,12 @@ async function getPublicSaleBody(saleId, res) {
       total_amount: sale.total_amount,
       notes: sale.notes,
       items: (sale.items || []).map(i => ({
+        id: i.id,
         product_name: i.product?.name || i.description,
         quantity: i.quantity,
         unit_price: i.unit_price,
         total: i.total,
+        approval_status: i.approval_status,
       })),
       quote_approved_by_name: sale.quote_approved_by_name,
       quote_responded_at: sale.quote_responded_at,
@@ -1633,12 +1639,12 @@ const respondPublicQuote = async (req, res) => {
   const { runWithTenantSchema } = require('../../config/tenantContext');
   try {
     const { token } = req.params;
-    const { approved, approved_by_name, approved_by_document } = req.body;
+    const { approvals, approved_by_name, approved_by_document } = req.body;
 
     if (!approved_by_name || !approved_by_document) {
       return res.status(400).json({ success: false, message: 'Nombre y documento son requeridos para responder' });
     }
-    if (typeof approved !== 'boolean') {
+    if (!Array.isArray(approvals) || approvals.length === 0) {
       return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión' });
     }
 
@@ -1653,7 +1659,7 @@ const respondPublicQuote = async (req, res) => {
     }
 
     return runWithTenantSchema(resolved.schemaName, () =>
-      respondPublicQuoteBody({ saleId: resolved.saleId, approved, approved_by_name, approved_by_document, req, res })
+      respondPublicQuoteBody({ saleId: resolved.saleId, approvals, approved_by_name, approved_by_document, req, res })
     );
   } catch (error) {
     logger.error('[Cotización pública] Error respondiendo:', error.message);
@@ -1661,22 +1667,71 @@ const respondPublicQuote = async (req, res) => {
   }
 };
 
-async function respondPublicQuoteBody({ saleId, approved, approved_by_name, approved_by_document, req, res }) {
-  const sale = await Sale.findByPk(saleId);
-  if (!sale) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
-  if (sale.quote_status !== 'enviada') {
-    return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
+// approvals: [{ item_id, approved }] — el cliente puede aprobar algunos
+// ítems y rechazar otros (mismo patrón que respondQuoteRequestBody en
+// workOrders.controller.js). El estado final de la cotización depende de la
+// mezcla resultante: 'aprobada' si aprobó todo, 'rechazada' si rechazó todo,
+// 'parcial' si mezcló ambas.
+async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, approved_by_document, req, res }) {
+  const transaction = await sequelize.transaction();
+  try {
+    const sale = await Sale.findOne({ where: { id: saleId }, include: [{ model: SaleItem, as: 'items' }], transaction });
+    if (!sale) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
+    if (sale.quote_status !== 'enviada') {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
+    }
+
+    const itemIds = new Set(sale.items.map(i => i.id));
+    const validApprovals = approvals.filter(a => itemIds.has(a.item_id));
+    if (validApprovals.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión válida' });
+    }
+
+    for (const a of validApprovals) {
+      await SaleItem.update(
+        {
+          approval_status: a.approved ? 'aprobado' : 'rechazado',
+          rejection_reason: a.approved ? null : (a.rejection_reason || null),
+        },
+        { where: { id: a.item_id, sale_id: sale.id }, transaction }
+      );
+    }
+
+    // Recalcular totales sobre los ítems aprobados — mismo criterio que
+    // calcTotals en workOrders.controller.js: un ítem rechazado por el
+    // cliente no se factura, así que no debe inflar lo que se cobra.
+    const refreshedItems = await SaleItem.findAll({ where: { sale_id: sale.id }, transaction });
+    const billable = refreshedItems.filter(i => i.approval_status === 'aprobado');
+    const subtotal        = billable.reduce((s, i) => s + parseFloat(i.subtotal || 0), 0);
+    const discount_amount = billable.reduce((s, i) => s + parseFloat(i.discount_amount || 0), 0);
+    const tax_amount      = billable.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
+    const total_amount    = billable.reduce((s, i) => s + parseFloat(i.total || 0), 0);
+
+    const anyApproved = refreshedItems.some(i => i.approval_status === 'aprobado');
+    const anyRejected = refreshedItems.some(i => i.approval_status === 'rechazado');
+    const quote_status = anyApproved && anyRejected ? 'parcial' : anyApproved ? 'aprobada' : 'rechazada';
+
+    await sale.update({
+      quote_status,
+      subtotal, discount_amount, tax_amount, total_amount,
+      quote_approved_by_name: approved_by_name,
+      quote_approved_by_document: approved_by_document,
+      quote_approved_ip: req.ip,
+      quote_responded_at: new Date(),
+    }, { transaction });
+
+    await transaction.commit();
+    res.json({ success: true, message: 'Respuesta registrada correctamente' });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('[Cotización pública] Error en respondPublicQuoteBody:', error);
+    res.status(500).json({ success: false, message: 'Error al procesar la respuesta' });
   }
-
-  await sale.update({
-    quote_status: approved ? 'aprobada' : 'rechazada',
-    quote_approved_by_name: approved_by_name,
-    quote_approved_by_document: approved_by_document,
-    quote_approved_ip: req.ip,
-    quote_responded_at: new Date(),
-  });
-
-  res.json({ success: true, message: 'Respuesta registrada correctamente' });
 }
 
 module.exports = {

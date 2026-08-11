@@ -91,6 +91,20 @@ const SaleItem = sequelize.define('SaleItem', {
     references: { model: 'users', key: 'id' },
     onDelete: 'SET NULL',
   },
+  // Aprobación por ítem de cotizaciones (document_type='cotizacion') — mismo
+  // patrón que WorkOrderItem.approval_status. Default 'aprobado' para que
+  // los ítems de ventas normales (sin flujo de cotización) se comporten
+  // exactamente igual que antes de esta funcionalidad.
+  approval_status: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    defaultValue: 'aprobado',
+    validate: { isIn: [['pendiente', 'aprobado', 'rechazado']] },
+  },
+  rejection_reason: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+  },
 }, {
   tableName: 'sale_items',
   timestamps: true,

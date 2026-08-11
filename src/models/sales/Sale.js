@@ -167,10 +167,10 @@ const Sale = sequelize.define('Sale', {
   },
   // ── Ciclo de vida de cotizaciones (document_type='cotizacion') ───────
   quote_status: {
-    type: DataTypes.ENUM('borrador', 'enviada', 'aprobada', 'rechazada', 'vencida'),
+    type: DataTypes.ENUM('borrador', 'enviada', 'aprobada', 'parcial', 'rechazada', 'vencida'),
     allowNull: true,
     defaultValue: null,
-    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza desde /public/quote/:token.',
+    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza (total o por ítem) desde /public/quote/:token. "parcial" = aprobó algunos ítems y rechazó otros.',
   },
   quote_approved_by_name:     { type: DataTypes.STRING, allowNull: true },
   quote_approved_by_document: { type: DataTypes.STRING, allowNull: true },
