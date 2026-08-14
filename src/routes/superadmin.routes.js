@@ -2534,7 +2534,7 @@ router.put(
       const { userId } = req.params;
       const { role } = req.body;
 
-      const validRoles = ['admin', 'operario', 'cliente'];
+      const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician', 'support'];
       if (!role || !validRoles.includes(role)) {
         return res.status(400).json({
           success: false,
