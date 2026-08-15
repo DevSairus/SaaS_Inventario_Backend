@@ -109,6 +109,8 @@ const EnsambladoraTecnicoAsesor = require('./ensambladora/EnsambladoraTecnicoAse
 const EnsambladoraRuntSolicitud = require('./ensambladora/EnsambladoraRuntSolicitud');
 // ✅ NUEVO - Módulo Ensambladora (cotización de moto no vendida)
 const EnsambladoraCotizacion = require('./ensambladora/EnsambladoraCotizacion');
+// ✅ NUEVO - Módulo Ensambladora (auditoría de acciones sobre garantía/alistamiento/etc)
+const EnsambladoraAuditLog = require('./ensambladora/EnsambladoraAuditLog');
 
 // ✅ NUEVO - Catálogo normalizado de vehículos (Fase 6)
 const VehicleBrand = require('./workshop/VehicleBrand');
@@ -747,4 +749,5 @@ module.exports = {
   EnsambladoraTecnicoAsesor,
   EnsambladoraRuntSolicitud,
   EnsambladoraCotizacion,
+  EnsambladoraAuditLog,
 };

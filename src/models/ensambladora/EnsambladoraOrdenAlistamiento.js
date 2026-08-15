@@ -11,6 +11,11 @@ const EnsambladoraOrdenAlistamiento = sequelize.define(
     fecha: { type: DataTypes.DATE, allowNull: false },
     checklist: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
     observaciones: DataTypes.TEXT,
+    // Mismo criterio que EnsambladoraOrdenRevision -- sin esto, el evento
+    // alistamiento.completado nunca llevaba valor a cobrar y el Core no
+    // tenía nada que facturar en la liquidación.
+    tarifario_servicio_id: DataTypes.UUID,
+    valor_mano_obra: DataTypes.DECIMAL(12, 2),
     sync_estado: {
       type: DataTypes.ENUM('pendiente', 'enviado', 'confirmado', 'error'),
       allowNull: false,

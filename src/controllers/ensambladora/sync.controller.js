@@ -1,6 +1,7 @@
 // backend/src/controllers/ensambladora/sync.controller.js
 const { EnsambladoraEventoSync } = require('../../models');
 const { reenviarEventoExistente } = require('../../services/ensambladora/syncOutboundClient');
+const { registrarAuditoria } = require('../../services/ensambladora/auditLog');
 const logger = require('../../config/logger');
 
 /**
@@ -45,6 +46,22 @@ async function receiveInbound(req, res) {
       tipo_evento,
       tenant_id: req.tenant_id,
     });
+
+    // Cobertura defensiva de auditoría: si el Core alguna vez empuja un
+    // evento de garantía (ej. garantia.devuelta, garantia.aprobada), queda
+    // registrado acá con actor "Ensambladora (Core)" -- no depende de que
+    // conozcamos de antemano el contrato exacto de tipos de evento del Core.
+    if (entidad_tipo === 'garantia') {
+      registrarAuditoria({
+        entidad_tipo: 'garantia',
+        entidad_id: entidad_id || null,
+        vin: payload?.vin || null,
+        accion: `evento_core_${tipo_evento}`,
+        usuario_id: null,
+        usuario_nombre: 'Ensambladora (Core)',
+        detalle: payload || {},
+      });
+    }
 
     res.json({ event_id, estado: 'confirmado' });
   } catch (error) {

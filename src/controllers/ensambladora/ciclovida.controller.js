@@ -2,6 +2,7 @@
 const { EnsambladoraVenta, EnsambladoraOrdenAlistamiento, EnsambladoraOrdenEntrega, EnsambladoraOrdenRevision, VehiculoCache } = require('../../models');
 const { validarDisponibilidadEnCore, consultarVehiculoPorVin } = require('../../services/ensambladora/coreApiClient');
 const { sendEventToCore } = require('../../services/ensambladora/syncOutboundClient');
+const { registrarAuditoria } = require('../../services/ensambladora/auditLog');
 const logger = require('../../config/logger');
 
 /**
@@ -142,7 +143,7 @@ async function listarEntregasPorVin(req, res) {
 
 /** POST /api/ensambladora/alistamientos */
 async function crearAlistamiento(req, res) {
-  const { vin, responsable, fecha, checklist, observaciones } = req.body || {};
+  const { vin, responsable, fecha, checklist, observaciones, tarifario_servicio_id, valor_mano_obra } = req.body || {};
 
   if (!vin || !fecha) {
     return res.status(400).json({ success: false, code: 'payload_invalido', message: 'vin y fecha son obligatorios' });
@@ -156,6 +157,8 @@ async function crearAlistamiento(req, res) {
       fecha,
       checklist: checklist || {},
       observaciones: observaciones || null,
+      tarifario_servicio_id: tarifario_servicio_id || null,
+      valor_mano_obra: valor_mano_obra != null ? valor_mano_obra : null,
       sync_estado: 'pendiente',
     });
   } catch (error) {
@@ -170,7 +173,15 @@ async function crearAlistamiento(req, res) {
     tipoEvento: 'alistamiento.completado',
     entidadTipo: 'alistamiento',
     entidadId: orden.id,
-    payload: { vin, responsable, fecha, checklist, observaciones },
+    payload: {
+      vin,
+      responsable,
+      fecha,
+      checklist,
+      observaciones,
+      tarifario_servicio_id: tarifario_servicio_id || null,
+      valor_mano_obra: valor_mano_obra != null ? valor_mano_obra : null,
+    },
   });
 
   await orden.update({ sync_estado: envio.ok ? 'confirmado' : 'error', evento_sync_id: envio.eventId });
@@ -184,6 +195,16 @@ async function crearAlistamiento(req, res) {
       error_core: envio.error,
     });
   }
+
+  registrarAuditoria({
+    entidad_tipo: 'alistamiento',
+    entidad_id: orden.id,
+    vin,
+    accion: 'creado',
+    usuario_id: req.user?.id,
+    usuario_nombre: req.user?.email,
+    detalle: { responsable },
+  });
 
   res.status(201).json({ success: true, data: orden });
 }

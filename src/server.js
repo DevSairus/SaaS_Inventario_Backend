@@ -202,6 +202,7 @@ const ensambladoraGarantiasRoutes   = require('./routes/ensambladora/garantias.r
 const ensambladoraLiquidacionesRoutes = require('./routes/ensambladora/liquidaciones.routes');
 const ensambladoraTecnicosRoutes    = require('./routes/ensambladora/tecnicos.routes');
 const ensambladoraRuntRoutes        = require('./routes/ensambladora/runt.routes');
+const ensambladoraAuditoriaRoutes   = require('./routes/ensambladora/auditoria.routes');
 
 // Rate limiting global
 app.use('/api/', generalLimiter);
@@ -305,6 +306,7 @@ app.use('/api/ensambladora/vehiculos',          authMiddleware, tenantMiddleware
 app.use('/api/ensambladora/garantias',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraGarantiasRoutes);
 app.use('/api/ensambladora/tecnicos',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraTecnicosRoutes);
 app.use('/api/ensambladora/runt',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraRuntRoutes);
+app.use('/api/ensambladora/auditoria',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraAuditoriaRoutes);
 app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraLiquidacionesRoutes);
 app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraCicloVidaRoutes);
 

@@ -2,6 +2,7 @@
 const { EnsambladoraOrdenGarantia } = require('../../models');
 const { sendEventToCore } = require('../../services/ensambladora/syncOutboundClient');
 const { consultarGarantias, consultarGarantia } = require('../../services/ensambladora/coreApiClient');
+const { registrarAuditoria } = require('../../services/ensambladora/auditLog');
 const logger = require('../../config/logger');
 
 /**
@@ -158,6 +159,16 @@ async function crearGarantia(req, res) {
     });
   }
 
+  registrarAuditoria({
+    entidad_tipo: 'garantia',
+    entidad_id: orden.id,
+    vin,
+    accion: 'radicada',
+    usuario_id: req.user?.id,
+    usuario_nombre: req.user?.email,
+    detalle: { tecnico_documento, items_count: items.length },
+  });
+
   res.status(201).json({ success: true, data: orden });
 }
 
@@ -205,6 +216,16 @@ async function cerrarGarantia(req, res) {
   }
 
   await orden.update({ cerrada: true, fecha_cierre });
+
+  registrarAuditoria({
+    entidad_tipo: 'garantia',
+    entidad_id: orden.id,
+    vin: orden.vin,
+    accion: 'cerrada',
+    usuario_id: req.user?.id,
+    usuario_nombre: req.user?.email,
+    detalle: { fecha_cierre },
+  });
 
   res.json({ success: true, data: orden });
 }
@@ -297,6 +318,19 @@ async function reenviarGarantia(req, res) {
       error_core: envio.error,
     });
   }
+
+  // Reenviar solo tiene efecto cuando el Core devolvió la garantía (ver
+  // comentario del handler) -- esta es la señal local confiable de que hubo
+  // una devolución que se está corrigiendo, para efectos de auditoría.
+  registrarAuditoria({
+    entidad_tipo: 'garantia',
+    entidad_id: orden.id,
+    vin: orden.vin,
+    accion: 'reenviada_tras_devolucion',
+    usuario_id: req.user?.id,
+    usuario_nombre: req.user?.email,
+    detalle: { items_count: items.length, items_eliminar_count: items_eliminar.length },
+  });
 
   res.json({ success: true, data: envio.resultado });
 }
