@@ -1,5 +1,5 @@
 const { JournalEntry, JournalEntryLine, ChartOfAccount } = require('../../models');
-const { createDraftEntry, postEntry, voidEntry, reverseEntry } = require('../../services/accounting/journalEntry.service');
+const { createDraftEntry, updateDraftEntry, postEntry, voidEntry, reverseEntry } = require('../../services/accounting/journalEntry.service');
 const logger = require('../../config/logger');
 
 // GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=
@@ -74,6 +74,33 @@ exports.create = async (req, res) => {
 
     await t.commit();
     res.status(201).json({ success: true, data: entry });
+  } catch (error) {
+    await t.rollback();
+    logger.error('Error en journalEntries.controller.js:', error);
+    res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// PUT /api/accounting/journal-entries/:id — edita un asiento manual en borrador
+exports.update = async (req, res) => {
+  const { sequelize } = require('../../config/database');
+  const t = await sequelize.transaction();
+  try {
+    const { entry_date, description, lines, branch_id } = req.body;
+    if (!entry_date || !Array.isArray(lines)) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'entry_date y lines son obligatorios' });
+    }
+
+    const entry = await updateDraftEntry(
+      req.params.id,
+      req.tenant_id,
+      { entryDate: entry_date, description, branchId: branch_id, lines },
+      t
+    );
+
+    await t.commit();
+    res.json({ success: true, data: entry });
   } catch (error) {
     await t.rollback();
     logger.error('Error en journalEntries.controller.js:', error);

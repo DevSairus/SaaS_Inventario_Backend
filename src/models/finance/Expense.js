@@ -30,7 +30,7 @@ const Expense = sequelize.define('Expense', {
       isIn: [[
         'arriendo', 'servicios_publicos', 'nomina', 'mantenimiento',
         'transporte', 'impuestos', 'marketing', 'insumos_oficina',
-        'seguros', 'honorarios', 'otro'
+        'seguros', 'honorarios', 'comisiones_tecnicos', 'otro'
       ]]
     }
   },

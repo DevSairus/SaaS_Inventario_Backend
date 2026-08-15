@@ -126,7 +126,7 @@ const updateTenantConfig = async (req, res) => {
     if (primary_color !== undefined) updates.primary_color = primary_color;
     if (secondary_color !== undefined) updates.secondary_color = secondary_color;
     if (pdf_config !== undefined) updates.pdf_config = pdf_config;
-    if (business_config !== undefined) updates.business_config = business_config;
+    if (business_config !== undefined) updates.business_config = { ...(tenant.business_config || {}), ...business_config };
     if (features !== undefined) updates.features = { ...(tenant.features || {}), ...features };
     if (tax_config !== undefined) updates.tax_config = { ...(tenant.tax_config || {}), ...tax_config };
 

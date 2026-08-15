@@ -119,6 +119,67 @@ async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sou
 }
 
 /**
+ * Edita un asiento manual que sigue en borrador: reemplaza sus líneas y
+ * reevalúa fecha/descripción/sede. Solo aplica a source_type='manual' — los
+ * asientos automáticos (venta, compra, gasto, comisión, etc.) reflejan un
+ * registro origen y deben corregirse regenerando ese registro o vía
+ * reverseEntry, nunca editándose directamente aquí (quedarían
+ * desincronizados de su fuente).
+ */
+async function updateDraftEntry(entryId, tenantId, { entryDate, description, branchId, lines }, transaction) {
+  const { JournalEntry, JournalEntryLine } = require('../../models');
+
+  const entry = await JournalEntry.findOne({ where: { id: entryId, tenant_id: tenantId }, transaction });
+  if (!entry) throw new Error('Asiento no encontrado');
+  if (entry.status !== 'draft') throw new Error(`Solo se pueden editar asientos en borrador (estado actual: ${entry.status})`);
+  if (entry.source_type !== 'manual') throw new Error('Solo los asientos manuales se pueden editar; los automáticos deben corregirse vía reversión');
+
+  if (!lines || lines.length < 2) {
+    throw new Error('Un asiento contable necesita al menos 2 líneas (débito y crédito)');
+  }
+
+  const totalDebit = lines.reduce((sum, l) => sum + Number(l.debit || 0), 0);
+  const totalCredit = lines.reduce((sum, l) => sum + Number(l.credit || 0), 0);
+  if (Math.abs(totalDebit - totalCredit) > 0.01) {
+    throw new Error(`El asiento no cuadra: débito ${totalDebit} vs crédito ${totalCredit}`);
+  }
+
+  const newEntryDate = entryDate || entry.entry_date;
+  const period = await getOrCreatePeriod(tenantId, newEntryDate, transaction);
+  if (period.status === 'closed') {
+    throw new Error(`El período ${period.month}/${period.year} está cerrado, no se pueden editar asientos en esa fecha`);
+  }
+
+  await JournalEntryLine.destroy({ where: { entry_id: entry.id }, transaction });
+  await JournalEntryLine.bulkCreate(
+    lines.map((l, idx) => ({
+      entry_id: entry.id,
+      account_id: l.account_id,
+      debit: l.debit || 0,
+      credit: l.credit || 0,
+      description: l.description || null,
+      third_party_id: l.third_party_id || null,
+      line_order: idx,
+    })),
+    { transaction }
+  );
+
+  await entry.update(
+    {
+      entry_date: newEntryDate,
+      period_id: period.id,
+      branch_id: branchId !== undefined ? branchId : entry.branch_id,
+      description: description !== undefined ? description : entry.description,
+      total_debit: totalDebit,
+      total_credit: totalCredit,
+    },
+    { transaction }
+  );
+
+  return entry;
+}
+
+/**
  * Contabiliza (posted) un asiento en draft. A partir de aquí el asiento
  * afecta reportes (balance de comprobación, balance general, P&G).
  */
@@ -242,6 +303,7 @@ module.exports = {
   getMappedAccountId,
   getOrCreatePeriod,
   createDraftEntry,
+  updateDraftEntry,
   postEntry,
   voidEntry,
   reverseEntry,

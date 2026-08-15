@@ -14,4 +14,7 @@ router.get('/profit', reportsController.getProfitReport);
 // Rotación de inventario
 router.get('/rotation', reportsController.getRotationReport);
 
+// Rentabilidad del taller (Ingresos - COGS - Mano de obra - Gastos operativos)
+router.get('/profitability', reportsController.getProfitabilityReport);
+
 module.exports = router;

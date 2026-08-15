@@ -223,7 +223,7 @@ const createProduct = async (req, res) => {
       min_stock = 0, max_stock, product_type = 'simple',
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
-      tax_config
+      tax_config, is_labor = false
     } = req.body;
 
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material'];
@@ -272,6 +272,7 @@ const createProduct = async (req, res) => {
       track_inventory: safeProductType === 'service' ? false : track_inventory,
       is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
       tax_config: finalTaxConfig,
+      is_labor: safeProductType === 'service' ? !!is_labor : false,
     });
 
     const newProduct = await Product.findOne({ where: { id: product.id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });

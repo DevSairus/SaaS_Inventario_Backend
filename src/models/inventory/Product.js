@@ -27,6 +27,15 @@ const Product = sequelize.define('Product', {
     allowNull: false,
     defaultValue: 'simple'
   },
+  // Solo aplica a product_type='service'. Cuando está marcado, agregar este
+  // producto a una OT precarga item_type='mano_obra' en vez de 'servicio'
+  // (ver WorkOrderDetailPage.jsx#handleSelectProduct) -- distingue mano de
+  // obra facturable a comisión de un servicio genérico sin comisión.
+  is_labor: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
   sku: {
     type: DataTypes.STRING(50),
     allowNull: false,

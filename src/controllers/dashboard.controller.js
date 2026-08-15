@@ -28,24 +28,30 @@ exports.getKPIs = async (req, res) => {
       raw: true
     });
 
-    // Calcular profit desde los items de venta
+    // Calcular profit desde los items de venta -- SOLO productos físicos
+    // (product_type != 'service'). Los ítems de servicio/mano de obra nacen
+    // con unit_cost = 0 (ver workOrders.controller.js), así que incluirlos
+    // aquí inflaba el profit por el 100% de su precio de venta. Su ganancia
+    // real se calcula aparte con laborCost.service.js (ver más abajo).
     const profitCalc = await SaleItem.findOne({
       where: {
         '$sale.tenant_id$': tenantId,
         '$sale.sale_date$': { [Op.gte]: dateFrom },
-        '$sale.status$': { [Op.in]: ['completed'] }
+        '$sale.status$': { [Op.in]: ['completed'] },
+        '$product.product_type$': { [Op.ne]: 'service' }
       },
       attributes: [
         [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'total_profit']
       ],
-      include: [{
-        model: Sale,
-        as: 'sale',
-        attributes: [],
-        required: true
-      }],
+      include: [
+        { model: Sale, as: 'sale', attributes: [], required: true },
+        { model: Product, as: 'product', attributes: [], required: true }
+      ],
       raw: true
     });
+
+    const { getLaborCostForPeriod } = require('../services/workshop/laborCost.service');
+    const laborProfitCalc = await getLaborCostForPeriod({ tenantId, dateFrom, dateTo: new Date() });
 
     // KPI 2: Ventas de hoy
     const today = new Date();
@@ -170,7 +176,8 @@ exports.getKPIs = async (req, res) => {
       };
     });
 
-    const totalProfit = parseFloat(profitCalc?.total_profit || 0);
+    const laborProfit = laborProfitCalc.labor_revenue - laborProfitCalc.labor_cost;
+    const totalProfit = parseFloat(profitCalc?.total_profit || 0) + laborProfit;
     const totalRevenue = parseFloat(salesStats?.revenue || 0);
 
     res.json({
@@ -180,9 +187,11 @@ exports.getKPIs = async (req, res) => {
           count: parseInt(salesStats?.count || 0),
           revenue: totalRevenue,
           profit: totalProfit,
-          margin: totalRevenue > 0 
+          margin: totalRevenue > 0
             ? ((totalProfit / totalRevenue) * 100).toFixed(2)
-            : 0
+            : 0,
+          labor_cost_real: laborProfitCalc.labor_cost_real,
+          labor_cost_estimated: laborProfitCalc.labor_cost_estimated,
         },
         today: {
           count: parseInt(todaySales?.count || 0),
@@ -387,6 +396,12 @@ exports.getWorkshopKPIs = async (req, res) => {
         AND created_at >= NOW() - INTERVAL '90 days'
     `, { replacements: { tenantId }, type: QueryTypes.SELECT });
 
+    // Costo de mano de obra del mes (real si liquidado, estimado si no) --
+    // usa criterio 'entregado' (no 'listo'), que es un subconjunto un poco
+    // más estricto que labor_revenue_month de arriba (incluye 'listo').
+    const { getLaborCostForPeriod } = require('../services/workshop/laborCost.service');
+    const laborCostMonth = await getLaborCostForPeriod({ tenantId, dateFrom: startOfMonth, dateTo: now });
+
     res.json({
       success: true,
       data: {
@@ -395,6 +410,11 @@ exports.getWorkshopKPIs = async (req, res) => {
         labor_revenue_month: parseFloat(laborRevenue?.total || 0),
         parts_revenue_month: parseFloat(partsRevenue?.total || 0),
         total_revenue_month: parseFloat(laborRevenue?.total || 0) + parseFloat(partsRevenue?.total || 0),
+        labor_cost_month: laborCostMonth.labor_cost,
+        labor_profit_month: laborCostMonth.labor_revenue - laborCostMonth.labor_cost,
+        labor_cost_basis: laborCostMonth.labor_cost_estimated > 0
+          ? (laborCostMonth.labor_cost_real > 0 ? 'mixto' : 'estimado')
+          : 'real',
         avg_resolution_days: parseFloat(avgTime[0]?.avg_days || 0),
         by_status: statusMap
       }

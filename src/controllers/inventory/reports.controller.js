@@ -235,7 +235,17 @@ exports.getValuation = async (req, res) => {
 };
 
 /**
- * Obtiene reporte de ganancia por producto
+ * Obtiene reporte de ganancia por producto físico Y por mano de obra/servicios.
+ *
+ * Los productos físicos (repuestos) usan su costo real (unit_cost snapshot o
+ * average_cost). La mano de obra NO puede usar sale_items.unit_cost -- ese
+ * campo siempre queda en 0 para ítems de servicio (ver workOrders.controller.js,
+ * generación de la Sale al cerrar una OT), lo que antes hacía que el margen de
+ * "Servicios" mostrara ~100% siempre. Ahora la mano de obra se calcula desde
+ * work_order_items usando laborCost.service.js: costo REAL si la OT ya fue
+ * liquidada (commission_settlement_items), costo ESTIMADO (% configurable del
+ * tenant) si aún no. Cada fila trae cost_source para que el frontend distinga
+ * cifras reales de estimadas.
  */
 exports.getProfitReport = async (req, res) => {
   try {
@@ -257,19 +267,40 @@ exports.getProfitReport = async (req, res) => {
     const safeLimit = Math.max(1, Math.min(500, parseInt(limit) || 100));
 
     let dateFilter;
+    let woDateFilter;
     if (from_date && to_date) {
       dateFilter = `COALESCE(s.sale_date, s.created_at) BETWEEN :fromDate AND :toDate`;
+      woDateFilter = `COALESCE(wo.delivered_at, wo.created_at) BETWEEN :fromDate AND :toDate`;
     } else {
       const monthsToUse = safeMonths(months || 3);
       dateFilter = `COALESCE(s.sale_date, s.created_at) >= NOW() - INTERVAL '${monthsToUse} months'`;
+      woDateFilter = `COALESCE(wo.delivered_at, wo.created_at) >= NOW() - INTERVAL '${monthsToUse} months'`;
     }
 
     // sales.branch_id ya existe (Fase 1/2), a diferencia de inventory_movements
     // no requiere lookup a warehouses.
     const branchFilter = branch_id ? `AND s.branch_id = :branchId` : '';
 
+    // work_orders no tiene branch_id propio (1 sede = 1 bodega) — resolver vía
+    // warehouse_id, mismo criterio que getMovementsByMonth.
+    let branchWarehouseId = null;
+    if (branch_id) {
+      const [warehouseRow] = await sequelize.query(
+        `SELECT id FROM "${schema}"."warehouses" WHERE tenant_id = :tenantId AND branch_id = :branchId LIMIT 1`,
+        { replacements: { tenantId, branchId: branch_id }, type: QueryTypes.SELECT }
+      );
+      branchWarehouseId = warehouseRow ? warehouseRow.id : '00000000-0000-0000-0000-000000000000';
+    }
+    const woBranchFilter = branch_id ? `AND wo.warehouse_id = :branchWarehouseId` : '';
+
+    const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+    const branchReplacements = branch_id ? { branchId: branch_id, branchWarehouseId } : {};
+
+    // ── Productos físicos (repuestos) — sin cambios de fondo, solo se
+    // excluye explícitamente product_type='service' para no mezclarlo con la
+    // rama de mano de obra de abajo ────────────────────────────────────────
     const query = `
-      SELECT 
+      SELECT
         p.id,
         p.name as product_name,
         p.sku as product_sku,
@@ -295,6 +326,7 @@ exports.getProfitReport = async (req, res) => {
       LEFT JOIN "${schema}"."categories" c ON p.category_id = c.id
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
+        AND p.product_type != 'service'
         AND ${dateFilter}
         AND s.status IN ('completed', 'pending')
         ${branchFilter}
@@ -303,15 +335,11 @@ exports.getProfitReport = async (req, res) => {
       LIMIT ${parseInt(limit)}
     `;
 
-    const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
-    const branchReplacements = branch_id ? { branchId: branch_id } : {};
-
-    const products = await sequelize.query(query, {
+    const physicalProducts = await sequelize.query(query, {
       replacements: { tenantId, ...dateReplacements, ...branchReplacements },
       type: QueryTypes.SELECT
     });
 
-    // Calcular totales con query separada (sin LIMIT) para no perder datos
     const totalsQuery = `
       SELECT
         COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
@@ -322,43 +350,131 @@ exports.getProfitReport = async (req, res) => {
       INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
+        AND p.product_type != 'service'
         AND ${dateFilter}
         AND s.status IN ('completed', 'pending')
         ${branchFilter}
     `;
-    const [totalsRow] = await sequelize.query(totalsQuery, {
+    const [physicalTotalsRow] = await sequelize.query(totalsQuery, {
       replacements: { tenantId, ...dateReplacements, ...branchReplacements },
       type: QueryTypes.SELECT
     });
-    const totals = {
-      total_revenue: parseFloat(totalsRow?.total_revenue) || 0,
-      total_cost: parseFloat(totalsRow?.total_cost) || 0,
-      total_profit: parseFloat(totalsRow?.total_profit) || 0,
-      margin_percentage: 0
-    };
-    if (totals.total_cost > 0) {
-      totals.margin_percentage = (totals.total_profit / totals.total_cost) * 100;
-    }
 
-    products.forEach(item => {
-      const revenue = parseFloat(item.total_revenue) || 0;
-      const cost = parseFloat(item.total_cost) || 0;
-      const profit = parseFloat(item.profit) || 0;
-      const margin = parseFloat(item.margin_percentage) || 0;
-      
-      totals.total_revenue += revenue;
-      totals.total_cost += cost;
-      totals.total_profit += profit;
-      
-      // Asegurar que los valores en el array sean números válidos
+    physicalProducts.forEach(item => {
       item.total_quantity = parseFloat(item.total_quantity) || 0;
-      item.total_revenue = revenue;
-      item.total_cost = cost;
-      item.profit = profit;
-      item.margin_percentage = margin;
+      item.total_revenue = parseFloat(item.total_revenue) || 0;
+      item.total_cost = parseFloat(item.total_cost) || 0;
+      item.profit = parseFloat(item.profit) || 0;
+      item.margin_percentage = parseFloat(item.margin_percentage) || 0;
     });
 
-    // Calcular margen promedio
+    // ── Mano de obra / servicios — desde work_order_items, con costo real
+    // (liquidado) o estimado (% del tenant) por OT ──────────────────────────
+    const laborItemsQuery = `
+      SELECT wo.id as work_order_id,
+        woi.product_name, woi.product_sku,
+        COALESCE(woi.quantity, 0)::numeric as quantity,
+        COALESCE(woi.unit_price, 0)::numeric as unit_price
+      FROM "${schema}"."work_orders" wo
+      INNER JOIN "${schema}"."work_order_items" woi ON woi.work_order_id = wo.id
+      WHERE wo.tenant_id = :tenantId
+        AND woi.item_type IN ('servicio', 'mano_obra')
+        AND wo.status = 'entregado'
+        AND ${woDateFilter}
+        ${woBranchFilter}
+    `;
+    const laborItems = await sequelize.query(laborItemsQuery, {
+      replacements: { tenantId, ...dateReplacements, ...branchReplacements },
+      type: QueryTypes.SELECT
+    });
+
+    const { getLaborCostByWorkOrderIds, resolveLaborCost } = require('../../services/workshop/laborCost.service');
+
+    const otRevenue = new Map();
+    for (const it of laborItems) {
+      const revenue = (parseFloat(it.quantity) || 0) * (parseFloat(it.unit_price) || 0);
+      otRevenue.set(it.work_order_id, (otRevenue.get(it.work_order_id) || 0) + revenue);
+    }
+    const workOrderIds = Array.from(otRevenue.keys());
+    const { pct, settledMap } = await getLaborCostByWorkOrderIds(tenantId, workOrderIds);
+
+    // Agregar por nombre de ítem para mostrar una tabla legible (equivalente
+    // a "por producto" para productos físicos), prorrateando el costo de la
+    // OT proporcionalmente al ingreso de cada línea dentro de esa OT.
+    const laborGroups = new Map();
+    let laborCostReal = 0;
+    let laborCostEstimated = 0;
+
+    for (const it of laborItems) {
+      const revenue = (parseFloat(it.quantity) || 0) * (parseFloat(it.unit_price) || 0);
+      const otTotalRevenue = otRevenue.get(it.work_order_id) || 0;
+      const { labor_cost: otLaborCost, is_real } = resolveLaborCost(it.work_order_id, otTotalRevenue, settledMap, pct);
+      const itemCost = otTotalRevenue > 0 ? (revenue / otTotalRevenue) * otLaborCost : 0;
+
+      if (is_real) laborCostReal += itemCost; else laborCostEstimated += itemCost;
+
+      const key = it.product_name || 'Mano de obra';
+      if (!laborGroups.has(key)) {
+        laborGroups.set(key, {
+          id: `labor:${key}`,
+          product_name: key,
+          product_sku: it.product_sku || null,
+          product_type: 'service',
+          category: 'Mano de obra',
+          total_sales: new Set(),
+          total_quantity: 0,
+          total_revenue: 0,
+          total_cost: 0,
+          has_real: false,
+          has_estimated: false,
+        });
+      }
+      const g = laborGroups.get(key);
+      g.total_sales.add(it.work_order_id);
+      g.total_quantity += parseFloat(it.quantity) || 0;
+      g.total_revenue += revenue;
+      g.total_cost += itemCost;
+      if (is_real) g.has_real = true; else g.has_estimated = true;
+    }
+
+    const laborProducts = Array.from(laborGroups.values()).map(g => {
+      const profit = g.total_revenue - g.total_cost;
+      return {
+        id: g.id,
+        product_name: g.product_name,
+        product_sku: g.product_sku,
+        product_type: g.product_type,
+        category: g.category,
+        total_sales: g.total_sales.size,
+        total_quantity: g.total_quantity,
+        total_revenue: g.total_revenue,
+        total_cost: g.total_cost,
+        profit,
+        margin_percentage: g.total_cost > 0 ? (profit / g.total_cost) * 100 : 0,
+        cost_source: g.has_real && g.has_estimated ? 'mixto' : (g.has_real ? 'real' : 'estimado'),
+      };
+    }).sort((a, b) => b.profit - a.profit);
+
+    const laborRevenueTotal = laborProducts.reduce((s, p) => s + p.total_revenue, 0);
+    const laborCostTotal = laborCostReal + laborCostEstimated;
+    const laborProfitTotal = laborRevenueTotal - laborCostTotal;
+
+    // ── Merge física + mano de obra ─────────────────────────────────────────
+    const products = [...physicalProducts, ...laborProducts].sort((a, b) => b.profit - a.profit);
+
+    const totals = {
+      total_revenue: (parseFloat(physicalTotalsRow?.total_revenue) || 0) + laborRevenueTotal,
+      total_cost: (parseFloat(physicalTotalsRow?.total_cost) || 0) + laborCostTotal,
+      total_profit: (parseFloat(physicalTotalsRow?.total_profit) || 0) + laborProfitTotal,
+      margin_percentage: 0,
+      labor_cost_real: laborCostReal,
+      labor_cost_estimated: laborCostEstimated,
+      // % del costo de mano de obra que es estimado (no liquidado todavía) —
+      // úsese para avisar en el frontend cuando el margen de servicios es
+      // en su mayoría una aproximación, no un dato real.
+      pct_estimated: laborCostTotal > 0 ? (laborCostEstimated / laborCostTotal) * 100 : 0,
+      default_labor_cost_percentage: pct,
+    };
     if (totals.total_cost > 0) {
       totals.margin_percentage = (totals.total_profit / totals.total_cost) * 100;
     }
@@ -497,6 +613,147 @@ exports.getRotationReport = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener reporte de rotación',
+      error: process.env.NODE_ENV === 'production' ? undefined : error.message
+    });
+  }
+};
+
+/**
+ * Rentabilidad consolidada del taller para un período:
+ *   Utilidad Neta = Ingresos - Costo de repuestos (COGS) - Costo de mano de
+ *                   obra (real+estimado) - Gastos operativos
+ *
+ * Se agrega directo de las tablas fuente (Sale, work_order_items,
+ * commission_settlement_items, Expense) en vez de depender del libro
+ * contable -- éste no está garantizado completo si algún evento no generó
+ * asiento (mapeo faltante), así que no es una fuente confiable para este
+ * número gerencial.
+ *
+ * OJO — evitar doble conteo: operating_expenses EXCLUYE la categoría
+ * 'comisiones_tecnicos' porque esa comisión ya está contada dentro de
+ * labor_cost (vía commission_settlement_items). Sumarla también aquí
+ * duplicaría el costo de mano de obra ya liquidado.
+ */
+exports.getProfitabilityReport = async (req, res) => {
+  try {
+    const { months, from_date, to_date } = req.query;
+    const tenantId = req.user.tenant_id;
+    const schema = getCurrentSchema() || 'public';
+    const branch_id = resolveBranchFilter(req);
+
+    if (from_date && !isValidDate(from_date)) {
+      return res.status(400).json({ success: false, message: 'from_date inválido. Use formato YYYY-MM-DD' });
+    }
+    if (to_date && !isValidDate(to_date)) {
+      return res.status(400).json({ success: false, message: 'to_date inválido. Use formato YYYY-MM-DD' });
+    }
+
+    const monthsToUse = safeMonths(months || 3);
+    const saleDateFilter = from_date && to_date
+      ? `COALESCE(s.sale_date, s.created_at) BETWEEN :fromDate AND :toDate`
+      : `COALESCE(s.sale_date, s.created_at) >= NOW() - INTERVAL '${monthsToUse} months'`;
+    const expenseDateFilter = from_date && to_date
+      ? `e.expense_date BETWEEN :fromDate AND :toDate`
+      : `e.expense_date >= NOW() - INTERVAL '${monthsToUse} months'`;
+
+    const branchFilter = branch_id ? `AND s.branch_id = :branchId` : '';
+    const expenseBranchFilter = branch_id ? `AND (e.branch_id = :branchId OR e.branch_id IS NULL)` : '';
+
+    let branchWarehouseId = null;
+    if (branch_id) {
+      const [warehouseRow] = await sequelize.query(
+        `SELECT id FROM "${schema}"."warehouses" WHERE tenant_id = :tenantId AND branch_id = :branchId LIMIT 1`,
+        { replacements: { tenantId, branchId: branch_id }, type: QueryTypes.SELECT }
+      );
+      branchWarehouseId = warehouseRow ? warehouseRow.id : '00000000-0000-0000-0000-000000000000';
+    }
+
+    const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
+
+    // Ingresos totales (la OT ya generó su Sale al entregarse, así que sumar
+    // solo Sale evita contar dos veces el mismo ingreso)
+    const [revenueRow] = await sequelize.query(
+      `
+        SELECT COALESCE(SUM(s.total_amount), 0)::numeric as total_revenue
+        FROM "${schema}"."sales" s
+        WHERE s.tenant_id = :tenantId
+          AND s.status IN ('completed', 'pending')
+          AND ${saleDateFilter}
+          ${branchFilter}
+      `,
+      { replacements: { tenantId, ...dateReplacements, branchId: branch_id }, type: QueryTypes.SELECT }
+    );
+
+    // Costo de repuestos (COGS) — misma fórmula que getProfitReport
+    const [partsCostRow] = await sequelize.query(
+      `
+        SELECT COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as parts_cost
+        FROM "${schema}"."products" p
+        INNER JOIN "${schema}"."sale_items" si ON p.id = si.product_id
+        INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
+        WHERE p.tenant_id = :tenantId
+          AND s.tenant_id = :tenantId
+          AND p.product_type != 'service'
+          AND s.status IN ('completed', 'pending')
+          AND ${saleDateFilter}
+          ${branchFilter}
+      `,
+      { replacements: { tenantId, ...dateReplacements, branchId: branch_id }, type: QueryTypes.SELECT }
+    );
+
+    // Costo de mano de obra (real + estimado) — mismo criterio de rango que
+    // ventas: fecha explícita si se dio, si no los últimos N meses.
+    const { getLaborCostForPeriod } = require('../../services/workshop/laborCost.service');
+    let laborRangeFrom = from_date;
+    let laborRangeTo = to_date;
+    if (!(from_date && to_date)) {
+      const dFrom = new Date();
+      dFrom.setMonth(dFrom.getMonth() - monthsToUse);
+      laborRangeFrom = dFrom;
+      laborRangeTo = new Date();
+    }
+    const laborForRange = await getLaborCostForPeriod({
+      tenantId, branchWarehouseId, dateFrom: laborRangeFrom, dateTo: laborRangeTo,
+    });
+
+    // Gastos operativos, EXCLUYENDO comisiones_tecnicos (ya contadas en labor_cost)
+    const [expensesRow] = await sequelize.query(
+      `
+        SELECT COALESCE(SUM(e.total_amount), 0)::numeric as operating_expenses
+        FROM "${schema}"."expenses" e
+        WHERE e.tenant_id = :tenantId
+          AND e.category != 'comisiones_tecnicos'
+          AND ${expenseDateFilter}
+          ${expenseBranchFilter}
+      `,
+      { replacements: { tenantId, ...dateReplacements, branchId: branch_id }, type: QueryTypes.SELECT }
+    );
+
+    const total_revenue = parseFloat(revenueRow?.total_revenue) || 0;
+    const parts_cost = parseFloat(partsCostRow?.parts_cost) || 0;
+    const labor_cost = laborForRange.labor_cost;
+    const operating_expenses = parseFloat(expensesRow?.operating_expenses) || 0;
+    const net_profit = total_revenue - parts_cost - labor_cost - operating_expenses;
+
+    res.json({
+      success: true,
+      data: {
+        total_revenue,
+        parts_cost,
+        labor_cost,
+        labor_cost_real: laborForRange.labor_cost_real,
+        labor_cost_estimated: laborForRange.labor_cost_estimated,
+        operating_expenses_excluding_commissions: operating_expenses,
+        net_profit,
+        net_margin_percentage: total_revenue > 0 ? (net_profit / total_revenue) * 100 : 0,
+        default_labor_cost_percentage: laborForRange.default_labor_cost_percentage,
+      }
+    });
+  } catch (error) {
+    console.error('Error en getProfitabilityReport:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener reporte de rentabilidad',
       error: process.env.NODE_ENV === 'production' ? undefined : error.message
     });
   }

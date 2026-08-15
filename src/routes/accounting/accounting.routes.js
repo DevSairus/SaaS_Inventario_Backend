@@ -26,6 +26,7 @@ router.delete('/chart-of-accounts/:id', chartOfAccountsCtrl.remove);
 router.get('/journal-entries', journalEntriesCtrl.list);
 router.get('/journal-entries/:id', journalEntriesCtrl.getById);
 router.post('/journal-entries', journalEntriesCtrl.create);
+router.put('/journal-entries/:id', journalEntriesCtrl.update);
 router.patch('/journal-entries/:id/post', journalEntriesCtrl.post);
 router.patch('/journal-entries/:id/void', journalEntriesCtrl.void);
 router.patch('/journal-entries/:id/reverse', journalEntriesCtrl.reverse);

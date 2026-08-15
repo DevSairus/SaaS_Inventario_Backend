@@ -6,7 +6,7 @@ const { Op } = require('sequelize');
 const CATEGORIES = [
   'arriendo', 'servicios_publicos', 'nomina', 'mantenimiento',
   'transporte', 'impuestos', 'marketing', 'insumos_oficina',
-  'seguros', 'honorarios', 'otro'
+  'seguros', 'honorarios', 'comisiones_tecnicos', 'otro'
 ];
 
 /**
@@ -339,6 +339,7 @@ const registerPayment = async (req, res) => {
 
 module.exports = {
   CATEGORIES,
+  generateExpenseNumber,
   getExpenses,
   getExpenseById,
   getExpensesSummary,

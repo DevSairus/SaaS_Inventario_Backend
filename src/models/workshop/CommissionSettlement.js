@@ -49,6 +49,13 @@ const CommissionSettlement = sequelize.define('CommissionSettlement', {
     type: DataTypes.UUID,
     allowNull: false,
   },
+  // Gasto operativo generado automáticamente al liquidar (categoría
+  // comisiones_tecnicos) -- ver commissionSettlements.controller.js#create.
+  // Permite trazabilidad y evita doble conteo en reportes de rentabilidad.
+  expense_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
 }, {
   tableName: 'commission_settlements',
   timestamps: true,

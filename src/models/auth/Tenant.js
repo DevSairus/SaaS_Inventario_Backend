@@ -143,7 +143,12 @@ const Tenant = sequelize.define('Tenant', {
       timezone: 'America/Bogota',
       locale: 'es-CO',
       date_format: 'DD/MM/YYYY',
-      cost_method: 'weighted_average'
+      cost_method: 'weighted_average',
+      // % estimado de costo de mano de obra (comisión a técnicos) sobre el
+      // ingreso de servicios, usado en reportes cuando la OT aún no ha sido
+      // liquidada (no hay commission_percentage real todavía). Ver
+      // services/workshop/laborCost.service.js.
+      default_labor_cost_percentage: 40
     }
   },
 

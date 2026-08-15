@@ -11,7 +11,9 @@ const {
   Sale,
   SaleItem,
   User,
+  Expense,
 } = require('../../models');
+const { generateExpenseNumber } = require('../finance/expenses.controller');
 const logger = require('../../config/logger');
 
 // Tipos de ítem que cuentan como mano de obra (servicios)
@@ -438,6 +440,40 @@ const create = async (req, res) => {
     setImmediate(() => audit({ tenant_id, user_id: req.user?.id, action: 'COMMISSION_SETTLEMENT',
       entity: 'settlement', entity_id: String(Date.now()),
       changes: { technician_id }, req }));
+
+    // Gasto operativo automático por la comisión pagada -- cierra el loop
+    // financiero: antes de esto, el costo de mano de obra liquidado quedaba
+    // aislado del motor de gastos/contabilidad (ver plan de rentabilidad).
+    // Se crea DESPUÉS del commit del settlement (no en la misma transacción):
+    // si esto falla, el settlement ya quedó registrado -- solo se loguea, no
+    // se bloquea el pago real al técnico. Se reconcilia manualmente si hace falta.
+    if (commission_amount > 0) {
+      try {
+        const expenseNumber = await generateExpenseNumber(tenant_id);
+        const expense = await Expense.create({
+          tenant_id,
+          expense_number: expenseNumber,
+          category: 'comisiones_tecnicos',
+          description: `Comisión mano de obra — ${technician.first_name} ${technician.last_name} (${settlement.settlement_number})`,
+          expense_date: date_to || new Date(),
+          total_amount: commission_amount,
+          payment_status: 'pending',
+          created_by: req.user.id,
+        });
+        await settlement.update({ expense_id: expense.id });
+
+        setImmediate(async () => {
+          try {
+            const { generateExpenseEntry } = require('../../services/accounting/autoEntries.service');
+            await generateExpenseEntry(expense, tenant_id, req.user.id);
+          } catch (err) {
+            logger.warn(`[accounting] Error generando asiento de comisión ${settlement.id}: ${err.message}`);
+          }
+        });
+      } catch (err) {
+        logger.warn(`[finance] Error generando gasto automático de liquidación ${settlement.id}: ${err.message}`);
+      }
+    }
 
     const full = await CommissionSettlement.findByPk(settlement.id, {
       include: [

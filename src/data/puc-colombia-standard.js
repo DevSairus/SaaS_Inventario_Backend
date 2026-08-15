@@ -89,6 +89,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '5', name: 'GASTOS', type: 'gasto', parent_code: null, accepts_entries: false },
   { code: '51', name: 'Operacionales de Administración', type: 'gasto', parent_code: '5', accepts_entries: false },
   { code: '510506', name: 'Gastos de Personal (Nómina Admin.)', type: 'gasto', parent_code: '51', accepts_entries: true },
+  { code: '510510', name: 'Comisiones a Técnicos (Mano de Obra)', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '511005', name: 'Honorarios', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '512005', name: 'Arrendamientos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '513005', name: 'Seguros', type: 'gasto', parent_code: '51', accepts_entries: true },
@@ -146,6 +147,7 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   'expense_category:insumos_oficina': '519540',
   'expense_category:seguros': '513005',
   'expense_category:honorarios': '511005',
+  'expense_category:comisiones_tecnicos': '510510',
   'expense_category:otro': '519599',
 
   // Cierre de ejercicio (3.3 del análisis contable): traslada el resultado

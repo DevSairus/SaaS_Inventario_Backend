@@ -2118,14 +2118,25 @@ const getReport = async (req, res) => {
         { model: User,          as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
         { model: Customer,      as: 'customer',   attributes: ['id', 'first_name', 'last_name', 'business_name'] },
         { model: Vehicle,       as: 'vehicle',    attributes: ['id', 'plate', 'brand', 'model'] },
-        { model: WorkOrderItem, as: 'items' },
+        { model: WorkOrderItem, as: 'items', include: [{ model: Product, as: 'product', attributes: ['average_cost'] }] },
       ],
       order: [['created_at', 'DESC']]
     });
 
+    // Costo de mano de obra (real si liquidado, estimado si no) — una sola
+    // query batch para todas las OT del reporte, no N+1.
+    const { getLaborCostByWorkOrderIds, resolveLaborCost } = require('../../services/workshop/laborCost.service');
+    const { pct, settledMap } = await getLaborCostByWorkOrderIds(tenant_id, orders.map(o => o.id));
+
     const rows = orders.map(o => {
       const laborTotal  = (o.items || []).filter(i => ['servicio','mano_obra'].includes(i.item_type)).reduce((s, i) => s + parseFloat(i.total || 0), 0);
       const partsTotal  = (o.items || []).filter(i => i.item_type === 'repuesto').reduce((s, i) => s + parseFloat(i.total || 0), 0);
+      const partsCost   = (o.items || []).filter(i => i.item_type === 'repuesto')
+        .reduce((s, i) => s + parseFloat(i.quantity || 0) * parseFloat(i.product?.average_cost || 0), 0);
+      const { labor_cost: laborCost, is_real: laborCostIsReal } = resolveLaborCost(o.id, laborTotal, settledMap, pct);
+      const totalAmount = parseFloat(o.total_amount || 0);
+      const netMargin   = totalAmount - partsCost - laborCost;
+
       const customerName = o.customer ? (o.customer.business_name || `${o.customer.first_name} ${o.customer.last_name}`) : 'Sin cliente';
       const techName     = o.technician ? `${o.technician.first_name} ${o.technician.last_name}` : 'Sin asignar';
       const resolutionDays = o.delivered_at && o.created_at
@@ -2143,7 +2154,12 @@ const getReport = async (req, res) => {
         resolution_days:   resolutionDays,
         labor_total:       laborTotal,
         parts_total:       partsTotal,
-        total_amount:      parseFloat(o.total_amount || 0),
+        total_amount:      totalAmount,
+        parts_cost:        partsCost,
+        labor_cost:        laborCost,
+        labor_cost_is_real: laborCostIsReal,
+        net_margin:        netMargin,
+        margin_percentage: totalAmount > 0 ? (netMargin / totalAmount) * 100 : 0,
         work_performed:    o.work_performed || '',
       };
     });
@@ -2157,6 +2173,15 @@ const getReport = async (req, res) => {
       total_labor:        rows.reduce((s, r) => s + r.labor_total, 0),
       total_parts:        rows.reduce((s, r) => s + r.parts_total, 0),
       total_revenue:      rows.reduce((s, r) => s + r.total_amount, 0),
+      total_parts_cost:   rows.reduce((s, r) => s + r.parts_cost, 0),
+      total_labor_cost:   rows.reduce((s, r) => s + r.labor_cost, 0),
+      total_net_margin:   rows.reduce((s, r) => s + r.net_margin, 0),
+      avg_margin_percentage: (() => {
+        const totalRevenue = rows.reduce((s, r) => s + r.total_amount, 0);
+        const totalMargin  = rows.reduce((s, r) => s + r.net_margin, 0);
+        return totalRevenue > 0 ? (totalMargin / totalRevenue) * 100 : 0;
+      })(),
+      orders_with_estimated_cost: rows.filter(r => r.labor_total > 0 && !r.labor_cost_is_real).length,
       avg_resolution_days: (() => {
         const resolved = rows.filter(r => r.resolution_days !== null);
         return resolved.length ? Math.round(resolved.reduce((s, r) => s + r.resolution_days, 0) / resolved.length) : 0;
