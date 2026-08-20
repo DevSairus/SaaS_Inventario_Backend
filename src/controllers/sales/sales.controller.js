@@ -1456,14 +1456,19 @@ const generateShareLink = async (req, res) => {
     const backendUrl = (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
     const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
     const pdfUrl = `${backendUrl}/api/public/pdf/${token}`;
-    const quoteUrl = isQuote ? `${frontendUrl}/public/quote/${token}` : null;
+    // El link que se comparte SIEMPRE debe apuntar al frontend (la SPA
+    // consulta la API por dentro) -- antes, para factura/remisión, `url`
+    // terminaba siendo `pdfUrl` (directo al backend) y al abrirla el
+    // navegador mostraba el JSON crudo del endpoint, no una página. La
+    // página pública (QuotePublicPage) ya es genérica por document_type.
+    const documentUrl = `${frontendUrl}/public/quote/${token}`;
 
     res.json({
       success: true,
       token,
-      url: quoteUrl || pdfUrl,
+      url: documentUrl,
       pdf_url: pdfUrl,
-      quote_url: quoteUrl,
+      quote_url: isQuote ? documentUrl : null,
     });
   } catch (error) {
     logger.error('Error generando enlace de venta:', error);
@@ -1519,15 +1524,18 @@ const sendWhatsApp = async (req, res) => {
     // BACKEND_URL puede no estar seteado en algunos entornos -- si falta,
     // se reconstruye desde el propio request en vez de dejar el link relativo.
     const backendUrl = (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
     const pdfUrl = `${backendUrl}/api/public/pdf/${token}`;
+    // Igual que en generateShareLink: el link compartido por WhatsApp debe
+    // apuntar siempre al frontend, no al endpoint del backend que sirve el
+    // PDF crudo (ver comentario ahí).
+    const documentUrl = `${frontendUrl}/public/quote/${token}`;
 
     let caption;
     if (isQuote) {
-      const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
-      const quoteUrl = `${frontendUrl}/public/quote/${token}`;
-      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Revisa y aprueba tu cotización aquí:\n${quoteUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Revisa y aprueba tu cotización aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
     } else {
-      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Descarga tu documento:\n${pdfUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Consulta tu documento aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
     }
 
     const result = await whatsappService.sendText(customerPhone, caption);
@@ -1582,7 +1590,7 @@ const getPublicSale = async (req, res) => {
       return res.status(503).json({ success: false, message: 'Función no disponible aún' });
     }
     if (!resolved) {
-      return res.status(404).json({ success: false, message: 'Cotización no encontrada o enlace inválido' });
+      return res.status(404).json({ success: false, message: 'Documento no encontrado o enlace inválido' });
     }
     return runWithTenantSchema(resolved.schemaName, () => getPublicSaleBody(resolved.saleId, res));
   } catch (error) {
@@ -1596,7 +1604,7 @@ async function getPublicSaleBody(saleId, res) {
     where: { id: saleId },
     include: [{ model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }] }],
   });
-  if (!sale) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+  if (!sale) return res.status(404).json({ success: false, message: 'Documento no encontrado' });
 
   const tenant = await Tenant.findByPk(sale.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });

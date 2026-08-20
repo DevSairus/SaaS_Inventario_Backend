@@ -255,6 +255,10 @@ const create = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'El vehículo es requerido' });
     }
+    if (!customer_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El cliente es requerido' });
+    }
 
     const order_number = await generateOrderNumber(tenant_id, transaction);
 
@@ -525,13 +529,20 @@ const update = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se puede editar una OT cerrada' });
 
     const {
-      technician_id, warehouse_id, promised_at,
+      customer_id, vehicle_id, technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
       notes, mileage_in, mileage_out, discount_amount,
       quality_checklist,
     } = req.body;
 
+    // El cliente es obligatorio (ver create) -- si se envía explícitamente
+    // vacío al editar, no se permite dejar la OT sin cliente.
+    if (customer_id !== undefined && !customer_id) {
+      return res.status(400).json({ success: false, message: 'El cliente es requerido' });
+    }
+
     await order.update({
+      customer_id, vehicle_id,
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
       notes, mileage_in, mileage_out,
@@ -2375,6 +2386,16 @@ async function getPublicOrderBody(orderId, res) {
       attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color'],
     });
 
+    // checklist_in (inventario de ingreso + nivel de combustible) es una
+    // columna JSONB agregada post-creación -- Sequelize la omite del modelo,
+    // igual que en getById/getOrderWithTenant, así que se trae con raw query.
+    const schema = getCurrentSchema() || 'public';
+    const checklistRows = await sequelize.query(
+      `SELECT checklist_in FROM "${schema}"."work_orders" WHERE id = :id`,
+      { replacements: { id: orderId }, type: sequelize.QueryTypes.SELECT }
+    );
+    const checklistIn = checklistRows[0]?.checklist_in || {};
+
     // Retornar solo campos seguros para el cliente (sin notas internas, sin IDs)
     const publicData = {
       order_number: order.order_number,
@@ -2392,6 +2413,7 @@ async function getPublicOrderBody(orderId, res) {
       total_amount: order.total_amount,
       photos_in: order.photos_in || [],
       photos_out: order.photos_out || [],
+      checklist_in: checklistIn,
       notes: order.notes,
       vehicle: order.vehicle,
       customer: order.customer ? {
