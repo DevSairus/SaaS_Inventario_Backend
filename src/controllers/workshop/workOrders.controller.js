@@ -882,6 +882,80 @@ const removeItem = async (req, res) => {
   }
 };
 
+// ── UPDATE ITEM ───────────────────────────────────────────────────────────────
+// Solo se puede editar un ítem 'pendiente' (todavía sin decisión del cliente).
+// Uno 'aprobado' ya puede tener movimiento de inventario o estar facturado, y
+// uno 'rechazado' ya es una decisión cerrada -- editar cualquiera de los dos
+// por debajo dejaría el total y el stock desincronizados de lo que el
+// cliente vio/aprobó.
+const updateItem = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
+    if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
+    if (['entregado', 'cancelado'].includes(order.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se pueden editar ítems de una OT cerrada' });
+    }
+
+    const item = await WorkOrderItem.findOne({ where: { id: req.params.itemId, work_order_id: order.id }, transaction });
+    if (!item) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Ítem no encontrado' }); }
+
+    if ((item.approval_status || 'aprobado') !== 'pendiente') {
+      await transaction.rollback();
+      return res.status(400).json({
+        success: false,
+        message: item.approval_status === 'aprobado'
+          ? 'Este ítem ya fue aprobado por el cliente, no se puede editar'
+          : 'Este ítem ya fue rechazado por el cliente, no se puede editar',
+      });
+    }
+
+    const { product_name, quantity, unit_price, tax_percentage } = req.body;
+
+    const qty   = quantity   !== undefined ? parseFloat(quantity)   : parseFloat(item.quantity);
+    const price = unit_price !== undefined ? parseFloat(unit_price) : parseFloat(item.unit_price);
+    if (!(qty > 0) || isNaN(price) || price < 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Cantidad y precio deben ser válidos' });
+    }
+
+    const updates = { quantity: qty, unit_price: price };
+
+    if (item.item_type === 'free_line' && product_name !== undefined) {
+      if (!product_name.trim()) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'La descripción de la línea libre es requerida' });
+      }
+      updates.product_name = product_name.trim();
+    }
+
+    const taxPct = tax_percentage !== undefined ? parseFloat(tax_percentage) : parseFloat(item.tax_percentage) || 0;
+    updates.tax_percentage = taxPct;
+    updates.subtotal   = qty * price;
+    updates.tax_amount = taxPct > 0 ? Math.round(updates.subtotal * (taxPct / 100)) : 0;
+    updates.total       = updates.subtotal + updates.tax_amount;
+
+    await item.update(updates, { transaction });
+
+    // Recalcular totales de la OT
+    const allItems = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
+    const { subtotal: s, tax_amount: t } = calcTotals(allItems);
+    const disc = parseFloat(order.discount_amount) || 0;
+    await order.update({ subtotal: s, tax_amount: t, total_amount: s + t - disc }, { transaction });
+
+    await transaction.commit();
+
+    res.json({ success: true, message: 'Ítem actualizado', data: item });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error editando ítem de OT:', error);
+    res.status(500).json({ success: false, message: 'Error al editar ítem' });
+  }
+};
+
 // ── DIAGRAMAS INTERACTIVOS DE INTERVENCIÓN ──────────────────────────────────
 // "Hoja de inspección" de la OT: el técnico elige un diagrama (vehicle_type +
 // system + configuration), marca los puntos dañados y opcionalmente los
@@ -2609,4 +2683,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, addItem, updateItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

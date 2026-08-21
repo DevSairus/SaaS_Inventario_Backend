@@ -36,6 +36,7 @@ router.post('/from-quote/:saleId', requireModule('workshop'), checkRole('seller'
 
 // Ítems
 router.post('/:id/items', ctrl.addItem);
+router.patch('/:id/items/:itemId', ctrl.updateItem);
 router.delete('/:id/items/:itemId', ctrl.removeItem);
 
 // Cotización con aprobación del cliente
