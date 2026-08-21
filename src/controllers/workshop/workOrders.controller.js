@@ -213,6 +213,10 @@ const getById = async (req, res) => {
           model: WorkOrderQuoteRequest, as: 'quote_requests',
           separate: true,
           order: [['sent_at', 'DESC']],
+          include: [{
+            model: WorkOrderItem, as: 'items',
+            attributes: ['id', 'item_type', 'product_name', 'quantity', 'total', 'approval_status', 'inventory_movement_id'],
+          }],
         },
       ],
     });
@@ -1368,11 +1372,30 @@ const sendQuoteRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No hay ítems pendientes de enviar a cotizar' });
     }
 
-    const quoteRequest = await WorkOrderQuoteRequest.create({
-      tenant_id,
-      work_order_id: order.id,
-      status: 'enviada',
-    }, { transaction });
+    // Una sola ronda por OT: si ya existe una (de un envío anterior, ya
+    // respondida o no), los ítems nuevos se suman ahí en vez de abrir un
+    // bloque aparte -- evita que el cliente (y el taller) tengan que leer
+    // varias secciones de cotización para la misma OT. Se toma la más
+    // antigua por si quedaron varias de antes de este cambio.
+    let quoteRequest = await WorkOrderQuoteRequest.findOne({
+      where: { work_order_id: order.id, tenant_id },
+      order: [['created_at', 'ASC']],
+      transaction,
+    });
+
+    if (quoteRequest) {
+      // Reabrir la ronda: los ítems ya decididos en rondas previas (aprobado/
+      // rechazado) no se toca acá, solo se suman los 'pendiente' nuevos.
+      // staff_seen_at se limpia para que la próxima respuesta del cliente
+      // vuelva a aparecer en la bandeja de notificaciones del taller.
+      await quoteRequest.update({ status: 'enviada', sent_at: new Date(), staff_seen_at: null }, { transaction });
+    } else {
+      quoteRequest = await WorkOrderQuoteRequest.create({
+        tenant_id,
+        work_order_id: order.id,
+        status: 'enviada',
+      }, { transaction });
+    }
 
     await WorkOrderItem.update(
       { quote_request_id: quoteRequest.id },
@@ -1438,7 +1461,12 @@ const resendQuoteRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Esta cotización ya fue respondida y no se puede reenviar' });
     }
 
-    const items = await WorkOrderItem.findAll({ where: { quote_request_id: quoteRequest.id } });
+    // Solo los 'pendiente' -- si la ronda se reabrió sumando ítems nuevos,
+    // los ya decididos en un envío anterior no hacen parte de lo que el
+    // cliente todavía tiene que revisar.
+    const items = await WorkOrderItem.findAll({
+      where: { quote_request_id: quoteRequest.id, approval_status: 'pendiente' },
+    });
 
     let token = order.share_token;
     if (!token) {
@@ -2591,7 +2619,12 @@ async function getPublicOrderBody(orderId, res) {
       active_quote_request: activeQuoteRequest ? {
         id: activeQuoteRequest.id,
         sent_at: activeQuoteRequest.sent_at,
-        items: (activeQuoteRequest.items || []).map(i => ({
+        // Solo lo 'pendiente' -- si la ronda se reabrió sumando ítems, lo ya
+        // decidido en un envío anterior no vuelve a quedar sujeto a que el
+        // cliente lo (des)marque otra vez (ver respondQuoteRequestBody).
+        items: (activeQuoteRequest.items || [])
+          .filter(i => (i.approval_status || 'aprobado') === 'pendiente')
+          .map(i => ({
           id: i.id,
           item_type: i.item_type,
           product_name: i.product_name,

@@ -2,10 +2,14 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../../config/database');
 
-// Agrupa los ítems de work_order_items que se enviaron a aprobar JUNTOS en
-// un mismo envío al cliente. Cada ronda se bloquea de forma independiente:
-// una vez 'respondida', esa ronda queda inmutable aunque después se cree
-// una nueva ronda (por un hallazgo posterior) en la misma OT.
+// Agrupa los ítems de work_order_items que se enviaron a aprobar al cliente
+// de esta OT. Hay UNA sola fila por OT (ver sendQuoteRequest): si ya existe,
+// los ítems 'pendiente' nuevos se suman ahí (quote_request_id) y la fila
+// vuelve a 'enviada' -- así el cliente ve un único enlace/bloque con todo lo
+// cotizado, en vez de un bloque nuevo por cada ronda de ítems agregados.
+// Los ítems ya decididos (aprobado/rechazado) en una ronda anterior no se
+// tocan al reabrir la ronda: solo los nuevos 'pendiente' quedan sujetos a
+// la respuesta del cliente.
 const WorkOrderQuoteRequest = sequelize.define('WorkOrderQuoteRequest', {
   id: {
     type: DataTypes.UUID,
