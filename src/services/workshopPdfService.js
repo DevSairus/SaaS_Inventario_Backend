@@ -905,6 +905,311 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
 };
 
 /* ══════════════════════════════════════════════════════════════
+   HOJA DE TRABAJO PARA EL TÉCNICO — de cara al vehículo en el taller.
+   Mismo contenido operativo que generateWorkOrderPDF (vehículo,
+   diagnóstico, ítems a hacer, checklist de calidad, diagramas, firmas)
+   pero SIN ningún valor monetario -- ni de repuestos, mano de obra,
+   servicios ni totales -- para que el técnico no negocie precios con
+   el cliente frente al vehículo.
+   ══════════════════════════════════════════════════════════════ */
+const generateTechSheetPDF = async (res, order, tenant) => {
+  try {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="OT-${order.order_number}-tecnico.pdf"`);
+    doc.pipe(res);
+
+    const MARGIN = 40;
+    const PAGE_W = doc.page.width;
+    const INNER  = PAGE_W - MARGIN * 2;
+
+    const statusLabels = {
+      recibido: 'RECIBIDO', en_proceso: 'EN PROCESO', en_espera: 'EN ESPERA',
+      listo: 'LISTO', entregado: 'ENTREGADO', cancelado: 'CANCELADO',
+    };
+
+    let y = await drawHeader(doc, tenant, 'HOJA DE TRABAJO', statusLabels[order.status] || '', order.order_number);
+
+    // ── Datos principales ─────────────────────────────────────────
+    const half = (INNER - 12) / 2;
+
+    // Vehículo (izq)
+    doc.roundedRect(MARGIN, y, half, 95, 5).strokeColor(C.border).lineWidth(0.5).stroke();
+    doc.font('Helvetica-Bold').fontSize(7).fillColor(C.gray).text('VEHÍCULO', MARGIN + 10, y + 8);
+    const v = order.vehicle || {};
+    [
+      ['Placa', v.plate || '—'],
+      ['Marca / Modelo', `${v.brand || '—'} ${v.model || ''}`.trim()],
+      ['Año / Color', [v.year, v.color].filter(Boolean).join(' · ') || '—'],
+      ['Km ingreso', order.mileage_in ? `${Number(order.mileage_in).toLocaleString('es-CO')} km` : '—'],
+      ['Km salida',  order.mileage_out ? `${Number(order.mileage_out).toLocaleString('es-CO')} km` : '—'],
+    ].forEach(([lbl, val], i) => {
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.gray).text(lbl, MARGIN + 10, y + 20 + i * 14, { width: 80 });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(C.dark).text(val, MARGIN + 92, y + 20 + i * 14, { width: half - 100 });
+    });
+
+    // Cliente + técnico (der) — sin datos de facturación (CC/NIT no aplica acá)
+    const cx = MARGIN + half + 12;
+    doc.roundedRect(cx, y, half, 95, 5).strokeColor(C.border).lineWidth(0.5).stroke();
+    doc.font('Helvetica-Bold').fontSize(7).fillColor(C.gray).text('CLIENTE', cx + 10, y + 8);
+    const cu = order.customer || {};
+    const cName = cu.business_name || `${cu.first_name || ''} ${cu.last_name || ''}`.trim() || '—';
+    [
+      ['Nombre',   cName],
+      ['Teléfono', cu.phone || cu.mobile || '—'],
+      ['Técnico',  order.technician ? `${order.technician.first_name} ${order.technician.last_name}` : '—'],
+    ].forEach(([lbl, val], i) => {
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.gray).text(lbl, cx + 10, y + 20 + i * 14, { width: 60 });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(C.dark).text(val, cx + 72, y + 20 + i * 14, { width: half - 80, ellipsis: true });
+    });
+
+    y += 107;
+
+    // Fechas
+    const fCols = [
+      ['Recibido',  fmtDateTime(order.received_at)],
+      ['Prometido', order.promised_at ? fmtDateTime(order.promised_at) : '—'],
+      ['Entregado', order.delivered_at ? fmtDateTime(order.delivered_at) : '—'],
+    ];
+    const fdW = INNER / 3;
+    doc.roundedRect(MARGIN, y, INNER, 26, 4).strokeColor(C.border).lineWidth(0.4).stroke();
+    fCols.forEach(([lbl, val], i) => {
+      const fx = MARGIN + i * fdW + 10;
+      doc.font('Helvetica').fontSize(7).fillColor(C.gray).text(lbl, fx, y + 5, { width: fdW - 14 });
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(C.dark).text(val, fx, y + 14, { width: fdW - 14 });
+    });
+    y += 36;
+
+    // Problema + diagnóstico + trabajo realizado
+    const textSections = [
+      ['PROBLEMA REPORTADO', order.problem_description],
+      ['DIAGNÓSTICO TÉCNICO', order.diagnosis],
+      ['TRABAJO REALIZADO',  order.work_performed],
+    ].filter(([, v]) => v);
+
+    textSections.forEach(([title, text]) => {
+      const h = 50;
+      const textWidth  = INNER - 20;
+      const textHeight = h - 26;
+      const size = fitFontSize(doc, text, textWidth, textHeight);
+      if (y + h > 680) { doc.addPage(); y = 40; }
+      doc.roundedRect(MARGIN, y, INNER, h, 4).strokeColor(C.border).lineWidth(0.4).stroke();
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(C.gray).text(title, MARGIN + 10, y + 8);
+      doc.font('Helvetica').fontSize(size).fillColor(C.dark)
+        .text(text, MARGIN + 10, y + 20, { width: textWidth, height: textHeight, ellipsis: true });
+      y += h + 8;
+    });
+
+    // ── Ítems a hacer — solo cantidad y descripción, sin ningún valor.
+    // Repuestos y mano de obra/servicios en tablas separadas, con una
+    // columna de casilla para que el técnico marque lo ya hecho a mano.
+    const allItems  = order.items || [];
+    const partItems  = allItems.filter(i => i.item_type === 'repuesto');
+    const laborItems = allItems.filter(i => ['servicio', 'mano_obra'].includes(i.item_type));
+
+    const drawChecklistTable = (title, items) => {
+      if (y + 40 > 700) { doc.addPage(); y = 40; }
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.dark).text(title, MARGIN, y);
+      y += 14;
+
+      doc.rect(MARGIN, y, INNER, 20).fill(C.primary);
+      tableRow(doc, [
+        { x: MARGIN + 6,   text: '✓',            w: 20,  bold: true, color: C.white, align: 'center' },
+        { x: MARGIN + 34,  text: 'CANT.',        w: 50,  bold: true, color: C.white, align: 'right' },
+        { x: MARGIN + 92,  text: 'DESCRIPCIÓN',  w: INNER - 92 - 6, bold: true, color: C.white },
+      ], y + 1);
+      y += 22;
+
+      items.forEach((item, idx) => {
+        if (y + 20 > 700) { doc.addPage(); y = 40; }
+        const bg = idx % 2 === 0 ? '#f8fafc' : null;
+        if (bg) doc.rect(MARGIN, y, INNER, 20).fill(bg);
+        doc.roundedRect(MARGIN + 6, y + 4, 12, 12, 2).strokeColor(C.border).lineWidth(0.6).stroke();
+        doc.font('Helvetica').fontSize(8.5).fillColor(C.dark)
+          .text(String(item.quantity), MARGIN + 34, y + 5, { width: 50, align: 'right' });
+        doc.text(item.product_name || item.product?.name || '—', MARGIN + 92, y + 5, { width: INNER - 92 - 6, ellipsis: true });
+        doc.rect(MARGIN, y, INNER, 20).strokeColor(C.border).lineWidth(0.3).stroke();
+        y += 20;
+      });
+
+      if (items.length === 0) {
+        doc.font('Helvetica').fontSize(8.5).fillColor(C.lightGray).text('Ninguno registrado', MARGIN + 10, y + 6);
+        y += 22;
+      }
+      y += 10;
+    };
+
+    drawChecklistTable('REPUESTOS A INSTALAR', partItems);
+    drawChecklistTable('MANO DE OBRA / SERVICIOS A REALIZAR', laborItems);
+
+    // ── Control de calidad ──────────────────────────────────────────
+    const qc = order.quality_checklist || {};
+    const qcChecklist = [
+      ['Limpieza final',        !!qc.limpieza_final],
+      ['Torques finales',       !!qc.torques_finales],
+      ['Entrega de repuestos',  !!qc.entrega_repuestos],
+    ];
+    const qcH = 18 + 12 + qcChecklist.length * 16 + 10;
+    if (y + qcH > 700) { doc.addPage(); y = 40; }
+    doc.roundedRect(MARGIN, y, INNER, qcH, 5).strokeColor(C.border).lineWidth(0.5).stroke();
+    doc.rect(MARGIN, y, INNER, 18).fill(C.soft);
+    doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.dark).text('CONTROL DE CALIDAD', MARGIN + 10, y + 5);
+    let qy = y + 26;
+    qcChecklist.forEach(([lbl, val]) => {
+      doc.font('Helvetica').fontSize(8.5).fillColor(C.gray).text(lbl, MARGIN + 10, qy, { width: INNER - 100 });
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(val ? C.green : C.lightGray)
+        .text(val ? 'SÍ' : 'NO', MARGIN + 10, qy, { width: INNER - 18, align: 'right' });
+      qy += 16;
+    });
+    y += qcH + 16;
+
+    // ── Notas ────────────────────────────────────────────────────
+    if (order.notes && y < 660) {
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.gray).text('Observaciones: ', MARGIN, y, { continued: true });
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.dark).text(order.notes, { width: INNER - 100 });
+      y += 20;
+    }
+
+    // ── Fotos adjuntas (ingreso / entrega) ─────────────────────────
+    const photosIn  = Array.isArray(order.photos_in)  ? order.photos_in.filter(p => p?.url)  : [];
+    const photosOut = Array.isArray(order.photos_out) ? order.photos_out.filter(p => p?.url) : [];
+
+    if (photosIn.length > 0 || photosOut.length > 0) {
+      const THUMB = 60;
+      const MAX_THUMBS = 3;
+      const rowH = THUMB + 26;
+      if (y + rowH > 700) { doc.addPage(); y = 40; }
+      const halfW = (INNER - 20) / 2;
+
+      const drawThumbs = async (label, photos, x) => {
+        if (photos.length === 0) return;
+        doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.gray).text(label, x, y);
+        let px = x;
+        for (const p of photos.slice(0, MAX_THUMBS)) {
+          try {
+            const buf = await downloadImage(p.url);
+            doc.roundedRect(px, y + 12, THUMB, THUMB, 3).strokeColor(C.border).lineWidth(0.5).stroke();
+            doc.image(buf, px + 1, y + 13, { fit: [THUMB - 2, THUMB - 2] });
+          } catch { /* si una foto falla en descargar, se omite sin romper el PDF */ }
+          px += THUMB + 8;
+        }
+        if (photos.length > MAX_THUMBS) {
+          doc.font('Helvetica').fontSize(7.5).fillColor(C.gray)
+            .text(`+${photos.length - MAX_THUMBS} más`, px + 4, y + 12 + THUMB / 2 - 5);
+        }
+      };
+
+      await drawThumbs('FOTOS DE INGRESO', photosIn, MARGIN);
+      await drawThumbs('FOTOS DE ENTREGA', photosOut, MARGIN + halfW + 20);
+      y += rowH;
+    }
+
+    // ── Diagrama de intervención (si hay marcas) ────────────────────
+    const marks = order.diagnosis_marks || [];
+    if (marks.length > 0) {
+      const diagramMap = {};
+      marks.forEach(m => {
+        const tpl = m.diagram_template;
+        if (!tpl) return;
+        if (!diagramMap[tpl.id]) diagramMap[tpl.id] = { template: tpl, marks: [] };
+        diagramMap[tpl.id].marks.push(m);
+      });
+
+      for (const [, { template: tpl, marks: dMarks }] of Object.entries(diagramMap)) {
+        const imgW = 240;
+        const imgH = imgW * 0.667;
+        const titleH = 14;
+
+        const tableX = MARGIN + imgW + 16;
+        const tableW = INNER - imgW - 16;
+        const colW = [18, 68, 34, 48, tableW - 18 - 68 - 34 - 48];
+        const headers = ['#', 'Parte', 'Lado', 'Sev.', 'Observación'];
+
+        doc.font('Helvetica').fontSize(6.5);
+        const rowHeights = dMarks.map(m => {
+          const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
+          const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
+          const h = Math.max(
+            doc.heightOfString(pt?.part_name || '—', { width: colW[1] - 4 }),
+            doc.heightOfString(sevLabel, { width: colW[3] - 4 }),
+            doc.heightOfString(m.observation || '', { width: colW[4] - 4 }),
+          );
+          return Math.max(11, h + 3);
+        });
+        const tableH = 13 + rowHeights.reduce((a, b) => a + b, 0);
+        const blockH = titleH + Math.max(imgH, tableH) + 10;
+
+        if (y + blockH > doc.page.height - 100) { doc.addPage(); y = 40; }
+
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(C.dark)
+          .text(`DIAGNÓSTICO — ${tpl.name}`, MARGIN, y);
+        y += titleH;
+        const blockTop = y;
+
+        try {
+          const pngBuf = await renderDiagramToPng(
+            tpl.image_path, tpl.view_box, tpl.points, dMarks
+          );
+          doc.image(pngBuf, MARGIN, blockTop, { fit: [imgW, imgH] });
+        } catch (e) {
+          console.error('Error renderizando diagrama:', e.message);
+          doc.font('Helvetica-Oblique').fontSize(8).fillColor(C.lightGray)
+            .text('(Error al renderizar diagrama)', MARGIN, blockTop, { width: imgW });
+        }
+
+        let ty = blockTop;
+        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(C.dark);
+        headers.forEach((h, i) => {
+          const hx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+          doc.text(h, hx, ty, { width: colW[i], align: i === 0 ? 'center' : 'left' });
+        });
+        ty += 10;
+        doc.moveTo(tableX, ty).lineTo(tableX + tableW, ty).strokeColor(C.lightGray).lineWidth(0.3).stroke();
+        ty += 3;
+
+        doc.font('Helvetica').fontSize(6.5).fillColor(C.gray);
+        dMarks.forEach((m, idx) => {
+          const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
+          const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
+          const vals = [
+            String(m.point_number),
+            pt?.part_name || '—',
+            m.side || '—',
+            sevLabel,
+            m.observation || '',
+          ];
+          vals.forEach((v, i) => {
+            const vx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+            doc.fillColor(i === 3 ? (SEVERITY_COLORS[m.severity] || C.gray) : C.gray)
+              .text(v, vx + 2, ty, { width: colW[i] - 4, align: i === 0 ? 'center' : 'left' });
+          });
+          ty += rowHeights[idx];
+        });
+
+        y = blockTop + Math.max(imgH, tableH) + 10;
+      }
+    }
+
+    // ── Firmas: técnico y supervisor (sin cliente -- esta hoja no sale del taller) ──
+    const sigArea = doc.page.height - 80;
+    if (y > sigArea - 40) { doc.addPage(); y = 40; }
+    const sigW2 = (INNER - 40) / 2;
+    const sigLabels = ['Firma y C.C. del técnico', 'Firma y C.C. del supervisor'];
+    [MARGIN, MARGIN + sigW2 + 40].forEach((sx, i) => {
+      doc.moveTo(sx, sigArea).lineTo(sx + sigW2, sigArea).strokeColor(C.lightGray).lineWidth(0.5).stroke();
+      doc.font('Helvetica').fontSize(7.5).fillColor(C.lightGray)
+        .text(sigLabels[i], sx, sigArea + 6, { width: sigW2, align: 'center' });
+    });
+
+    doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(C.primary);
+    doc.end();
+  } catch (e) {
+    console.error('Error generando hoja de técnico:', e);
+    if (!res.headersSent) res.status(500).json({ message: 'Error generando hoja de técnico' });
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════
    BUFFER WRAPPERS — necesarios para Vercel serverless
    (doc.pipe(res) no funciona en serverless; se genera el PDF
     completo en memoria y se envía de una sola vez)
@@ -955,13 +1260,21 @@ const generateWorkOrderPDFBuffer = async (order, tenant) => {
   return bufferPromise;
 };
 
+const generateTechSheetBuffer = async (order, tenant) => {
+  const { stream, bufferPromise } = createBufferStream();
+  await generateTechSheetPDF(stream, order, tenant);
+  return bufferPromise;
+};
+
 module.exports = {
   generatePaymentReceipt,
   generateIntakeForm,
   generateWorkOrderPDF,
+  generateTechSheetPDF,
   generatePaymentReceiptBuffer,
   generateIntakeFormBuffer,
   generateWorkOrderPDFBuffer,
+  generateTechSheetBuffer,
   // Reutilizados por pdfService.js para dibujar los mismos diagramas de
   // intervención sobre el PDF de una cotización (SaleDiagnosisMark)
   renderDiagramToPng,

@@ -2165,7 +2165,7 @@ const getPaymentHistory = async (req, res) => {
 };
 
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
-const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrderPDFBuffer } = require('../../services/workshopPdfService');
+const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrderPDFBuffer, generateTechSheetBuffer } = require('../../services/workshopPdfService');
 const whatsappService = require('../../services/whatsappService');
 
 async function getOrderWithTenant(id, tenant_id) {
@@ -2211,7 +2211,7 @@ async function getOrderWithTenant(id, tenant_id) {
 const generatePDF = async (req, res) => {
   try {
     const { id } = req.params;
-    const { type } = req.query; // 'intake' | 'receipt' | 'workorder'
+    const { type } = req.query; // 'intake' | 'receipt' | 'workorder' | 'technician'
     const tenant_id = req.user.tenant_id;
 
     const { order, tenant } = await getOrderWithTenant(id, tenant_id);
@@ -2232,6 +2232,11 @@ const generatePDF = async (req, res) => {
       };
       pdfBuffer = await generatePaymentReceiptBuffer(order, tenant, paymentData);
       filename  = `recibo-${order.order_number}.pdf`;
+    } else if (type === 'technician') {
+      // Hoja para pegar en el vehículo -- sin ningún valor monetario (ver
+      // generateTechSheetPDF en workshopPdfService.js).
+      pdfBuffer = await generateTechSheetBuffer(order, tenant);
+      filename  = `OT-${order.order_number}-tecnico.pdf`;
     } else {
       pdfBuffer = await generateWorkOrderPDFBuffer(order, tenant);
       filename  = `OT-${order.order_number}.pdf`;
