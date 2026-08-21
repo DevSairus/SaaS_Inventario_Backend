@@ -23,9 +23,24 @@ const Product = sequelize.define('Product', {
     references: { model: 'warehouses', key: 'id' }
   },
   product_type: {
-    type: DataTypes.ENUM('simple', 'variant', 'service', 'bundle', 'raw_material'),
+    type: DataTypes.ENUM('simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'),
     allowNull: false,
     defaultValue: 'simple'
+  },
+  // Marca del producto (ej. "Bosch", "Michelin"). Columna ya existía en el
+  // baseline de BD pero nunca se declaró acá -- Product.create/update la
+  // descartaba en silencio aunque el controller la enviara.
+  brand: {
+    type: DataTypes.STRING(100),
+    allowNull: true
+  },
+  // Solo aplica a product_type='vehicle' -- vincula este producto (stock de
+  // concesionario) con la fila real en `vehicles`, para que el vehículo
+  // también sea consultable/editable como tal en el resto del sistema.
+  vehicle_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'vehicles', key: 'id' }
   },
   // Solo aplica a product_type='service'. Cuando está marcado, agregar este
   // producto a una OT precarga item_type='mano_obra' en vez de 'servicio'
@@ -167,6 +182,9 @@ const Supplier = require('./Supplier');
 const ProductSupplier = require('./ProductSupplier');
 const ProductEquivalenceGroup = require('./ProductEquivalenceGroup');
 const ProductEquivalenceGroupMember = require('./ProductEquivalenceGroupMember');
+const Vehicle = require('../workshop/Vehicle');
+
+Product.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
 
 Product.belongsToMany(Supplier, {
   through: ProductSupplier,

@@ -15,6 +15,17 @@ const fmtDate = d =>
 const fmtDateTime = d =>
   d ? new Date(d).toLocaleString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
 
+// Reduce el tamaño de fuente hasta que el texto quepa en `width`x`height`,
+// para no truncar observaciones largas con ellipsis.
+const fitFontSize = (doc, text, width, height, maxSize = 8.5, minSize = 6) => {
+  let size = maxSize;
+  doc.font('Helvetica');
+  while (size > minSize && doc.fontSize(size).heightOfString(text, { width }) > height) {
+    size -= 0.5;
+  }
+  return size;
+};
+
 const downloadImage = url =>
   new Promise((resolve, reject) => {
     // Rutas locales (ej. /uploads/workshop/foto.jpg) — leer directo del disco
@@ -604,11 +615,14 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
 
     textSections.forEach(([title, text]) => {
       const h = 50;
+      const textWidth  = INNER - 20;
+      const textHeight = h - 26;
+      const size = fitFontSize(doc, text, textWidth, textHeight);
       if (y + h > 680) { doc.addPage(); y = 40; }
       doc.roundedRect(MARGIN, y, INNER, h, 4).strokeColor(C.border).lineWidth(0.4).stroke();
       doc.font('Helvetica-Bold').fontSize(7).fillColor(C.gray).text(title, MARGIN + 10, y + 8);
-      doc.font('Helvetica').fontSize(8.5).fillColor(C.dark)
-        .text(text, MARGIN + 10, y + 20, { width: INNER - 20, height: h - 26, ellipsis: true });
+      doc.font('Helvetica').fontSize(size).fillColor(C.dark)
+        .text(text, MARGIN + 10, y + 20, { width: textWidth, height: textHeight, ellipsis: true });
       y += h + 8;
     });
 

@@ -577,6 +577,10 @@ const update = async (req, res) => {
       const parsed = parseInt(updateData.mileage);
       updateData.mileage = isNaN(parsed) ? null : parsed;
     }
+    if ('vehicle_year' in updateData) {
+      const parsed = parseInt(updateData.vehicle_year);
+      updateData.vehicle_year = isNaN(parsed) ? null : parsed;
+    }
 
     if ('technician_id' in updateData) {
       if (updateData.technician_id) {
@@ -1630,6 +1634,8 @@ async function getPublicSaleBody(saleId, res) {
         product_name: i.product?.name || i.description,
         quantity: i.quantity,
         unit_price: i.unit_price,
+        subtotal: i.subtotal,
+        tax_amount: i.tax_amount,
         total: i.total,
         approval_status: i.approval_status,
       })),

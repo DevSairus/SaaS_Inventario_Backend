@@ -2,7 +2,14 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { Product, Category } = require('../../models/inventory');
+const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+
+// Debe reflejar exactamente el CHECK constraint de la tabla products
+// (ver 20260101000000-baseline-core-inventory-tables.js) -- si diverge,
+// un insert/update con una unidad fuera de esta lista pasa la validación
+// de acá pero igual rebota como un 500 crudo de Postgres.
+const VALID_UNITS_OF_MEASURE = ['unit', 'kg', 'g', 'lb', 'oz', 'l', 'ml', 'gal', 'm', 'cm', 'ft', 'box', 'pack', 'dozen'];
 
 const getProductStats = async (req, res) => {
   try {
@@ -202,7 +209,7 @@ const getProductById = async (req, res) => {
       if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
       whereClause.tenant_id = req.user.tenant_id;
     }
-    const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
+    const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
     res.json({ success: true, data: product });
   } catch (error) {
@@ -223,13 +230,23 @@ const createProduct = async (req, res) => {
       min_stock = 0, max_stock, product_type = 'simple',
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
-      tax_config, is_labor = false
+      tax_config, is_labor = false, vehicle
     } = req.body;
 
-    const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material'];
+    const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
     const safeProductType = VALID_PRODUCT_TYPES.includes(product_type) ? product_type : 'simple';
 
     if (!sku || !name) return res.status(400).json({ success: false, message: 'SKU y nombre son requeridos' });
+
+    // El check constraint de la BD solo acepta estos valores (ver migración
+    // baseline de inventario) -- validar acá da un 400 claro en vez de dejar
+    // que rebote como un 500 crudo de Postgres cuando llega algo como "unidad".
+    if (unit_of_measure && !VALID_UNITS_OF_MEASURE.includes(unit_of_measure.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: `Unidad de medida inválida: "${unit_of_measure}". Valores permitidos: ${VALID_UNITS_OF_MEASURE.join(', ')}`,
+      });
+    }
 
     const tenantId = req.user.role === 'super_admin' ? (req.body.tenant_id || null) : req.user.tenant_id;
 
@@ -248,36 +265,86 @@ const createProduct = async (req, res) => {
       ica: { enabled: false, rate: 0 },
     };
 
-    const available_stock = parseFloat(current_stock) - parseFloat(reserved_stock);
-    const product = await Product.create({
-      tenant_id: tenantId,
-      sku: sku.trim(),
-      barcode: barcode ? barcode.trim() : null,
-      name: name.trim(),
-      description: description?.trim() || null,
-      category_id: category_id || null,
-      warehouse_id: warehouse_id || null,
-      brand: brand?.trim() || null,
-      unit_of_measure: unit_of_measure?.trim() || null,
-      average_cost: average_cost || 0,
-      sale_price: sale_price || 0,
-      base_price: base_price || 0,
-      profit_margin_percentage: profit_margin_percentage || 0,
-      product_type: safeProductType,
-      current_stock: safeProductType === 'service' ? 0 : current_stock,
-      reserved_stock: safeProductType === 'service' ? 0 : reserved_stock,
-      available_stock: safeProductType === 'service' ? 0 : available_stock,
-      min_stock: safeProductType === 'service' ? 0 : min_stock,
-      max_stock: safeProductType === 'service' ? null : max_stock,
-      track_inventory: safeProductType === 'service' ? false : track_inventory,
-      is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
-      tax_config: finalTaxConfig,
-      is_labor: safeProductType === 'service' ? !!is_labor : false,
-    });
+    // Un vehículo en stock es una unidad única (no una cantidad de piezas
+    // intercambiables) -- se fuerza a 1 en vez de tomar lo que venga del form.
+    const effectiveCurrentStock = safeProductType === 'vehicle' ? 1 : current_stock;
+    const available_stock = parseFloat(effectiveCurrentStock) - parseFloat(reserved_stock);
 
-    const newProduct = await Product.findOne({ where: { id: product.id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
-    if (tenantId) markForAlertCheck(res, product.id, tenantId);
-    res.status(201).json({ success: true, message: 'Producto creado exitosamente', data: newProduct });
+    const transaction = await sequelize.transaction();
+    try {
+      // Se crea primero el Vehicle real (para que el producto pueda
+      // apuntarle por vehicle_id) -- así el vehículo queda registrado como
+      // tal en el sistema, no solo como una línea de inventario genérica.
+      let vehicleRecord = null;
+      if (safeProductType === 'vehicle') {
+        const v = vehicle || {};
+        // vehicles.plate es NOT NULL a nivel de BD (columna compartida con
+        // todo el módulo Taller) -- para un vehículo nuevo que aún no tiene
+        // matrícula se genera un identificador temporal, fácil de distinguir
+        // de una placa real, que se reemplaza luego editando el Vehicle.
+        const plate = v.plate?.trim()
+          ? v.plate.trim().toUpperCase()
+          : `PEND-${require('crypto').randomUUID().slice(0, 6).toUpperCase()}`;
+
+        vehicleRecord = await Vehicle.create({
+          tenant_id: tenantId,
+          customer_id: null, // sin dueño todavía: es stock del concesionario
+          plate,
+          vehicle_type: v.vehicle_type || 'automovil',
+          brand: v.brand?.trim() || brand?.trim() || null,
+          model: v.model?.trim() || null,
+          year: v.year ? parseInt(v.year) : null,
+          color: v.color?.trim() || null,
+          vin: v.vin?.trim() || null,
+          engine_number: v.engine_number?.trim() || null,
+          fuel_type: v.fuel_type || 'gasolina',
+          current_mileage: v.current_mileage ? parseInt(v.current_mileage) : null,
+          notes: 'Vehículo en stock -- registrado desde Inventario',
+        }, { transaction });
+      }
+
+      const product = await Product.create({
+        tenant_id: tenantId,
+        sku: sku.trim(),
+        barcode: barcode ? barcode.trim() : null,
+        name: name.trim(),
+        description: description?.trim() || null,
+        category_id: category_id || null,
+        warehouse_id: warehouse_id || null,
+        brand: brand?.trim() || null,
+        vehicle_id: vehicleRecord?.id || null,
+        unit_of_measure: unit_of_measure?.trim() || null,
+        average_cost: average_cost || 0,
+        sale_price: sale_price || 0,
+        base_price: base_price || 0,
+        profit_margin_percentage: profit_margin_percentage || 0,
+        product_type: safeProductType,
+        current_stock: safeProductType === 'service' ? 0 : effectiveCurrentStock,
+        reserved_stock: safeProductType === 'service' ? 0 : reserved_stock,
+        available_stock: safeProductType === 'service' ? 0 : available_stock,
+        min_stock: (safeProductType === 'service' || safeProductType === 'vehicle') ? 0 : min_stock,
+        max_stock: (safeProductType === 'service' || safeProductType === 'vehicle') ? null : max_stock,
+        track_inventory: safeProductType === 'service' ? false : track_inventory,
+        is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
+        tax_config: finalTaxConfig,
+        is_labor: safeProductType === 'service' ? !!is_labor : false,
+      }, { transaction });
+
+      await transaction.commit();
+
+      const newProduct = await Product.findOne({
+        where: { id: product.id },
+        include: [
+          { model: Category, as: 'category', attributes: ['id', 'name'] },
+          { model: Vehicle, as: 'vehicle' },
+        ],
+      });
+      if (tenantId) markForAlertCheck(res, product.id, tenantId);
+      return res.status(201).json({ success: true, message: 'Producto creado exitosamente', data: newProduct });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
   } catch (error) {
     console.error('Error en createProduct:', error);
     res.status(500).json({ success: false, message: 'Error al crear producto' });
@@ -309,6 +376,13 @@ const updateProduct = async (req, res) => {
       if (existingBarcode) return res.status(400).json({ success: false, message: 'Ya existe un producto con ese código de barras' });
     }
 
+    if (updateData.unit_of_measure && !VALID_UNITS_OF_MEASURE.includes(updateData.unit_of_measure.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: `Unidad de medida inválida: "${updateData.unit_of_measure}". Valores permitidos: ${VALID_UNITS_OF_MEASURE.join(', ')}`,
+      });
+    }
+
     if (updateData.current_stock !== undefined || updateData.reserved_stock !== undefined) {
       const current = updateData.current_stock !== undefined ? parseFloat(updateData.current_stock) : parseFloat(product.current_stock);
       const reserved = updateData.reserved_stock !== undefined ? parseFloat(updateData.reserved_stock) : parseFloat(product.reserved_stock);
@@ -328,14 +402,18 @@ const updateProduct = async (req, res) => {
     Object.keys(updateData).forEach(key => { if (updateData[key] === undefined) delete updateData[key]; });
 
     if (updateData.product_type) {
-      const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material'];
+      const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
       if (!VALID_PRODUCT_TYPES.includes(updateData.product_type)) {
         updateData.product_type = 'simple';
       }
     }
 
+    // Los campos propios del vehículo (placa, VIN, etc.) se editan desde el
+    // módulo Vehículos, no desde acá -- este objeto solo se usa al crear.
+    delete updateData.vehicle;
+
     await product.update(updateData);
-    const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
+    const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });
     if (updateData.current_stock !== undefined || updateData.min_stock !== undefined || updateData.max_stock !== undefined) {
       markForAlertCheck(res, id, tenantId);
     }
@@ -394,7 +472,7 @@ const getProductByBarcode = async (req, res) => {
       if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
       whereClause.tenant_id = req.user.tenant_id;
     }
-    const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }] });
+    const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
     res.json({ success: true, data: product });
   } catch (error) {

@@ -1343,6 +1343,65 @@ const sendQuoteRequest = async (req, res) => {
 };
 
 /**
+ * POST /work-orders/:id/quote-requests/:quoteRequestId/resend
+ * Regenera el link/mensaje de WhatsApp de una ronda que sigue 'enviada'
+ * (el cliente no respondió o no vio el mensaje). No crea una ronda nueva ni
+ * toca los ítems -- son los mismos, solo se reenvía la notificación. Antes
+ * de esto no había forma de volver a contactar al cliente por una ronda que
+ * quedó colgada, ni de ver qué ítems seguían pendientes de esa ronda.
+ */
+const resendQuoteRequest = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id } });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    const quoteRequest = await WorkOrderQuoteRequest.findOne({
+      where: { id: req.params.quoteRequestId, work_order_id: order.id, tenant_id },
+    });
+    if (!quoteRequest) return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    if (quoteRequest.status !== 'enviada') {
+      return res.status(400).json({ success: false, message: 'Esta cotización ya fue respondida y no se puede reenviar' });
+    }
+
+    const items = await WorkOrderItem.findAll({ where: { quote_request_id: quoteRequest.id } });
+
+    let token = order.share_token;
+    if (!token) {
+      token = require('crypto').randomUUID();
+      await order.update({ share_token: token });
+    }
+
+    const customer = await Customer.findOne({ where: { id: order.customer_id } });
+    const phone = customer?.mobile || customer?.phone || '';
+    const cleanPhone = phone.replace(/\D/g, '');
+
+    const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
+    const shareUrl = `${frontendUrl}/ot/${token}`;
+    const itemsSummary = items.map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
+    const whatsappText = encodeURIComponent(
+      `Hola! Recordatorio: sigue pendiente tu aprobación para la orden ${order.order_number}:\n${itemsSummary}\n\nRevísala y apruébala aquí:\n${shareUrl}`
+    );
+    const whatsappUrl = cleanPhone
+      ? `https://wa.me/${cleanPhone}?text=${whatsappText}`
+      : `https://wa.me/?text=${whatsappText}`;
+
+    // No se toca `status` ni `quote_request_id` de los ítems -- sigue siendo
+    // la misma ronda, solo se refresca `sent_at` para reflejar el reenvío.
+    await quoteRequest.update({ sent_at: new Date() });
+
+    res.json({
+      success: true,
+      message: 'Cotización reenviada',
+      data: { quote_request_id: quoteRequest.id, share_url: shareUrl, whatsapp_url: whatsappUrl, items_count: items.length },
+    });
+  } catch (error) {
+    logger.error('Error reenviando cotización:', error);
+    res.status(500).json({ success: false, message: 'Error al reenviar la cotización' });
+  }
+};
+
+/**
  * POST /work-orders/:id/quote-requests/:quoteRequestId/apply
  * Descuenta inventario de los ítems 'aprobado' de esa ronda que todavía no
  * se hayan aplicado — recién en este momento se toca inventario, nunca
@@ -1526,6 +1585,17 @@ const generateSale = async (req, res) => {
       return res.status(400).json({ success: false, message: 'La OT no tiene ítems' });
     }
 
+    // Solo los ítems 'aprobado' se facturan -- uno 'rechazado' no se cobra y uno
+    // 'pendiente' todavía no tiene luz verde del cliente (mismo criterio que
+    // calcTotals). Sin este filtro, generateSale copiaba TODOS los ítems al
+    // documento pero el total venía de order.total_amount (que ya los excluía),
+    // dejando remisiones/facturas con ítems visibles pero total en 0.
+    const billableItems = order.items.filter(i => (i.approval_status || 'aprobado') === 'aprobado');
+    if (billableItems.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'La OT no tiene ítems aprobados para facturar' });
+    }
+
     // Tipo de documento: factura o remisión (el frontend pregunta al usuario)
     const { document_type = 'remision' } = req.body;
     if (!['factura', 'remision'].includes(document_type)) {
@@ -1568,6 +1638,12 @@ const generateSale = async (req, res) => {
       ? (customer.business_name || `${customer.first_name} ${customer.last_name}`)
       : 'Cliente General';
 
+    // Recalculado desde billableItems (no desde order.total_amount) para que el
+    // documento generado sea consistente con los ítems que realmente copia.
+    const { subtotal: saleSubtotal, tax_amount: saleTaxAmount } = calcTotals(billableItems);
+    const saleDiscount = parseFloat(order.discount_amount) || 0;
+    const saleTotalAmount = Math.max(0, saleSubtotal + saleTaxAmount - saleDiscount);
+
     const sale = await Sale.create({
       tenant_id,
       branch_id: req.branch_id || null,
@@ -1588,10 +1664,10 @@ const generateSale = async (req, res) => {
         ? [order.technician.first_name, order.technician.last_name].filter(Boolean).join(' ')
         : null,
       warehouse_id:     order.warehouse_id,
-      subtotal:         order.subtotal,
-      tax_amount:       order.tax_amount,
+      subtotal:         saleSubtotal,
+      tax_amount:       saleTaxAmount,
       discount_amount:  order.discount_amount || 0,
-      total_amount:     order.total_amount,
+      total_amount:     saleTotalAmount,
       status:           'pending',
       payment_status:   'pending',
       dian_status:      document_type === 'factura' ? 'pending' : 'not_applicable',
@@ -1599,8 +1675,8 @@ const generateSale = async (req, res) => {
       created_by: req.user.id,
     }, { transaction });
 
-    // Ítems de la venta + movimientos de inventario
-    for (const item of order.items) {
+    // Ítems de la venta + movimientos de inventario (solo los aprobados/facturables)
+    for (const item of billableItems) {
       // Obtener costo actual del producto si es un producto con inventario
       let unit_cost = 0;
       let product = null;
@@ -2318,7 +2394,7 @@ async function getPublicOrderBody(orderId, res) {
         {
           model: WorkOrderItem,
           as: 'items',
-          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'total', 'approval_status'],
+          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'subtotal', 'tax_amount', 'total', 'approval_status'],
         },
       ],
     });
@@ -2336,7 +2412,7 @@ async function getPublicOrderBody(orderId, res) {
       include: [{
         model: WorkOrderItem,
         as: 'items',
-        attributes: ['id', 'product_name', 'product_sku', 'quantity', 'unit_price', 'total', 'item_type', 'approval_status', 'rejection_reason'],
+        attributes: ['id', 'product_name', 'product_sku', 'quantity', 'unit_price', 'subtotal', 'tax_amount', 'total', 'item_type', 'approval_status', 'rejection_reason'],
       }],
     });
 
@@ -2434,6 +2510,8 @@ async function getPublicOrderBody(orderId, res) {
           product_sku: i.product_sku,
           quantity: parseFloat(i.quantity),
           unit_price: parseFloat(i.unit_price),
+          subtotal: parseFloat(i.subtotal || 0),
+          tax_amount: parseFloat(i.tax_amount || 0),
           total: parseFloat(i.total),
         })),
       active_quote_request: activeQuoteRequest ? {
@@ -2446,6 +2524,8 @@ async function getPublicOrderBody(orderId, res) {
           product_sku: i.product_sku,
           quantity: parseFloat(i.quantity),
           unit_price: parseFloat(i.unit_price),
+          subtotal: parseFloat(i.subtotal || 0),
+          tax_amount: parseFloat(i.tax_amount || 0),
           total: parseFloat(i.total),
         })),
       } : null,
@@ -2457,6 +2537,8 @@ async function getPublicOrderBody(orderId, res) {
         items: (q.items || []).map(i => ({
           product_name: i.product_name,
           quantity: parseFloat(i.quantity),
+          subtotal: parseFloat(i.subtotal || 0),
+          tax_amount: parseFloat(i.tax_amount || 0),
           total: parseFloat(i.total),
           approval_status: i.approval_status,
           rejection_reason: i.rejection_reason,
@@ -2527,4 +2609,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, addItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

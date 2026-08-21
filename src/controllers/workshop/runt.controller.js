@@ -113,6 +113,7 @@ const consultarVehiculo = async (req, res) => {
     }
 
     if (data.error) {
+      logger.warn('RUNT rechazó la consulta:', { descripcionRespuesta: data.descripcionRespuesta });
       return res.status(422).json({
         success: false,
         message: data.descripcionRespuesta || 'CAPTCHA incorrecto o datos inválidos.',
@@ -120,8 +121,12 @@ const consultarVehiculo = async (req, res) => {
       });
     }
 
+    // A veces RUNT responde 200 sin `error` pero con infoVehiculo vacío/incompleto
+    // (sin placa ni VIN) — sin este chequeo se llenaría el formulario con datos nulos
+    // dando la impresión de que la falla es de Pitbox y no de los datos ingresados.
     const v = data.infoVehiculo;
-    if (!v) {
+    if (!v || (!v.placa && !v.vin && !v.numSerie)) {
+      logger.warn('RUNT no devolvió infoVehiculo utilizable:', { infoVehiculo: v });
       return res.status(404).json({
         success: false, message: 'El RUNT no encontró información para esta placa y documento.',
       });
@@ -226,6 +231,7 @@ const consultarVehiculo = async (req, res) => {
     if (err.response) {
       const body = err.response.data;
       const runtMsg = body?.descripcionRespuesta || body?.message || body?.error || 'CAPTCHA incorrecto o sesión expirada.';
+      logger.warn('RUNT devolvió error HTTP:', { status: err.response.status, body });
       return res.status(422).json({ success: false, message: `${runtMsg} Solicita un nuevo CAPTCHA.`, runtError: true });
     }
     logger.error('RUNT consultarVehiculo error:', err.message);

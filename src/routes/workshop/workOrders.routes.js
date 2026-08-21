@@ -40,6 +40,7 @@ router.delete('/:id/items/:itemId', ctrl.removeItem);
 
 // Cotización con aprobación del cliente
 router.post('/:id/quote-requests', ctrl.sendQuoteRequest);
+router.post('/:id/quote-requests/:quoteRequestId/resend', ctrl.resendQuoteRequest);
 router.post('/:id/quote-requests/:quoteRequestId/apply', ctrl.applyApprovedItems);
 
 // Generar remisión
