@@ -32,6 +32,15 @@ module.exports = {
         ON products (vehicle_id) WHERE vehicle_id IS NOT NULL;
       `, { transaction });
 
+      // Dato legacy: filas con product_type='product' (valor previo a que el
+      // CHECK se endureciera, nunca limpiado en `public` -- ver el mismo caso
+      // en migrateTenantData.js) violarían el CHECK nuevo. Se normalizan a
+      // 'simple' igual que en esa migración de datos, en cualquier schema
+      // donde corra esta migración.
+      await queryInterface.sequelize.query(`
+        UPDATE products SET product_type = 'simple' WHERE product_type = 'product';
+      `, { transaction });
+
       await queryInterface.sequelize.query(`
         ALTER TABLE products DROP CONSTRAINT IF EXISTS products_product_type_check;
         ALTER TABLE products ADD CONSTRAINT products_product_type_check
