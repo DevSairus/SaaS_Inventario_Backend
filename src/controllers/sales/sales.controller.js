@@ -13,6 +13,21 @@ const taxService = require('../../services/taxService');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 
+// Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
+// que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
+// (tope: no supera el total antes de descuento), 'percentage' es un % de
+// ese mismo total (ya con impuestos y descuentos de línea aplicados). Se
+// resta DESPUÉS de impuestos -- mismo criterio que ya usa el descuento
+// global de las OT (ver resolveDiscountAmount en workOrders.controller.js).
+function resolveGlobalDiscount(type, value, preDiscountTotal) {
+  const v = parseFloat(value) || 0;
+  if (v <= 0) return 0;
+  if (type === 'percentage') {
+    return Math.round(preDiscountTotal * Math.min(v, 100) / 100);
+  }
+  return Math.min(v, preDiscountTotal);
+}
+
 // Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
@@ -189,7 +204,20 @@ const create = async (req, res) => {
       due_date,
       payment_terms,
       opportunity_id = null,
+      global_discount_type = 'fixed',
+      global_discount_value = 0,
     } = req.body;
+
+    if (!['fixed', 'percentage'].includes(global_discount_type)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: "global_discount_type debe ser 'fixed' o 'percentage'" });
+    }
+    // El descuento global mueve el total a cobrar -- el técnico no debe
+    // poder aplicarlo (mismo criterio que el descuento global de OT).
+    if ((parseFloat(global_discount_value) || 0) > 0 && req.user.role === 'technician') {
+      await transaction.rollback();
+      return res.status(403).json({ success: false, message: 'No tienes permiso para aplicar descuentos' });
+    }
 
     let finalCustomerId = customer_id;
     let customerInfo = {};
@@ -313,7 +341,9 @@ const create = async (req, res) => {
       });
     }
 
-    const total_amount = saleItems.reduce((sum, i) => sum + i.total, 0);
+    const preDiscountTotal = saleItems.reduce((sum, i) => sum + i.total, 0);
+    const global_discount_amount = resolveGlobalDiscount(global_discount_type, global_discount_value, preDiscountTotal);
+    const total_amount = preDiscountTotal - global_discount_amount;
 
     // Si no viene bodega explícita, usar la bodega default de la sede activa
     // como respaldo (el frontend ya la precarga, pero esto protege contra
@@ -367,6 +397,9 @@ const create = async (req, res) => {
       subtotal,
       tax_amount,
       discount_amount,
+      global_discount_type,
+      global_discount_value: parseFloat(global_discount_value) || 0,
+      global_discount_amount,
       total_amount,
       payment_method,
       payment_status: 'pending',
@@ -554,6 +587,21 @@ const update = async (req, res) => {
     const { items, customer_data, ...rest } = req.body;
     const updateData = { ...rest };
 
+    if ('global_discount_type' in updateData && !['fixed', 'percentage'].includes(updateData.global_discount_type)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: "global_discount_type debe ser 'fixed' o 'percentage'" });
+    }
+    const discountFieldsChanged = 'global_discount_type' in updateData || 'global_discount_value' in updateData;
+    // El descuento global mueve el total a cobrar -- el técnico no debe
+    // poder aplicarlo (mismo criterio que el descuento global de OT).
+    if (discountFieldsChanged) {
+      const effValue = updateData.global_discount_value !== undefined ? updateData.global_discount_value : sale.global_discount_value;
+      if ((parseFloat(effValue) || 0) > 0 && req.user.role === 'technician') {
+        await transaction.rollback();
+        return res.status(403).json({ success: false, message: 'No tienes permiso para aplicar descuentos' });
+      }
+    }
+
     if ('warehouse_id' in updateData) {
       updateData.warehouse_id = (updateData.warehouse_id && uuidRegex.test(updateData.warehouse_id))
         ? updateData.warehouse_id : null;
@@ -603,6 +651,8 @@ const update = async (req, res) => {
         updateData.customer_address = customer.address;
       }
     }
+
+    let lineItemsTotal; // total pre-descuento-global -- solo se resuelve si cambian ítems o el descuento
 
     if (items && Array.isArray(items) && items.length > 0) {
       await SaleItem.destroy({ where: { sale_id: id }, transaction });
@@ -668,11 +718,23 @@ const update = async (req, res) => {
 
       await SaleItem.bulkCreate(newItems, { transaction });
 
-      const total_amount = newItems.reduce((sum, i) => sum + i.total, 0);
+      lineItemsTotal = newItems.reduce((sum, i) => sum + i.total, 0);
       updateData.subtotal        = subtotal;
       updateData.tax_amount      = tax_amount;
       updateData.discount_amount = discount_amount;
-      updateData.total_amount    = total_amount;
+    } else if (discountFieldsChanged) {
+      // Ítems no cambiaron pero sí el descuento global -- reconstruir el
+      // total pre-descuento-global desde lo ya persistido (total_amount
+      // actual + el descuento global YA aplicado antes, si alguno), para no
+      // perder la base sobre la que aplicar el descuento nuevo.
+      lineItemsTotal = parseFloat(sale.total_amount) + (parseFloat(sale.global_discount_amount) || 0);
+    }
+
+    if (lineItemsTotal !== undefined) {
+      const effType  = updateData.global_discount_type  !== undefined ? updateData.global_discount_type  : sale.global_discount_type;
+      const effValue = updateData.global_discount_value  !== undefined ? updateData.global_discount_value : sale.global_discount_value;
+      updateData.global_discount_amount = resolveGlobalDiscount(effType, effValue, lineItemsTotal);
+      updateData.total_amount = lineItemsTotal - updateData.global_discount_amount;
     }
 
     await sale.update(updateData, { transaction });

@@ -316,7 +316,8 @@ const generateSalePDF = async (res, sale, tenant) => {
     const taxBreakdown = sale.tax_breakdown || [];
     const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
     let totRows = isRemision ? 1 : 1 + (allTaxes.length || 1); // subtotal + impuestos (o IVA fallback)
-    if ((sale.discount_amount || 0) > 0)   totRows++;
+    if ((sale.discount_amount || 0) > 0)          totRows++;
+    if ((sale.global_discount_amount || 0) > 0)   totRows++;
     if (paidAmt > 0)                        totRows++;
     if (balance > 0 && paidAmt > 0)         totRows++;
     const BAND_H = totRows * 18 + 20;
@@ -368,6 +369,10 @@ const generateSalePDF = async (res, sale, tenant) => {
       }
       if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
     }
+    // Descuento global -- independiente de discount_amount (suma de
+    // descuentos por línea); se resta después de impuestos, en ambos
+    // formatos (remisión y factura/cotización).
+    if ((sale.global_discount_amount || 0) > 0) drawRow('Descuento global', `- ${formatCurrency(sale.global_discount_amount)}`);
 
     doc.moveTo(LBL_X, y - 3).lineTo(TOT_X + TOT_W - 8, y - 3).strokeColor(borderMd).lineWidth(0.4).stroke();
 

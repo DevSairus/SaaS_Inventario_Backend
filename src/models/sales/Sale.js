@@ -102,7 +102,27 @@ const Sale = sequelize.define('Sale', {
     allowNull: false,
     defaultValue: 0,
   },
+  // Suma de los descuentos por línea (sale_items.discount_amount) -- NO es
+  // un descuento global, ver global_discount_* abajo.
   discount_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    defaultValue: 0,
+  },
+  // Descuento global de la venta/cotización -- 'fixed' (global_discount_value
+  // = monto en $) o 'percentage' (% del total antes de descuento). Se resta
+  // DESPUÉS de impuestos, encima de los descuentos por línea (que sí afectan
+  // la base gravable) -- ver resolveGlobalDiscount en sales.controller.js.
+  // global_discount_amount queda persistido como el monto ya resuelto.
+  global_discount_type: {
+    type: DataTypes.STRING(10),
+    defaultValue: 'fixed',
+    validate: { isIn: [['fixed', 'percentage']] },
+  },
+  global_discount_value: {
+    type: DataTypes.DECIMAL(15, 2),
+    defaultValue: 0,
+  },
+  global_discount_amount: {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0,
   },

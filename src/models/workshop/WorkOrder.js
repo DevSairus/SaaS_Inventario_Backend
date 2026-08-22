@@ -115,6 +115,20 @@ const WorkOrder = sequelize.define('WorkOrder', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0
   },
+  // Descuento global de la OT -- 'fixed' (discount_value = monto en $) o
+  // 'percentage' (discount_value = % del total antes de descuento). Se
+  // recalcula en cada cambio de ítems (ver resolveDiscountAmount en
+  // workOrders.controller.js); discount_amount queda persistido como el
+  // monto ya resuelto, para lecturas que no recalculan (listados, PDF).
+  discount_type: {
+    type: DataTypes.STRING(10),
+    defaultValue: 'fixed',
+    validate: { isIn: [['fixed', 'percentage']] },
+  },
+  discount_value: {
+    type: DataTypes.DECIMAL(15, 2),
+    defaultValue: 0
+  },
   discount_amount: {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0

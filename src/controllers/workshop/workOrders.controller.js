@@ -46,7 +46,7 @@ const WO_SAFE_ATTRS = [
   'warehouse_id','status','mileage_in','mileage_out','problem_description',
   'diagnosis','work_performed','photos_in','photos_out','received_at',
   'promised_at','completed_at','delivered_at','subtotal','tax_amount',
-  'discount_amount','total_amount','paid_amount','payment_status','sale_id','notes','internal_notes',
+  'discount_type','discount_value','discount_amount','total_amount','paid_amount','payment_status','sale_id','notes','internal_notes',
   'created_by','created_at','updated_at','share_token',
 ];
 
@@ -89,6 +89,22 @@ function calcTotals(items) {
   const subtotal   = billable.reduce((s, i) => s + parseFloat(i.subtotal   || 0), 0);
   const tax_amount = billable.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
   return { subtotal, tax_amount, total_amount: subtotal + tax_amount };
+}
+
+// Descuento global de la OT — 'fixed' es un monto fijo (tope: no supera el
+// total antes de descuento), 'percentage' es un % de ese mismo total. Se
+// recalcula contra el subtotal/impuestos vigentes en cada recálculo de
+// totales (no se guarda "congelado"), así que si se eligió porcentaje se
+// mantiene proporcional aunque después se agreguen/quiten ítems.
+// discount_amount queda persistido igual (para lecturas que no recalculan,
+// ej. listados/PDF), pero siempre se deriva de discount_type/discount_value.
+function resolveDiscountAmount(order, preDiscountTotal) {
+  const value = parseFloat(order.discount_value) || 0;
+  if (value <= 0) return 0;
+  if (order.discount_type === 'percentage') {
+    return Math.round(preDiscountTotal * Math.min(value, 100) / 100);
+  }
+  return Math.min(value, preDiscountTotal);
 }
 
 /**
@@ -478,8 +494,8 @@ const convertQuoteToWorkOrder = async (req, res) => {
 
     const items = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
     const { subtotal, tax_amount } = calcTotals(items);
-    const disc = parseFloat(order.discount_amount) || 0;
-    await order.update({ subtotal, tax_amount, total_amount: subtotal + tax_amount - disc }, { transaction });
+    const disc = resolveDiscountAmount(order, subtotal + tax_amount);
+    await order.update({ subtotal, tax_amount, discount_amount: disc, total_amount: subtotal + tax_amount - disc }, { transaction });
 
     await sale.update({ converted_to_work_order_id: order.id }, { transaction });
 
@@ -535,7 +551,7 @@ const update = async (req, res) => {
     const {
       customer_id, vehicle_id, technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
-      notes, mileage_in, mileage_out, discount_amount,
+      notes, mileage_in, mileage_out, discount_type, discount_value,
       quality_checklist,
     } = req.body;
 
@@ -545,12 +561,23 @@ const update = async (req, res) => {
       return res.status(400).json({ success: false, message: 'El cliente es requerido' });
     }
 
+    // El descuento global mueve el total a pagar -- igual que los precios,
+    // el técnico no debe poder tocarlo (ver hidePrices en el frontend).
+    const settingDiscount = discount_type !== undefined || discount_value !== undefined;
+    if (settingDiscount && req.user.role === 'technician') {
+      return res.status(403).json({ success: false, message: 'No tienes permiso para aplicar descuentos' });
+    }
+    if (discount_type !== undefined && !['fixed', 'percentage'].includes(discount_type)) {
+      return res.status(400).json({ success: false, message: "discount_type debe ser 'fixed' o 'percentage'" });
+    }
+
     await order.update({
       customer_id, vehicle_id,
       technician_id, warehouse_id, promised_at,
       problem_description, diagnosis, work_performed,
       notes, mileage_in, mileage_out,
-      discount_amount: discount_amount != null ? parseFloat(discount_amount) : order.discount_amount,
+      discount_type:  discount_type  !== undefined ? discount_type : order.discount_type,
+      discount_value: discount_value !== undefined ? (parseFloat(discount_value) || 0) : order.discount_value,
       // Merge en vez de reemplazo: permite marcar un solo check (ej. "Limpieza
       // final") sin borrar los demás que ya estaban marcados.
       quality_checklist: quality_checklist
@@ -560,8 +587,8 @@ const update = async (req, res) => {
 
     const items = await WorkOrderItem.findAll({ where: { work_order_id: order.id } });
     const { subtotal, tax_amount } = calcTotals(items);
-    const disc = parseFloat(order.discount_amount) || 0;
-    await order.update({ subtotal, tax_amount, total_amount: subtotal + tax_amount - disc });
+    const disc = resolveDiscountAmount(order, subtotal + tax_amount);
+    await order.update({ subtotal, tax_amount, discount_amount: disc, total_amount: subtotal + tax_amount - disc });
 
     res.json({ success: true, message: 'Orden actualizada', data: order });
   } catch (error) {
@@ -829,8 +856,8 @@ const addItem = async (req, res) => {
     // Recalcular totales de la OT
     const allItems = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
     const { subtotal: s, tax_amount: t } = calcTotals(allItems);
-    const disc = parseFloat(order.discount_amount) || 0;
-    await order.update({ subtotal: s, tax_amount: t, total_amount: s + t - disc }, { transaction });
+    const disc = resolveDiscountAmount(order, s + t);
+    await order.update({ subtotal: s, tax_amount: t, discount_amount: disc, total_amount: s + t - disc }, { transaction });
 
     await transaction.commit();
 
@@ -874,8 +901,8 @@ const removeItem = async (req, res) => {
     // Recalcular totales
     const remaining = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
     const { subtotal, tax_amount } = calcTotals(remaining);
-    const disc = parseFloat(order.discount_amount) || 0;
-    await order.update({ subtotal, tax_amount, total_amount: subtotal + tax_amount - disc }, { transaction });
+    const disc = resolveDiscountAmount(order, subtotal + tax_amount);
+    await order.update({ subtotal, tax_amount, discount_amount: disc, total_amount: subtotal + tax_amount - disc }, { transaction });
 
     await transaction.commit();
     res.json({ success: true, message: 'Ítem eliminado' });
@@ -947,8 +974,8 @@ const updateItem = async (req, res) => {
     // Recalcular totales de la OT
     const allItems = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
     const { subtotal: s, tax_amount: t } = calcTotals(allItems);
-    const disc = parseFloat(order.discount_amount) || 0;
-    await order.update({ subtotal: s, tax_amount: t, total_amount: s + t - disc }, { transaction });
+    const disc = resolveDiscountAmount(order, s + t);
+    await order.update({ subtotal: s, tax_amount: t, discount_amount: disc, total_amount: s + t - disc }, { transaction });
 
     await transaction.commit();
 
@@ -1628,8 +1655,8 @@ async function respondQuoteRequestBody({ orderId, quoteRequestId, approvals, app
     const fullOrder = await WorkOrder.findByPk(order.id, { transaction });
     const allItems = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
     const { subtotal, tax_amount } = calcTotals(allItems);
-    const disc = parseFloat(fullOrder.discount_amount) || 0;
-    await fullOrder.update({ subtotal, tax_amount, total_amount: subtotal + tax_amount - disc }, { transaction });
+    const disc = resolveDiscountAmount(fullOrder, subtotal + tax_amount);
+    await fullOrder.update({ subtotal, tax_amount, discount_amount: disc, total_amount: subtotal + tax_amount - disc }, { transaction });
 
     await transaction.commit();
 
