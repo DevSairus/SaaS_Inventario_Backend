@@ -13,7 +13,7 @@
 const express = require('express');
 const router  = express.Router();
 const { runWithTenantSchema } = require('../config/tenantContext');
-const { Sale, Customer, SaleItem, Product, Tenant, SaleDiagnosisMark, DiagramTemplate } = require('../models');
+const { Sale, Customer, SaleItem, Product, Vehicle, Tenant, SaleDiagnosisMark, DiagramTemplate } = require('../models');
 const { generateSalePDFBuffer } = require('../services/pdfService');
 const { resolveSaleSchemaByToken } = require('../controllers/sales/sales.controller');
 const logger  = require('../config/logger');
@@ -49,7 +49,7 @@ async function servePdfBody(saleId, res) {
     where: { id: saleId },
     include: [
       { model: Customer, as: 'customer' },
-      { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] },
+      { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', include: [{ model: Vehicle, as: 'vehicle' }] }] },
       { model: SaleDiagnosisMark, as: 'diagnosis_marks', include: [{ model: DiagramTemplate, as: 'diagram_template' }] },
     ],
   });

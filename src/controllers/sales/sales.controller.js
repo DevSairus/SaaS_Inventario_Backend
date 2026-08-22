@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -780,6 +780,49 @@ const confirm = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Solo se pueden confirmar ventas en borrador' });
     }
 
+    // Tipo de documento final -- se calcula acá para poder validar antes de
+    // abrir la transacción; se reutiliza más abajo en vez de recalcularlo.
+    const finalDocType = document_type || (sale.document_type !== null ? sale.document_type : 'remision');
+
+    // Si se factura un producto tipo 'vehicle', su ficha de Vehicle debe traer
+    // ya los datos que pide el organismo de tránsito (VIN, motor, color, etc.)
+    // -- si falta alguno, es mejor bloquear la factura ahora que descubrirlo
+    // ya emitida y sin forma fácil de corregirla.
+    if (finalDocType === 'factura') {
+      const vehicleItemProductIds = sale.items
+        .filter(i => i.approval_status !== 'rechazado' && i.product_id)
+        .map(i => i.product_id);
+      if (vehicleItemProductIds.length > 0) {
+        const vehicleProducts = await Product.findAll({
+          where: { id: { [Op.in]: vehicleItemProductIds }, tenant_id: tenantId, product_type: 'vehicle' },
+          include: [{ model: Vehicle, as: 'vehicle' }],
+        });
+        const REQUIRED_VEHICLE_FIELDS = [
+          ['vin', 'VIN/Chasis'], ['engine_number', 'Número de motor'],
+          ['brand', 'Marca'], ['model', 'Línea'], ['year', 'Modelo (año)'], ['color', 'Color'],
+        ];
+        const incomplete = [];
+        for (const product of vehicleProducts) {
+          if (!product.vehicle) {
+            incomplete.push(`${product.name}: no tiene una ficha de vehículo asociada`);
+            continue;
+          }
+          const missing = REQUIRED_VEHICLE_FIELDS
+            .filter(([field]) => !product.vehicle[field])
+            .map(([, label]) => label);
+          if (missing.length > 0) {
+            incomplete.push(`${product.name}: falta ${missing.join(', ')}`);
+          }
+        }
+        if (incomplete.length > 0) {
+          return res.status(400).json({
+            success: false,
+            message: `No se puede facturar: faltan datos del vehículo requeridos para tránsito. ${incomplete.join(' | ')}`,
+          });
+        }
+      }
+    }
+
     // Validar límite de crédito
     if (payment_method === 'credito' && sale.customer_id) {
       const creditCustomer = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } });
@@ -919,7 +962,8 @@ const confirm = async (req, res) => {
       // ── Asignar tipo de documento al confirmar ───────────────────────────────
       // El tipo siempre se elige en este momento. Si llega document_type lo aplicamos;
       // si no viene, usar remision como fallback solo si ya tenía tipo previo.
-      const finalDocType = document_type || (sale.document_type !== null ? sale.document_type : 'remision');
+      // (finalDocType ya se calculó arriba, antes de la transacción, para
+      // poder validar los datos del vehículo sin abrirla innecesariamente.)
       if (finalDocType !== sale.document_type) {
         updateData.document_type = finalDocType;
         updateData.dian_status   = finalDocType === 'factura' ? 'pending' : 'not_applicable';
@@ -1344,7 +1388,7 @@ const generatePDF = async (req, res) => {
       where: { id, tenant_id: tenantId },
       include: [
         { model: Customer, as: 'customer' },
-        { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product' }] },
+        { model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', include: [{ model: Vehicle, as: 'vehicle' }] }] },
         { model: SaleDiagnosisMark, as: 'diagnosis_marks', include: [{ model: DiagramTemplate, as: 'diagram_template' }] }
       ]
     });

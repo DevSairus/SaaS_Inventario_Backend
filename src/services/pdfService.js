@@ -298,6 +298,53 @@ const generateSalePDF = async (res, sale, tenant) => {
     }
 
     /* ══════════════════════════════════════════════════════════
+       DATOS DEL VEHÍCULO FACTURADO (VIN, motor, color, etc.)
+       Solo aparece si algún ítem es un producto tipo 'vehicle' con su
+       ficha de Vehicle asociada -- una venta normal de repuestos/servicios
+       nunca dispara este bloque, pero la venta de una moto/carro nuevo sí,
+       para que la factura sirva como soporte ante el organismo de tránsito.
+       ══════════════════════════════════════════════════════════ */
+    const vehicleItems = items.filter(item => item.product?.product_type === 'vehicle' && item.product?.vehicle);
+    if (vehicleItems.length > 0) {
+      y += 14;
+      for (const item of vehicleItems) {
+        const v = item.product.vehicle;
+        const fields = [
+          ['Marca',    v.brand],
+          ['Línea',    v.model],
+          ['Modelo',   v.year],
+          ['Color',    v.color],
+          ['VIN / Chasis', v.vin],
+          ['Motor',    v.engine_number],
+          ['Cilindraje', v.engine],
+          ['Placa',    v.plate],
+        ].filter(([, val]) => val);
+
+        if (fields.length === 0) continue;
+
+        const rowsCount = Math.ceil(fields.length / 2);
+        const boxH = 22 + rowsCount * 14;
+        if (y + boxH > 700) { doc.addPage(); y = 40; }
+
+        doc.roundedRect(MARGIN, y, INNER_W, boxH, 5).strokeColor(borderMd).lineWidth(0.5).stroke();
+        doc.font('Helvetica-Bold').fontSize(8).fillColor(gray)
+          .text(`DATOS DEL VEHÍCULO — ${item.product?.name || item.product_name}`, MARGIN + 10, y + 8);
+
+        const colW = (INNER_W - 20) / 2;
+        fields.forEach(([label, val], idx) => {
+          const col = idx % 2;
+          const row = Math.floor(idx / 2);
+          const fx = MARGIN + 10 + col * colW;
+          const fy = y + 22 + row * 14;
+          doc.font('Helvetica-Bold').fontSize(7.5).fillColor(gray).text(`${label}:`, fx, fy, { continued: true, width: colW });
+          doc.font('Helvetica').fontSize(7.5).fillColor(black).text(` ${val}`, { width: colW - 60 });
+        });
+
+        y += boxH + 8;
+      }
+    }
+
+    /* ══════════════════════════════════════════════════════════
        OBSERVACIONES DE PAGO (izq) + TOTALES (der) — mismo nivel
        ══════════════════════════════════════════════════════════ */
     y += 14;
