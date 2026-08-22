@@ -1,9 +1,13 @@
 const ExcelJS = require('exceljs');
 const { Op } = require('sequelize');
 const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember } = require('../../models/inventory');
+const { runWithTenantSchema } = require('../../config/tenantContext');
 
 const REQUIRED_COLUMNS = ['Código*', 'Nombre*'];
 const MAX_REPORTED_ERRORS = 300;
+// Tamaño de lote para bulkCreate / IN (...) -- con archivos de miles de filas,
+// un await por fila agota el timeout del cliente/proxy antes de terminar.
+const BULK_CHUNK_SIZE = 500;
 
 // Debe reflejar exactamente el CHECK del controlador de productos
 // (products.controller.js VALID_UNITS_OF_MEASURE) y el mapeo usado por el
@@ -181,8 +185,25 @@ function buildClusters(linkableRows) {
   return { roots, normToOriginalSku };
 }
 
-// GET/POST /products/bulk-import?dry_run=true|false
-const bulkImportProducts = async (req, res) => {
+// POST /products/bulk-import?dry_run=true|false
+//
+// El upload de archivo (multer/busboy, ver uploadProductsExcel.js) corre
+// entre tenantMiddleware y este controller, y rompe la propagación del
+// AsyncLocalStorage que tenantMiddleware usa para fijar el schema del
+// tenant (ver tenantContext.js y el mismo problema ya resuelto en
+// invoiceImport.controller.js) -- para cuando este handler arranca,
+// getCurrentSchema() ya da undefined y todas las queries de Product/
+// ProductEquivalenceGroup/-Member caen silenciosamente a `public` en vez
+// del schema real del tenant. Fix: re-fijar el contexto acá mismo con el
+// schema_name que tenantMiddleware ya dejó en req.tenant.
+const bulkImportProducts = (req, res) => {
+  if (req.tenant?.schema_name) {
+    return runWithTenantSchema(req.tenant.schema_name, () => bulkImportProductsInner(req, res));
+  }
+  return bulkImportProductsInner(req, res);
+};
+
+const bulkImportProductsInner = async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
     if (req.user.role !== 'super_admin' && !req.user.tenant_id) {
@@ -284,36 +305,56 @@ const bulkImportProducts = async (req, res) => {
     }
 
     // ------- Importación real -------
+    // Se usa bulkCreate en lotes en vez de un INSERT por fila -- con miles de
+    // productos, un await por fila implica miles de viajes de ida y vuelta a
+    // la BD y el request termina superando el timeout del cliente/proxy.
     const skuToId = new Map(existingBySkuExact);
     const creationErrors = [];
     let creados = 0;
 
-    for (const row of toCreate) {
+    for (let i = 0; i < toCreate.length; i += BULK_CHUNK_SIZE) {
+      const chunk = toCreate.slice(i, i + BULK_CHUNK_SIZE);
+      const payload = chunk.map((row) => ({
+        tenant_id: tenantId,
+        sku: row.sku,
+        name: row.name,
+        unit_of_measure: row.unit_of_measure,
+        average_cost: row.average_cost,
+        base_price: row.base_price,
+        profit_margin_percentage: row.profit_margin_percentage,
+        product_type: 'simple',
+        current_stock: row.current_stock,
+        reserved_stock: 0,
+        available_stock: row.current_stock,
+        min_stock: 0,
+        track_inventory: true,
+        is_active: true,
+        has_tax: true,
+        tax_percentage: 19,
+        price_includes_tax: false,
+        tax_config: { iva: { enabled: true, rate: 19 }, inc: { enabled: false, rate: 0 }, ica: { enabled: false, rate: 0 } },
+      }));
+
       try {
-        const product = await Product.create({
-          tenant_id: tenantId,
-          sku: row.sku,
-          name: row.name,
-          unit_of_measure: row.unit_of_measure,
-          average_cost: row.average_cost,
-          base_price: row.base_price,
-          profit_margin_percentage: row.profit_margin_percentage,
-          product_type: 'simple',
-          current_stock: row.current_stock,
-          reserved_stock: 0,
-          available_stock: row.current_stock,
-          min_stock: 0,
-          track_inventory: true,
-          is_active: true,
-          has_tax: true,
-          tax_percentage: 19,
-          price_includes_tax: false,
-          tax_config: { iva: { enabled: true, rate: 19 }, inc: { enabled: false, rate: 0 }, ica: { enabled: false, rate: 0 } },
+        const created = await Product.bulkCreate(payload, { returning: true, validate: true });
+        created.forEach((product, idx) => {
+          skuToId.set(chunk[idx].sku, product.id);
         });
-        skuToId.set(row.sku, product.id);
-        creados++;
+        creados += created.length;
       } catch (err) {
-        creationErrors.push({ row: row.rowNumber, sku: row.sku, name: row.name, errors: [err.message || 'Error al crear el producto'] });
+        // Un INSERT multi-fila es atómico -- si una fila del lote falla, se
+        // pierde todo el lote. Se reintenta fila por fila solo en ese caso,
+        // para aislar cuál era la mala sin penalizar el caso normal.
+        for (let idx = 0; idx < chunk.length; idx++) {
+          const row = chunk[idx];
+          try {
+            const product = await Product.create(payload[idx]);
+            skuToId.set(row.sku, product.id);
+            creados++;
+          } catch (rowErr) {
+            creationErrors.push({ row: row.rowNumber, sku: row.sku, name: row.name, errors: [rowErr.message || 'Error al crear el producto'] });
+          }
+        }
       }
     }
 
@@ -326,63 +367,130 @@ const bulkImportProducts = async (req, res) => {
       return null;
     };
 
-    let gruposCreados = 0;
-    let gruposReusados = 0;
-    let enlacesCreados = 0;
+    // Resolver todos los clusters con pareja válida ANTES de tocar la BD, para
+    // poder consultar y crear todo en pocos lotes en vez de una consulta y un
+    // insert por cluster (con miles de equivalencias eso también agota el timeout).
     const codigosNoEncontrados = new Set();
-    const equivalenceErrors = [];
-
+    const validClusters = []; // [{ memberIds: [{norm,id}], firstNorm }]
     for (const members of roots.values()) {
       if (members.size < 2) continue;
-
       const memberIds = [];
       for (const norm of members) {
         const id = resolveProductId(norm);
         if (id) memberIds.push({ norm, id });
         else codigosNoEncontrados.add(normToOriginalSku.get(norm) || norm);
       }
-      if (memberIds.length < 2) continue;
+      if (memberIds.length >= 2) validClusters.push(memberIds);
+    }
 
-      try {
-        const existingMemberships = await ProductEquivalenceGroupMember.findAll({
-          where: { tenant_id: tenantId, product_id: { [Op.in]: memberIds.map((m) => m.id) } },
+    let gruposCreados = 0;
+    let gruposReusados = 0;
+    let enlacesCreados = 0;
+    const equivalenceErrors = [];
+
+    if (validClusters.length > 0) {
+      // Una sola consulta para saber a qué grupo(s) ya pertenece cada producto
+      // involucrado, en vez de un findAll por cluster.
+      const allMemberProductIds = [...new Set(validClusters.flatMap((m) => m.map((x) => x.id)))];
+      const existingMemberships = [];
+      for (let i = 0; i < allMemberProductIds.length; i += BULK_CHUNK_SIZE) {
+        const idsChunk = allMemberProductIds.slice(i, i + BULK_CHUNK_SIZE);
+        const found = await ProductEquivalenceGroupMember.findAll({
+          where: { tenant_id: tenantId, product_id: { [Op.in]: idsChunk } },
         });
+        existingMemberships.push(...found);
+      }
+      const groupsByProductId = new Map(); // product_id -> Set(group_id)
+      for (const m of existingMemberships) {
+        if (!groupsByProductId.has(m.product_id)) groupsByProductId.set(m.product_id, new Set());
+        groupsByProductId.get(m.product_id).add(m.group_id);
+      }
 
-        let groupId;
-        if (existingMemberships.length > 0) {
-          groupId = existingMemberships[0].group_id;
+      // Para cada cluster, decidir si reutiliza un grupo existente o necesita uno nuevo.
+      const clusterGroupId = new Array(validClusters.length).fill(null);
+      const clustersNeedingNewGroup = [];
+      for (let i = 0; i < validClusters.length; i++) {
+        const memberIds = validClusters[i];
+        let reuseGroupId = null;
+        for (const { id } of memberIds) {
+          const groups = groupsByProductId.get(id);
+          if (groups && groups.size > 0) { reuseGroupId = [...groups][0]; break; }
+        }
+        if (reuseGroupId) {
+          clusterGroupId[i] = reuseGroupId;
           gruposReusados++;
         } else {
-          const group = await ProductEquivalenceGroup.create({
+          clustersNeedingNewGroup.push(i);
+        }
+      }
+
+      // Crear en un solo bulkCreate todos los grupos nuevos que hacen falta.
+      if (clustersNeedingNewGroup.length > 0) {
+        const groupPayload = clustersNeedingNewGroup.map((i) => {
+          const memberIds = validClusters[i];
+          return {
             tenant_id: tenantId,
             name: `Equivalencia ${normToOriginalSku.get(memberIds[0].norm) || memberIds[0].norm}`,
             created_by: req.user.id,
+          };
+        });
+        try {
+          const createdGroups = await ProductEquivalenceGroup.bulkCreate(groupPayload, { returning: true, validate: true });
+          createdGroups.forEach((group, idx) => {
+            clusterGroupId[clustersNeedingNewGroup[idx]] = group.id;
+            gruposCreados++;
           });
-          groupId = group.id;
-          gruposCreados++;
-        }
-
-        // Solo se omite un miembro si YA pertenece exactamente a este grupo
-        // (un producto puede pertenecer a varios grupos distintos a la vez).
-        const alreadyInThisGroup = new Set(existingMemberships.filter((m) => m.group_id === groupId).map((m) => m.product_id));
-
-        for (let i = 0; i < memberIds.length; i++) {
-          const { id } = memberIds[i];
-          if (alreadyInThisGroup.has(id)) continue;
-          try {
-            await ProductEquivalenceGroupMember.create({
-              tenant_id: tenantId,
-              group_id: groupId,
-              product_id: id,
-              role: existingMemberships.length === 0 && i === 0 ? 'referencia' : 'equivalente',
-            });
-            enlacesCreados++;
-          } catch (memberErr) {
-            equivalenceErrors.push({ skus: [...members].map((n) => normToOriginalSku.get(n) || n), error: memberErr.message });
+        } catch (err) {
+          // Fallback fila por fila si el lote de grupos falla por algún motivo.
+          for (let idx = 0; idx < groupPayload.length; idx++) {
+            try {
+              const group = await ProductEquivalenceGroup.create(groupPayload[idx]);
+              clusterGroupId[clustersNeedingNewGroup[idx]] = group.id;
+              gruposCreados++;
+            } catch (rowErr) {
+              const memberIds = validClusters[clustersNeedingNewGroup[idx]];
+              equivalenceErrors.push({ skus: memberIds.map((m) => normToOriginalSku.get(m.norm) || m.norm), error: rowErr.message });
+            }
           }
         }
-      } catch (err) {
-        equivalenceErrors.push({ skus: [...members].map((n) => normToOriginalSku.get(n) || n), error: err.message });
+      }
+
+      // Armar todas las membresías a insertar (omitiendo las que ya existan
+      // exactamente en el grupo destino) y crearlas en lotes.
+      const membershipPayload = [];
+      for (let i = 0; i < validClusters.length; i++) {
+        const groupId = clusterGroupId[i];
+        if (!groupId) continue; // el grupo nuevo falló arriba
+        const memberIds = validClusters[i];
+        const alreadyInThisGroup = new Set(existingMemberships.filter((m) => m.group_id === groupId).map((m) => m.product_id));
+        let assignedReference = alreadyInThisGroup.size > 0; // si el grupo ya existía, no reasignar 'referencia'
+        for (const { id } of memberIds) {
+          if (alreadyInThisGroup.has(id)) continue;
+          membershipPayload.push({
+            tenant_id: tenantId,
+            group_id: groupId,
+            product_id: id,
+            role: assignedReference ? 'equivalente' : 'referencia',
+          });
+          assignedReference = true;
+        }
+      }
+
+      for (let i = 0; i < membershipPayload.length; i += BULK_CHUNK_SIZE) {
+        const chunk = membershipPayload.slice(i, i + BULK_CHUNK_SIZE);
+        try {
+          await ProductEquivalenceGroupMember.bulkCreate(chunk, { validate: true });
+          enlacesCreados += chunk.length;
+        } catch (err) {
+          for (const member of chunk) {
+            try {
+              await ProductEquivalenceGroupMember.create(member);
+              enlacesCreados++;
+            } catch (rowErr) {
+              equivalenceErrors.push({ skus: [member.product_id], error: rowErr.message });
+            }
+          }
+        }
       }
     }
 
@@ -400,6 +508,7 @@ const bulkImportProducts = async (req, res) => {
         grupos_equivalencia_reusados: gruposReusados,
         enlaces_equivalencia_creados: enlacesCreados,
         codigos_equivalencia_no_encontrados: [...codigosNoEncontrados].slice(0, MAX_REPORTED_ERRORS),
+        errores_equivalencia: equivalenceErrors.slice(0, MAX_REPORTED_ERRORS),
         errores: allErrors.slice(0, MAX_REPORTED_ERRORS),
         errores_truncados: allErrors.length > MAX_REPORTED_ERRORS,
       },
