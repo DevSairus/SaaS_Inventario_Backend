@@ -1898,7 +1898,25 @@ const generateSale = async (req, res) => {
 
 // ── UPLOAD PHOTOS ─────────────────────────────────────────────────────────────
 
+/**
+ * El upload de archivos (multer/busboy, ver workOrders.routes.js) corre entre
+ * tenantMiddleware y este controller, y rompe la propagación del
+ * AsyncLocalStorage que tenantMiddleware usa para fijar el schema del
+ * tenant (ver tenantContext.js) -- para cuando este handler arranca,
+ * getCurrentSchema() ya da undefined y WorkOrder.findOne cae silenciosamente
+ * a `public` en vez del schema real del tenant, así que nunca encuentra la
+ * OT (404 "Orden no encontrada" aunque la OT sí exista). Mismo bug ya visto
+ * y resuelto en invoiceImport.controller.js -- mismo fix: re-fijar el
+ * contexto acá con el schema_name que tenantMiddleware ya dejó en req.tenant.
+ */
 const uploadPhotos = async (req, res) => {
+  if (req.tenant?.schema_name) {
+    return runWithTenantSchema(req.tenant.schema_name, () => uploadPhotosInner(req, res));
+  }
+  return uploadPhotosInner(req, res);
+};
+
+const uploadPhotosInner = async (req, res) => {
   try {
     const { phase } = req.params;
     if (!['in', 'out'].includes(phase))
