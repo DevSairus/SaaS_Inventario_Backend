@@ -34,7 +34,10 @@ const {
   getOrCreateBrandAndLine
 } = require('../../controllers/inventory/vehicleApplications.controller');
 
+const { bulkImportProducts } = require('../../controllers/inventory/productsBulkImport.controller');
+
 const uploadProductImageMiddleware = require('../../middleware/uploadProductImage');
+const uploadProductsExcelMiddleware = require('../../middleware/uploadProductsExcel');
 
 const { authMiddleware } = require('../../middleware/auth');
 const { branchMiddleware } = require('../../middleware/branch');
@@ -57,6 +60,9 @@ router.post('/equivalents/batch-check', batchCheckEquivalents);
 // Marcas y líneas para autocompletado (antes de /:id)
 router.get('/vehicle-brands-lines', getBrandsAndLines);
 router.post('/vehicle-brands-lines', getOrCreateBrandAndLine);
+
+// Carga masiva de productos por Excel, incluye equivalencias por código (antes de /:id)
+router.post('/bulk-import', uploadProductsExcelMiddleware.single('archivo'), bulkImportProducts);
 
 // CRUD básico
 // branchMiddleware solo en el listado/búsqueda: getAllProducts filtra por las
