@@ -11,6 +11,8 @@ const audit = require('../utils/audit');
 const { cutoverTenant } = require('../scripts/cutoverTenant');
 const { rollbackTenant } = require('../scripts/rollbackTenant');
 const { cleanupTenantPublicData } = require('../scripts/cleanupTenantPublicData');
+const { resetTenantForDelivery } = require('../scripts/resetTenantForDelivery');
+const { ASK_GROUPS: RESET_ASK_GROUPS } = require('../scripts/tenantResetClassification');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
@@ -2806,6 +2808,56 @@ router.post(
     } catch (error) {
       console.error(`Error en cleanup manual de "${slug}":`, error);
       res.status(500).json({ error: 'Error al limpiar datos legados de public', details: error.message });
+    }
+  }
+);
+
+// GET /tenants/:slug/reset-for-delivery/groups -- catálogo de "grupos
+// dudosos" que hay que decidir conservar o no antes de correr el reset (para
+// que el panel arme el formulario de checkboxes sin tener que hardcodearlo).
+router.get(
+  '/tenants/:slug/reset-for-delivery/groups',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  (req, res) => {
+    res.json({ success: true, groups: RESET_ASK_GROUPS.map(({ key, label, tables }) => ({ key, label, tables })) });
+  }
+);
+
+// POST /tenants/:slug/reset-for-delivery -- body: { decisions: { <key del
+// ASK_GROUP>: boolean, ... }, execute: boolean }. Sin `execute`, corre en
+// dry-run (solo cuenta filas y valida conflictos de FK, no borra nada) --
+// mismo criterio que /cleanup. Reset de entrega: borra TODO lo transaccional
+// de un tenant (ventas, OTs, cotizaciones, contabilidad, tesorería, cartera,
+// etc.) conservando su configuración, para reutilizar el mismo schema
+// después de que un cliente nuevo termina su trial. Ver
+// scripts/resetTenantForDelivery.js y scripts/tenantResetClassification.js.
+router.post(
+  '/tenants/:slug/reset-for-delivery',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    const { slug } = req.params;
+    const execute = req.body?.execute === true;
+    const decisions = req.body?.decisions || {};
+    try {
+      const tenant = await Tenant.findOne({ where: { slug } });
+      if (!tenant) return res.status(404).json({ error: `Tenant "${slug}" no existe` });
+      if (!tenant.schema_name) {
+        return res.status(400).json({ error: `Tenant "${slug}" está en modo legado (sin schema dedicado), no aplica reset de entrega` });
+      }
+
+      const report = await resetTenantForDelivery(
+        Tenant.sequelize,
+        { id: tenant.id, slug: tenant.slug, schema_name: tenant.schema_name },
+        decisions,
+        { execute, triggeredBy: req.user?.id || null }
+      );
+
+      res.json({ success: true, slug, execute, report });
+    } catch (error) {
+      console.error(`Error en reset de entrega de "${slug}":`, error);
+      res.status(500).json({ error: 'Error al resetear el tenant para la entrega', details: error.message });
     }
   }
 );
