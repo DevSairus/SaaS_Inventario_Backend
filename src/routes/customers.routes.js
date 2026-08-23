@@ -3,9 +3,13 @@ const express = require('express');
 const router  = express.Router();
 const customersController = require('../controllers/sales/customers.controller');
 const { consultarNit }    = require('../controllers/customers/rues.controller');
+const { getAvailableAdvancesForCustomer } = require('../controllers/finance/customerAdvances.controller');
 
 // ── Consulta RUES por NIT (empresas) — antes del CRUD para evitar colisión ──
 router.get('/rues/:nit', consultarNit);
+
+// ── Anticipos disponibles del cliente (selector al facturar) ────────────────
+router.get('/:id/advances/available', getAvailableAdvancesForCustomer);
 
 // ── CRUD de clientes ─────────────────────────────────────────────────────────
 router.get('/',          customersController.getAll);

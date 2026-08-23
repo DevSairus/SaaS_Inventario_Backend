@@ -35,6 +35,13 @@ const { getCurrentSchema } = require('../../config/tenantContext');
 // dinero real, en todo el motor de asientos automáticos (ver
 // autoEntries.service.js: generateSaleEntry, generatePurchaseEntry,
 // generateExpenseEntry, generateCashSessionEntry, y las devoluciones).
+// Nota (Fase 2 de Anticipos de Clientes, ver Anticipos-Clientes-Analisis-y-Plan.md
+// §10): generateAdvanceEntry y generateAdvanceRefundEntry reutilizan estos
+// mismos eventos ('sale_cash_account' / 'sale_bank_account') para el lado de
+// Caja/Bancos de sus asientos — no se necesitó agregar un evento nuevo aquí
+// ni tocar esta consulta para que los anticipos queden dentro del cuadre
+// Tesorería↔Contabilidad: ya se resuelven automáticamente por venir del
+// mismo account_mapping que ya usa el resto del motor de asientos.
 const CASH_AND_BANK_EVENTS = [
   'sale_cash_account',
   'sale_bank_account',

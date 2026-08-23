@@ -556,6 +556,172 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
   }, `devolución a proveedor ${supplierReturn.id}`);
 }
 
+/**
+ * Genera el asiento en borrador al RECIBIR un anticipo de cliente
+ * (`source_type: 'customer_advance'`). Ver Anticipos-Clientes-Analisis-y-Plan.md §7.2.a.
+ *
+ * Caja/Bancos (débito) vs 280505 Anticipos de Clientes (crédito) — no toca
+ * ingresos ni IVA. La excepción de IVA en anticipos de servicio no
+ * terminado (Art. 429 lit. c ET, ver §7.3 del análisis) se deja marcada en
+ * `advance.triggers_iva` como dato informativo para el informe y para que
+ * el usuario decida con su contador cómo tratarla — automatizar aquí el
+ * prorrateo de IVA asumiría una tarifa que este módulo no conoce (el
+ * anticipo no está itemizado), así que el asiento siempre sale "limpio".
+ *
+ * @param {object} advance - instancia de CustomerAdvance ya creada
+ */
+async function generateAdvanceEntry(advance, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Number(advance.amount || 0);
+      if (amount <= 0) return null;
+
+      const pm = (advance.method || '').toLowerCase();
+      const isCash = pm.includes('efectivo') || pm.includes('cash');
+      const debitAccount = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+      const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+
+      const lines = [
+        { account_id: debitAccount, debit: amount, credit: 0, description: 'Recepción de anticipo de cliente' },
+        {
+          account_id: liabilityAccount, debit: 0, credit: amount,
+          description: 'Anticipo recibido — pasivo con el cliente',
+          third_party_id: advance.customer_id || null,
+        },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: advance.branch_id,
+          entryDate: advance.received_date || new Date(),
+          sourceType: 'customer_advance',
+          sourceId: advance.id,
+          description: `Anticipo ${advance.advance_number || advance.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `anticipo ${advance.id}`, options);
+}
+
+/**
+ * Genera el asiento en borrador al APLICAR un anticipo (o parte de él) a
+ * una factura (`source_type: 'customer_advance_application'`). Ver §7.2.b.
+ *
+ * 280505 Anticipos de Clientes (débito) vs 130505 Clientes/cartera
+ * (crédito) — el efectivo ya se reconoció al recibir el anticipo
+ * (generateAdvanceEntry), así que este asiento no vuelve a tocar caja; solo
+ * "paga" la cartera que generó la venta, igual que un abono en efectivo.
+ *
+ * @param {object} application - { id, amount, application_date }
+ * @param {object} sale - venta a la que se aplicó (para customer_id, branch_id, sale_number)
+ */
+async function generateAdvanceApplicationEntry(application, sale, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Number(application.amount || 0);
+      if (amount <= 0) return null;
+
+      const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+      const receivableAccount = await getMappedAccountId(tenantId, 'sale_receivable', t);
+
+      const lines = [
+        { account_id: liabilityAccount, debit: amount, credit: 0, description: 'Aplicación de anticipo a factura' },
+        {
+          account_id: receivableAccount, debit: 0, credit: amount,
+          description: 'Reducción de cartera por anticipo aplicado',
+          third_party_id: sale.customer_id || null,
+        },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: sale.branch_id,
+          entryDate: application.application_date || new Date(),
+          sourceType: 'customer_advance_application',
+          sourceId: application.id,
+          description: `Aplicación de anticipo a venta ${sale.sale_number || sale.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `aplicación de anticipo ${application.id} (venta ${sale.id})`, options);
+}
+
+/**
+ * Genera el asiento en borrador al DEVOLVER un anticipo (total o parcial)
+ * a un cliente (`source_type: 'customer_advance_refund'`). Ver §7.2.c.
+ *
+ * 280505 Anticipos de Clientes (débito) vs Caja/Bancos (crédito) — sale
+ * dinero de caja, no hay factura de por medio.
+ *
+ * @param {object} refund - { id, amount, method, refund_date }
+ * @param {object} advance - anticipo original (para customer_id, branch_id, advance_number)
+ */
+async function generateAdvanceRefundEntry(refund, advance, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Number(refund.amount || 0);
+      if (amount <= 0) return null;
+
+      const pm = (refund.method || advance.method || '').toLowerCase();
+      const isCash = pm.includes('efectivo') || pm.includes('cash');
+      const creditAccount = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+      const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+
+      const lines = [
+        {
+          account_id: liabilityAccount, debit: amount, credit: 0,
+          description: 'Devolución de anticipo a cliente',
+          third_party_id: advance.customer_id || null,
+        },
+        { account_id: creditAccount, debit: 0, credit: amount, description: 'Salida de caja/bancos por devolución de anticipo' },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: advance.branch_id,
+          entryDate: refund.refund_date || new Date(),
+          sourceType: 'customer_advance_refund',
+          sourceId: refund.id,
+          description: `Devolución de anticipo ${advance.advance_number || advance.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `devolución de anticipo ${refund.id} (anticipo ${advance.id})`, options);
+}
+
 module.exports = {
   generateSaleEntry,
   generatePaymentEntry,
@@ -564,5 +730,8 @@ module.exports = {
   generateCashSessionEntry,
   generateCustomerReturnEntry,
   generateSupplierReturnEntry,
+  generateAdvanceEntry,
+  generateAdvanceApplicationEntry,
+  generateAdvanceRefundEntry,
   reverseSourceEntries,
 };

@@ -11,10 +11,12 @@ const JournalEntry = sequelize.define(
     entry_date: { type: DataTypes.DATEONLY, allowNull: false },
     period_id: { type: DataTypes.UUID, allowNull: true },
     source_type: {
-      type: DataTypes.STRING(20),
+      // VARCHAR(40) desde 2026082104-widen-journal-entry-source-type.js —
+      // 'customer_advance_application' (29 chars) no cabía en VARCHAR(20).
+      type: DataTypes.STRING(40),
       allowNull: false,
       defaultValue: 'manual',
-      validate: { isIn: [['sale', 'purchase', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'manual', 'adjustment']] },
+      validate: { isIn: [['sale', 'purchase', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'manual', 'adjustment', 'customer_advance', 'customer_advance_application', 'customer_advance_refund']] },
     },
     source_id: { type: DataTypes.UUID, allowNull: true },
     description: { type: DataTypes.STRING(500), allowNull: true },

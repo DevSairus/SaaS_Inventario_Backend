@@ -4,6 +4,7 @@ const { User } = require('../../models');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
 
 // Obtener resumen de cuentas por pagar
 const getAccountsPayableSummary = async (req, res) => {
@@ -361,6 +362,9 @@ const registerPayment = async (req, res) => {
     );
 
     await transaction.commit();
+
+    // 🔔 Verificación automática de alertas de cuentas por pagar
+    markPurchaseForAlertCheck(res, id, tenantId);
 
     const updatedPurchase = await Purchase.findByPk(id, {
       include: [{ model: Supplier, as: 'supplier' }]

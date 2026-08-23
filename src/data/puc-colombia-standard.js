@@ -60,6 +60,10 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '252005', name: 'Prima de Servicios', type: 'pasivo', parent_code: '25', accepts_entries: true },
   { code: '252505', name: 'Vacaciones Consolidadas', type: 'pasivo', parent_code: '25', accepts_entries: true },
 
+  { code: '28', name: 'Otros Pasivos', type: 'pasivo', parent_code: '2', accepts_entries: false },
+  { code: '2805', name: 'Anticipos y Avances Recibidos', type: 'pasivo', parent_code: '28', accepts_entries: false },
+  { code: '280505', name: 'Anticipos de Clientes', type: 'pasivo', parent_code: '2805', accepts_entries: true },
+
   // ══════════════ CLASE 3 — PATRIMONIO ══════════════
   { code: '3', name: 'PATRIMONIO', type: 'patrimonio', parent_code: null, accepts_entries: false },
   { code: '31', name: 'Capital Social', type: 'patrimonio', parent_code: '3', accepts_entries: false },
@@ -156,6 +160,10 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   year_end_accumulated: '370505',   // Utilidades Acumuladas (años anteriores ya cerrados)
 
   opening_balance_suspense: '380505', // Cuenta puente para saldos iniciales (cartera, cuentas, inventario)
+
+  // Anticipos de Clientes (pasivo): lo que la empresa "debe" a sus clientes
+  // por dinero recibido antes de facturar. Ver Anticipos-Clientes-Analisis-y-Plan.md §7.
+  customer_advance_liability: '280505',
 };
 
 module.exports = { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS };

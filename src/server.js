@@ -134,6 +134,7 @@ const adjustmentsRoutes             = require('./routes/inventory/adjustments.ro
 const warehousesRoutes              = require('./routes/inventory/warehouses.routes');
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
+const payableAlertsRoutes           = require('./routes/payableAlerts.routes');
 const superadminRoutes              = require('./routes/superadmin.routes');
 const salesRoutes                   = require('./routes/sales.routes');
 const customersRoutes               = require('./routes/customers.routes');
@@ -183,6 +184,8 @@ const expensesRoutes                = require('./routes/expenses.routes');
 const cashflowRoutes                = require('./routes/cashflow.routes');
 const cashSessionsRoutes            = require('./routes/cashSessions.routes');
 const receiptsRoutes                = require('./routes/receipts.routes');
+const customerAdvancesRoutes        = require('./routes/customer-advances.routes');
+const customerAdvanceAlertsRoutes   = require('./routes/customer-advance-alerts.routes');
 
 // Públicas y Cron
 const publicRoutes                  = require('./routes/public.routes');
@@ -248,7 +251,8 @@ app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware,
 app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, adjustmentsRoutes);
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
-app.use('/api/stock-alerts',                   authMiddleware, stockAlertsRoutes);
+app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
+app.use('/api/payable-alerts',                 authMiddleware, tenantMiddleware, payableAlertsRoutes);
 app.use('/api/dashboard',                      authMiddleware, tenantMiddleware, dashboardRoutes);
 
 // Estas rutas específicas ANTES de /api/sales para evitar conflicto con /:id
@@ -281,6 +285,8 @@ app.use('/api/expenses',                       authMiddleware, tenantMiddleware,
 app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashflowRoutes);
 app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashSessionsRoutes);
 app.use('/api/receipts',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), receiptsRoutes);
+app.use('/api/customer-advances',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerAdvancesRoutes);
+app.use('/api/customer-advance-alerts',        authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerAdvanceAlertsRoutes);
 app.use('/api/tenant',                         authMiddleware, tenantMiddleware, tenantRoutes);
 app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, branchMiddleware, reportsRoutes);
 app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware, branchMiddleware, invoiceImportRoutes);

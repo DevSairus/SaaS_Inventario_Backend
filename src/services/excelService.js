@@ -1,7 +1,14 @@
 // backend/src/services/excelService.js
 const ExcelJS = require('exceljs');
 
-const SOURCE_LABELS = { sale: 'Venta', purchase: 'Compra', expense: 'Gasto' };
+const SOURCE_LABELS = {
+  sale: 'Venta',
+  purchase: 'Compra',
+  expense: 'Gasto',
+  work_order: 'Abono OT',
+  customer_advance: 'Anticipo recibido',
+  customer_advance_refund: 'Devolución anticipo',
+};
 
 // Los valores ya vienen como 'YYYY-MM-DD' (fecha de negocio, sin hora).
 // Se convierten a Date usando componentes UTC explícitos para que Excel

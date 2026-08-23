@@ -52,6 +52,15 @@ const JOBS = [
     },
   },
   {
+    name: 'customer-advance-alerts',
+    schedule: '0 6 * * *', // 6:00am hora Colombia -- basta con una vez al día, el disparador es antigüedad en días, no una hora exacta
+    run: async () => {
+      const { checkAllAdvanceAlerts } = require('../middleware/autoCheckAdvanceAlerts.middleware');
+      const result = await checkAllAdvanceAlerts();
+      return [result]; // envuelto en array para que el log de "elementos" del scheduler tenga sentido
+    },
+  },
+  {
     name: 'ncf-sync',
     schedule: '0 7 * * *', // 7:00am hora Colombia
     run: async () => {

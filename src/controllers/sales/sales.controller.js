@@ -1144,9 +1144,48 @@ const cancel = async (req, res) => {
         // contabilizados para una venta que ya no existe.
         // Los recibos de esos abonos quedan anulados junto con su asiento —
         // se conservan (no se borran) para trazabilidad, solo cambian de estado.
-        const { Receipt } = require('../../models');
+        const { Receipt, CustomerAdvance, CustomerAdvanceApplication } = require('../../models');
         for (const p of (sale.payment_history || [])) {
           if (!p.payment_id) continue;
+
+          // Entradas con source: 'advance' no tienen Receipt (no movieron caja
+          // hoy) — hay que revertir la aplicación en vez de anular un recibo:
+          // marcar la CustomerAdvanceApplication como reversed y devolver el
+          // balance al anticipo original, para que vuelva a estar disponible
+          // (ver Anticipos-Clientes-Analisis-y-Plan.md §5 "Reversas").
+          if (p.source === 'advance' && p.application_id) {
+            try {
+              const application = await CustomerAdvanceApplication.findOne({
+                where: { id: p.application_id, tenant_id: tenantId, status: 'active' },
+              });
+              if (application) {
+                await application.update({
+                  status: 'reversed',
+                  reversed_at: new Date(),
+                  reversed_by: userId,
+                  reversed_reason: `Venta ${sale.sale_number || sale.id} cancelada${reason ? ' — ' + reason : ''}`,
+                });
+
+                const advance = await CustomerAdvance.findOne({ where: { id: application.advance_id, tenant_id: tenantId } });
+                if (advance) {
+                  const newAppliedAmount = Math.max(0, parseFloat(advance.applied_amount) - parseFloat(application.amount));
+                  const newBalance = parseFloat(advance.amount) - newAppliedAmount - parseFloat(advance.refunded_amount);
+                  await advance.update({
+                    applied_amount: newAppliedAmount,
+                    balance: newBalance,
+                    // Solo reactiva si no estaba anulado/devuelto por fuera de esta aplicación.
+                    status: advance.status === 'fully_applied' ? 'active' : advance.status,
+                  });
+                }
+
+                await reverseSourceEntries('customer_advance_application', application.id, tenantId, userId, `Venta ${sale.sale_number || sale.id} cancelada${reason ? ' — ' + reason : ''}`);
+              }
+            } catch (advErr) {
+              logger.warn(`[accounting] Error revirtiendo aplicación de anticipo (venta ${id}): ${advErr.message}`);
+            }
+            continue;
+          }
+
           await reverseSourceEntries('payment', p.payment_id, tenantId, userId, `Venta ${sale.sale_number || sale.id} cancelada${reason ? ' — ' + reason : ''}`);
           await Receipt.update(
             { status: 'voided', voided_at: new Date(), voided_reason: reason || 'Venta cancelada' },

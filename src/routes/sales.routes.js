@@ -3,6 +3,7 @@ const express = require('express');
 const router = express.Router();
 const salesController = require('../controllers/sales/sales.controller');
 const voidSale        = require('../controllers/sales/voidSale');
+const { applyAdvanceToSale } = require('../controllers/finance/customerAdvances.controller');
 const { checkAccountOwnership } = require('../middleware/checkAccountOwnership');
 
 // Estadísticas (debe ir antes de /:id)
@@ -22,6 +23,7 @@ router.post('/:id/confirm',       salesController.confirm);
 router.post('/:id/cancel',        salesController.cancel);
 router.post('/:id/deliver',       salesController.markAsDelivered);
 router.post('/:id/payments',      salesController.registerPayment);
+router.post('/:id/apply-advance', applyAdvanceToSale);
 router.post('/:id/void',          voidSale);              // ← anulación/devolución
 
 // Documentos

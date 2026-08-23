@@ -1,11 +1,12 @@
 // backend/src/controllers/finance/cashflow.controller.js
 // Flujo de Caja: NO es un modelo transaccional nuevo — es una vista que agrega
-// los payment_history (abonos ya registrados) de Ventas, Compras y Gastos.
-// Esas tres fuentes son los únicos puntos donde el sistema hoy registra
-// movimiento real de efectivo/dinero. Si en el futuro se agrega un módulo de
-// caja/bancos con transacciones propias, este endpoint debería sumarlas aquí
-// también en vez de reemplazarlas.
-const { Sale, Purchase, Expense, Supplier, Tenant, WorkOrder } = require('../../models');
+// los payment_history (abonos ya registrados) de Ventas, Compras y Gastos,
+// más los Anticipos de Clientes (recibidos y devueltos, ver
+// Anticipos-Clientes-Analisis-y-Plan.md §6). Esas son las fuentes donde el
+// sistema hoy registra movimiento real de efectivo/dinero. Si en el futuro
+// se agrega un módulo de caja/bancos con transacciones propias, este
+// endpoint debería sumarlas aquí también en vez de reemplazarlas.
+const { Sale, Purchase, Expense, Supplier, Tenant, WorkOrder, CustomerAdvance, Customer } = require('../../models');
 const { Op } = require('sequelize');
 const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
@@ -24,7 +25,7 @@ const toDateOnly = (value) => {
 // Compras y Gastos. Usado tanto por el JSON de la pantalla como por el PDF,
 // para que ambos siempre muestren exactamente los mismos números.
 const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) => {
-  const [sales, purchases, expenses, pendingWorkOrders] = await Promise.all([
+  const [sales, purchases, expenses, pendingWorkOrders, advances] = await Promise.all([
     Sale.findAll({
       where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
       attributes: ['id', 'sale_number', 'customer_name', 'payment_history', 'branch_id']
@@ -46,6 +47,16 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     WorkOrder.findAll({
       where: { tenant_id, paid_amount: { [Op.gt]: 0 }, sale_id: null },
       attributes: ['id', 'order_number', 'payment_history'],
+    }),
+    // Anticipos de clientes: el ingreso de caja ocurre el día que se RECIBE
+    // el anticipo, no el día que se aplica a una factura (ver
+    // Anticipos-Clientes-Analisis-y-Plan.md §6). No se filtran por 'voided'
+    // en SQL porque un anticipo anulado nunca movió caja real — se excluye
+    // abajo junto con el resto del armado de transacciones.
+    CustomerAdvance.findAll({
+      where: { tenant_id, status: { [Op.ne]: 'voided' } },
+      include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] }],
+      attributes: ['id', 'advance_number', 'amount', 'received_date', 'method', 'branch_id', 'cash_session_id', 'refund_history'],
     }),
   ]);
 
@@ -81,6 +92,43 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
         // que quedó guardada en el propio pago (ver registerPayment).
         branch_id: p.branch_id || null,
         cash_session_id: p.cash_session_id || null,
+      });
+    });
+  });
+
+  advances.forEach(a => {
+    const customerName = a.customer
+      ? (a.customer.business_name || `${a.customer.first_name || ''} ${a.customer.last_name || ''}`.trim())
+      : 'Cliente';
+
+    // Entrada: dinero que SÍ entró a caja/banco el día que se recibió el
+    // anticipo. NO se vuelve a sumar el día que se aplica a una factura —
+    // esa plata ya se contó aquí (ver §6 del análisis: sumarla otra vez
+    // sería doble conteo).
+    transactions.push({
+      date: toDateOnly(a.received_date),
+      amount: parseFloat(a.amount) || 0,
+      direction: 'in',
+      source: 'customer_advance',
+      reference: a.advance_number,
+      detail: `Anticipo de ${customerName}`,
+      method: a.method || null,
+      branch_id: a.branch_id,
+      cash_session_id: a.cash_session_id || null,
+    });
+
+    // Salida: cada devolución de anticipo es un movimiento de caja de salida
+    // en la fecha en que se devolvió, igual que un gasto.
+    (a.refund_history || []).forEach(r => {
+      transactions.push({
+        date: toDateOnly(r.date),
+        amount: parseFloat(r.amount) || 0,
+        direction: 'out',
+        source: 'customer_advance_refund',
+        reference: a.advance_number,
+        detail: `Devolución de anticipo a ${customerName}`,
+        method: r.method || a.method || null,
+        branch_id: a.branch_id,
       });
     });
   });

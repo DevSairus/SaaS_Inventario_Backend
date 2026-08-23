@@ -113,6 +113,31 @@ router.get('/stock-alerts', cronAuth, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/cron/customer-advance-alerts
+ * Red de seguridad: re-escanea todos los anticipos activos con saldo y
+ * crea/resuelve alertas de antigüedad (60 / 120 días por defecto, ver
+ * middleware/autoCheckAdvanceAlerts.middleware.js), por si algún flujo no
+ * disparó la verificación automática.
+ * Corre solo vía src/jobs/scheduler.js una vez al día (6am COT).
+ */
+router.get('/customer-advance-alerts', cronAuth, async (req, res) => {
+  try {
+    console.log('🔔 [CRON] Iniciando verificación de alertas de anticipos...');
+    const { checkAllAdvanceAlerts } = require('../middleware/autoCheckAdvanceAlerts.middleware');
+    const result = await checkAllAdvanceAlerts();
+    res.json({
+      success: true,
+      message: 'Verificación de alertas de anticipos completada',
+      result,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ [CRON] Error en customer-advance-alerts:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
 
 // ============================================================================
 // TEST ENDPOINT — Solo disponible en desarrollo o con CRON_SECRET

@@ -15,11 +15,11 @@ async function checkAlertsForProduct(product_id, tenant_id) {
     // Obtener producto
     const product = await Product.findOne({
       where: { id: product_id, tenant_id },
-      attributes: ['id', 'name', 'sku', 'current_stock', 'min_stock', 'max_stock']
+      attributes: ['id', 'name', 'sku', 'current_stock', 'min_stock', 'max_stock', 'track_inventory']
     });
 
-    if (!product || !product.min_stock || product.min_stock <= 0) {
-      return; // Sin min_stock configurado, no hacer nada
+    if (!product || product.track_inventory === false) {
+      return; // Producto no rastreado por inventario, no aplica
     }
 
     const currentStock = parseFloat(product.current_stock) || 0;
@@ -30,10 +30,14 @@ async function checkAlertsForProduct(product_id, tenant_id) {
     let severity = null;
 
     // Determinar tipo de alerta
+    // "Sin stock" no depende de tener min_stock configurado: 0 unidades es
+    // crítico siempre. "Stock bajo" y "sobrestock" sí necesitan un umbral
+    // (min_stock/max_stock) configurado para tener sentido -- si no hay
+    // umbral, se compara contra 0 y siempre daría falso.
     if (currentStock <= 0) {
       alertType = 'out_of_stock';
       severity = 'critical';
-    } else if (currentStock <= minStock) {
+    } else if (minStock > 0 && currentStock <= minStock) {
       alertType = 'low_stock';
       severity = 'warning';
     } else if (maxStock && currentStock >= maxStock) {
@@ -136,7 +140,11 @@ async function checkAllStockAlerts() {
   const legacyTenantIds = tenants.filter((t) => !t.schema_name).map((t) => t.id);
   if (legacyTenantIds.length > 0) {
     const legacyProducts = await Product.findAll({
-      where: { tenant_id: legacyTenantIds, min_stock: { [Op.not]: null, [Op.gt]: 0 } },
+      where: {
+        tenant_id: legacyTenantIds,
+        track_inventory: true,
+        [Op.or]: [{ min_stock: { [Op.gt]: 0 } }, { current_stock: { [Op.lte]: 0 } }]
+      },
       attributes: ['id', 'tenant_id']
     });
     for (const product of legacyProducts) {
@@ -153,7 +161,11 @@ async function checkAllStockAlerts() {
     try {
       await runWithTenantSchema(tenant.schema_name, async () => {
         const products = await Product.findAll({
-          where: { tenant_id: tenant.id, min_stock: { [Op.not]: null, [Op.gt]: 0 } },
+          where: {
+            tenant_id: tenant.id,
+            track_inventory: true,
+            [Op.or]: [{ min_stock: { [Op.gt]: 0 } }, { current_stock: { [Op.lte]: 0 } }]
+          },
           attributes: ['id', 'tenant_id']
         });
         for (const product of products) {

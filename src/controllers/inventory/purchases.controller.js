@@ -5,6 +5,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { createMovement } = require('./movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 /**
@@ -582,6 +583,9 @@ const confirmPurchase = async (req, res) => {
 
     await purchase.update({ status: 'confirmed' });
 
+    // 🔔 Verificación automática de alertas de cuentas por pagar
+    markPurchaseForAlertCheck(res, purchase.id, tenant_id);
+
     res.json({
       success: true,
       message: 'Compra confirmada exitosamente',
@@ -764,6 +768,7 @@ const receivePurchase = async (req, res) => {
     // 🔔 Verificación automática de alertas
     const product_ids = purchase.items.map(item => item.product_id);
     markProductsForAlertCheck(res, product_ids, tenant_id);
+    markPurchaseForAlertCheck(res, purchase.id, tenant_id);
 
     res.json({
       success: true,
@@ -820,6 +825,9 @@ const cancelPurchase = async (req, res) => {
       cancelled_by: user_id,
       cancellation_reason
     });
+
+    // 🔔 Resolver alertas de cuentas por pagar que ya no aplican
+    markPurchaseForAlertCheck(res, purchase.id, tenant_id);
 
     res.json({
       success: true,

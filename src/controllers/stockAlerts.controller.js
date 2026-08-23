@@ -618,19 +618,24 @@ const checkAndCreateAlerts = async (req, res) => {
 
     console.log('🔍 Iniciando verificación de alertas para tenant:', tenant_id);
 
-    // Obtener TODOS los productos con stock configurado (sin límite de paginación)
+    // Obtener productos rastreados que o bien tienen un umbral configurado,
+    // o bien están directamente en 0 unidades (esto último no depende de
+    // tener min_stock configurado -- min_stock=0 es el valor por defecto de
+    // TODO producto, así que filtrar solo por min_stock > 0 dejaba fuera a
+    // la inmensa mayoría de productos sin stock).
     const products = await Product.findAll({
       where: {
         tenant_id,
-        min_stock: {
-          [Op.not]: null,
-          [Op.gt]: 0
-        }
+        track_inventory: true,
+        [Op.or]: [
+          { min_stock: { [Op.gt]: 0 } },
+          { current_stock: { [Op.lte]: 0 } }
+        ]
       },
       attributes: ['id', 'name', 'sku', 'current_stock', 'min_stock', 'max_stock']
     });
 
-    console.log(`📦 Productos encontrados con min_stock configurado: ${products.length}`);
+    console.log(`📦 Productos encontrados a evaluar: ${products.length}`);
 
     let alertsCreated = 0;
     let alertsResolved = 0;
@@ -643,12 +648,13 @@ const checkAndCreateAlerts = async (req, res) => {
       let alertType = null;
       let severity = null;
 
-      // Determinar tipo de alerta
+      // Determinar tipo de alerta. "Sin stock" es crítico siempre,
+      // independientemente de si hay min_stock configurado.
       if (currentStock <= 0) {
         alertType = 'out_of_stock';
         severity = 'critical';
         console.log(`⚠️ CRÍTICO - Producto sin stock: ${product.name} (${product.sku}) - Stock: ${currentStock}`);
-      } else if (currentStock <= minStock) {
+      } else if (minStock > 0 && currentStock <= minStock) {
         alertType = 'low_stock';
         severity = 'warning';
         console.log(`⚠️ Stock bajo: ${product.name} (${product.sku}) - Stock: ${currentStock} / Min: ${minStock}`);

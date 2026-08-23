@@ -29,6 +29,7 @@ const InventoryMovement = require('./inventory/InventoryMovement');
 const InventoryAdjustment = require('./inventory/InventoryAdjustment');
 const InventoryAdjustmentItem = require('./inventory/InventoryAdjustmentItem');
 const StockAlert = require('./StockAlert');
+const PayableAlert = require('./PayableAlert');
 
 // NUEVOS - Movimientos Avanzados
 const SupplierReturn = require('./inventory/SupplierReturn');
@@ -124,6 +125,9 @@ const DianEvent = require('./dian/DianEvent');
 const Expense = require('./finance/Expense');
 const CashSession = require('./finance/CashSession');
 const Receipt = require('./finance/Receipt');
+const CustomerAdvance = require('./finance/CustomerAdvance');
+const CustomerAdvanceApplication = require('./finance/CustomerAdvanceApplication');
+const CustomerAdvanceAlert = require('./finance/CustomerAdvanceAlert');
 
 // ✅ NUEVO - Asistente de IA (Fase 1 solo lectura + Fase 2 propuestas)
 const AiConversation = require('./ai/AiConversation');
@@ -203,6 +207,34 @@ CashSession.hasMany(Receipt, { foreignKey: 'cash_session_id', as: 'receipts' });
 Receipt.belongsTo(CashSession, { foreignKey: 'cash_session_id', as: 'cash_session' });
 Receipt.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 
+// CustomerAdvance ↔ Tenant / Branch / Customer / CashSession / User (Anticipos de Clientes)
+Tenant.hasMany(CustomerAdvance, { foreignKey: 'tenant_id', as: 'customer_advances' });
+CustomerAdvance.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(CustomerAdvance, { foreignKey: 'branch_id', as: 'customer_advances' });
+CustomerAdvance.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Customer.hasMany(CustomerAdvance, { foreignKey: 'customer_id', as: 'advances' });
+CustomerAdvance.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+CashSession.hasMany(CustomerAdvance, { foreignKey: 'cash_session_id', as: 'customer_advances' });
+CustomerAdvance.belongsTo(CashSession, { foreignKey: 'cash_session_id', as: 'cash_session' });
+CustomerAdvance.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+CustomerAdvance.belongsTo(User, { foreignKey: 'voided_by', as: 'voider' });
+
+// CustomerAdvanceApplication ↔ CustomerAdvance / Sale (tabla puente N:M)
+CustomerAdvance.hasMany(CustomerAdvanceApplication, { foreignKey: 'advance_id', as: 'applications' });
+CustomerAdvanceApplication.belongsTo(CustomerAdvance, { foreignKey: 'advance_id', as: 'advance' });
+Sale.hasMany(CustomerAdvanceApplication, { foreignKey: 'sale_id', as: 'advance_applications' });
+CustomerAdvanceApplication.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+CustomerAdvanceApplication.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
+// CustomerAdvanceAlert ↔ Tenant / CustomerAdvance / Customer / User (antigüedad de anticipos, Fase 4.2)
+Tenant.hasMany(CustomerAdvanceAlert, { foreignKey: 'tenant_id', as: 'customer_advance_alerts' });
+CustomerAdvanceAlert.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+CustomerAdvance.hasMany(CustomerAdvanceAlert, { foreignKey: 'advance_id', as: 'alerts' });
+CustomerAdvanceAlert.belongsTo(CustomerAdvance, { foreignKey: 'advance_id', as: 'advance' });
+Customer.hasMany(CustomerAdvanceAlert, { foreignKey: 'customer_id', as: 'advance_alerts' });
+CustomerAdvanceAlert.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+CustomerAdvanceAlert.belongsTo(User, { foreignKey: 'resolved_by', as: 'resolver' });
+
 // OpeningBalance ↔ Tenant / Branch / Customer / Supplier / JournalEntry / User
 // (Saldos iniciales de cartera/CxP al arrancar con Pitbox)
 Tenant.hasMany(OpeningBalance, { foreignKey: 'tenant_id', as: 'opening_balances' });
@@ -231,6 +263,13 @@ User.hasMany(StockAlert, { foreignKey: 'resolved_by', as: 'resolved_alerts' });
 
 StockAlert.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.hasMany(StockAlert, { foreignKey: 'tenant_id', as: 'stock_alerts' });
+
+// PayableAlert ↔ Tenant / Purchase / User (antigüedad de cuentas por pagar)
+Tenant.hasMany(PayableAlert, { foreignKey: 'tenant_id', as: 'payable_alerts' });
+PayableAlert.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Purchase.hasMany(PayableAlert, { foreignKey: 'purchase_id', as: 'alerts' });
+PayableAlert.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+PayableAlert.belongsTo(User, { foreignKey: 'resolved_by', as: 'resolver' });
 
 // Relaciones de Suscripciones
 Tenant.hasMany(TenantSubscription, { foreignKey: 'tenant_id', as: 'subscriptions' });
@@ -669,6 +708,7 @@ module.exports = {
   InventoryAdjustment,
   InventoryAdjustmentItem,
   StockAlert,
+  PayableAlert,
   Invoice,
   SubscriptionPlan,
   TenantSubscription,
@@ -710,6 +750,9 @@ module.exports = {
   Expense,
   CashSession,
   Receipt,
+  CustomerAdvance,
+  CustomerAdvanceApplication,
+  CustomerAdvanceAlert,
   ChartOfAccount,
   FiscalPeriod,
   JournalEntry,

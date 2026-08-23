@@ -754,7 +754,14 @@ const generatePaymentReceiptPDFBuffer = (sale, tenant, payment) =>
                 by_day: [...], transactions: [...] } — misma forma que
    devuelve GET /api/cashflow.
    ══════════════════════════════════════════════════════════════ */
-const SOURCE_LABELS = { sale: 'Venta', purchase: 'Compra', expense: 'Gasto' };
+const SOURCE_LABELS = {
+  sale: 'Venta',
+  purchase: 'Compra',
+  expense: 'Gasto',
+  work_order: 'Abono OT',
+  customer_advance: 'Anticipo recibido',
+  customer_advance_refund: 'Devolución anticipo',
+};
 
 // Los valores ya vienen como 'YYYY-MM-DD' (fecha de negocio, sin hora) —
 // se formatean por texto, sin pasar por Date(), para no reintroducir

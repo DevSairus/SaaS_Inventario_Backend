@@ -28,7 +28,7 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
     const purchase = await Purchase.findOne({
       where: { id: purchase_id, tenant_id },
       attributes: [
-        'id', 'due_date', 'total_amount', 'paid_amount',
+        'id', 'due_date', 'purchase_date', 'total_amount', 'paid_amount',
         'payment_status', 'status'
       ]
     });
@@ -37,11 +37,19 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
 
     const balance = parseFloat(purchase.total_amount) - parseFloat(purchase.paid_amount || 0);
 
-    // Ya pagada, en borrador o cancelada, o sin fecha de vencimiento: resolver cualquier alerta activa
+    // Igual que en getAgingReport (accountsPayable.controller.js): si la
+    // compra no tiene due_date explícito (proveedor sin payment_terms
+    // configurado), se usa purchase_date como referencia en vez de
+    // descartar la compra por completo -- de lo contrario cualquier compra
+    // sin plazo de pago explícito nunca generaba alerta, sin importar
+    // cuántos días llevara pendiente.
+    const referenceDate = purchase.due_date || purchase.purchase_date;
+
+    // Ya pagada, en borrador o cancelada, o sin ninguna fecha de referencia: resolver cualquier alerta activa
     const isFormalized = ['confirmed', 'received'].includes(purchase.status);
     const isPending = ['pending', 'partial'].includes(purchase.payment_status);
 
-    if (!purchase.due_date || balance <= 0 || !isFormalized || !isPending) {
+    if (!referenceDate || balance <= 0 || !isFormalized || !isPending) {
       await PayableAlert.update(
         {
           status: 'resolved',
@@ -55,7 +63,7 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
       return;
     }
 
-    const daysToDue = calcDaysToDue(purchase.due_date);
+    const daysToDue = calcDaysToDue(referenceDate);
 
     let alertType = null;
     let severity = null;
@@ -127,8 +135,7 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
 async function checkAllPayableAlerts(tenant_id = null) {
   const where = {
     status: { [Op.in]: ['confirmed', 'received'] },
-    payment_status: { [Op.in]: ['pending', 'partial'] },
-    due_date: { [Op.not]: null }
+    payment_status: { [Op.in]: ['pending', 'partial'] }
   };
   if (tenant_id) where.tenant_id = tenant_id;
 
