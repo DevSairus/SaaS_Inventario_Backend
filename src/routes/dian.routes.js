@@ -11,6 +11,9 @@ router.use(authMiddleware);
 router.get('/config',                ctrl.getConfig);
 router.put('/config',                ctrl.updateConfig);
 
+// Catálogo DIVIPOLA (departamentos + municipios), para selectores
+router.get('/divipola',              ctrl.getDivipola);
+
 // Resoluciones
 router.get('/resolutions',           ctrl.getResolutions);
 router.post('/resolutions',          ctrl.createResolution);

@@ -43,6 +43,22 @@ const Sale = sequelize.define('Sale', {
   customer_email:  { type: DataTypes.STRING(255) },
   customer_phone:  { type: DataTypes.STRING(20) },
   customer_address:{ type: DataTypes.TEXT },
+  // ── DIAN — dirección real del comprador, denormalizada al momento de
+  // facturar (mismo patrón que customer_address/customer_tax_id de arriba)
+  // para que la factura/NC/ND ya enviada conserve los datos con los que
+  // se transmitió aunque el cliente cambie de ciudad después ──
+  customer_city_code: {
+    type: DataTypes.STRING(5),
+    allowNull: true,
+    comment: 'Código DIVIPOLA (DANE) del comprador al momento de facturar — copiado de Customer.city_code',
+  },
+  customer_city_name: { type: DataTypes.STRING(100), allowNull: true },
+  customer_department_name: { type: DataTypes.STRING(100), allowNull: true },
+  customer_document_type: {
+    type: DataTypes.STRING(4),
+    allowNull: true,
+    comment: 'schemeID DIAN del comprador al momento de facturar — copiado de Customer.document_type',
+  },
   vehicle_plate: {
     type: DataTypes.STRING(20),
     allowNull: true,

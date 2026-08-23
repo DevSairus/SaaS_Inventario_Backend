@@ -47,9 +47,22 @@ const Customer = sequelize.define('Customer', {
   },
   city: {
     type: DataTypes.STRING(100),
+    comment: 'Nombre de la ciudad/municipio — poblado por el selector DIVIPOLA junto con city_code',
   },
   state: {
     type: DataTypes.STRING(100),
+    comment: 'Nombre del departamento — poblado por el selector DIVIPOLA junto con city_code',
+  },
+  city_code: {
+    type: DataTypes.STRING(5),
+    allowNull: true,
+    comment: 'Código DIVIPOLA (DANE) de la ciudad/municipio — fuente de verdad para la dirección DIAN del comprador. El departamento se deriva con city_code.substring(0,2), igual que para el emisor.',
+  },
+  document_type: {
+    type: DataTypes.STRING(4),
+    allowNull: true,
+    defaultValue: '13',
+    comment: 'Tipo de identificación DIAN (schemeID): 13=Cédula, 31=NIT, 12=Tarjeta identidad, 21=Tarjeta extranjería, 22=Cédula extranjería, 41=Pasaporte, 91=NUIP, etc.',
   },
   country: {
     type: DataTypes.STRING(100),
@@ -120,6 +133,39 @@ const Customer = sequelize.define('Customer', {
     { fields: ['tenant_id', 'owner_user_id'] },
     { fields: ['tenant_id', 'lifecycle_stage'] },
   ],
+
+  hooks: {
+    // Los formularios de creación rápida (OT, Ventas, webhook de WhatsApp/
+    // Meta) no piden ciudad DIVIPOLA -- por fricción del flujo, no por
+    // descuido: un asesor recibiendo un carro no debería tener que buscar
+    // departamento/ciudad para poder guardar el cliente y seguir. Si no
+    // llega city_code, se autocompleta con la ciudad configurada del tenant
+    // (misma fuente que ya usa el emisor en dianKitAdapter#buildAddress) en
+    // vez de quedar en null -- así, al momento de facturar, la mayoría de
+    // los clientes ya tienen dato real en vez de caer en el fallback
+    // hardcodeado de Bogotá/Cundinamarca (el hallazgo original de la
+    // auditoría). Nunca pisa un city_code que sí haya llegado en el body.
+    // Si el cliente resulta ser de otra ciudad, se corrige después en su
+    // ficha -- el gate de facturación (customerDianReadiness.js) es quien
+    // realmente exige el dato correcto antes de emitir, esto es solo un
+    // atajo de UX para no bloquear la creación rápida.
+    beforeValidate: async (customer, options) => {
+      if (customer.city_code) return;
+      try {
+        const Tenant = require('../auth/Tenant');
+        const tenant = await Tenant.findByPk(customer.tenant_id, { transaction: options.transaction });
+        const cfg = tenant?.dian_config;
+        if (cfg?.city_code) {
+          customer.city_code = cfg.city_code;
+          if (!customer.city) customer.city = cfg.city || null;
+          if (!customer.state) customer.state = cfg.dept || null;
+        }
+      } catch (e) {
+        // No bloquear la creación del cliente si falla este lookup -- el
+        // gate de facturación es la fuente de verdad real, esto es best-effort.
+      }
+    },
+  },
 });
 
 // Sobrescribe toJSON para agregar full_name al JSON de respuesta

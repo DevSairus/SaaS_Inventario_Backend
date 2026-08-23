@@ -7,6 +7,7 @@
 const dianKit = require('./dianKitAdapter');
 const { sequelize } = require('../../config/database');
 const logger = require('../../config/logger');
+const { assertReadiness: assertCustomerDianReadiness } = require('./customerDianReadiness');
 
 /* ──────────────────────────────────────────────────────────
  * Extrae configuración DIAN del tenant y valida campos
@@ -81,6 +82,10 @@ async function sendInvoiceToDian(sale, tenant) {
       await transaction.commit();
       return { sent: false, reason: 'not_applicable' };
     }
+
+    // Cortar acá si faltan datos DIAN del comprador (ciudad DIVIPOLA, tipo
+    // de identificación) — antes de consumir un consecutivo, no después.
+    assertCustomerDianReadiness(sale);
 
     const { consecutive, invoiceNumber, resolution } = await getNextConsecutive(
       tenant.id, sale.branch_id, isTest, transaction
@@ -224,6 +229,9 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     // ID de la venta original para actualizar estado DIAN y registrar evento
     const saleId = note.reference_sale_id || note.id;
 
+    // Mismo gate que en sendInvoiceToDian — antes de consumir consecutivo.
+    assertCustomerDianReadiness(note);
+
     const resolution = await DianResolution.findOne({
       where: { tenant_id: tenant.id, branch_id: note.branch_id, is_active: true, is_test: isTest },
       order: [['created_at', 'DESC']],
@@ -263,23 +271,40 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       unit_code: 'EA',
     }];
 
+    // Dirección y tipo de identificación reales del comprador — denormalizados
+    // en la venta/nota igual que customer_address/customer_tax_id (ver
+    // sales.controller.js, voidSale.js y dian.controller.js), en vez del
+    // hardcodeo fijo a Bogotá/Cundinamarca y cédula ('13') que traía antes.
+    // Mismo schemeID que tuvo la factura original, no uno asumido.
+    const noteCityCode = note.customer_city_code || '11001';
+    const noteAddress = {
+      street: note.customer_address || 'Sin direccion',
+      cityCode: noteCityCode,
+      cityName: note.customer_city_name || 'Bogota',
+      departmentCode: noteCityCode.substring(0, 2),
+      departmentName: note.customer_department_name || 'Cundinamarca',
+      countryCode: 'CO',
+      countryName: 'Colombia',
+    };
+    const noteSchemeID = note.customer_document_type || '13';
+
     const noteInput = {
       id: noteNumber,
       issueDate: new Date(),
       issueTime: new Date(),
       customer: {
         name: note.customer_name || 'Consumidor Final',
-        identification: { number: note.customer_tax_id || '13832081', type: '13', dv: '0' },
+        identification: { number: note.customer_tax_id || '13832081', type: noteSchemeID, dv: '0' },
         personType: '1',
         fiscalResponsibilities: ['R-99-PN'],
         taxInfo: {
           registrationName: note.customer_name || 'Consumidor Final',
-          companyId: { number: note.customer_tax_id || '13832081', type: '13', dv: '0' },
+          companyId: { number: note.customer_tax_id || '13832081', type: noteSchemeID, dv: '0' },
           taxLevelCode: 'R-99-PN',
           taxScheme: { code: '01' },
-          address: { street: 'Sin direccion', cityCode: '11001', cityName: 'Bogota', departmentCode: '11', departmentName: 'Cundinamarca', countryCode: 'CO', countryName: 'Colombia' },
+          address: noteAddress,
         },
-        address: { street: 'Sin direccion', cityCode: '11001', cityName: 'Bogota', departmentCode: '11', departmentName: 'Cundinamarca', countryCode: 'CO', countryName: 'Colombia' },
+        address: noteAddress,
         email: note.customer_email || '',
       },
       billingReference: {

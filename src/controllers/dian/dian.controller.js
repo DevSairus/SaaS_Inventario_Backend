@@ -23,10 +23,30 @@ const dianService = require('../../services/dian/dianService');
 const dianKit = require('../../services/dian/dianKitAdapter');
 const logger = require('../../config/logger');
 const { Op } = require('sequelize');
+const { DIVIPOLA_DEPARTMENTS, DIVIPOLA_CITIES } = require('../../data/divipola-colombia');
 
 /* ─── Helpers ─── */
 const ok = (res, data, status = 200) => res.status(status).json({ success: true, ...data });
 const fail = (res, message, status = 400) => res.status(status).json({ success: false, message });
+
+// Envío a DIAN: si falló porque al cliente le faltan datos DIAN (ciudad
+// DIVIPOLA, tipo de identificación — ver customerDianReadiness.js), se
+// responde 422 con el detalle estructurado para que el frontend pueda abrir
+// el modal de "completar datos" en vez de solo mostrar un toast genérico.
+// Cualquier otro error (SDK, DIAN, red) sigue el camino de siempre.
+const failDianSend = (res, e, fallbackMessage) => {
+  logger.error(fallbackMessage, e);
+  if (e.code === 'DIAN_CUSTOMER_INCOMPLETE') {
+    return res.status(422).json({
+      success: false,
+      code: e.code,
+      message: e.message,
+      customerId: e.customerId,
+      missingFields: e.missingFields,
+    });
+  }
+  fail(res, e.message || fallbackMessage, 500);
+};
 
 /* ──────────────────────────────────────────────────────────
  * GET /api/dian/config
@@ -229,8 +249,7 @@ const sendInvoice = async (req, res) => {
 
     ok(res, { data: result, message: result.accepted ? 'Factura aceptada por DIAN' : 'Factura enviada (pendiente de aceptación)' });
   } catch (e) {
-    logger.error('Error sendInvoice:', e);
-    fail(res, e.message || 'Error al enviar factura a DIAN', 500);
+    failDianSend(res, e, 'Error sendInvoice:');
   }
 };
 
@@ -258,8 +277,7 @@ const sendCreditNote = async (req, res) => {
 
     ok(res, { data: result, message: result.accepted ? 'Nota crédito aceptada por DIAN' : 'Nota crédito enviada (pendiente de aceptación)' });
   } catch (e) {
-    logger.error('Error sendCreditNote:', e);
-    fail(res, e.message || 'Error al enviar nota crédito a DIAN', 500);
+    failDianSend(res, e, 'Error sendCreditNote:');
   }
 };
 
@@ -287,8 +305,7 @@ const sendDebitNote = async (req, res) => {
 
     ok(res, { data: result, message: result.accepted ? 'Nota débito aceptada por DIAN' : 'Nota débito enviada (pendiente de aceptación)' });
   } catch (e) {
-    logger.error('Error sendDebitNote:', e);
-    fail(res, e.message || 'Error al enviar nota débito a DIAN', 500);
+    failDianSend(res, e, 'Error sendDebitNote:');
   }
 };
 
@@ -879,6 +896,10 @@ const createAndSendCreditNote = async (req, res) => {
       customer_email: original.customer_email,
       customer_phone: original.customer_phone,
       customer_address: original.customer_address,
+      customer_city_code: original.customer_city_code,
+      customer_city_name: original.customer_city_name,
+      customer_department_name: original.customer_department_name,
+      customer_document_type: original.customer_document_type,
       subtotal: noteSubtotal,
       tax_amount: noteTax,
       discount_amount: 0,
@@ -1044,6 +1065,10 @@ const createAndSendDebitNote = async (req, res) => {
       customer_email: original.customer_email,
       customer_phone: original.customer_phone,
       customer_address: original.customer_address,
+      customer_city_code: original.customer_city_code,
+      customer_city_name: original.customer_city_name,
+      customer_department_name: original.customer_department_name,
+      customer_document_type: original.customer_document_type,
       subtotal: noteSubtotal,
       tax_amount: noteTax,
       discount_amount: 0,
@@ -1111,6 +1136,27 @@ const createAndSendDebitNote = async (req, res) => {
   }
 };
 
+/* ──────────────────────────────────────────────────────────
+ * GET /api/dian/divipola
+ * Catálogo DIVIPOLA (departamentos + municipios) para poblar
+ * el selector departamento → ciudad en el frontend. Datos
+ * estáticos (backend/src/data/divipola-colombia.js), no requieren
+ * ir a base de datos.
+ * ────────────────────────────────────────────────────────── */
+const getDivipola = async (req, res) => {
+  try {
+    ok(res, {
+      data: {
+        departments: DIVIPOLA_DEPARTMENTS,
+        cities: DIVIPOLA_CITIES,
+      },
+    });
+  } catch (e) {
+    logger.error('Error getDivipola:', e);
+    fail(res, 'Error al obtener catálogo DIVIPOLA', 500);
+  }
+};
+
 module.exports = {
   getConfig,
   updateConfig,
@@ -1131,4 +1177,5 @@ module.exports = {
   sendAutoTestDocuments,
   diagnoseCert,
   testConnectionProd,
+  getDivipola,
 };

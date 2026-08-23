@@ -1735,6 +1735,31 @@ const generateSale = async (req, res) => {
       return res.status(400).json({ success: false, message: 'document_type debe ser "factura" o "remision"' });
     }
 
+    // Si se va a facturar, el cliente debe tener ciudad DIVIPOLA y tipo de
+    // identificación -- se valida ANTES de consumir el consecutivo DIAN de
+    // abajo, para no quemar numeración en un intento que de todas formas no
+    // se puede transmitir bien (mismo criterio que sales.controller.js#confirm
+    // y dianService.js). Antes de este chequeo, este flujo ni siquiera
+    // copiaba estos campos al Sale generado -- ver customer_city_code etc.
+    // más abajo en Sale.create.
+    if (document_type === 'factura') {
+      const { checkReadiness } = require('../../services/dian/customerDianReadiness');
+      const { ready, missing } = checkReadiness({
+        customer_city_code: order.customer?.city_code,
+        customer_document_type: order.customer?.document_type,
+      });
+      if (!ready) {
+        await transaction.rollback();
+        return res.status(422).json({
+          success: false,
+          code: 'DIAN_CUSTOMER_INCOMPLETE',
+          message: `No se puede facturar: falta ${missing.map(m => m.label).join(', ')} en la ficha del cliente. Complétala e intenta de nuevo.`,
+          customerId: order.customer_id,
+          missingFields: missing.map(m => m.key),
+        });
+      }
+    }
+
     // Número del documento
     const year   = new Date().getFullYear();
     let sale_number;
@@ -1785,6 +1810,15 @@ const generateSale = async (req, res) => {
       customer_name:    customerName,
       customer_phone:   customer?.phone  || null,
       customer_email:   customer?.email  || null,
+      customer_tax_id:  customer?.tax_id || null,
+      customer_address: customer?.address || null,
+      // Antes ausentes -- sin esto, una factura generada desde el cierre de
+      // una OT siempre caía al fallback hardcodeado de Bogotá/Cundinamarca
+      // en dianKitAdapter, sin importar los datos reales del cliente.
+      customer_city_code:        customer?.city_code || null,
+      customer_city_name:        customer?.city || null,
+      customer_department_name:  customer?.state || null,
+      customer_document_type:    customer?.document_type || null,
       vehicle_plate:    order.vehicle?.plate || null,
       vehicle_brand:    order.vehicle?.brand || null,
       vehicle_model:    order.vehicle?.model || null,

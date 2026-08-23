@@ -278,11 +278,27 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
   const taxAmount = items.reduce((s, it) => s + Number(it.tax_amount || 0), 0);
   const total = subtotal + taxAmount;
 
+  // Prioridad: `customer` explícito (ej. comprador sintético de
+  // dianAutoTestService) > los campos customer_* denormalizados en `sale`
+  // al momento de facturar (Customer.city_code/document_type copiados en
+  // sales.controller.js) > "Consumidor Final"/Bogotá como último recurso.
+  const buyerCityCode = customer?.cityCode || sale?.customer_city_code || '11001';
+  const buyerAddress = {
+    street: customer?.address || sale?.customer_address || 'Sin direccion',
+    cityCode: buyerCityCode,
+    cityName: customer?.city || sale?.customer_city_name || 'Bogota',
+    departmentCode: buyerCityCode.substring(0, 2),
+    departmentName: customer?.dept || sale?.customer_department_name || 'Cundinamarca',
+    countryCode: 'CO',
+    countryName: 'Colombia',
+  };
+  const buyerSchemeID = customer?.schemeID || sale?.customer_document_type || '31';
+
   const customerData = {
     name: customer?.name || sale?.customer_name || 'Consumidor Final',
     identification: {
       number: customer?.nit || sale?.customer_tax_id || '13832081',
-      type: customer?.schemeID || sale?.buyerSchemeID || '31',
+      type: buyerSchemeID,
       dv: customer?.dv || '0',
     },
     personType: '1',
@@ -291,30 +307,14 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
       registrationName: customer?.name || sale?.customer_name || 'Consumidor Final',
       companyId: {
         number: customer?.nit || sale?.customer_tax_id || '13832081',
-        type: customer?.schemeID || sale?.buyerSchemeID || '31',
+        type: buyerSchemeID,
         dv: customer?.dv || '0',
       },
       taxLevelCode: customer?.taxLevelCode || 'R-99-PN',
       taxScheme: { code: '01' },
-      address: {
-        street: customer?.address || sale?.customer_address || 'Sin direccion',
-        cityCode: customer?.cityCode || '11001',
-        cityName: customer?.city || 'Bogota',
-        departmentCode: '11',
-        departmentName: customer?.dept || 'Cundinamarca',
-        countryCode: 'CO',
-        countryName: 'Colombia',
-      },
+      address: buyerAddress,
     },
-    address: {
-      street: customer?.address || sale?.customer_address || 'Sin direccion',
-      cityCode: customer?.cityCode || '11001',
-      cityName: customer?.city || 'Bogota',
-      departmentCode: '11',
-      departmentName: customer?.dept || 'Cundinamarca',
-      countryCode: 'CO',
-      countryName: 'Colombia',
-    },
+    address: buyerAddress,
     email: customer?.email || sale?.customer_email || '',
   };
 

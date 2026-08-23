@@ -236,6 +236,10 @@ const create = async (req, res) => {
         customer_email: customer.email,
         customer_phone: customer.phone || customer.mobile,
         customer_address: customer.address,
+        customer_city_code: customer.city_code,
+        customer_city_name: customer.city,
+        customer_department_name: customer.state,
+        customer_document_type: customer.document_type,
       };
     } else if (customer_data) {
       const { full_name: cdFullName, ...cdRest } = customer_data;
@@ -255,6 +259,10 @@ const create = async (req, res) => {
         customer_email: newCustomer.email,
         customer_phone: newCustomer.phone || newCustomer.mobile,
         customer_address: newCustomer.address,
+        customer_city_code: newCustomer.city_code,
+        customer_city_name: newCustomer.city,
+        customer_department_name: newCustomer.state,
+        customer_document_type: newCustomer.document_type,
       };
     } else {
       await transaction.rollback();
@@ -649,6 +657,10 @@ const update = async (req, res) => {
         updateData.customer_email   = customer.email;
         updateData.customer_phone   = customer.phone || customer.mobile;
         updateData.customer_address = customer.address;
+        updateData.customer_city_code        = customer.city_code;
+        updateData.customer_city_name        = customer.city;
+        updateData.customer_department_name  = customer.state;
+        updateData.customer_document_type    = customer.document_type;
       }
     }
 
@@ -823,6 +835,33 @@ const confirm = async (req, res) => {
       }
     }
 
+    // Si se va a facturar electrónicamente, el cliente debe tener ciudad
+    // DIVIPOLA y tipo de identificación -- si faltan, hoy dianKitAdapter
+    // caía al fallback hardcodeado de Bogotá/Cundinamarca (el hallazgo
+    // original de la auditoría). Se valida contra el registro vivo del
+    // Customer (no lo que ya tenga cacheado la Sale) para no bloquear un
+    // cliente que ya se completó después de crear el borrador. Si pasa, se
+    // reutiliza acá abajo para refrescar el snapshot denormalizado de la
+    // Sale con el que realmente se factura.
+    let freshCustomerForDian = null;
+    if (finalDocType === 'factura' && sale.customer_id) {
+      freshCustomerForDian = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } });
+      const { checkReadiness } = require('../../services/dian/customerDianReadiness');
+      const { ready, missing } = checkReadiness({
+        customer_city_code: freshCustomerForDian?.city_code,
+        customer_document_type: freshCustomerForDian?.document_type,
+      });
+      if (!ready) {
+        return res.status(422).json({
+          success: false,
+          code: 'DIAN_CUSTOMER_INCOMPLETE',
+          message: `No se puede facturar: falta ${missing.map(m => m.label).join(', ')} en la ficha del cliente. Complétala e intenta de nuevo.`,
+          customerId: sale.customer_id,
+          missingFields: missing.map(m => m.key),
+        });
+      }
+    }
+
     // Validar límite de crédito
     if (payment_method === 'credito' && sale.customer_id) {
       const creditCustomer = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } });
@@ -972,6 +1011,18 @@ const confirm = async (req, res) => {
       } else if (document_type) {
         updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
 
+      }
+
+      // Refrescar el snapshot denormalizado del cliente con el que se va a
+      // facturar -- freshCustomerForDian ya se cargó (y validó) arriba, antes
+      // de la transacción. Evita facturar con un customer_city_code/
+      // document_type cacheado en la Sale desde antes de que el cliente se
+      // completara.
+      if (finalDocType === 'factura' && freshCustomerForDian) {
+        updateData.customer_city_code       = freshCustomerForDian.city_code;
+        updateData.customer_city_name       = freshCustomerForDian.city;
+        updateData.customer_department_name = freshCustomerForDian.state;
+        updateData.customer_document_type   = freshCustomerForDian.document_type;
       }
 
       // El recibo se numera al final, ya con el sale_number definitivo
