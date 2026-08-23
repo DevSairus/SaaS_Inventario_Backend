@@ -14,156 +14,166 @@ exports.getKPIs = async (req, res) => {
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
-    // KPI 1: Ventas del período
-    const salesStats = await Sale.findOne({
-      where: {
-        tenant_id: tenantId,
-        sale_date: { [Op.gte]: dateFrom },
-        status: { [Op.in]: ['completed'] }
-      },
-      attributes: [
-        [fn('COUNT', col('id')), 'count'],
-        [fn('SUM', col('total_amount')), 'revenue']
-      ],
-      raw: true
-    });
-
-    // Calcular profit desde los items de venta -- SOLO productos físicos
-    // (product_type != 'service'). Los ítems de servicio/mano de obra nacen
-    // con unit_cost = 0 (ver workOrders.controller.js), así que incluirlos
-    // aquí inflaba el profit por el 100% de su precio de venta. Su ganancia
-    // real se calcula aparte con laborCost.service.js (ver más abajo).
-    const profitCalc = await SaleItem.findOne({
-      where: {
-        '$sale.tenant_id$': tenantId,
-        '$sale.sale_date$': { [Op.gte]: dateFrom },
-        '$sale.status$': { [Op.in]: ['completed'] },
-        '$product.product_type$': { [Op.ne]: 'service' }
-      },
-      attributes: [
-        [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'total_profit']
-      ],
-      include: [
-        { model: Sale, as: 'sale', attributes: [], required: true },
-        { model: Product, as: 'product', attributes: [], required: true }
-      ],
-      raw: true
-    });
-
     const { getLaborCostForPeriod } = require('../services/workshop/laborCost.service');
-    const laborProfitCalc = await getLaborCostForPeriod({ tenantId, dateFrom, dateTo: new Date() });
 
-    // KPI 2: Ventas de hoy
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    
-    const todaySales = await Sale.findOne({
-      where: {
-        tenant_id: tenantId,
-        sale_date: { [Op.gte]: today },
-        status: { [Op.in]: ['completed'] }
-      },
-      attributes: [
-        [fn('COUNT', col('id')), 'count'],
-        [fn('SUM', col('total_amount')), 'revenue']
-      ],
-      raw: true
-    });
 
-    // KPI 3: Productos con stock bajo (pero no sin stock)
-    const lowStockCount = await Product.count({
-      where: {
-        tenant_id: tenantId,
-        [Op.and]: [
-          literal('current_stock <= min_stock'),
-          { current_stock: { [Op.gt]: 0 } }
+    // Las 9 consultas de acá abajo son independientes entre sí -- ninguna
+    // usa el resultado de otra, solo se combinan al armar la respuesta. Antes
+    // se esperaban una por una (9 round-trips secuenciales a la DB); ahora
+    // se lanzan todas juntas y el tiempo total es el de la más lenta, no la suma.
+    const [
+      salesStats,     // KPI 1: Ventas del período
+      profitCalc,     // Profit de productos físicos del período (ver nota abajo)
+      laborProfitCalc,
+      todaySales,     // KPI 2: Ventas de hoy
+      lowStockCount,  // KPI 3: Productos con stock bajo (pero no sin stock)
+      inventoryValue, // KPI 4: Valor total del inventario
+      topProducts,    // KPI 5: Top 5 productos vendidos
+      salesByDay,     // KPI 6: Ventas por día (gráfica)
+      profitByDay,    // Profit por día, para combinar con salesByDay
+    ] = await Promise.all([
+      Sale.findOne({
+        where: {
+          tenant_id: tenantId,
+          sale_date: { [Op.gte]: dateFrom },
+          status: { [Op.in]: ['completed'] }
+        },
+        attributes: [
+          [fn('COUNT', col('id')), 'count'],
+          [fn('SUM', col('total_amount')), 'revenue']
         ],
-        is_active: true
-      }
-    });
+        raw: true
+      }),
 
-    // KPI 4: Valor total del inventario
-    const inventoryValue = await Product.findOne({
-      where: {
-        tenant_id: tenantId,
-        is_active: true
-      },
-      attributes: [
-        [fn('SUM', literal('current_stock * average_cost')), 'total_value'],
-        [fn('COUNT', col('id')), 'total_products']
-      ],
-      raw: true
-    });
+      // Calcular profit desde los items de venta -- SOLO productos físicos
+      // (product_type != 'service'). Los ítems de servicio/mano de obra nacen
+      // con unit_cost = 0 (ver workOrders.controller.js), así que incluirlos
+      // aquí inflaba el profit por el 100% de su precio de venta. Su ganancia
+      // real se calcula aparte con laborCost.service.js (ver más abajo).
+      SaleItem.findOne({
+        where: {
+          '$sale.tenant_id$': tenantId,
+          '$sale.sale_date$': { [Op.gte]: dateFrom },
+          '$sale.status$': { [Op.in]: ['completed'] },
+          '$product.product_type$': { [Op.ne]: 'service' }
+        },
+        attributes: [
+          [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'total_profit']
+        ],
+        include: [
+          { model: Sale, as: 'sale', attributes: [], required: true },
+          { model: Product, as: 'product', attributes: [], required: true }
+        ],
+        raw: true
+      }),
 
-    // KPI 5: Top 5 productos vendidos
-    const topProducts = await SaleItem.findAll({
-      where: {
-        '$sale.tenant_id$': tenantId,
-        '$sale.sale_date$': { [Op.gte]: dateFrom },
-        '$sale.status$': { [Op.in]: ['completed'] }
-      },
-      attributes: [
-        'product_id',
-        [fn('SUM', col('SaleItem.quantity')), 'total_quantity'],
-        [fn('SUM', col('SaleItem.subtotal')), 'revenue']
-      ],
-      include: [
-        {
+      getLaborCostForPeriod({ tenantId, dateFrom, dateTo: new Date() }),
+
+      Sale.findOne({
+        where: {
+          tenant_id: tenantId,
+          sale_date: { [Op.gte]: today },
+          status: { [Op.in]: ['completed'] }
+        },
+        attributes: [
+          [fn('COUNT', col('id')), 'count'],
+          [fn('SUM', col('total_amount')), 'revenue']
+        ],
+        raw: true
+      }),
+
+      Product.count({
+        where: {
+          tenant_id: tenantId,
+          [Op.and]: [
+            literal('current_stock <= min_stock'),
+            { current_stock: { [Op.gt]: 0 } }
+          ],
+          is_active: true
+        }
+      }),
+
+      Product.findOne({
+        where: {
+          tenant_id: tenantId,
+          is_active: true
+        },
+        attributes: [
+          [fn('SUM', literal('current_stock * average_cost')), 'total_value'],
+          [fn('COUNT', col('id')), 'total_products']
+        ],
+        raw: true
+      }),
+
+      SaleItem.findAll({
+        where: {
+          '$sale.tenant_id$': tenantId,
+          '$sale.sale_date$': { [Op.gte]: dateFrom },
+          '$sale.status$': { [Op.in]: ['completed'] }
+        },
+        attributes: [
+          'product_id',
+          [fn('SUM', col('SaleItem.quantity')), 'total_quantity'],
+          [fn('SUM', col('SaleItem.subtotal')), 'revenue']
+        ],
+        include: [
+          {
+            model: Sale,
+            as: 'sale',
+            attributes: [],
+            required: true
+          },
+          {
+            model: Product,
+            as: 'product',
+            attributes: ['id', 'name', 'sku']
+          }
+        ],
+        group: ['product_id', 'product.id', 'product.name', 'product.sku'],
+        order: [[fn('SUM', col('SaleItem.quantity')), 'DESC']],
+        limit: 5,
+        raw: false
+      }),
+
+      Sale.findAll({
+        where: {
+          tenant_id: tenantId,
+          sale_date: { [Op.gte]: dateFrom },
+          status: { [Op.in]: ['completed'] }
+        },
+        attributes: [
+          [fn('DATE', col('sale_date')), 'date'],
+          [fn('COUNT', col('id')), 'count'],
+          [fn('SUM', col('total_amount')), 'revenue']
+        ],
+        group: [fn('DATE', col('sale_date'))],
+        order: [[fn('DATE', col('sale_date')), 'ASC']],
+        raw: true
+      }),
+
+      SaleItem.findAll({
+        where: {
+          '$sale.tenant_id$': tenantId,
+          '$sale.sale_date$': { [Op.gte]: dateFrom },
+          '$sale.status$': { [Op.in]: ['completed'] }
+        },
+        attributes: [
+          [fn('DATE', col('sale.sale_date')), 'date'],
+          [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'profit']
+        ],
+        include: [{
           model: Sale,
           as: 'sale',
           attributes: [],
           required: true
-        },
-        {
-          model: Product,
-          as: 'product',
-          attributes: ['id', 'name', 'sku']
-        }
-      ],
-      group: ['product_id', 'product.id', 'product.name', 'product.sku'],
-      order: [[fn('SUM', col('SaleItem.quantity')), 'DESC']],
-      limit: 5,
-      raw: false
-    });
-
-    // KPI 6: Ventas por día (gráfica)
-    const salesByDay = await Sale.findAll({
-      where: {
-        tenant_id: tenantId,
-        sale_date: { [Op.gte]: dateFrom },
-        status: { [Op.in]: ['completed'] }
-      },
-      attributes: [
-        [fn('DATE', col('sale_date')), 'date'],
-        [fn('COUNT', col('id')), 'count'],
-        [fn('SUM', col('total_amount')), 'revenue']
-      ],
-      group: [fn('DATE', col('sale_date'))],
-      order: [[fn('DATE', col('sale_date')), 'ASC']],
-      raw: true
-    });
-
-    // Calcular profit por día
-    const profitByDay = await SaleItem.findAll({
-      where: {
-        '$sale.tenant_id$': tenantId,
-        '$sale.sale_date$': { [Op.gte]: dateFrom },
-        '$sale.status$': { [Op.in]: ['completed'] }
-      },
-      attributes: [
-        [fn('DATE', col('sale.sale_date')), 'date'],
-        [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'profit']
-      ],
-      include: [{
-        model: Sale,
-        as: 'sale',
-        attributes: [],
-        required: true
-      }],
-      group: [fn('DATE', col('sale.sale_date'))],
-      order: [[fn('DATE', col('sale.sale_date')), 'ASC']],
-      raw: true
-    });
+        }],
+        group: [fn('DATE', col('sale.sale_date'))],
+        order: [[fn('DATE', col('sale.sale_date')), 'ASC']],
+        raw: true
+      }),
+    ]);
 
     // Combinar salesByDay con profitByDay
     const salesByDayWithProfit = salesByDay.map(day => {

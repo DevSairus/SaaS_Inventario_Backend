@@ -88,6 +88,10 @@ const Opportunity = sequelize.define('Opportunity', {
     { fields: ['tenant_id', 'stage'] },
     { fields: ['tenant_id', 'owner_user_id'] },
     { fields: ['tenant_id', 'customer_id'] },
+    // Cubre el ORDER BY stage_changed_at del listado del Kanban
+    // (controllers/crm/opportunities.controller.js) -- sin esto el sort
+    // se hacía en memoria a medida que crecía el histórico por tenant.
+    { fields: ['tenant_id', 'stage_changed_at'] },
   ],
 });
 

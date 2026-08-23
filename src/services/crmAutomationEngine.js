@@ -27,6 +27,7 @@
 // regla como "sin contactar hace 2 horas" pierde sentido si solo se revisa
 // una vez al día.
 const { Op } = require('sequelize');
+const { mapWithConcurrencyLimit } = require('../utils/concurrency');
 
 // ── acciones ──────────────────────────────────────────────────────────────
 
@@ -104,12 +105,28 @@ async function executeAction(rule, tenant_id, opportunity) {
 
 // ── evaluación de reglas de SONDEO ──────────────────────────────────────
 
-async function alreadyTriggered(ruleId, opportunityId, stageChangedAt) {
+async function alreadyTriggeredSet(ruleId, opportunities) {
   const { CrmAutomationRuleLog } = require('../models');
-  const existing = await CrmAutomationRuleLog.findOne({
-    where: { automation_rule_id: ruleId, opportunity_id: opportunityId, triggered_for_stage_changed_at: stageChangedAt },
+  if (!opportunities.length) return new Set();
+
+  // Antes: 1 query por oportunidad (alreadyTriggered llamado dentro del
+  // for). Con el índice único de dedupe ya cubriendo automation_rule_id +
+  // opportunity_id, se puede traer todo lo ya disparado para esta regla en
+  // una sola query y filtrar en memoria -- de N queries a 1.
+  const logs = await CrmAutomationRuleLog.findAll({
+    where: {
+      automation_rule_id: ruleId,
+      opportunity_id: { [Op.in]: opportunities.map((o) => o.id) },
+    },
+    attributes: ['opportunity_id', 'triggered_for_stage_changed_at'],
+    raw: true,
   });
-  return !!existing;
+
+  return new Set(logs.map((l) => dedupeKey(l.opportunity_id, l.triggered_for_stage_changed_at)));
+}
+
+function dedupeKey(opportunityId, stageChangedAt) {
+  return `${opportunityId}|${new Date(stageChangedAt).toISOString()}`;
 }
 
 async function logTrigger(tenant_id, ruleId, opportunityId, stageChangedAt) {
@@ -126,9 +143,45 @@ async function logTrigger(tenant_id, ruleId, opportunityId, stageChangedAt) {
   }
 }
 
+// Aplica la regla a un conjunto de oportunidades ya filtradas por trigger.
+// `assign_round_robin` NECESITA procesarse en orden estricto -- cada
+// asignación depende de `rule.last_round_robin_user_id` que dejó la
+// anterior (ver actionAssignRoundRobin), así que ahí NO se paraleliza.
+// Para el resto de acciones (ej. create_task), cada oportunidad es
+// independiente de las demás, así que se procesan con concurrencia
+// limitada en vez de una por una (ver utils/concurrency.js).
+const ACTIONS_CONCURRENCY = 5;
+
+async function applyRuleToOpportunities(rule, tenant_id, opportunities, results, ruleLabel) {
+  if (!opportunities.length) return;
+
+  const triggered = await alreadyTriggeredSet(rule.id, opportunities);
+  const pending = opportunities.filter((o) => !triggered.has(dedupeKey(o.id, o.stage_changed_at)));
+  if (!pending.length) return;
+
+  const runOne = async (opportunity) => {
+    try {
+      await executeAction(rule, tenant_id, opportunity);
+      await logTrigger(tenant_id, rule.id, opportunity.id, opportunity.stage_changed_at);
+      results.rulesTriggered++;
+    } catch (err) {
+      results.errors++;
+      console.error(`❌ [CRM automation] Error aplicando regla "${rule.name}" (${ruleLabel}) a oportunidad ${opportunity.id}:`, err.message);
+    }
+  };
+
+  if (rule.action_type === 'assign_round_robin') {
+    for (const opportunity of pending) {
+      await runOne(opportunity);
+    }
+  } else {
+    await mapWithConcurrencyLimit(pending, ACTIONS_CONCURRENCY, runOne);
+  }
+}
+
 async function evaluateUnattendedLead(rule, tenant_id, stageMap, results) {
   const { Opportunity } = require('../models');
-  const { keysByType, resolveEntryStageKey } = require('../utils/crmPipelineStages');
+  const { resolveEntryStageKey } = require('../utils/crmPipelineStages');
 
   const hours = Number(rule.trigger_config?.hours) || 2;
   const sourceFilter = rule.trigger_config?.source || null;
@@ -143,18 +196,7 @@ async function evaluateUnattendedLead(rule, tenant_id, stageMap, results) {
   if (sourceFilter) where.source = sourceFilter;
 
   const opportunities = await Opportunity.findAll({ where });
-
-  for (const opportunity of opportunities) {
-    if (await alreadyTriggered(rule.id, opportunity.id, opportunity.stage_changed_at)) continue;
-    try {
-      await executeAction(rule, tenant_id, opportunity);
-      await logTrigger(tenant_id, rule.id, opportunity.id, opportunity.stage_changed_at);
-      results.rulesTriggered++;
-    } catch (err) {
-      results.errors++;
-      console.error(`❌ [CRM automation] Error aplicando regla "${rule.name}" (unattended_lead) a oportunidad ${opportunity.id}:`, err.message);
-    }
-  }
+  await applyRuleToOpportunities(rule, tenant_id, opportunities, results, 'unattended_lead');
 }
 
 async function evaluateStageStale(rule, tenant_id, stageMap, results) {
@@ -168,18 +210,7 @@ async function evaluateStageStale(rule, tenant_id, stageMap, results) {
   const opportunities = await Opportunity.findAll({
     where: { tenant_id, stage: stageKey, stage_changed_at: { [Op.lte]: cutoff } },
   });
-
-  for (const opportunity of opportunities) {
-    if (await alreadyTriggered(rule.id, opportunity.id, opportunity.stage_changed_at)) continue;
-    try {
-      await executeAction(rule, tenant_id, opportunity);
-      await logTrigger(tenant_id, rule.id, opportunity.id, opportunity.stage_changed_at);
-      results.rulesTriggered++;
-    } catch (err) {
-      results.errors++;
-      console.error(`❌ [CRM automation] Error aplicando regla "${rule.name}" (stage_stale) a oportunidad ${opportunity.id}:`, err.message);
-    }
-  }
+  await applyRuleToOpportunities(rule, tenant_id, opportunities, results, 'stage_stale');
 }
 
 async function processTenantRules(tenantId, results) {
@@ -210,11 +241,21 @@ async function runPollingRules() {
   const results = { rulesTriggered: 0, errors: 0, tenantsSkipped: 0 };
   const allTenants = await Tenant.findAll({ attributes: ['id', 'schema_name'] });
 
-  for (const tenant of allTenants) {
+  // Antes: `for (const tenant of allTenants) { await processTenantRules(...) }`
+  // -- un tenant a la vez, sosteniendo el pool de conexiones todo el rato
+  // que dura la corrida completa. runWithTenantSchema usa AsyncLocalStorage
+  // (ver config/tenantContext.js), que aísla el schema activo por cadena
+  // de async independientemente de que corran varias en simultáneo -- es
+  // el mismo mecanismo que ya sostiene requests HTTP concurrentes de
+  // distintos tenants, así que paralelizar acá es seguro. El límite de
+  // concurrencia evita saturar el pool de golpe con tenants que tengan
+  // muchas reglas activas.
+  const TENANT_CONCURRENCY = 5;
+  await mapWithConcurrencyLimit(allTenants, TENANT_CONCURRENCY, async (tenant) => {
     const modules = await getEffectiveModulesForTenantId(tenant.id);
     if (!modules.includes('crm')) {
       results.tenantsSkipped++;
-      continue;
+      return;
     }
     try {
       if (tenant.schema_name) {
@@ -226,7 +267,7 @@ async function runPollingRules() {
       results.errors++;
       console.error(`❌ [CRM automation] Error procesando tenant "${tenant.schema_name || tenant.id}":`, err.message);
     }
-  }
+  });
 
   console.log(`✅ [CRM automation] Reglas disparadas: ${results.rulesTriggered} | Tenants sin CRM: ${results.tenantsSkipped} | Errores: ${results.errors}`);
   return results;

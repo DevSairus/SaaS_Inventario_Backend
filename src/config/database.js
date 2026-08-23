@@ -84,11 +84,15 @@ if (DATABASE_URL) {
     // Logging
     logging: isProduction ? false : console.log,
     
-    // Pool optimizado para Vercel Serverless
+    // Pool para servidor persistente (Pitbox corre como proceso único con
+    // scheduler in-process, ver src/jobs/scheduler.js -- NO es serverless,
+    // así que no tiene sentido limitar a 2 conexiones compartidas por todos
+    // los requests + el propio scheduler). Ajustar `max` según el límite de
+    // conexiones que permita el plan de Neon (revisar antes de subir más).
     pool: {
-      max: 2,
+      max: 15,
       min: 0,
-      acquire: 30000,
+      acquire: 15000,
       idle: 10000
     },
     
@@ -131,9 +135,9 @@ if (DATABASE_URL) {
       logging: console.log,
       
       pool: {
-        max: 5,
+        max: 10,
         min: 0,
-        acquire: 30000,
+        acquire: 15000,
         idle: 10000
       },
       
