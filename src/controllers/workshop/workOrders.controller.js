@@ -481,10 +481,13 @@ const convertQuoteToWorkOrder = async (req, res) => {
         if (product?.track_inventory) {
           const qty = parseFloat(saleItem.quantity);
           if (parseFloat(product.current_stock) < qty) {
+            const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
+            const alternatives = await getEquivalentsWithStock(product.id, tenant_id);
             await transaction.rollback();
             return res.status(400).json({
               success: false,
               message: `Stock insuficiente para convertir: "${product.name}". Disponible: ${product.current_stock}`,
+              alternatives,
             });
           }
           await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
@@ -1839,10 +1842,13 @@ const generateSale = async (req, res) => {
           const disponible = parseFloat(product.current_stock || 0);
           const solicitado = parseFloat(item.quantity);
           if (disponible < solicitado) {
+            const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
+            const alternatives = await getEquivalentsWithStock(product.id, tenant_id);
             await transaction.rollback();
             return res.status(400).json({
               success: false,
-              message: `Stock insuficiente para ${product.name}: disponible ${disponible}, solicitado ${solicitado}`
+              message: `Stock insuficiente para ${product.name}: disponible ${disponible}, solicitado ${solicitado}`,
+              alternatives,
             });
           }
         }
