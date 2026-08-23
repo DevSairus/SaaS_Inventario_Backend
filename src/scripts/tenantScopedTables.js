@@ -25,16 +25,6 @@ const PUBLIC_ONLY_TABLES = new Set([
   'subscription_invoices', 'super_admin_mercadopago_config',
   'permissions', 'role_permissions', 'announcements',
   'user_announcement_views', 'sequelize_migrations', 'SequelizeMeta',
-  // `wa_reminder_jobs` existe en `public` (columna tenant_id incluida) pero
-  // no la crea ninguna migración de este repo -- no aparece en
-  // src/database/migrations ni en el historial de git. Es una tabla ajena
-  // al esquema versionado (creada a mano o por un servicio externo de
-  // recordatorios de WhatsApp que comparte esta base de datos), así que
-  // provisionTenantSchema.js nunca la crea en los schemas de tenant.
-  // Sin esta exclusión, migrateTenantData.js/cleanupTenantPublicData.js/
-  // tenantPurgeService.js la tratan como tabla de tenant y revientan con
-  // "relation ... does not exist" al intentar copiarla/borrarla en el schema.
-  'wa_reminder_jobs',
 ]);
 
 async function getAllFkEdges(sequelize) {
