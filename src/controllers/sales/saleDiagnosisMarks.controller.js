@@ -12,7 +12,7 @@ const logger = require('../../config/logger');
 const { sequelize } = require('../../config/database');
 const {
   Sale, SaleItem, DiagramTemplate, SaleDiagnosisMark, Product, User,
-  WorkOrder, WorkOrderItem, WorkOrderDiagnosisMark, Vehicle, Customer,
+  WorkOrder, WorkOrderItem, WorkOrderDiagnosisMark, Vehicle, Customer, Tenant,
 } = require('../../models');
 const { Op } = require('sequelize');
 const taxService = require('../../services/taxService');
@@ -180,12 +180,16 @@ const generateItemsFromMarks = async (req, res) => {
     }
 
     const created = [];
+    // tax_config del tenant — para resolver ICA por categoría (Fase D), igual
+    // que en sales.controller.js.
+    const tenantTaxConfigRow = await Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction });
+    const tenantTaxConfig = tenantTaxConfigRow?.tax_config || {};
     for (const mark of marks) {
       const product = await Product.findOne({ where: { id: mark.suggested_product_id, tenant_id }, transaction });
       if (!product) continue;
 
       const draftItem = { quantity: 1, unit_price: parseFloat(product.base_price) || 0, discount_percentage: 0 };
-      const taxes = taxService.calculateItemTaxes(draftItem, product, 'sale');
+      const taxes = taxService.calculateItemTaxes(draftItem, product, 'sale', tenantTaxConfig);
 
       const item = await SaleItem.create({
         sale_id: sale.id, tenant_id,

@@ -16,9 +16,10 @@ function round(n) {
  * @param {object} item       - { quantity, unit_price, discount_percentage?, discount_amount?, tax_percentage? }
  * @param {object} product    - { has_tax, tax_percentage, price_includes_tax, tax_config }
  * @param {string} context    - 'sale' | 'purchase' (para defaults distintos)
+ * @param {object} tenantConfig - tenant.tax_config (Fase D: fuente de las tarifas ICA por categoría económica)
  * @returns {object}          - { iva, inc, ica, total_taxes, base }
  * ────────────────────────────────────────────────────────── */
-function calculateItemTaxes(item, product, context = 'sale') {
+function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) {
   const qty = Number(item.quantity || 1);
   const unitPrice = Number(item.unit_price || item.unit_cost || 0);
   const discPct = Number(item.discount_percentage || 0);
@@ -48,8 +49,22 @@ function calculateItemTaxes(item, product, context = 'sale') {
   const incAmount = base * incRate / 100;
 
   // ── ICA (03) — sobre base SIN IVA, se expresa en ‰ (milesimas) ──
+  // Fase D: el producto puede fijar una tarifa manual (icaConfig.rate, legado)
+  // o referenciar una categoría económica (icaConfig.category) cuya tarifa
+  // vive en tenant.tax_config.ica_categories — la carga y mantiene cada
+  // tenant según su propio municipio, no hay tabla nacional aquí. Si hay
+  // categoría, esta manda: así un cambio de tarifa se refleja para todos
+  // los productos de esa categoría sin editarlos uno por uno.
   const icaConfig = product?.tax_config?.ica;
-  const icaRate = (icaConfig?.enabled && icaConfig?.rate > 0) ? Number(icaConfig.rate) : 0;
+  let icaRate = 0;
+  if (icaConfig?.enabled) {
+    if (icaConfig.category) {
+      const cat = (tenantConfig?.ica_categories || []).find(c => c.key === icaConfig.category);
+      icaRate = Number(cat?.rate || 0);
+    } else {
+      icaRate = Number(icaConfig.rate || 0);
+    }
+  }
   const icaAmount = base * icaRate / 1000;
 
   return {
@@ -65,19 +80,41 @@ function calculateItemTaxes(item, product, context = 'sale') {
 /* ──────────────────────────────────────────────────────────
  * Calcula retenciones a nivel documento (venta o compra)
  *
+ * La retención la practica quien PAGA sobre quien RECIBE el pago. El campo
+ * `is_autoretenedor` es una propiedad de quien RECIBE el pago (declarado
+ * autorretenedor ante la DIAN, se retiene a sí mismo — nadie más debe
+ * hacerlo). En una venta, quien recibe el pago es el tenant; en una compra,
+ * es el proveedor. Por eso el lado que se revisa depende de `context`:
+ * el tenant puede no ser autorretenedor, pero un proveedor puntual sí serlo
+ * (o viceversa un cliente puntual), y eso debe bastar para no retenerle.
+ *
+ * `is_exento`, en cambio, siempre se evalúa sobre la contraparte
+ * (customer.retention_config en venta, supplier.retention_config en
+ * compra): es la entidad concreta con la que se hace la transacción la que
+ * está exenta de que se le practique/practique retención, sin importar el
+ * estado del tenant.
+ *
  * @param {Array}   items         - Ítems ya calculados con tax_amount, inc_amount, etc.
- * @param {object}  tenantConfig  - tenant.tax_config
- * @param {object}  entityConfig  - customer.retention_config o supplier.retention_config
+ * @param {object}  tenantConfig  - tenant.tax_config (fuente de las tarifas por defecto configuradas por el tenant)
+ * @param {object}  entityConfig  - customer.retention_config o supplier.retention_config (contraparte)
+ * @param {string}  context       - 'sale' | 'purchase' (default 'sale') — determina de qué lado se revisa is_autoretenedor
  * @returns {object}              - { retefuente, reteiva, reteica, total }
  * ────────────────────────────────────────────────────────── */
-function calculateRetentions(items, tenantConfig, entityConfig) {
+function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale') {
   const zero = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
 
-  // No aplicar si el cliente/proveedor está exento
+  // No aplicar si la contraparte (cliente en venta, proveedor en compra) está exenta
   if (entityConfig?.is_exento) return zero;
 
-  // No aplicar si el tenant es autoretenedor
-  if (tenantConfig?.is_autoretenedor) return zero;
+  // No aplicar si quien RECIBE el pago es autorretenedor:
+  // - en venta, quien recibe el pago es el tenant → tenantConfig.is_autoretenedor
+  // - en compra, quien recibe el pago es el proveedor → entityConfig.is_autoretenedor
+  // Nota: el tenant puede no ser autorretenedor y aun así el proveedor sí
+  // serlo (muy común) — por eso no se puede revisar solo tenantConfig.
+  const payeeIsAutoretenedor = context === 'purchase'
+    ? entityConfig?.is_autoretenedor
+    : tenantConfig?.is_autoretenedor;
+  if (payeeIsAutoretenedor) return zero;
 
   // Base = suma de subtotales (sin IVA)
   const base = items.reduce((s, i) => s + Number(i.subtotal || i.base || 0), 0);

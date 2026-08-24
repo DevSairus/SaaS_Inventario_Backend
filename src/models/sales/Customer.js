@@ -92,6 +92,14 @@ const Customer = sequelize.define('Customer', {
     type: DataTypes.BOOLEAN,
     defaultValue: true,
   },
+  // Configuración de retenciones que este cliente aplica al tenant al pagarle
+  // (ReteFuente/ReteIVA/ReteICA, is_exento). Columna agregada en la migración
+  // 2026070302-add-multi-tax-system.js pero nunca declarada aquí -> nunca se
+  // guardaba ni se leía, así que el cálculo de retenciones siempre daba 0.
+  retention_config: {
+    type: DataTypes.JSONB,
+    defaultValue: {},
+  },
   // ── CRM (Fase 1) ────────────────────────────────────────────
   owner_user_id: {
     type: DataTypes.UUID,

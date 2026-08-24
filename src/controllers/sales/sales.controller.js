@@ -289,6 +289,11 @@ const create = async (req, res) => {
       : [];
     const productMap = Object.fromEntries(productRows.map(p => [p.id, p]));
 
+    // tax_config del tenant — se reusa para ICA por categoría (Fase D) y más
+    // abajo para retenciones (Fase A/C), evita una segunda consulta.
+    const tenantTaxConfigRow = await Tenant.findByPk(tenantId, { attributes: ['tax_config'], transaction });
+    const tenantTaxConfig = tenantTaxConfigRow?.tax_config || {};
+
     for (const item of items) {
       const itemType = item.item_type || 'product';
 
@@ -323,7 +328,7 @@ const create = async (req, res) => {
       }
 
       // Usar taxService para calcular todos los impuestos
-      const taxes = taxService.calculateItemTaxes(item, product, 'sale');
+      const taxes = taxService.calculateItemTaxes(item, product, 'sale', tenantTaxConfig);
 
       subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.total_taxes;
       saleItems.push({
@@ -370,9 +375,8 @@ const create = async (req, res) => {
     let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
     if (finalCustomerId) {
       const customer = await Customer.findByPk(finalCustomerId, { transaction });
-      const tenant = await Tenant.findByPk(tenantId, { attributes: ['tax_config'], transaction });
-      if (customer && tenant) {
-        retentions = taxService.calculateRetentions(saleItems, tenant.tax_config || {}, customer.retention_config || {});
+      if (customer) {
+        retentions = taxService.calculateRetentions(saleItems, tenantTaxConfig, customer.retention_config || {});
       }
     }
 
@@ -683,6 +687,10 @@ const update = async (req, res) => {
         : [];
       const productMap = Object.fromEntries(productRows.map(p => [p.id, p]));
 
+      // tax_config del tenant — para resolver ICA por categoría (Fase D)
+      const tenantTaxConfigRow = await Tenant.findByPk(tenantId, { attributes: ['tax_config'], transaction });
+      const tenantTaxConfig = tenantTaxConfigRow?.tax_config || {};
+
       for (const item of items) {
         const itemType = item.item_type || 'product';
 
@@ -710,7 +718,7 @@ const update = async (req, res) => {
           return res.status(404).json({ success: false, message: `Producto ${item.product_id} no encontrado` });
         }
 
-        const taxes = taxService.calculateItemTaxes(item, product, 'sale');
+        const taxes = taxService.calculateItemTaxes(item, product, 'sale', tenantTaxConfig);
 
         subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.total_taxes;
         newItems.push({

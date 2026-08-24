@@ -59,6 +59,15 @@ const Tenant = sequelize.define('Tenant', {
     type: DataTypes.JSONB,
     defaultValue: {}
   },
+  // Configuración tributaria del tenant: tarifas de ReteFuente/ReteIVA/ReteICA
+  // e is_autoretenedor. Columna agregada en la migración
+  // 2026070302-add-multi-tax-system.js pero nunca declarada aquí -> Sequelize
+  // ignoraba lecturas y escrituras en silencio (bug raíz del cálculo de
+  // retenciones siempre en 0).
+  tax_config: {
+    type: DataTypes.JSONB,
+    defaultValue: {}
+  },
 
   // Suscripción
   plan: {

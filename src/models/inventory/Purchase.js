@@ -109,6 +109,18 @@ const Purchase = sequelize.define('Purchase', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0
   },
+  // ── Retenciones (Fase C) — columnas ya existían en BD desde
+  // 2026070302-add-multi-tax-system.js pero el modelo no las declaraba
+  // (mismo bug que tax_config/retention_config en Fase A) ──────────────
+  retefuente_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  retefuente_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  reteiva_rate:      { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  reteiva_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  reteica_rate:      { type: DataTypes.DECIMAL(5, 4), defaultValue: 0 },
+  reteica_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  total_retentions:  { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  tax_breakdown:     { type: DataTypes.JSONB, defaultValue: [] },
+  // ───────────────────────────────────────────────────────────────────
   payment_method: {
     type: DataTypes.STRING(50),
     allowNull: true,

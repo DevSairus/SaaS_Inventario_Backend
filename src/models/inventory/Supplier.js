@@ -143,6 +143,16 @@ const Supplier = sequelize.define('Supplier', {
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  // Configuración de retenciones que el tenant aplica a este proveedor al
+  // pagarle (ReteFuente/ReteIVA/ReteICA, is_exento). Columna agregada en la
+  // migración 2026070302-add-multi-tax-system.js pero nunca declarada aquí ->
+  // nunca se guardaba ni se leía. Hoy purchases.controller.js no llama a
+  // taxService (ver Fase C), pero el campo debe existir para cuando se
+  // conecte.
+  retention_config: {
+    type: DataTypes.JSONB,
+    defaultValue: {}
   }
 }, {
   tableName: 'suppliers',

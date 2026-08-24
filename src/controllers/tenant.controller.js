@@ -45,7 +45,8 @@ const getTenantConfig = async (req, res) => {
         'pdf_config',
         'business_config',
         'features',
-        'plan_id'
+        'plan_id',
+        'tax_config'
       ]
     });
 

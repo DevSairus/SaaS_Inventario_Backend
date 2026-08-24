@@ -1,8 +1,9 @@
 const { Purchase, PurchaseItem, Product, Supplier } = require('../../models/inventory');
 const ProductSupplier = require('../../models/inventory/ProductSupplier');
-const { Branch, Warehouse } = require('../../models');
+const { Branch, Warehouse, Tenant } = require('../../models');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
+const taxService = require('../../services/taxService');
 const { createMovement } = require('./movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
@@ -283,6 +284,22 @@ const createPurchase = async (req, res) => {
 
     const total_amount = subtotal + tax_amount - parseFloat(discount_amount) + parseFloat(shipping_cost);
 
+    // Calcular retenciones (Fase C) — el tenant, como comprador, puede
+    // retener a este proveedor en ReteFuente/ReteIVA/ReteICA. No se aplica
+    // si el proveedor está exento, o si el proveedor mismo es autorretenedor
+    // (así el tenant no lo sea) — ver taxService.calculateRetentions.
+    const tenantForRetentions = await Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction: t });
+    const retentions = taxService.calculateRetentions(
+      itemsToCreate,
+      tenantForRetentions?.tax_config || {},
+      supplier.retention_config || {},
+      'purchase'
+    );
+    const tax_breakdown = taxService.buildTaxBreakdown(
+      itemsToCreate.map(i => ({ ...i, tax_percentage: i.tax_rate })),
+      retentions
+    );
+
     // Generar número de compra con lock dentro de la transacción (evita duplicados bajo concurrencia)
     const MAX_RETRIES = 5;
     let purchase;
@@ -312,7 +329,16 @@ const createPurchase = async (req, res) => {
           reference,
           notes,
           internal_notes,
-          warehouse_id
+          warehouse_id,
+          // Retenciones (Fase C)
+          retefuente_rate:   retentions.retefuente.rate,
+          retefuente_amount: retentions.retefuente.amount,
+          reteiva_rate:      retentions.reteiva.rate,
+          reteiva_amount:    retentions.reteiva.amount,
+          reteica_rate:      retentions.reteica.rate,
+          reteica_amount:    retentions.reteica.amount,
+          total_retentions:  retentions.total,
+          tax_breakdown,
         }, { transaction: t });
         break; // éxito
       } catch (uniqueErr) {
@@ -437,6 +463,7 @@ const updatePurchase = async (req, res) => {
 
       let subtotal = 0;
       let tax_amount = 0;
+      const itemsForRetentions = [];
 
       // Crear nuevos items
       for (const [index, item] of items.entries()) {
@@ -462,7 +489,7 @@ const updatePurchase = async (req, res) => {
         subtotal += item_subtotal_after_discount;
         tax_amount += item_tax;
 
-        await PurchaseItem.create({
+        const newItemData = {
           tenant_id,
           purchase_id: id,
           line_number: index + 1,
@@ -480,12 +507,33 @@ const updatePurchase = async (req, res) => {
           subtotal: item_subtotal_after_discount,
           total: item_total,
           notes: item.notes || null
-        }, { transaction: t });
+        };
+
+        await PurchaseItem.create(newItemData, { transaction: t });
+        itemsForRetentions.push(newItemData);
       }
 
       const total_amount = subtotal + tax_amount - 
         parseFloat(discount_amount || 0) + 
         parseFloat(shipping_cost || 0);
+
+      // Retenciones (Fase C) — recalcular con el proveedor efectivo (puede
+      // venir cambiado en el mismo request) y su retention_config vigente.
+      const effectiveSupplierId = supplier_id ?? purchase.supplier_id;
+      const [supplierForRetentions, tenantForRetentions] = await Promise.all([
+        Supplier.findOne({ where: { id: effectiveSupplierId, tenant_id }, transaction: t }),
+        Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction: t }),
+      ]);
+      const retentions = taxService.calculateRetentions(
+        itemsForRetentions,
+        tenantForRetentions?.tax_config || {},
+        supplierForRetentions?.retention_config || {},
+        'purchase'
+      );
+      const tax_breakdown = taxService.buildTaxBreakdown(
+        itemsForRetentions.map(i => ({ ...i, tax_percentage: i.tax_rate })),
+        retentions
+      );
 
       await purchase.update({
         supplier_id:              supplier_id              ?? purchase.supplier_id,
@@ -504,9 +552,49 @@ const updatePurchase = async (req, res) => {
         notes:                    notes                    !== undefined ? (notes           || null) : purchase.notes,
         internal_notes:           internal_notes           !== undefined ? (internal_notes  || null) : purchase.internal_notes,
         warehouse_id:             warehouse_id             ?? purchase.warehouse_id,
+        // Retenciones (Fase C)
+        retefuente_rate:   retentions.retefuente.rate,
+        retefuente_amount: retentions.retefuente.amount,
+        reteiva_rate:      retentions.reteiva.rate,
+        reteiva_amount:    retentions.reteiva.amount,
+        reteica_rate:      retentions.reteica.rate,
+        reteica_amount:    retentions.reteica.amount,
+        total_retentions:  retentions.total,
+        tax_breakdown,
       }, { transaction: t });
     } else {
-      // Solo actualizar campos de la compra
+      // Solo actualizar campos de la compra. Si cambia el proveedor sin
+      // reenviar items, igual recalculamos retenciones sobre los items
+      // existentes: el proveedor nuevo puede tener otro retention_config
+      // (exento / autorretenedor / tarifas) que el anterior.
+      let retentionFields = {};
+      if (supplier_id && supplier_id !== purchase.supplier_id) {
+        const [supplierForRetentions, tenantForRetentions] = await Promise.all([
+          Supplier.findOne({ where: { id: supplier_id, tenant_id }, transaction: t }),
+          Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction: t }),
+        ]);
+        const existingItems = purchase.items || [];
+        const retentions = taxService.calculateRetentions(
+          existingItems,
+          tenantForRetentions?.tax_config || {},
+          supplierForRetentions?.retention_config || {},
+          'purchase'
+        );
+        retentionFields = {
+          retefuente_rate:   retentions.retefuente.rate,
+          retefuente_amount: retentions.retefuente.amount,
+          reteiva_rate:      retentions.reteiva.rate,
+          reteiva_amount:    retentions.reteiva.amount,
+          reteica_rate:      retentions.reteica.rate,
+          reteica_amount:    retentions.reteica.amount,
+          total_retentions:  retentions.total,
+          tax_breakdown: taxService.buildTaxBreakdown(
+            existingItems.map(i => ({ ...(i.toJSON ? i.toJSON() : i), tax_percentage: i.tax_rate })),
+            retentions
+          ),
+        };
+      }
+
       await purchase.update({
         supplier_id:            supplier_id            ?? purchase.supplier_id,
         purchase_date:          purchase_date          ?? purchase.purchase_date,
@@ -521,6 +609,7 @@ const updatePurchase = async (req, res) => {
         notes:                  notes                  !== undefined ? (notes           || null) : purchase.notes,
         internal_notes:         internal_notes         !== undefined ? (internal_notes  || null) : purchase.internal_notes,
         warehouse_id:           warehouse_id           ?? purchase.warehouse_id,
+        ...retentionFields,
       }, { transaction: t });
     }
 
