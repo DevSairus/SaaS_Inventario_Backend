@@ -1,6 +1,7 @@
 const { RemoteSupportSession, SupportTicket, User, Tenant } = require('../../models');
 const { Op } = require('sequelize');
 const logger = require('../../config/logger');
+const { emitSessionPending } = require('../../services/remoteSupportSignaling');
 
 // POST /api/superadmin/support/tickets/:id/remote-session — solicitar sesión
 const createSession = async (req, res) => {
@@ -60,6 +61,22 @@ const createSession = async (req, res) => {
     });
 
     logger.info(`[REMOTE] Sesión ${session.id} creada por agente ${agent_id} para ticket ${ticket_id}, usuario destino: ${targetUserId}`);
+
+    // Avisar al usuario destino por socket en vez de que su cliente tenga
+    // que hacer polling — ver RemoteSessionNotifier.jsx / remoteSupportSignaling.js.
+    // Se recarga con los includes que RemoteConsentModal necesita (agent,
+    // ticket) porque `session` recién creado no los trae.
+    try {
+      const sessionForClient = await RemoteSupportSession.findByPk(session.id, {
+        include: [
+          { model: User, as: 'agent', attributes: ['id', 'first_name', 'last_name'] },
+          { model: SupportTicket, as: 'ticket', attributes: ['id', 'subject'] },
+        ],
+      });
+      emitSessionPending(targetUserId, sessionForClient);
+    } catch (emitError) {
+      logger.error('Error emitiendo session:pending:', emitError.message);
+    }
 
     res.status(201).json({
       success: true,

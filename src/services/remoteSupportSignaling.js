@@ -1,4 +1,6 @@
-module.exports = function initRemoteSupportSignaling(io) {
+let remoteNsp = null;
+
+function initRemoteSupportSignaling(io) {
   const nsp = io.of('/support-remote');
 
   const closeSession = async (sessionId) => {
@@ -24,6 +26,13 @@ module.exports = function initRemoteSupportSignaling(io) {
 
   nsp.on('connection', (socket) => {
     console.log(`[WS] Conectado: ${socket.user?.id}`);
+
+    // Room por usuario — permite empujarle 'session:pending' apenas el
+    // agente crea una sesión, sin que el cliente tenga que hacer polling
+    // para enterarse (antes: checkPending cada 8s en RemoteSessionNotifier).
+    if (socket.user?.id) {
+      socket.join(`user:${socket.user.id}`);
+    }
 
     socket.on('session:join', ({ sessionId }) => {
       socket.join(`session:${sessionId}`);
@@ -74,5 +83,20 @@ module.exports = function initRemoteSupportSignaling(io) {
     });
   });
 
+  remoteNsp = nsp;
   console.log('[WS] /support-remote registrado');
-};
+}
+
+// Empuja la sesión pendiente al usuario destino apenas el agente la crea.
+// Reemplaza el polling de 8s que tenía RemoteSessionNotifier: en vez de que
+// el cliente pregunte "¿hay algo pendiente?" todo el día, el backend avisa
+// una sola vez, en el momento exacto en que hay algo que avisar.
+function emitSessionPending(userId, sessionData) {
+  if (!remoteNsp) { console.warn('[REMOTE-WS] remoteNsp is null, skipping emit'); return; }
+  remoteNsp.to(`user:${userId}`).emit('session:pending', sessionData);
+  console.log(`[REMOTE-WS] Emitted session:pending to user:${userId}`);
+}
+
+module.exports = initRemoteSupportSignaling;
+module.exports.initRemoteSupportSignaling = initRemoteSupportSignaling;
+module.exports.emitSessionPending = emitSessionPending;

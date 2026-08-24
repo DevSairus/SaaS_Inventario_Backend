@@ -135,6 +135,7 @@ const warehousesRoutes              = require('./routes/inventory/warehouses.rou
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
 const payableAlertsRoutes           = require('./routes/payableAlerts.routes');
+const notificationsBundleRoutes     = require('./routes/notificationsBundle.routes');
 const superadminRoutes              = require('./routes/superadmin.routes');
 const salesRoutes                   = require('./routes/sales.routes');
 const customersRoutes               = require('./routes/customers.routes');
@@ -253,6 +254,7 @@ app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware,
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
 app.use('/api/payable-alerts',                 authMiddleware, tenantMiddleware, payableAlertsRoutes);
+app.use('/api/notifications',                  authMiddleware, tenantMiddleware, branchMiddleware, notificationsBundleRoutes);
 app.use('/api/dashboard',                      authMiddleware, tenantMiddleware, dashboardRoutes);
 
 // Estas rutas específicas ANTES de /api/sales para evitar conflicto con /:id

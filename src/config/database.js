@@ -89,9 +89,12 @@ if (DATABASE_URL) {
     // así que no tiene sentido limitar a 2 conexiones compartidas por todos
     // los requests + el propio scheduler). Ajustar `max` según el límite de
     // conexiones que permita el plan de Neon (revisar antes de subir más).
+    // `min: 10` mantiene conexiones vivas contra Neon incluso en horas de
+    // tráfico bajo (madrugada) para evitar el handshake TLS repetido que
+    // ocurría con `min: 0` + `idle: 10000` (ver analisis-consumo-neon.md).
     pool: {
       max: 15,
-      min: 0,
+      min: 10,
       acquire: 15000,
       idle: 10000
     },
