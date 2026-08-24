@@ -214,6 +214,7 @@ const consultarVehiculo = async (req, res) => {
       plate: v.placa, brand: toTitle(v.marca), model: toTitle(v.linea),
       year: v.modelo ? parseInt(v.modelo) : null, color: toTitle(v.color),
       vin: v.vin || v.numSerie || null, engine_number: v.numMotor || null,
+      engine: v.cilindraje ? `${v.cilindraje}cc` : null,
       fuel_type: FUEL_MAP[v.tipoCombustible?.toUpperCase()] || 'gasolina',
       vehicle_type: VEHICLE_TYPE_MAP[v.clase?.toUpperCase()] || 'automovil',
       soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
