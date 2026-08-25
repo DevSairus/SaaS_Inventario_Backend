@@ -87,11 +87,21 @@ const getAllProducts = async (req, res) => {
       whereClause.tenant_id = req.user.tenant_id;
     }
     if (search) {
-      whereClause[Op.or] = [
-        { name: { [Op.iLike]: `%${search}%` } },
-        { sku: { [Op.iLike]: `%${search}%` } },
-        { barcode: { [Op.iLike]: `%${search}%` } },
-        { description: { [Op.iLike]: `%${search}%` } }
+      // Búsqueda por múltiples palabras: cada palabra debe aparecer en
+      // alguno de los campos (AND de ORs), no la frase completa como una
+      // sola subcadena -- así "filtro aceite" encuentra "Filtro de aceite
+      // Mann" y también funciona con el orden invertido ("aceite filtro").
+      const searchWords = search.trim().split(/\s+/).filter(Boolean);
+      whereClause[Op.and] = [
+        ...(whereClause[Op.and] || []),
+        ...searchWords.map(word => ({
+          [Op.or]: [
+            { name: { [Op.iLike]: `%${word}%` } },
+            { sku: { [Op.iLike]: `%${word}%` } },
+            { barcode: { [Op.iLike]: `%${word}%` } },
+            { description: { [Op.iLike]: `%${word}%` } }
+          ]
+        }))
       ];
     }
     if (category_id) whereClause.category_id = category_id;

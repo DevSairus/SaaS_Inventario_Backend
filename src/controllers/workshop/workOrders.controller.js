@@ -198,7 +198,31 @@ const list = async (req, res) => {
       subQuery: false,
     });
 
-    res.json({ success: true, data: rows, total: count, page: parseInt(page), pages: Math.ceil(count / limit) });
+    // Total pendiente de aprobación por OT, para informar en el listado (ver
+    // WorkOrderDetailPage.jsx/WorkOrderPublicPage.jsx, mismo criterio: no
+    // está incluido en total_amount porque calcTotals solo suma ítems
+    // 'aprobado'). Se trae aparte con una query liviana agrupada, en vez de
+    // un include hasMany en la query de arriba -- eso multiplicaría filas
+    // por cada ítem y rompería el LIMIT/OFFSET (subQuery: false ya hace el
+    // paginado a nivel de fila plana, no de OT distinta).
+    const orderIds = rows.map(o => o.id);
+    let pendingByOrder = {};
+    if (orderIds.length > 0) {
+      const pendingRows = await WorkOrderItem.findAll({
+        attributes: ['work_order_id', [sequelize.fn('SUM', sequelize.col('total')), 'pending_total']],
+        where: { tenant_id, work_order_id: { [Op.in]: orderIds }, approval_status: 'pendiente' },
+        group: ['work_order_id'],
+        raw: true,
+      });
+      pendingByOrder = Object.fromEntries(pendingRows.map(r => [r.work_order_id, parseFloat(r.pending_total || 0)]));
+    }
+
+    const data = rows.map(order => ({
+      ...order.toJSON(),
+      pending_items_total: pendingByOrder[order.id] || 0,
+    }));
+
+    res.json({ success: true, data, total: count, page: parseInt(page), pages: Math.ceil(count / limit) });
   } catch (error) {
     logger.error('Error listando OTs:', error);
     res.status(500).json({ success: false, message: 'Error al obtener órdenes de trabajo' });
@@ -2382,6 +2406,13 @@ const getReport = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
     const { date_from, date_to, format = 'json' } = req.query;
+    // Igual criterio que WorkOrderDetailPage.jsx/WorkOrderPublicPage.jsx/el
+    // listado de OT: lo pendiente de aprobación del cliente NO está incluido
+    // en total_amount (calcTotals solo suma ítems 'aprobado'). Acá se deja
+    // como toggle explícito porque el reporte se usa para análisis
+    // financiero -- mezclar cotizaciones sin aprobar en ingresos/márgenes
+    // reales sería engañoso si no es intencional.
+    const includePending = ['true', '1'].includes(String(req.query.include_pending).toLowerCase());
 
     const where = { tenant_id };
     if (date_from || date_to) {
@@ -2408,12 +2439,28 @@ const getReport = async (req, res) => {
     const { pct, settledMap } = await getLaborCostByWorkOrderIds(tenant_id, orders.map(o => o.id));
 
     const rows = orders.map(o => {
-      const laborTotal  = (o.items || []).filter(i => ['servicio','mano_obra'].includes(i.item_type)).reduce((s, i) => s + parseFloat(i.total || 0), 0);
-      const partsTotal  = (o.items || []).filter(i => i.item_type === 'repuesto').reduce((s, i) => s + parseFloat(i.total || 0), 0);
-      const partsCost   = (o.items || []).filter(i => i.item_type === 'repuesto')
+      const allItems     = o.items || [];
+      const approvedItems = allItems.filter(i => (i.approval_status || 'aprobado') === 'aprobado');
+      const pendingItems  = allItems.filter(i => i.approval_status === 'pendiente');
+      // Antes esto sumaba SIEMPRE de allItems sin filtrar por
+      // approval_status -- labor_total/parts_total quedaban inflados con
+      // cotizaciones sin aprobar mientras total_amount (que sale de
+      // calcTotals en el backend, solo ítems 'aprobado') no. Ahora ambos
+      // lados usan el mismo criterio, gobernado por el toggle.
+      const relevantItems = includePending ? allItems : approvedItems;
+      const laborTotal  = relevantItems.filter(i => ['servicio','mano_obra'].includes(i.item_type)).reduce((s, i) => s + parseFloat(i.total || 0), 0);
+      const partsTotal  = relevantItems.filter(i => i.item_type === 'repuesto').reduce((s, i) => s + parseFloat(i.total || 0), 0);
+      const partsCost   = relevantItems.filter(i => i.item_type === 'repuesto')
         .reduce((s, i) => s + parseFloat(i.quantity || 0) * parseFloat(i.product?.average_cost || 0), 0);
       const { labor_cost: laborCost, is_real: laborCostIsReal } = resolveLaborCost(o.id, laborTotal, settledMap, pct);
-      const totalAmount = parseFloat(o.total_amount || 0);
+      // pendingAmount es informativo y siempre se calcula (independiente del
+      // toggle) para poder mostrarlo en el reporte aunque no se esté
+      // incluyendo en los totales -- mismo patrón que pending_items_total
+      // del listado de OT.
+      const pendingAmount = pendingItems.reduce((s, i) => s + parseFloat(i.total || 0), 0);
+      const totalAmount = includePending
+        ? parseFloat(o.total_amount || 0) + pendingAmount
+        : parseFloat(o.total_amount || 0);
       const netMargin   = totalAmount - partsCost - laborCost;
 
       const customerName = o.customer ? (o.customer.business_name || `${o.customer.first_name} ${o.customer.last_name}`) : 'Sin cliente';
@@ -2434,6 +2481,7 @@ const getReport = async (req, res) => {
         labor_total:       laborTotal,
         parts_total:       partsTotal,
         total_amount:      totalAmount,
+        pending_amount:    pendingAmount,
         parts_cost:        partsCost,
         labor_cost:        laborCost,
         labor_cost_is_real: laborCostIsReal,
@@ -2452,6 +2500,8 @@ const getReport = async (req, res) => {
       total_labor:        rows.reduce((s, r) => s + r.labor_total, 0),
       total_parts:        rows.reduce((s, r) => s + r.parts_total, 0),
       total_revenue:      rows.reduce((s, r) => s + r.total_amount, 0),
+      total_pending:      rows.reduce((s, r) => s + r.pending_amount, 0),
+      orders_with_pending: rows.filter(r => r.pending_amount > 0).length,
       total_parts_cost:   rows.reduce((s, r) => s + r.parts_cost, 0),
       total_labor_cost:   rows.reduce((s, r) => s + r.labor_cost, 0),
       total_net_margin:   rows.reduce((s, r) => s + r.net_margin, 0),
@@ -2467,7 +2517,7 @@ const getReport = async (req, res) => {
       })(),
     };
 
-    res.json({ success: true, data: rows, summary, period: { date_from, date_to } });
+    res.json({ success: true, data: rows, summary, period: { date_from, date_to }, include_pending: includePending });
   } catch (error) {
     logger.error('Error en reporte taller:', error);
     res.status(500).json({ success: false, message: 'Error al generar reporte del taller' });
@@ -2651,8 +2701,15 @@ async function getPublicOrderBody(orderId, res) {
 
     // Buscar datos del taller (tenant) para mostrar nombre y contacto
     const tenant = await Tenant.findByPk(order.tenant_id, {
-      attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color'],
+      attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color', 'features'],
     });
+    // Config independiente de la de remisiones/facturas de ventas — oculto
+    // por defecto salvo que se desactive explícitamente
+    // (features.hide_workorder_tax === false). Antes usaba hide_remision_tax,
+    // compartido con SaleFormPage/SaleDetailPage/pdfService, lo que causaba
+    // que activar/desactivar IVA en remisiones de ventas afectara también las
+    // OT sin querer. Se separó a su propia llave.
+    const hideWorkOrderTax = tenant?.features?.hide_workorder_tax !== false;
 
     // checklist_in (inventario de ingreso + nivel de combustible) es una
     // columna JSONB agregada post-creación -- Sequelize la omite del modelo,
@@ -2678,7 +2735,12 @@ async function getPublicOrderBody(orderId, res) {
       delivered_at: order.delivered_at,
       subtotal: order.subtotal,
       tax_amount: order.tax_amount,
+      discount_amount: order.discount_amount,
       total_amount: order.total_amount,
+      // Mismo criterio que en la vista interna de la OT: si el taller oculta
+      // el IVA discriminado para órdenes de trabajo, la vista pública
+      // tampoco lo desglosa (solo total).
+      hide_workorder_tax: hideWorkOrderTax,
       photos_in: order.photos_in || [],
       photos_out: order.photos_out || [],
       checklist_in: checklistIn,

@@ -685,12 +685,21 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
     const paid = parseFloat(order.paid_amount || 0);
     const bal  = tot - paid;
 
+    // Config propia de la OT (independiente de hide_remision_tax, que solo
+    // aplica a remisiones/facturas de Ventas — ver pdfService.js). Oculto
+    // por defecto salvo que se desactive explícitamente
+    // (features.hide_workorder_tax === false), igual criterio que
+    // WorkOrderDetailPage.jsx y la vista pública de la OT.
+    const hideWorkOrderTax = tenant?.features?.hide_workorder_tax !== false;
+
     // El IVA solo se muestra si el tenant/los ítems realmente lo generaron
     // (tax_amount > 0) — si el taller no es responsable de IVA o todos los
-    // ítems son exentos, la fila desaparece, no se muestra "$0".
+    // ítems son exentos, la fila desaparece, no se muestra "$0". Si
+    // hideWorkOrderTax está activo, Subtotal/IVA no se discriminan en
+    // absoluto (el Total ya los incluye).
     const totRows = [
-      sub  > 0 ? ['Subtotal',        COP(sub),  C.dark,   false] : null,
-      tax  > 0 ? ['IVA',             COP(tax),  C.dark,   false] : null,
+      (!hideWorkOrderTax && sub > 0) ? ['Subtotal',        COP(sub),  C.dark,   false] : null,
+      (!hideWorkOrderTax && tax > 0) ? ['IVA',             COP(tax),  C.dark,   false] : null,
       disc > 0 ? ['Descuento',       `- ${COP(disc)}`, C.orange, false] : null,
                  ['Total a pagar',   COP(tot),  C.primary, true],
       paid > 0 ? ['Pagado',          COP(paid), C.green,  false] : null,
