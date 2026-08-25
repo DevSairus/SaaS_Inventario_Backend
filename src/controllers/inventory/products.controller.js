@@ -86,6 +86,19 @@ const getAllProducts = async (req, res) => {
       if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado. Por favor contacte a soporte.' });
       whereClause.tenant_id = req.user.tenant_id;
     }
+    // ── Relevancia de búsqueda ──────────────────────────────────────────────
+    // Cuando hay término de búsqueda, el ORDER BY normal (name ASC) puede
+    // enterrar el resultado que el usuario realmente busca al final del
+    // listado -- y como hay LIMIT, ni siquiera llega a mostrarse. El score
+    // se calcula POR PALABRA (igual que el WHERE de abajo, que también es
+    // por palabra y no exige que estén juntas ni en orden) y se suman los
+    // puntajes: coincidencia como palabra completa en `name` pesa más que
+    // una coincidencia parcial, que a su vez pesa más que un match solo en
+    // sku/barcode/description. Así "tijera mazda" prioriza "TIJERA SUP IZQ
+    // MAZDA 6" (tiene ambas palabras completas en el nombre, aunque no
+    // estén juntas) por encima de "BUJE TIJERA MAZDA 626" (palabras juntas
+    // pero el nombre no empieza con lo buscado).
+    let relevanceOrderLiteral = null;
     if (search) {
       // Búsqueda por múltiples palabras: cada palabra debe aparecer en
       // alguno de los campos (AND de ORs), no la frase completa como una
@@ -103,6 +116,32 @@ const getAllProducts = async (req, res) => {
           ]
         }))
       ];
+
+      // Escapes para insertar de forma segura en el literal SQL / regex POSIX.
+      // Se escapan primero los metacaracteres de regex y luego las comillas.
+      const escapeRegexPg = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const escapeSqlLiteral = (s) => s.replace(/'/g, "''");
+
+      const perWordScores = searchWords.map(word => {
+        const wRegex = escapeSqlLiteral(escapeRegexPg(word));
+        const wLike = escapeSqlLiteral(word);
+        return `CASE
+          WHEN "Product"."name" ~* '\\m${wRegex}\\M' THEN 0
+          WHEN "Product"."name" ILIKE '%${wLike}%' THEN 2
+          WHEN "Product"."sku" ILIKE '${wLike}' OR "Product"."barcode" ILIKE '${wLike}' THEN 3
+          WHEN "Product"."sku" ILIKE '%${wLike}%' OR "Product"."barcode" ILIKE '%${wLike}%' THEN 4
+          ELSE 5
+        END`;
+      });
+
+      const fullTerm  = escapeSqlLiteral(search.trim());
+      const firstWord = escapeSqlLiteral(searchWords[0] || '');
+
+      relevanceOrderLiteral = sequelize.literal(`(
+        (${perWordScores.join(' + ')})
+        + CASE WHEN "Product"."name" ILIKE '${fullTerm}' THEN -100 ELSE 0 END
+        + CASE WHEN "Product"."name" ILIKE '${firstWord}%' THEN -1 ELSE 0 END
+      )`);
     }
     if (category_id) whereClause.category_id = category_id;
     if (is_active !== '') whereClause.is_active = is_active === 'true';
@@ -189,12 +228,22 @@ const getAllProducts = async (req, res) => {
       }
     }
 
+    // Si el usuario pidió explícitamente otro orden (sort_by distinto del
+    // default), respetarlo tal cual -- la relevancia solo aplica cuando se
+    // está usando el orden por defecto (name ASC), que es el caso del
+    // buscador de referencias en ventas/OT.
+    const isDefaultSort = sort_by === 'name' && (sort_order || '').toUpperCase() !== 'DESC';
+    const orderClause = (relevanceOrderLiteral && isDefaultSort)
+      ? [[relevanceOrderLiteral, 'ASC'], [safeSortBy, safeSortOrder]]
+      : [[safeSortBy, safeSortOrder]];
+
     const { count, rows } = await Product.findAndCountAll({
       where: whereClause,
       include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }],
       limit: safeLimit,
       offset: offset,
-      order: [[safeSortBy, safeSortOrder]]
+      order: orderClause,
+      subQuery: false
     });
 
     // Si hay filtro vehicular, anotar qué productos tienen aplicación confirmada
