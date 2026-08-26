@@ -23,12 +23,19 @@ const list = async (req, res) => {
 const create = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { name, channel, body } = req.body;
+    const { name, channel, body, meta_template_name, meta_language } = req.body;
     if (!name || !body) {
       return res.status(400).json({ success: false, message: 'name y body son requeridos' });
     }
 
-    const template = await CrmMessageTemplate.create({ tenant_id, name, channel: channel || 'whatsapp', body });
+    const template = await CrmMessageTemplate.create({
+      tenant_id,
+      name,
+      channel: channel || 'whatsapp',
+      body,
+      meta_template_name: meta_template_name || null,
+      meta_language: meta_language || 'es',
+    });
     res.status(201).json({ success: true, message: 'Plantilla creada', data: template });
   } catch (error) {
     logger.error('Error creando plantilla de mensaje:', error);
@@ -39,7 +46,7 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { name, channel, body } = req.body;
+    const { name, channel, body, meta_template_name, meta_language } = req.body;
 
     const template = await CrmMessageTemplate.findOne({ where: { id: req.params.id, tenant_id } });
     if (!template) return res.status(404).json({ success: false, message: 'Plantilla no encontrada' });
@@ -48,6 +55,8 @@ const update = async (req, res) => {
     if (name !== undefined) updateData.name = name;
     if (channel !== undefined) updateData.channel = channel;
     if (body !== undefined) updateData.body = body;
+    if (meta_template_name !== undefined) updateData.meta_template_name = meta_template_name;
+    if (meta_language !== undefined) updateData.meta_language = meta_language;
 
     await template.update(updateData);
     res.json({ success: true, message: 'Plantilla actualizada', data: template });

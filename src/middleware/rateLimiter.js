@@ -268,6 +268,53 @@ const aiChatLimiter = rateLimit({
 });
 
 /**
+ * Rate limiter para envíos salientes de WhatsApp (plantillas, texto libre,
+ * respuestas del inbox, inicio de campañas).
+ *
+ * 40 envíos por minuto POR TENANT (no por IP -- varios asesores del mismo
+ * negocio pueden compartir IP de oficina, y a la inversa, un tenant grande
+ * puede tener asesores en distintas IPs). Antes estos endpoints solo caían
+ * bajo generalLimiter (500 req/15min por IP, compartido con TODA la API) --
+ * eso no frena nada específico de WhatsApp: un bug de reintento en el
+ * frontend, un script de un tercero con las credenciales de un asesor, o un
+ * bucle en una automatización podían disparar cientos de mensajes en
+ * segundos.
+ *
+ * Por qué importa puntualmente para WhatsApp (y no solo "costo de API"):
+ * Meta mide la calidad del número (quality rating) y el volumen permitido
+ * en 24h (messaging tier: 250/1K/10K/100K conversaciones) a nivel de
+ * phone_number_id -- un pico de envíos mal dirigidos puede degradar la
+ * calificación del número o, en casos extremos, hacer que Meta lo
+ * restrinja. 40/min = 2400/hora es generoso para uso humano normal de un
+ * inbox pero corta en segundos un bucle descontrolado.
+ */
+const waSendLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.tenant_id?.toString() || req.user?.id?.toString() || ipKeyGenerator(req),
+  message: {
+    success: false,
+    message: 'Demasiados mensajes de WhatsApp enviados en poco tiempo. Espera un minuto e intenta de nuevo',
+  },
+
+  handler: (req, res) => {
+    logger.warn('WhatsApp send rate limit exceeded', {
+      tenant: req.tenant_id,
+      user: req.user?.id,
+      path: req.path,
+    });
+
+    res.status(429).json({
+      success: false,
+      message: 'Demasiados mensajes de WhatsApp enviados en poco tiempo. Espera un minuto e intenta de nuevo',
+      retryAfter: 1,
+    });
+  },
+});
+
+/**
  * Rate limiter flexible basado en rol del usuario
  * Los admin tienen límites más altos
  */
@@ -330,4 +377,5 @@ module.exports = {
   createRoleBasedLimiter,
   aiChatLimiter,
   quoteResponseLimiter,
+  waSendLimiter,
 };

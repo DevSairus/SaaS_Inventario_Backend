@@ -67,6 +67,11 @@ const User = sequelize.define('User', {
     type: DataTypes.DATE,
     allowNull: true
   },
+  wa_workspace_prefs: {
+    type: DataTypes.JSONB,
+    allowNull: true,
+    comment: 'Toggles visuales del workspace WhatsApp (funciones plus del asesor)',
+  },
   created_at: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW

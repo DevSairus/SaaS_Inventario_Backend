@@ -9,6 +9,7 @@ const jwt = require('jsonwebtoken');
 const logger = require('../../config/logger') || console;
 const { TenantMetaConfig } = require('../../models');
 const metaClient = require('../../services/meta/metaClient');
+const { encryptToken } = require('../../utils/metaTokenCrypto');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -32,10 +33,15 @@ const getStatus = async (req, res) => {
         is_active: config.is_active,
         own_page_name: config.own_page_name || null,
         own_page_id: config.own_page_id || null,
+        own_waba_id: config.own_waba_id || null,
+        own_phone_number_id: config.own_phone_number_id || null,
+        own_display_phone: config.own_display_phone || null,
+        wa_coexistence: !!config.wa_coexistence,
         has_own_token: !!config.own_access_token,
         pitbox_lead_form_count: (config.pitbox_lead_form_ids || []).length,
         connected_at: config.connected_at,
         last_lead_at: config.last_lead_at,
+        last_wa_message_at: config.last_wa_message_at,
         last_error: config.last_error,
       },
     });
@@ -113,7 +119,7 @@ const handleOwnCallback = async (req, res) => {
       is_active: true,
       own_page_id: page.id,
       own_page_name: page.name,
-      own_access_token: page.access_token || userToken,
+      own_access_token: encryptToken(page.access_token || userToken),
       own_token_expires_at: expires_in ? new Date(Date.now() + expires_in * 1000) : null,
       connected_at: new Date(),
       disconnected_at: null,
@@ -167,7 +173,11 @@ const disconnect = async (req, res) => {
       own_page_name: null,
       own_waba_id: null,
       own_phone_number_id: null,
+      own_display_phone: null,
       own_token_expires_at: null,
+      wa_coexistence: false,
+      last_wa_message_at: null,
+      wa_history_synced_at: null,
       pitbox_lead_form_ids: [],
       disconnected_at: new Date(),
     });

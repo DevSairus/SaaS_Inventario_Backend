@@ -31,6 +31,16 @@ const CrmMessageTemplate = sequelize.define('CrmMessageTemplate', {
     type: DataTypes.TEXT,
     allowNull: false,
   },
+  meta_template_name: {
+    type: DataTypes.STRING(128),
+    allowNull: true,
+    comment: 'Nombre de plantilla aprobada en Meta Cloud API (si aplica)',
+  },
+  meta_language: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    defaultValue: 'es',
+  },
 }, {
   tableName: 'crm_message_templates',
   timestamps: true,

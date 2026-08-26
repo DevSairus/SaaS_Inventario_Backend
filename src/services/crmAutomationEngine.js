@@ -88,16 +88,46 @@ async function actionAssignRoundRobin({ tenant_id, opportunity, rule }) {
   return nextUserId;
 }
 
+async function actionSendWhatsAppTemplate({ tenant_id, opportunity, actionConfig }) {
+  const { Customer } = require('../models');
+  const waCloud = require('./whatsappCloud.service');
+
+  const templateName = actionConfig?.template_name;
+  if (!templateName) return null;
+
+  const customer = await Customer.findOne({
+    where: { id: opportunity.customer_id, tenant_id },
+  });
+  const phone = customer?.phone || customer?.mobile || null;
+  if (!phone) return null;
+
+  try {
+    return await waCloud.sendTemplateFromTenant({
+      tenantId: tenant_id,
+      to: phone,
+      templateName,
+      language: actionConfig?.language || 'es',
+      components: actionConfig?.components || [],
+      source: 'automation',
+    });
+  } catch (err) {
+    // No tumbar el resto de reglas si WA no está conectado
+    const logger = require('../config/logger') || console;
+    logger.warn(`[Automation] send_whatsapp_template falló: ${err.message}`);
+    return null;
+  }
+}
+
 async function executeAction(rule, tenant_id, opportunity) {
   if (rule.action_type === 'create_task') {
     return actionCreateTask({ tenant_id, opportunity, actionConfig: rule.action_config });
   }
   if (rule.action_type === 'assign_round_robin') {
     const assignedId = await actionAssignRoundRobin({ tenant_id, opportunity, rule });
-    // Si además hay reglas de sondeo mirando esta oportunidad recién
-    // asignada en la misma corrida, no aplica acá — el sondeo corre en su
-    // propia pasada y ya verá owner_user_id actualizado.
     return assignedId;
+  }
+  if (rule.action_type === 'send_whatsapp_template') {
+    return actionSendWhatsAppTemplate({ tenant_id, opportunity, actionConfig: rule.action_config });
   }
   return null;
 }

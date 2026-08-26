@@ -23,8 +23,9 @@
 //   opportunity_created: { source? }                  // source opcional filtra por canal
 //
 // action_type / action_config (JSON):
-//   'create_task'        → { title, due_in_hours, assign_to: 'owner'|'creator' }
-//   'assign_round_robin'  → {}  (usa vendedores activos del tenant/sede)
+//   'create_task'             → { title, due_in_hours, assign_to: 'owner'|'creator' }
+//   'assign_round_robin'      → {}  (usa vendedores activos del tenant/sede)
+//   'send_whatsapp_template'  → { template_name, language?, phone_from?: 'customer' }
 //
 // Las reglas de sondeo (unattended_lead/stage_stale) usan CrmAutomationRuleLog
 // para no re-disparar la misma acción sobre la misma oportunidad mientras
@@ -63,7 +64,7 @@ const CrmAutomationRule = sequelize.define('CrmAutomationRule', {
     defaultValue: {},
   },
   action_type: {
-    type: DataTypes.ENUM('create_task', 'assign_round_robin'),
+    type: DataTypes.ENUM('create_task', 'assign_round_robin', 'send_whatsapp_template'),
     allowNull: false,
   },
   action_config: {

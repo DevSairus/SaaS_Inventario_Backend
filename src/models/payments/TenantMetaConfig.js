@@ -46,17 +46,27 @@ const TenantMetaConfig = sequelize.define(
     },
 
     // ── Modo "own" -- credenciales OAuth propias del tenant ────────────────
-    own_app_id: { type: DataTypes.STRING(100), allowNull: true },
-    own_page_id: { type: DataTypes.STRING(100), allowNull: true },
-    own_page_name: { type: DataTypes.STRING(255), allowNull: true },
-    own_waba_id: { type: DataTypes.STRING(100), allowNull: true },
-    own_phone_number_id: { type: DataTypes.STRING(100), allowNull: true },
-    own_access_token: {
+    own_app_id: { type: DataTypes.STRING(100), allowNull: true }, // id de la aplicación
+    own_page_id: { type: DataTypes.STRING(100), allowNull: true }, // id de la página
+    own_page_name: { type: DataTypes.STRING(255), allowNull: true }, // nombre de la página
+    own_waba_id: { type: DataTypes.STRING(100), allowNull: true }, // id de la WABA
+    own_phone_number_id: { type: DataTypes.STRING(100), allowNull: true }, // id del número de teléfono
+    own_display_phone: { type: DataTypes.STRING(32), allowNull: true }, // número de teléfono visible
+    own_access_token: { // token de acceso
       type: DataTypes.TEXT,
       allowNull: true,
-      comment: 'Token de larga duración (page access token) obtenido en el intercambio OAuth -- Meta lo vence ~60 días, ver own_token_expires_at',
+      comment: 'Token cifrado (enc:v1:...) de larga duración — Meta / Embedded Signup',
     },
     own_token_expires_at: { type: DataTypes.DATE, allowNull: true },
+  wa_coexistence: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  last_wa_message_at: { type: DataTypes.DATE, allowNull: true },
+  wa_history_synced_at: { type: DataTypes.DATE, allowNull: true },
+  wa_demo_mode: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    comment: 'Inbox simulable sin Meta (demo comercial / Empresa de Pruebas)',
+  },
 
     // ── Modo "pitbox" -- mapeo dentro del App/página compartida ────────────
     pitbox_lead_form_ids: {

@@ -2012,6 +2012,7 @@ router.get(
           has_webhook_verify_token: !!config.webhook_verify_token,
           shared_page_id: config.shared_page_id || null,
           shared_waba_id: config.shared_waba_id || null,
+          embedded_signup_config_id: config.embedded_signup_config_id || null,
           has_shared_system_user_token: !!config.shared_system_user_token,
           is_active: config.is_active,
           last_test_at: config.last_test_at,
@@ -2038,7 +2039,7 @@ router.post(
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
     try {
-      const { app_id, app_secret, webhook_verify_token, shared_page_id, shared_waba_id, shared_system_user_token, is_active } = req.body;
+      const { app_id, app_secret, webhook_verify_token, shared_page_id, shared_waba_id, embedded_signup_config_id, shared_system_user_token, is_active } = req.body;
 
       const MetaConfig = require('../models/payments/MetaConfig');
       let config = await MetaConfig.findOne();
@@ -2049,6 +2050,7 @@ router.post(
       if (webhook_verify_token) updates.webhook_verify_token = webhook_verify_token;
       if (shared_page_id !== undefined) updates.shared_page_id = shared_page_id;
       if (shared_waba_id !== undefined) updates.shared_waba_id = shared_waba_id;
+      if (embedded_signup_config_id !== undefined) updates.embedded_signup_config_id = embedded_signup_config_id;
       if (shared_system_user_token) updates.shared_system_user_token = shared_system_user_token;
       if (is_active !== undefined) updates.is_active = is_active;
 
@@ -2099,6 +2101,10 @@ router.get(
     try {
       const TenantMetaConfig = require('../models/payments/TenantMetaConfig');
       const configs = await TenantMetaConfig.findAll({
+        // own_access_token nunca sale de este endpoint aunque esté cifrado
+        // en BD -- defensa en profundidad: si algún día se filtra la clave
+        // de cifrado, que el blob ni siquiera haya circulado por acá ayuda.
+        attributes: { exclude: ['own_access_token'] },
         include: [{ model: Tenant, as: 'tenant', attributes: ['id', 'company_name', 'business_name'] }],
         order: [['updated_at', 'DESC']],
       });
