@@ -1746,10 +1746,35 @@ const sendWhatsApp = async (req, res) => {
       caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Consulta tu documento aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
     }
 
+    // Preferir Cloud API si el tenant tiene WhatsApp conectado; si no, wa.me
+    try {
+      const waCloud = require('../../services/whatsappCloud.service');
+      const status = await waCloud.getWhatsAppStatus(tenantId);
+      if (status.connected) {
+        const sent = await waCloud.sendTextFromTenant({
+          tenantId,
+          to: customerPhone,
+          body: caption,
+          userId: req.user?.id || null,
+          source: 'api',
+        });
+        return res.json({
+          success: true,
+          channel: 'cloud_api',
+          pdfUrl,
+          conversation_id: sent.conversation_id,
+          message: `Documento enviado por WhatsApp Cloud API a ${customerPhone}.`,
+        });
+      }
+    } catch (cloudErr) {
+      logger.warn('WhatsApp Cloud fallback a wa.me:', cloudErr.message);
+    }
+
     const result = await whatsappService.sendText(customerPhone, caption);
 
     res.json({
       success: true,
+      channel: 'wa_me',
       waLink:  result.waLink,
       pdfUrl,
       message: `Enlace listo para ${customerPhone}. Se abrirá WhatsApp con el mensaje.`,

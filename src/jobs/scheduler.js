@@ -44,6 +44,24 @@ const JOBS = [
     },
   },
   {
+    name: 'wa-reminders',
+    schedule: '* * * * *', // cada minuto
+    run: async () => {
+      const { processDueReminders } = require('../services/waCampaigns.service');
+      const result = await processDueReminders();
+      return [result];
+    },
+  },
+  {
+    name: 'wa-campaigns',
+    schedule: '* * * * *', // cada minuto — rate-limit interno ~15/min por tenant
+    run: async () => {
+      const { processQueuedCampaigns } = require('../services/waCampaigns.service');
+      const result = await processQueuedCampaigns();
+      return [result];
+    },
+  },
+  {
     name: 'stock-alerts',
     schedule: '0 * * * *', // cada hora en punto (no depende de timezone)
     run: async () => {

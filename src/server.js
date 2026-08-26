@@ -170,6 +170,7 @@ const crmPipelineStagesRoutes       = require('./routes/crm/pipelineStages.route
 const crmLossReasonsRoutes          = require('./routes/crm/lossReasons.routes');
 const crmMessageTemplatesRoutes     = require('./routes/crm/messageTemplates.routes');
 const crmAutomationRulesRoutes      = require('./routes/crm/automationRules.routes');
+const crmWhatsappCloudRoutes        = require('./routes/crm/whatsappCloud.routes');
 
 // Anuncios
 const announcementsRoutes           = require('./routes/announcements.routes');
@@ -281,6 +282,7 @@ app.use('/api/crm/pipeline-stages',            authMiddleware, tenantMiddleware,
 app.use('/api/crm/loss-reasons',                authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmLossReasonsRoutes);
 app.use('/api/crm/message-templates',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmMessageTemplatesRoutes);
 app.use('/api/crm/automation-rules',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmAutomationRulesRoutes);
+app.use('/api/crm/whatsapp',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmWhatsappCloudRoutes);
 app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
 app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);
 app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), expensesRoutes);
@@ -379,6 +381,10 @@ if (!isVercel) {
   // Notificaciones en vivo de nuevas solicitudes de cita de taller
   const { initAppointmentNotifications } = require('./services/appointmentNotifications.socket');
   initAppointmentNotifications(io);
+
+  // Inbox WhatsApp Cloud
+  const { initWhatsAppNotifications } = require('./services/whatsappNotifications.socket');
+  initWhatsAppNotifications(io);
 
   server.listen(PORT, async () => {
     console.log('Servidor corriendo en puerto ' + PORT);

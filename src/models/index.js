@@ -91,6 +91,13 @@ const CrmMessageTemplate = require('./crm/CrmMessageTemplate');
 // ✅ NUEVO - CRM (Fase C.1) — motor de automatizaciones configurables
 const CrmAutomationRule = require('./crm/CrmAutomationRule');
 const CrmAutomationRuleLog = require('./crm/CrmAutomationRuleLog');
+// WhatsApp Cloud API + coexistencia
+const WaConversation = require('./crm/WaConversation');
+const WaMessage = require('./crm/WaMessage');
+const WaTemplate = require('./crm/WaTemplate');
+const WaReminderJob = require('./crm/WaReminderJob');
+const WaCampaign = require('./crm/WaCampaign');
+const WaCampaignRecipient = require('./crm/WaCampaignRecipient');
 
 // ✅ NUEVO - Módulo Ensambladora (sincronización con Core Ensambladora, Fase 0)
 const EnsambladoraSyncCredential = require('./ensambladora/EnsambladoraSyncCredential');
@@ -563,6 +570,18 @@ CustomerTag.belongsToMany(Customer, { through: CustomerTagAssignment, foreignKey
 CrmAutomationRule.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'created_by' });
 CrmAutomationRule.belongsTo(User, { foreignKey: 'last_round_robin_user_id', as: 'last_round_robin_user' });
 CrmAutomationRule.hasMany(CrmAutomationRuleLog, { foreignKey: 'automation_rule_id', as: 'logs' });
+
+WaConversation.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+WaConversation.belongsTo(User, { foreignKey: 'assigned_user_id', as: 'assignee' });
+WaConversation.hasMany(WaMessage, { foreignKey: 'conversation_id', as: 'messages' });
+WaMessage.belongsTo(WaConversation, { foreignKey: 'conversation_id', as: 'conversation' });
+WaMessage.belongsTo(User, { foreignKey: 'sent_by_user_id', as: 'sent_by' });
+Customer.hasMany(WaConversation, { foreignKey: 'customer_id', as: 'wa_conversations' });
+
+WaCampaign.hasMany(WaCampaignRecipient, { foreignKey: 'campaign_id', as: 'recipients' });
+WaCampaignRecipient.belongsTo(WaCampaign, { foreignKey: 'campaign_id', as: 'campaign' });
+WaReminderJob.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+WaCampaign.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'created_by' });
 CrmAutomationRuleLog.belongsTo(CrmAutomationRule, { foreignKey: 'automation_rule_id', as: 'rule' });
 CrmAutomationRuleLog.belongsTo(Opportunity, { foreignKey: 'opportunity_id', as: 'opportunity' });
 
@@ -781,6 +800,12 @@ module.exports = {
   CrmMessageTemplate,
   CrmAutomationRule,
   CrmAutomationRuleLog,
+  WaConversation,
+  WaMessage,
+  WaTemplate,
+  WaReminderJob,
+  WaCampaign,
+  WaCampaignRecipient,
   EnsambladoraSyncCredential,
   EnsambladoraEventoSync,
   VehiculoCache,

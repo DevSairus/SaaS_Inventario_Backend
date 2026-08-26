@@ -4,20 +4,16 @@
 // llamada para que un cambio desde el panel superadmin surta efecto de
 // inmediato.
 //
-// Cubre lo necesario para el modo "cuenta propia" (OAuth) y la verificación
-// de firma de los webhooks (usada tanto por leads en modo "own" como en
-// modo "pitbox", ya que ambos llegan al mismo App de Meta). El fetch de
-// detalle de un lead y el envío de mensajes de WhatsApp Cloud API quedan
-// para cuando se aborde esa fase -- acá se deja el cliente HTTP listo para
-// que esa próxima fase solo tenga que agregar el método, no reconstruir la
-// base de auth/firma.
+// Lead Ads (OAuth/webhooks) + WhatsApp Cloud API (plantillas, texto,
+// Embedded Signup / coexistencia). Firma HMAC compartida para todos los
+// webhooks de la misma App de Meta.
 const axios = require('axios');
 const crypto = require('crypto');
 const MetaConfig = require('../../models/payments/MetaConfig');
 const TenantMetaConfig = require('../../models/payments/TenantMetaConfig');
 const logger = require('../../config/logger') || console;
 
-const GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v19.0';
+const GRAPH_VERSION = process.env.META_GRAPH_VERSION || 'v21.0';
 const GRAPH_BASE_URL = `https://graph.facebook.com/${GRAPH_VERSION}`;
 
 async function getConfig() {
@@ -149,6 +145,15 @@ async function resolveAppSecretForPage(pageId) {
  */
 async function verificarFirmaWebhook(rawBody, signatureHeader, appSecret) {
   if (!appSecret) {
+    // Antes esto devolvía `true` (aceptaba CUALQUIER webhook sin firma) --
+    // en producción eso permite que cualquiera con la URL del endpoint
+    // falsifique leads/mensajes de WhatsApp de cualquier tenant. Ahora solo
+    // se tolera en desarrollo/pruebas, donde es común no tener todavía el
+    // app_secret real cargado en el panel superadmin.
+    if (process.env.NODE_ENV === 'production') {
+      logger.error('[Meta] no se pudo resolver ningún app_secret -- se rechaza el webhook (producción exige firma válida)');
+      return false;
+    }
     logger.warn('[Meta] no se pudo resolver ningún app_secret -- se omite verificación (inseguro, solo dev)');
     return true;
   }
@@ -211,15 +216,228 @@ async function probarConexion() {
   }
 }
 
+/**
+ * Intercambia el `code` de Embedded Signup (FB.login) por access token.
+ * Docs: WhatsApp Embedded Signup / Onboard Business App users.
+ */
+async function exchangeEmbeddedSignupCode({ appId, appSecret, code }) {
+  const { data } = await axios.get(`${GRAPH_BASE_URL}/oauth/access_token`, {
+    params: {
+      client_id: appId,
+      client_secret: appSecret,
+      code,
+    },
+    timeout: 20000,
+  });
+  if (!data?.access_token) throw new Error('Meta no devolvió access_token en Embedded Signup');
+  return {
+    access_token: data.access_token,
+    expires_in: data.expires_in || null,
+    token_type: data.token_type || 'bearer',
+  };
+}
+
+/** Lista números de un WABA. */
+async function listWabaPhoneNumbers(wabaId, accessToken) {
+  const { data } = await axios.get(`${GRAPH_BASE_URL}/${wabaId}/phone_numbers`, {
+    params: {
+      access_token: accessToken,
+      fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status',
+    },
+    timeout: 15000,
+  });
+  return data?.data || [];
+}
+
+async function getPhoneNumberDetails(phoneNumberId, accessToken) {
+  const { data } = await axios.get(`${GRAPH_BASE_URL}/${phoneNumberId}`, {
+    params: {
+      access_token: accessToken,
+      fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status',
+    },
+    timeout: 15000,
+  });
+  return data;
+}
+
+/**
+ * Envía plantilla aprobada por Meta.
+ * POST /{phone-number-id}/messages
+ */
+async function sendWhatsAppTemplate({
+  phoneNumberId,
+  accessToken,
+  to,
+  templateName,
+  language = 'es',
+  components = [],
+}) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: String(to).replace(/\D/g, ''),
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: language },
+      ...(components.length ? { components } : {}),
+    },
+  };
+  const { data } = await axios.post(
+    `${GRAPH_BASE_URL}/${phoneNumberId}/messages`,
+    payload,
+    {
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    }
+  );
+  return data;
+}
+
+/** Texto libre — solo dentro de ventana 24h de conversación. */
+async function sendWhatsAppText({ phoneNumberId, accessToken, to, body }) {
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: String(to).replace(/\D/g, ''),
+    type: 'text',
+    text: { preview_url: true, body },
+  };
+  const { data } = await axios.post(
+    `${GRAPH_BASE_URL}/${phoneNumberId}/messages`,
+    payload,
+    {
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    }
+  );
+  return data;
+}
+
+/**
+ * Sube binario a Meta Cloud API y retorna media id.
+ * POST /{phone-number-id}/media
+ */
+async function uploadWhatsAppMediaBinary({
+  phoneNumberId,
+  accessToken,
+  fileBuffer,
+  mimeType,
+  filename,
+}) {
+  const FormData = require('form-data');
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', mimeType);
+  form.append('file', fileBuffer, {
+    filename: filename || 'file',
+    contentType: mimeType,
+  });
+
+  const { data } = await axios.post(
+    `${GRAPH_BASE_URL}/${phoneNumberId}/media`,
+    form,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...form.getHeaders(),
+      },
+      timeout: 60000,
+      maxContentLength: 20 * 1024 * 1024,
+      maxBodyLength: 20 * 1024 * 1024,
+    }
+  );
+  return data; // { id }
+}
+
+/**
+ * Envía media (image|audio|video|document) por Cloud API.
+ */
+async function sendWhatsAppMedia({
+  phoneNumberId,
+  accessToken,
+  to,
+  type,
+  mediaId,
+  caption,
+  filename,
+}) {
+  const mediaKey = type === 'document' ? 'document' : type;
+  const mediaPayload = { id: mediaId };
+  if (caption && ['image', 'video', 'document'].includes(type)) {
+    mediaPayload.caption = caption;
+  }
+  if (filename && type === 'document') {
+    mediaPayload.filename = filename;
+  }
+
+  const payload = {
+    messaging_product: 'whatsapp',
+    to: String(to).replace(/\D/g, ''),
+    type,
+    [mediaKey]: mediaPayload,
+  };
+
+  const { data } = await axios.post(
+    `${GRAPH_BASE_URL}/${phoneNumberId}/messages`,
+    payload,
+    {
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    }
+  );
+  return data;
+}
+
+/**
+ * Lista plantillas del WABA (message_templates).
+ * GET /{waba-id}/message_templates
+ */
+async function listWabaMessageTemplates(wabaId, accessToken) {
+  const { data } = await axios.get(`${GRAPH_BASE_URL}/${wabaId}/message_templates`, {
+    params: { limit: 100, fields: 'name,language,status,category,components,id' },
+    headers: { Authorization: `Bearer ${accessToken}` },
+    timeout: 20000,
+  });
+  return data?.data || [];
+}
+
+/**
+ * Dispara sync de historial / contactos de coexistencia (solo una vez, <24h
+ * tras onboarding). Docs: smb_app_state_sync + history.
+ */
+async function requestCoexistenceSync({ phoneNumberId, accessToken, syncType = 'smb_app_state_sync' }) {
+  // Endpoint puede variar por versión; se documenta y se llama de forma
+  // tolerante — si Meta rechaza, el caller registra last_error.
+  const { data } = await axios.post(
+    `${GRAPH_BASE_URL}/${phoneNumberId}/smb_app_data`,
+    { messaging_product: 'whatsapp', sync_type: syncType },
+    {
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+      validateStatus: (s) => s < 500,
+    }
+  );
+  return data;
+}
+
 module.exports = {
   GRAPH_BASE_URL,
+  GRAPH_VERSION,
   getConfig,
   buildOAuthUrl,
   exchangeCodeForLongLivedToken,
+  exchangeEmbeddedSignupCode,
   listManagedPages,
   listLeadForms,
   getLeadDetails,
   resolveAppSecretForPage,
+  listWabaPhoneNumbers,
+  getPhoneNumberDetails,
+  sendWhatsAppTemplate,
+  sendWhatsAppText,
+  uploadWhatsAppMediaBinary,
+  sendWhatsAppMedia,
+  listWabaMessageTemplates,
+  requestCoexistenceSync,
   verificarFirmaWebhook,
   verificarHandshake,
   probarConexion,

@@ -1,21 +1,15 @@
 // backend/src/controllers/metaWebhook.controller.js
-// Recibe los eventos de Meta (Facebook/Instagram) -- hoy solo `leadgen`
-// (Lead Ads). Mismo espíritu que ncfWebhook.controller.js: ruta pública,
-// se autentica por firma HMAC en vez de JWT, y siempre responde 200 para
-// que Meta no reintente indefinidamente algo que ya se resolvió (o que
-// nunca va a encontrar, ej. un tenant que se dio de baja).
-//
-// Un webhook de Meta llega SIN contexto de tenant -- a diferencia de una
-// request normal de la app, todavía no sabemos a qué tenant pertenece.
-// Por eso la resolución (ver resolverTenantConfig) consulta TenantMetaConfig
-// en `public` ANTES de fijar cualquier schema (ver nota en el modelo).
+// Webhooks Meta: Lead Ads (`page` / leadgen) + WhatsApp Cloud API
+// (`whatsapp_business_account` / messages, statuses, smb_message_echoes).
 const { Op } = require('sequelize');
 const logger = require('../config/logger') || console;
 const { TenantMetaConfig, Tenant } = require('../models');
 const metaClient = require('../services/meta/metaClient');
+const waCloud = require('../services/whatsappCloud.service');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 const { applyOpportunityCreatedRules } = require('../services/crmAutomationEngine');
+const { decryptToken } = require('../utils/metaTokenCrypto');
 
 async function handleVerify(req, res) {
   const mode = req.query['hub.mode'];
@@ -30,10 +24,6 @@ async function handleVerify(req, res) {
   return res.status(200).send(result);
 }
 
-/**
- * Encuentra a qué TenantMetaConfig pertenece un evento, por page_id (modo
- * "own") o por form_id (modo "pitbox", asignado a mano al onboardear).
- */
 async function resolverTenantConfig({ pageId, formId }) {
   if (pageId) {
     const own = await TenantMetaConfig.findOne({
@@ -57,9 +47,6 @@ async function procesarLead({ leadgenId, formId, tenantConfig }) {
     return;
   }
 
-  // El tenant pudo haber conectado Meta y luego perder el módulo (plan
-  // bajado, módulo desactivado a mano) -- no seguir creando oportunidades
-  // gratis para alguien que ya no lo tiene contratado.
   const effectiveModules = await getEffectiveModulesForTenantId(tenant.id);
   if (!effectiveModules.includes('crm_meta_leads')) {
     logger.warn(`[Meta Webhook] Tenant ${tenant.id} ya no tiene el módulo crm_meta_leads activo -- se ignora el lead`);
@@ -67,8 +54,14 @@ async function procesarLead({ leadgenId, formId, tenantConfig }) {
   }
 
   const isOwn = tenantConfig.provider_mode === 'own';
-  let accessToken = tenantConfig.own_access_token;
-  if (!isOwn) {
+  let accessToken = null;
+  if (isOwn) {
+    try {
+      accessToken = decryptToken(tenantConfig.own_access_token);
+    } catch (_) {
+      accessToken = tenantConfig.own_access_token;
+    }
+  } else {
     const metaConfig = await metaClient.getConfig();
     accessToken = metaConfig?.shared_system_user_token;
   }
@@ -126,9 +119,6 @@ async function procesarLead({ leadgenId, formId, tenantConfig }) {
       outcome: 'sin_respuesta',
     });
 
-    // Fase C.1 — ej. "lead de Meta Ads entra → asignar por ronda entre
-    // asesores activos". Corre dentro del mismo `run` (ya en el schema del
-    // tenant) para que la regla vea las tablas correctas.
     await applyOpportunityCreatedRules(tenant.id, opportunity);
 
     return { customerId: customer.id, opportunityId: opportunity.id };
@@ -138,6 +128,74 @@ async function procesarLead({ leadgenId, formId, tenantConfig }) {
 
   await tenantConfig.update({ last_lead_at: new Date(), last_error: null });
   logger.info(`[Meta Webhook] Lead ${leadgenId} -> tenant ${tenant.id}: customer ${result.customerId}, opportunity ${result.opportunityId}`);
+}
+
+async function procesarWhatsAppEntry(entry) {
+  const changes = entry.changes || [];
+  for (const change of changes) {
+    const value = change.value || {};
+    const field = change.field;
+    const metadata = value.metadata || {};
+    const phoneNumberId = metadata.phone_number_id;
+
+    if (field === 'messages' || !field) {
+      const contacts = value.contacts || [];
+      const contactName = contacts[0]?.profile?.name || null;
+
+      for (const message of value.messages || []) {
+        try {
+          await waCloud.ingestInboundWhatsApp({
+            phoneNumberId,
+            contactPhone: message.from,
+            contactName,
+            message,
+            source: 'webhook',
+          });
+        } catch (err) {
+          logger.error(`[Meta WA] Error inbound ${message.id}: ${err.message}`);
+        }
+      }
+
+      // tenantId resuelto UNA vez por phone_number_id (no por cada status)
+      // -- antes updateMessageStatus se llamaba sin tenantId, así que el
+      // dato en BD quedaba bien pero el evento socket `wa:message-status`
+      // nunca se emitía (ver el `if (tenantId)` adentro de esa función):
+      // el inbox no mostraba los ticks de enviado/entregado/leído en vivo,
+      // solo al recargar. Con esto los updates llegan en tiempo real.
+      if (value.statuses?.length) {
+        const tenantConfig = await waCloud.resolverTenantByPhoneNumberId(phoneNumberId);
+        for (const status of value.statuses) {
+          try {
+            await waCloud.updateMessageStatus({
+              metaMessageId: status.id,
+              status: status.status,
+              tenantId: tenantConfig?.tenant_id || null,
+            });
+          } catch (err) {
+            logger.error(`[Meta WA] Error status ${status.id}: ${err.message}`);
+          }
+        }
+      }
+    }
+
+    // Coexistencia: mensajes enviados desde WhatsApp Business App
+    if (field === 'smb_message_echoes' || value.message_echoes) {
+      const echoes = value.message_echoes || value.messages || [];
+      for (const echo of echoes) {
+        try {
+          await waCloud.ingestInboundWhatsApp({
+            phoneNumberId,
+            contactPhone: echo.to || echo.recipient_id,
+            contactName: null,
+            message: { ...echo, from: echo.to, id: echo.id },
+            source: 'app_echo',
+          });
+        } catch (err) {
+          logger.error(`[Meta WA] Error echo ${echo.id}: ${err.message}`);
+        }
+      }
+    }
+  }
 }
 
 async function handleWebhook(req, res) {
@@ -159,7 +217,22 @@ async function handleWebhook(req, res) {
     return res.status(200).json({ received: true, ignored: true });
   }
 
-  if (payload?.object !== 'page') {
+  const objectType = payload?.object;
+
+  // WhatsApp Cloud API
+  if (objectType === 'whatsapp_business_account') {
+    for (const entry of payload.entry || []) {
+      try {
+        await procesarWhatsAppEntry(entry);
+      } catch (err) {
+        logger.error(`[Meta WA] Error entry: ${err.message}`);
+      }
+    }
+    return res.status(200).json({ received: true });
+  }
+
+  // Lead Ads (páginas)
+  if (objectType !== 'page') {
     return res.status(200).json({ received: true, ignored: true });
   }
 

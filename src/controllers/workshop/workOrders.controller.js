@@ -2853,12 +2853,37 @@ const sendWhatsApp = async (req, res) => {
     const shareUrl = `${frontendUrl}/ot/${token}`;
     const message  = `Hola! Te compartimos el estado de tu Orden de Trabajo *${order.order_number}*.\nPuedes consultarla en tiempo real aquí:\n${shareUrl}`;
 
+    try {
+      const waCloud = require('../../services/whatsappCloud.service');
+      const status = await waCloud.getWhatsAppStatus(tenant_id);
+      if (status.connected) {
+        const sent = await waCloud.sendTextFromTenant({
+          tenantId: tenant_id,
+          to: phone,
+          body: message,
+          userId: req.user?.id || null,
+          source: 'api',
+        });
+        logger.info(`[WhatsApp] Cloud API OT ${order.order_number} enviado a ${phone}`);
+        return res.json({
+          success: true,
+          channel: 'cloud_api',
+          shareUrl,
+          conversation_id: sent.conversation_id,
+          message: `Orden enviada por WhatsApp Cloud API a ${phone}.`,
+        });
+      }
+    } catch (cloudErr) {
+      logger.warn('[WhatsApp] Cloud fallback a wa.me OT:', cloudErr.message);
+    }
+
     // Genera enlace wa.me (no envía automáticamente)
     const result = await whatsappService.sendText(phone, message);
 
     logger.info(`[WhatsApp] wa.me OT ${order.order_number} generado para ${phone}`);
     res.json({
       success: true,
+      channel: 'wa_me',
       waLink:   result.waLink,   // El frontend abre este enlace
       shareUrl,
       message: `Enlace listo para enviar a ${phone}. Haz clic en "Abrir WhatsApp".`,
