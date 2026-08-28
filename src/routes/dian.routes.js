@@ -15,9 +15,12 @@ router.put('/config',                ctrl.updateConfig);
 router.get('/divipola',              ctrl.getDivipola);
 
 // Resoluciones
-router.get('/resolutions',           ctrl.getResolutions);
-router.post('/resolutions',          ctrl.createResolution);
-router.delete('/resolutions/:id',    ctrl.deactivateResolution);
+router.get('/resolutions',                  ctrl.getResolutions);
+router.post('/resolutions',                 ctrl.createResolution);
+router.put('/resolutions/:id',              ctrl.updateResolution);
+router.delete('/resolutions/:id',           ctrl.deactivateResolution);
+router.post('/resolutions/:id/reactivate',  ctrl.reactivateResolution);
+router.delete('/resolutions/:id/permanent', ctrl.deleteResolution);
 
 // Operaciones sobre facturas
 router.post('/send/:saleId',             ctrl.sendInvoice);

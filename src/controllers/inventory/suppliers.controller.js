@@ -171,7 +171,13 @@ const createSupplier = async (req, res) => {
       website,
       notes,
       is_active = true,
-      rating
+      rating,
+      // Clasificación fiscal (Documento Soporte DIAN)
+      person_type,
+      tax_regime,
+      fiscal_responsibilities,
+      is_obligated_to_invoice = true,
+      retention_config,
     } = req.body;
 
     // Validar campos requeridos
@@ -218,7 +224,12 @@ const createSupplier = async (req, res) => {
       website,
       notes,
       is_active,
-      rating
+      rating,
+      person_type: person_type || null,
+      tax_regime: tax_regime || null,
+      fiscal_responsibilities: fiscal_responsibilities || [],
+      is_obligated_to_invoice,
+      retention_config: retention_config || {},
     });
 
     res.status(201).json({
@@ -304,7 +315,8 @@ const updateSupplier = async (req, res) => {
       'code', 'business_name', 'trade_name', 'tax_id', 'email', 'phone', 'mobile',
       'website', 'address', 'city', 'state', 'country', 'postal_code',
       'contact_name', 'contact_email', 'contact_phone', 'contact_position',
-      'supplier_type', 'bank_name', 'account_number', 'account_type', 'notes'
+      'supplier_type', 'bank_name', 'account_number', 'account_type', 'notes',
+      'person_type', 'tax_regime'
     ];
     nullableFields.forEach(field => {
       if (updateData[field] === '' || updateData[field] === undefined) {

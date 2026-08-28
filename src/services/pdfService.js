@@ -3,12 +3,17 @@ const fs = require('fs');
 const path = require('path');
 const https = require('https');
 const http = require('http');
+const QRCode = require('qrcode');
 
 const DOCUMENT_TYPES = {
-  factura:    { title: 'FACTURA',    numberLabel: 'FACTURA No.'    },
-  remision:   { title: 'REMISIÓN',   numberLabel: 'REMISIÓN No.'   },
-  cotizacion: { title: 'COTIZACIÓN', numberLabel: 'COTIZACIÓN No.' }
+  factura:      { title: 'FACTURA',       numberLabel: 'FACTURA No.'        },
+  remision:     { title: 'REMISIÓN',      numberLabel: 'REMISIÓN No.'       },
+  cotizacion:   { title: 'COTIZACIÓN',    numberLabel: 'COTIZACIÓN No.'     },
+  nota_credito: { title: 'NOTA CRÉDITO',  numberLabel: 'NOTA CRÉDITO No.'   },
+  nota_debito:  { title: 'NOTA DÉBITO',   numberLabel: 'NOTA DÉBITO No.'    },
 };
+
+const DIAN_ELECTRONIC_TYPES = new Set(['factura', 'nota_credito', 'nota_debito']);
 
 const downloadImage = (url) => {
   return new Promise((resolve, reject) => {
@@ -21,6 +26,39 @@ const downloadImage = (url) => {
     }).on('error', reject);
   });
 };
+
+/**
+ * Contenido del código QR de la representación gráfica DIAN — mismo formato
+ * (líneas NumFac/FecFac/.../CUFE + URL de verificación) que arma el propio
+ * SDK dentro del XML (ver AttachedDocument/QRCode), para que el QR impreso
+ * coincida con lo que la DIAN espera mostrar.
+ */
+function buildDianQrContent(sale, tenant) {
+  const cfg = tenant.dian_config || {};
+  const isTest = cfg.environment !== 'production';
+  const verifyBase = isTest
+    ? 'https://catalogo-vpfe-hab.dian.gov.co/document/searchqr'
+    : 'https://catalogo-vpfe.dian.gov.co/document/searchqr';
+  const sentAt = sale.dian_sent_at ? new Date(sale.dian_sent_at) : new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const fecFac = `${sentAt.getFullYear()}-${pad(sentAt.getMonth() + 1)}-${pad(sentAt.getDate())}`;
+  const horFac = `${pad(sentAt.getHours())}:${pad(sentAt.getMinutes())}:${pad(sentAt.getSeconds())}-05:00`;
+  const fmt = (v) => Number(v || 0).toFixed(2);
+
+  return [
+    `NumFac: ${sale.dian_invoice_number || sale.sale_number}`,
+    `FecFac: ${fecFac}`,
+    `HorFac: ${horFac}`,
+    `NitFac: ${cfg.nit || ''}`,
+    `DocAdq: ${(sale.customer_tax_id || '').toString().trim()}`,
+    `ValFac: ${fmt(sale.subtotal)}`,
+    `ValIva: ${fmt(sale.tax_amount)}`,
+    `ValOtroIm: 0.00`,
+    `ValTotFac: ${fmt(sale.total_amount)}`,
+    `${sale.document_type === 'factura' ? 'CUFE' : 'CUDE'}: ${sale.cufe}`,
+    `${verifyBase}?documentkey=${sale.cufe}`,
+  ].join('\n');
+}
 
 const generateSalePDF = async (res, sale, tenant) => {
   const bufferMode = !res;
@@ -569,6 +607,38 @@ const generateSalePDF = async (res, sale, tenant) => {
 
         y = blockTop + Math.max(imgH, tableH) + 10;
       }
+    }
+
+    /* ══════════════════════════════════════════════════════════
+       CUFE + QR — obligatorio en la representación gráfica de toda
+       factura electrónica aceptada por la DIAN (Resolución 000042/2020).
+       ══════════════════════════════════════════════════════════ */
+    if (DIAN_ELECTRONIC_TYPES.has(sale.document_type) && sale.dian_status === 'accepted' && sale.cufe) {
+      const cufeLabel = sale.document_type === 'factura' ? 'CUFE' : 'CUDE';
+      y += 20;
+      const QR_SIZE = 80;
+      if (y + QR_SIZE + 20 > doc.page.height - 60) { doc.addPage(); y = 40; }
+
+      const qrY = y;
+      try {
+        const qrDataUrl = await QRCode.toDataURL(buildDianQrContent(sale, tenant), { margin: 1, width: QR_SIZE * 4 });
+        const qrBuffer = Buffer.from(qrDataUrl.split(',')[1], 'base64');
+        doc.image(qrBuffer, MARGIN, qrY, { fit: [QR_SIZE, QR_SIZE] });
+      } catch (e) {
+        doc.font('Helvetica-Oblique').fontSize(7).fillColor(gray).text('(No se pudo generar el QR)', MARGIN, qrY, { width: QR_SIZE });
+      }
+
+      const cufeX = MARGIN + QR_SIZE + 12;
+      const cufeW = INNER_W - QR_SIZE - 12;
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(gray).text(cufeLabel, cufeX, qrY);
+      doc.font('Helvetica').fontSize(6.5).fillColor(black).text(sale.cufe, cufeX, qrY + 10, { width: cufeW });
+      doc.font('Helvetica').fontSize(6.5).fillColor(gray)
+        .text(`Documento validado por la DIAN — ${docType.title}`, cufeX, qrY + 38, { width: cufeW });
+      if (sale.dian_accepted_at) {
+        doc.text(`Fecha validación: ${formatDate(sale.dian_accepted_at)}`, cufeX, qrY + 50, { width: cufeW });
+      }
+
+      y = qrY + QR_SIZE + 10;
     }
 
     /* ── ACENTO INFERIOR ────────────────────────────────────── */

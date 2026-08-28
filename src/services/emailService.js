@@ -30,7 +30,7 @@ const verifyEmailConfig = async () => {
 // ─────────────────────────────────────────
 // Función base de envío
 // ─────────────────────────────────────────
-const sendEmail = async ({ to, subject, html, text }) => {
+const sendEmail = async ({ to, subject, html, text, attachments }) => {
   try {
     if (!isEmailConfigured()) {
       logger.warn(`[EMAIL] Brevo no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
@@ -38,6 +38,14 @@ const sendEmail = async ({ to, subject, html, text }) => {
     }
 
     const recipients = (Array.isArray(to) ? to : [to]).map((email) => ({ email }));
+
+    // Adjuntos vía la API de Brevo: [{ name, content }] con content en
+    // base64 (ver docs.brevo.com/reference/sendtransacemail). `attachments`
+    // llega como [{ filename, content: Buffer }] — se convierte acá.
+    const attachment = (attachments || []).map((a) => ({
+      name: a.filename,
+      content: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+    }));
 
     const response = await axios.post(BREVO_API_URL, {
       sender: {
@@ -48,9 +56,10 @@ const sendEmail = async ({ to, subject, html, text }) => {
       subject,
       htmlContent: html,
       textContent: text || html.replace(/<[^>]*>/g, ''),
+      ...(attachment.length > 0 && { attachment }),
     }, {
       headers: { 'api-key': process.env.BREVO_API_KEY },
-      timeout: 15000,
+      timeout: 30000,
     });
 
     logger.info(`[EMAIL] Enviado a: ${to} | ID: ${response.data.messageId}`);

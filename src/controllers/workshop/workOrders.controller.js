@@ -572,8 +572,8 @@ const update = async (req, res) => {
   try {
     const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
-    if (['entregado', 'cancelado'].includes(order.status))
-      return res.status(400).json({ success: false, message: 'No se puede editar una OT cerrada' });
+    if (['listo', 'entregado', 'cancelado'].includes(order.status))
+      return res.status(400).json({ success: false, message: 'No se puede editar una OT bloqueada — un administrador debe reversar el estado primero' });
 
     const {
       customer_id, vehicle_id, technician_id, warehouse_id, promised_at,
@@ -648,6 +648,14 @@ const changeStatus = async (req, res) => {
     if (['entregado', 'cancelado'].includes(order.status)) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: `La OT ya está ${order.status} y no puede cambiar de estado` });
+    }
+
+    // 'listo' bloquea edición (ver addItem/removeItem/etc.) -- por consistencia,
+    // desde ahí solo se puede avanzar a 'entregado'. Para volver atrás hace
+    // falta que un administrador la reverse explícitamente (ver revertStatus).
+    if (order.status === 'listo' && status !== 'entregado') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'La OT está en "Listo" (bloqueada). Solo puede pasar a "Entregado", o un administrador debe reversarla primero.' });
     }
 
     const updates = { status };
@@ -728,6 +736,165 @@ const changeStatus = async (req, res) => {
   }
 };
 
+// ── REVERT STATUS (solo administrador) ──────────────────────────────────────
+//
+// Reversa una OT bloqueada ('listo' o 'entregado') para poder volver a
+// editarla. Si tiene un documento generado (remisión/factura):
+//   - remisión, o factura nunca enviada/rechazada por DIAN -> se anula
+//     directamente (mismo mecanismo que sales.controller.js#cancel: reversa
+//     inventario del lado de la venta + asiento contable).
+//   - factura ya ACEPTADA por DIAN -> no se puede anular a secas (no es legal
+//     borrar una factura electrónica aceptada); se genera una nota crédito
+//     real vía el mismo núcleo que usa la devolución de ventas (voidSale.js).
+//   - factura en 'sending' -> se bloquea el reverso hasta que termine el envío.
+// Las cotizaciones (WorkOrderQuoteRequest) no requieren tratamiento especial:
+// resendQuoteRequest ya no depende del estado de la OT.
+const REVERTIBLE_TARGET_STATUSES = ['recibido', 'en_proceso', 'en_espera', 'listo'];
+
+const revertStatus = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+
+    if (!['admin', 'super_admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Solo un administrador puede reversar el estado de una OT bloqueada' });
+    }
+
+    const { target_status, reason } = req.body;
+    if (!reason || !String(reason).trim()) {
+      return res.status(400).json({ success: false, message: 'Debes indicar el motivo de la reversión' });
+    }
+    if (!REVERTIBLE_TARGET_STATUSES.includes(target_status)) {
+      return res.status(400).json({ success: false, message: `Estado destino inválido. Debe ser uno de: ${REVERTIBLE_TARGET_STATUSES.join(', ')}` });
+    }
+
+    const order = await WorkOrder.findOne({
+      where: { id: req.params.id, tenant_id },
+      include: [{ model: Sale, as: 'sale' }],
+    });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+
+    if (!['listo', 'entregado'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'Esta OT no está bloqueada — no hay nada que reversar' });
+    }
+
+    let documentVoidInfo = null;
+    const sale = order.sale;
+
+    if (sale && !['cancelled', 'voided'].includes(sale.status)) {
+      if (sale.dian_status === 'sending') {
+        return res.status(409).json({
+          success: false,
+          message: 'La factura de esta OT está en proceso de envío a DIAN. Espera a que termine antes de reversar.',
+        });
+      }
+
+      if (sale.document_type === 'factura' && sale.dian_status === 'accepted') {
+        // Factura ya aceptada -- requiere nota crédito real, no un simple cambio de estado.
+        const { voidSaleCore } = require('../sales/voidSale');
+        const fullItems = await SaleItem.findAll({ where: { sale_id: sale.id, tenant_id } });
+        if (fullItems.length === 0) {
+          return res.status(400).json({ success: false, message: 'La factura no tiene ítems — no se puede generar la nota crédito' });
+        }
+        const result = await voidSaleCore({
+          sale_id: sale.id,
+          tenant_id,
+          user_id: req.user.id,
+          items: fullItems.map(si => ({ sale_item_id: si.id, quantity: si.quantity, condition: 'used' })),
+          reason: `Reversión de OT ${order.order_number} por administrador — ${reason}`,
+          work_order_target_status: target_status,
+        });
+        documentVoidInfo = {
+          method: 'nota_credito',
+          return_number: result.return_number,
+          dian_status: result.dian_status,
+          message: 'La factura ya estaba aceptada por DIAN: se generó una nota crédito para anularla. La numeración de la factura original no se recupera.',
+        };
+      } else {
+        // remisión, o factura nunca enviada / rechazada -- anulación directa segura.
+        const transaction = await sequelize.transaction();
+        try {
+          const items = await SaleItem.findAll({ where: { sale_id: sale.id, tenant_id }, transaction });
+          for (const item of items) {
+            if (!item.product_id) continue;
+            const product = await Product.findOne({ where: { id: item.product_id, tenant_id }, transaction });
+            if (!product || !product.track_inventory) continue;
+            await createMovement({
+              tenant_id,
+              movement_type: 'entrada',
+              movement_reason: 'sale_reversal',
+              reference_type: 'sale',
+              reference_id: sale.id,
+              product_id: item.product_id,
+              warehouse_id: sale.warehouse_id || null,
+              quantity: item.quantity,
+              unit_cost: item.unit_cost || product.average_cost || item.unit_price,
+              user_id: req.user.id,
+              notes: `Reversión de OT ${order.order_number} por administrador — ${reason}`,
+            }, transaction);
+          }
+          await sale.update({
+            status: 'cancelled',
+            internal_notes: `Anulada por reversión de OT ${order.order_number} — ${reason}`,
+          }, { transaction });
+          await transaction.commit();
+        } catch (err) {
+          await transaction.rollback();
+          throw err;
+        }
+
+        documentVoidInfo = { method: 'direct_cancel', document_type: sale.document_type };
+
+        setImmediate(async () => {
+          try {
+            const { reverseSourceEntries } = require('../../services/accounting/autoEntries.service');
+            await reverseSourceEntries('sale', sale.id, tenant_id, req.user.id, `OT ${order.order_number} reversada por administrador — ${reason}`);
+          } catch (err) {
+            logger.warn(`[accounting] Error revirtiendo asiento de venta ${sale.id} (reversión de OT ${order.id}): ${err.message}`);
+          }
+        });
+      }
+    }
+
+    const previousStatus = order.status;
+    const auditLine = `[${new Date().toISOString()}] Reversada de "${previousStatus}" a "${target_status}" por ${req.user.first_name || ''} ${req.user.last_name || ''} (${req.user.id}). Motivo: ${reason}`;
+
+    await order.update({
+      status: target_status,
+      sale_id: null,
+      delivered_at: null,
+      internal_notes: [order.internal_notes, auditLine].filter(Boolean).join('\n'),
+    });
+
+    const full = await WorkOrder.findOne({
+      where: { id: req.params.id, tenant_id },
+      include: [
+        { model: Vehicle,  as: 'vehicle' },
+        { model: Customer, as: 'customer' },
+        { model: User,     as: 'technician', attributes: ['id', 'first_name', 'last_name', 'phone'] },
+        { model: User,     as: 'creator_wo', attributes: ['id', 'first_name', 'last_name'] },
+        { model: Warehouse,as: 'warehouse',  attributes: ['id', 'name'] },
+        {
+          model: WorkOrderItem, as: 'items',
+          include: [
+            { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] },
+            ITEM_TECHNICIAN_INCLUDE,
+          ],
+        },
+      ],
+    });
+
+    res.json({
+      success: true,
+      message: `OT revertida de "${previousStatus}" a "${target_status}"`,
+      data: full,
+      document_voided: documentVoidInfo,
+    });
+  } catch (error) {
+    logger.error('Error reversando estado de OT:', error);
+    res.status(500).json({ success: false, message: error.message || 'Error al reversar el estado de la OT' });
+  }
+};
+
 // ── ADD ITEM ──────────────────────────────────────────────────────────────────
 
 const addItem = async (req, res) => {
@@ -740,9 +907,9 @@ const addItem = async (req, res) => {
       await transaction.rollback();
       return res.status(404).json({ success: false, message: 'Orden no encontrada' });
     }
-    if (['entregado', 'cancelado'].includes(order.status)) {
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT cerrada' });
+      return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT bloqueada' });
     }
 
     const { product_id, product_name, item_type, quantity, unit_price, tax_percentage, technician_id: itemTechnicianId, requires_approval } = req.body;
@@ -905,9 +1072,9 @@ const removeItem = async (req, res) => {
 
     const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
     if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
-    if (['entregado', 'cancelado'].includes(order.status)) {
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No se pueden eliminar ítems de una OT cerrada' });
+      return res.status(400).json({ success: false, message: 'No se pueden eliminar ítems de una OT bloqueada' });
     }
 
     const item = await WorkOrderItem.findOne({ where: { id: req.params.itemId, work_order_id: order.id }, transaction });
@@ -953,9 +1120,9 @@ const updateItem = async (req, res) => {
 
     const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
     if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
-    if (['entregado', 'cancelado'].includes(order.status)) {
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No se pueden editar ítems de una OT cerrada' });
+      return res.status(400).json({ success: false, message: 'No se pueden editar ítems de una OT bloqueada' });
     }
 
     const item = await WorkOrderItem.findOne({ where: { id: req.params.itemId, work_order_id: order.id }, transaction });
@@ -1057,8 +1224,8 @@ const addDiagnosisMark = async (req, res) => {
     const tenant_id = req.user.tenant_id;
     const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id } });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
-    if (['entregado', 'cancelado'].includes(order.status)) {
-      return res.status(400).json({ success: false, message: 'No se pueden agregar marcas a una OT cerrada' });
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'No se pueden agregar marcas a una OT bloqueada' });
     }
 
     const { diagram_template_id, point_number, severity, side, observation, suggested_product_id } = req.body;
@@ -1103,6 +1270,12 @@ const addDiagnosisMark = async (req, res) => {
 const updateDiagnosisMark = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, attributes: ['id', 'status'] });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'No se pueden editar marcas de una OT bloqueada' });
+    }
+
     const mark = await WorkOrderDiagnosisMark.findOne({
       where: { id: req.params.markId, work_order_id: req.params.id, tenant_id },
     });
@@ -1133,6 +1306,12 @@ const updateDiagnosisMark = async (req, res) => {
 const removeDiagnosisMark = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, attributes: ['id', 'status'] });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'No se pueden eliminar marcas de una OT bloqueada' });
+    }
+
     const mark = await WorkOrderDiagnosisMark.findOne({
       where: { id: req.params.markId, work_order_id: req.params.id, tenant_id },
     });
@@ -1162,9 +1341,9 @@ const generateItemsFromMarks = async (req, res) => {
     const tenant_id = req.user.tenant_id;
     const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
     if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
-    if (['entregado', 'cancelado'].includes(order.status)) {
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No se pueden generar ítems en una OT cerrada' });
+      return res.status(400).json({ success: false, message: 'No se pueden generar ítems en una OT bloqueada' });
     }
 
     const { mark_ids } = req.body; // opcional: subset de marcas a convertir
@@ -2868,4 +3047,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, addItem, updateItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

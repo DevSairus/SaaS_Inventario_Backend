@@ -192,7 +192,8 @@ const createPurchase = async (req, res) => {
       reference,
       notes,
       internal_notes,
-      warehouse_id
+      warehouse_id,
+      requires_support_document,
     } = req.body;
 
     // Validaciones
@@ -231,6 +232,17 @@ const createPurchase = async (req, res) => {
     // Plazo 0 = compra de contado: se marca pagada de inmediato y no debe
     // aparecer en cuentas por pagar (mismo criterio que en la importación de facturas).
     const isCash = effectivePaymentTerms === 0;
+
+    // Documento Soporte DIAN: si el proveedor no está obligado a facturar y
+    // la compra no trae ya un invoice_number del proveedor, se precarga
+    // requires_support_document=true — el usuario puede destildarlo desde
+    // el formulario si al final sí llegó una factura del proveedor (ver
+    // Documento-Soporte-Analisis-y-Plan.md §5). No dispara envío a la DIAN
+    // automáticamente: eso queda como acción explícita desde
+    // PurchaseDetailPage una vez la compra esté confirmada/recibida.
+    const effectiveRequiresSupportDocument = requires_support_document !== undefined
+      ? !!requires_support_document
+      : (supplier.is_obligated_to_invoice === false && !invoice_number);
 
     // Calcular totales
     let subtotal = 0;
@@ -339,6 +351,7 @@ const createPurchase = async (req, res) => {
           reteica_amount:    retentions.reteica.amount,
           total_retentions:  retentions.total,
           tax_breakdown,
+          requires_support_document: effectiveRequiresSupportDocument,
         }, { transaction: t });
         break; // éxito
       } catch (uniqueErr) {
@@ -450,7 +463,8 @@ const updatePurchase = async (req, res) => {
       reference,
       notes,
       internal_notes,
-      warehouse_id
+      warehouse_id,
+      requires_support_document,
     } = req.body;
 
     // Si se proporcionan items, recalcular totales
@@ -552,6 +566,7 @@ const updatePurchase = async (req, res) => {
         notes:                    notes                    !== undefined ? (notes           || null) : purchase.notes,
         internal_notes:           internal_notes           !== undefined ? (internal_notes  || null) : purchase.internal_notes,
         warehouse_id:             warehouse_id             ?? purchase.warehouse_id,
+        requires_support_document: requires_support_document !== undefined ? !!requires_support_document : purchase.requires_support_document,
         // Retenciones (Fase C)
         retefuente_rate:   retentions.retefuente.rate,
         retefuente_amount: retentions.retefuente.amount,
@@ -609,6 +624,7 @@ const updatePurchase = async (req, res) => {
         notes:                  notes                  !== undefined ? (notes           || null) : purchase.notes,
         internal_notes:         internal_notes         !== undefined ? (internal_notes  || null) : purchase.internal_notes,
         warehouse_id:           warehouse_id           ?? purchase.warehouse_id,
+        requires_support_document: requires_support_document !== undefined ? !!requires_support_document : purchase.requires_support_document,
         ...retentionFields,
       }, { transaction: t });
     }

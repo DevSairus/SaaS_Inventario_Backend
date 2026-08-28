@@ -26,6 +26,7 @@ router.get('/:id', ctrl.getById);
 router.post('/', checkAccountOwnership, ctrl.create);
 router.put('/:id', ctrl.update);
 router.patch('/:id/status', ctrl.changeStatus);
+router.post('/:id/revert-status', ctrl.revertStatus); // solo administrador — ver revertStatus en el controller
 router.patch('/:id/checklist', ctrl.updateChecklist);
 
 // Convertir cotización (sales.document_type='cotizacion') en OT — solo

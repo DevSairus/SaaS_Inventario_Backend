@@ -153,6 +153,32 @@ const Supplier = sequelize.define('Supplier', {
   retention_config: {
     type: DataTypes.JSONB,
     defaultValue: {}
+  },
+  // ── Clasificación fiscal (Documento Soporte DIAN) ───────────────────
+  // Sin esto no hay forma de saber automáticamente cuándo una compra a
+  // este proveedor necesita Documento Soporte en vez de esperar una
+  // factura de él (Resolución DIAN 000167 de 2021).
+  person_type: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    validate: { isIn: [['natural', 'juridica']] },
+    comment: 'natural | juridica — determina el schemeID en el XML (CC vs NIT)'
+  },
+  tax_regime: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    comment: 'simple | comun | no_responsable, etc. — informativo'
+  },
+  fiscal_responsibilities: {
+    type: DataTypes.JSONB,
+    defaultValue: [],
+    comment: 'Códigos de responsabilidad DIAN del proveedor (ej. ["R-99-PN"])'
+  },
+  is_obligated_to_invoice: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true,
+    comment: 'FALSE = proveedor no obligado a facturar (régimen simplificado histórico, informal, sin resolución propia) — las compras a él requieren Documento Soporte.'
   }
 }, {
   tableName: 'suppliers',

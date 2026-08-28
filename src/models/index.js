@@ -24,6 +24,7 @@ const Product = require('./inventory/Product');
 const Supplier = require('./inventory/Supplier');
 const Purchase = require('./inventory/Purchase');
 const PurchaseItem = require('./inventory/PurchaseItem');
+const PurchaseSupportDocumentAdjustment = require('./inventory/PurchaseSupportDocumentAdjustment');
 const Warehouse = require('./inventory/Warehouse');
 const InventoryMovement = require('./inventory/InventoryMovement');
 const InventoryAdjustment = require('./inventory/InventoryAdjustment');
@@ -632,6 +633,16 @@ Tenant.hasMany(DianEvent, { foreignKey: 'tenant_id', as: 'dian_events' });
 DianEvent.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 Sale.hasMany(DianEvent, { foreignKey: 'sale_id', as: 'dian_events' });
 
+// DianEvent ↔ Purchase (Documento Soporte / ajustes)
+DianEvent.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+Purchase.hasMany(DianEvent, { foreignKey: 'purchase_id', as: 'dian_events' });
+
+// PurchaseSupportDocumentAdjustment ↔ Tenant / Purchase / User
+PurchaseSupportDocumentAdjustment.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+PurchaseSupportDocumentAdjustment.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+Purchase.hasMany(PurchaseSupportDocumentAdjustment, { foreignKey: 'purchase_id', as: 'support_document_adjustments' });
+PurchaseSupportDocumentAdjustment.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
 // Asistente de IA
 AiConversation.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 AiConversation.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
@@ -702,6 +713,7 @@ module.exports = {
   Product,
   Supplier,
   Purchase,
+  PurchaseSupportDocumentAdjustment,
   PurchaseItem,
   Warehouse,
   InventoryMovement,

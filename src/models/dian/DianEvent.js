@@ -20,6 +20,13 @@ const DianEvent = sequelize.define('DianEvent', {
     references: { model: 'sales', key: 'id' },
     onDelete: 'SET NULL',
   },
+  purchase_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'purchases', key: 'id' },
+    onDelete: 'SET NULL',
+    comment: 'Equivalente a sale_id pero para Documento Soporte / notas de ajuste (compras).',
+  },
   event_type: {
     type: DataTypes.STRING(50),
     allowNull: false,
@@ -27,7 +34,7 @@ const DianEvent = sequelize.define('DianEvent', {
   },
   document_type: {
     type: DataTypes.STRING(30),
-    comment: 'Invoice | CreditNote | DebitNote',
+    comment: 'Invoice | CreditNote | DebitNote | SupportDocument | SupportDocumentAdjustment',
   },
   invoice_number: {
     type: DataTypes.STRING(50),

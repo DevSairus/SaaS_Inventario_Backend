@@ -259,6 +259,13 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.TEXT,
     allowNull: true,
   },
+  reference_sale_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'sales', key: 'id' },
+    onDelete: 'SET NULL',
+    comment: 'Para notas crédito/débito: factura original que referencian (persistido para poder reenviar).',
+  },
   // ── Retenciones ─────────────────────────────────────────────────────
   retefuente_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
   retefuente_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },

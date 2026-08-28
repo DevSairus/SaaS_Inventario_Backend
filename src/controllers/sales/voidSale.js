@@ -47,24 +47,30 @@ async function generateReturnNumber(tenant_id, transaction) {
   return `${prefix}${String(next).padStart(5, '0')}`;
 }
 
-// ── Controller ────────────────────────────────────────────────────────────────
-const voidSale = async (req, res) => {
-  const { id }    = req.params;
-  const tenant_id = req.tenant_id;
-  const user_id   = req.user_id || req.user?.id;
-  const { items, reason, notes, return_type = 'total' } = req.body;
-
-  if (!items || !Array.isArray(items) || items.length === 0)
-    return res.status(400).json({ success: false, message: 'Debe indicar al menos un ítem a devolver' });
-  if (!reason)
-    return res.status(400).json({ success: false, message: 'El motivo es obligatorio' });
-
+// ── Núcleo reutilizable ──────────────────────────────────────────────────────
+// Extraído del handler HTTP para poder reusarse desde otros flujos (ej.
+// revertStatus de OT, que necesita anular una factura ya aceptada por DIAN
+// vía nota crédito, igual que aquí, pero sin forzar la OT a 'cancelado' --
+// ver work_order_target_status). El handler HTTP de abajo es ahora un wrapper
+// delgado sobre esto.
+//
+// Devuelve { customerReturn, return_number, subtotal, tax, dian_status,
+//            work_order_updated } o lanza un Error con .statusCode y .payload
+// (para que el wrapper HTTP pueda responder con el mismo formato de antes).
+async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes, work_order_target_status = 'cancelado' }) {
   const transaction = await sequelize.transaction();
+
+  const httpError = (statusCode, payload) => {
+    const err = new Error(payload.message);
+    err.statusCode = statusCode;
+    err.payload = payload;
+    return err;
+  };
 
   try {
     // ── 1. Cargar venta con ítems (sin WorkOrder en la transacción) ───────────
     const sale = await Sale.findOne({
-      where: { id, tenant_id },
+      where: { id: sale_id, tenant_id },
       include: [
         {
           model: SaleItem,
@@ -77,11 +83,11 @@ const voidSale = async (req, res) => {
 
     if (!sale) {
       await transaction.rollback();
-      return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+      throw httpError(404, { success: false, message: 'Venta no encontrada' });
     }
     if (['draft', 'cancelled'].includes(sale.status)) {
       await transaction.rollback();
-      return res.status(400).json({
+      throw httpError(400, {
         success: false,
         message: sale.status === 'draft'
           ? 'No se puede anular un borrador — cancélalo directamente'
@@ -98,7 +104,7 @@ const voidSale = async (req, res) => {
       const saleItem = sale.items.find(si => si.id === reqItem.sale_item_id);
       if (!saleItem) {
         await transaction.rollback();
-        return res.status(400).json({ success: false, message: `Ítem ${reqItem.sale_item_id} no pertenece a esta venta` });
+        throw httpError(400, { success: false, message: `Ítem ${reqItem.sale_item_id} no pertenece a esta venta` });
       }
 
       const qtyReq = parseFloat(reqItem.quantity);
@@ -106,7 +112,7 @@ const voidSale = async (req, res) => {
 
       if (qtyReq > parseFloat(saleItem.quantity)) {
         await transaction.rollback();
-        return res.status(400).json({
+        throw httpError(400, {
           success: false,
           message: `${saleItem.product_name}: máximo ${saleItem.quantity} unidades`,
         });
@@ -120,7 +126,7 @@ const voidSale = async (req, res) => {
       const remaining = parseFloat(saleItem.quantity) - parseFloat(alreadyReturned);
       if (qtyReq > remaining) {
         await transaction.rollback();
-        return res.status(400).json({
+        throw httpError(400, {
           success: false,
           message: `${saleItem.product_name}: solo quedan ${remaining} unidades por devolver`,
         });
@@ -151,7 +157,7 @@ const voidSale = async (req, res) => {
 
     if (validatedItems.length === 0) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No hay ítems válidos para devolver' });
+      throw httpError(400, { success: false, message: 'No hay ítems válidos para devolver' });
     }
 
     // ── 3. Crear CustomerReturn ───────────────────────────────────────────────
@@ -226,19 +232,24 @@ const voidSale = async (req, res) => {
         attributes: ['id', 'work_order_number', 'status', 'notes'],
       });
 
+      // work_order_target_status: 'cancelado' en el flujo normal de devolución
+      // (el trabajo entregado se está deshaciendo por completo); en el flujo de
+      // revertStatus de OT viene el estado que el administrador eligió, porque
+      // ahí la intención es reabrir para editar, no cancelar el trabajo.
       if (workOrder && !['cancelado', 'entregado'].includes(workOrder.status)) {
+        const previousStatus = workOrder.status;
         const newNotes = [
           workOrder.notes,
           `Venta ${sale.sale_number} anulada — devolución ${return_number}`,
         ].filter(Boolean).join(' | ');
 
-        await workOrder.update({ status: 'cancelado', notes: newNotes });
+        await workOrder.update({ status: work_order_target_status, notes: newNotes });
 
         workOrderUpdated = {
           id:                workOrder.id,
           work_order_number: workOrder.work_order_number,
-          previous_status:   workOrder.status,
-          new_status:        'cancelado',
+          previous_status:   previousStatus,
+          new_status:        work_order_target_status,
         };
       }
     } catch (woErr) {
@@ -313,31 +324,68 @@ const voidSale = async (req, res) => {
 
     // ── 8. Alertas de stock ───────────────────────────────────────────────────
     const product_ids = validatedItems.map(i => i.product_id).filter(Boolean);
-    markProductsForAlertCheck(res, product_ids, tenant_id);
+    markProductsForAlertCheck(null, product_ids, tenant_id);
 
-    return res.status(201).json({
-      success: true,
-      message: sale.document_type === 'factura'
-        ? 'Devolución registrada. Nota crédito en proceso de envío a DIAN.'
-        : 'Devolución registrada e inventario ajustado exitosamente.',
-      data: {
-        return_number,
-        return_id:          customerReturn.id,
-        total_amount:       subtotal + tax,
-        items_count:        validatedItems.length,
-        dian_status,
-        document_type:      sale.document_type,
-        work_order_updated: workOrderUpdated,
-      },
-    });
+    return {
+      sale,
+      return_number,
+      return_id:          customerReturn.id,
+      total_amount:       subtotal + tax,
+      items_count:        validatedItems.length,
+      dian_status,
+      document_type:      sale.document_type,
+      work_order_updated: workOrderUpdated,
+    };
 
   } catch (error) {
     if (transaction && !transaction.finished) {
       await transaction.rollback().catch(() => {});
     }
+    if (error.statusCode) throw error; // ya es un httpError, propagar tal cual
+    logger.error('[VOID] Error en voidSaleCore:', error);
+    throw httpError(500, { success: false, message: process.env.NODE_ENV === 'development' ? 'Error al procesar la anulación: ' + error.message : 'Error al procesar la anulación' });
+  }
+}
+
+// ── Handler HTTP ─────────────────────────────────────────────────────────────
+// POST /api/sales/:id/void
+const voidSale = async (req, res) => {
+  const { id }    = req.params;
+  const tenant_id = req.tenant_id;
+  const user_id   = req.user_id || req.user?.id;
+  const { items, reason, notes } = req.body;
+
+  if (!items || !Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ success: false, message: 'Debe indicar al menos un ítem a devolver' });
+  if (!reason)
+    return res.status(400).json({ success: false, message: 'El motivo es obligatorio' });
+
+  try {
+    const result = await voidSaleCore({ sale_id: id, tenant_id, user_id, items, reason, notes });
+
+    return res.status(201).json({
+      success: true,
+      message: result.document_type === 'factura'
+        ? 'Devolución registrada. Nota crédito en proceso de envío a DIAN.'
+        : 'Devolución registrada e inventario ajustado exitosamente.',
+      data: {
+        return_number:       result.return_number,
+        return_id:           result.return_id,
+        total_amount:        result.total_amount,
+        items_count:         result.items_count,
+        dian_status:         result.dian_status,
+        document_type:       result.document_type,
+        work_order_updated:  result.work_order_updated,
+      },
+    });
+  } catch (error) {
+    if (error.statusCode && error.payload) {
+      return res.status(error.statusCode).json(error.payload);
+    }
     logger.error('[VOID] Error en voidSale:', error);
-    return res.status(500).json({ success: false, message: process.env.NODE_ENV === 'development' ? 'Error al procesar la anulación: ' + error.message : 'Error al procesar la anulación' });
+    return res.status(500).json({ success: false, message: 'Error al procesar la anulación' });
   }
 };
 
 module.exports = voidSale;
+module.exports.voidSaleCore = voidSaleCore;

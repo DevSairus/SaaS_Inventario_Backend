@@ -27,9 +27,27 @@ function extractDianConfig(tenant) {
 }
 
 /* ──────────────────────────────────────────────────────────
+ * Arma el mensaje de rechazo: la DIAN casi siempre manda un
+ * statusDescription genérico ("Validación contiene errores en campos
+ * mandatorios") y el detalle real de qué campo(s) fallaron viene en
+ * dianResponse.errors ([{code, description}]). Se concatena todo en un
+ * solo string — la primera línea (el genérico) es lo que muestra
+ * getPrimaryDianReason() del frontend, y el resto queda disponible
+ * detrás de "Ver detalle completo" en DianDetailPanel.
+ * ────────────────────────────────────────────────────────── */
+function buildRejectionMessage(dianResponse) {
+  const lines = [dianResponse.statusMessage || dianResponse.statusDescription];
+  for (const err of dianResponse.errors || []) {
+    const label = err.code ? `${err.code}: ` : '';
+    lines.push(`${label}${err.description || err.message || ''}`);
+  }
+  return lines.filter(Boolean).join('\n');
+}
+
+/* ──────────────────────────────────────────────────────────
  * Obtiene o incrementa el consecutivo de la resolución
  * ────────────────────────────────────────────────────────── */
-async function getNextConsecutive(tenantId, branchId, isTest = false, transaction) {
+async function getNextConsecutive(tenantId, branchId, isTest = false, transaction, existingInvoiceNumber = null, documentType = 'invoice') {
   const { DianResolution } = require('../../models');
 
   if (!branchId) {
@@ -37,13 +55,25 @@ async function getNextConsecutive(tenantId, branchId, isTest = false, transactio
   }
 
   const resolution = await DianResolution.findOne({
-    where: { tenant_id: tenantId, branch_id: branchId, is_active: true, is_test: isTest, document_type: 'invoice' },
+    where: { tenant_id: tenantId, branch_id: branchId, is_active: true, is_test: isTest, document_type: documentType },
     transaction,
     lock: transaction ? transaction.LOCK.UPDATE : undefined,
   });
 
+  const docLabel = { invoice: 'de facturación', credit_note: 'de nota crédito', debit_note: 'de nota débito' }[documentType] || '';
   if (!resolution) {
-    throw new Error(`No existe resolución DIAN ${isTest ? 'de pruebas ' : ''}activa para esta sede.`);
+    throw new Error(`No existe resolución DIAN ${docLabel} ${isTest ? 'de pruebas ' : ''}activa para esta sede. Las notas crédito/débito requieren su propia resolución de numeración — regístrala en Facturación Electrónica DIAN → Resoluciones.`);
+  }
+
+  // Reintento de una venta que ya tenía número asignado (rechazada o con
+  // error en un envío anterior): se reutiliza el mismo consecutivo en vez
+  // de tomar uno nuevo — una factura no debe consumir numeración adicional
+  // solo porque el intento anterior falló.
+  if (existingInvoiceNumber && existingInvoiceNumber.startsWith(resolution.prefix)) {
+    const existing = parseInt(existingInvoiceNumber.slice(resolution.prefix.length), 10);
+    if (!Number.isNaN(existing) && existing >= resolution.from_number && existing < resolution.current_number) {
+      return { consecutive: existing, invoiceNumber: existingInvoiceNumber, resolution };
+    }
   }
 
   if (resolution.current_number > resolution.to_number) {
@@ -87,8 +117,14 @@ async function sendInvoiceToDian(sale, tenant) {
     // de identificación) — antes de consumir un consecutivo, no después.
     assertCustomerDianReadiness(sale);
 
+    // Si esta venta ya tuvo un intento previo (rechazado o con error) que le
+    // asignó un número, se reutiliza en el reintento en vez de tomar uno nuevo.
+    const reusableNumber = (sale.dian_invoice_number && sale.dian_status && sale.dian_status !== 'accepted')
+      ? sale.dian_invoice_number
+      : null;
+
     const { consecutive, invoiceNumber, resolution } = await getNextConsecutive(
-      tenant.id, sale.branch_id, isTest, transaction
+      tenant.id, sale.branch_id, isTest, transaction, reusableNumber
     );
 
     await Sale.update(
@@ -123,7 +159,7 @@ async function sendInvoiceToDian(sale, tenant) {
       dian_response: dianResponse,
       dian_sent_at: new Date(),
       dian_accepted_at: accepted ? new Date() : null,
-      dian_error_message: accepted ? null : (dianResponse.statusMessage || dianResponse.statusDescription),
+      dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
     }, { where: { id: sale.id }, transaction });
 
     await DianEvent.create({
@@ -133,6 +169,7 @@ async function sendInvoiceToDian(sale, tenant) {
       document_type: 'Invoice',
       invoice_number: invoiceNumber,
       cufe,
+      request_xml: signedXml,
       response_raw: dianResponse.raw,
       status: dianStatus,
       error_message: accepted ? null : dianResponse.statusMessage,
@@ -142,6 +179,24 @@ async function sendInvoiceToDian(sale, tenant) {
     await transaction.commit();
 
     logger.info(`[DIAN] Factura ${invoiceNumber} — Status: ${dianStatus} | CUFE: ${cufe.substring(0, 16)}...`);
+
+    // Envío del PDF+XML al comprador — obligatorio para todo documento
+    // electrónico aceptado (Resolución 000042/2020). No bloquea la
+    // respuesta al usuario: un problema de correo no debe hacer parecer que
+    // la factura no se envió a la DIAN.
+    if (accepted) {
+      setImmediate(async () => {
+        try {
+          const { Sale: SaleModel } = require('../../models');
+          const freshSale = await SaleModel.findByPk(sale.id, {
+            include: [{ model: require('../../models').SaleItem, as: 'items' }],
+          });
+          await require('./dianEmailService').sendElectronicInvoiceEmail(freshSale, tenant, signedXml);
+        } catch (emailErr) {
+          logger.error(`[DIAN] Error enviando correo de factura ${invoiceNumber}:`, emailErr.message);
+        }
+      });
+    }
 
     return { sent: true, accepted, invoiceNumber, cufe, dianStatus, dianResponse };
 
@@ -192,7 +247,7 @@ async function checkInvoiceStatus(sale, tenant) {
     dian_status: accepted ? 'accepted' : 'rejected',
     dian_response: result,
     dian_accepted_at: accepted ? new Date() : null,
-    dian_error_message: accepted ? null : result.statusMessage,
+    dian_error_message: accepted ? null : buildRejectionMessage(result),
   }, { where: { id: sale.id } });
 
   await DianEvent.create({
@@ -215,9 +270,10 @@ async function checkInvoiceStatus(sale, tenant) {
  * _sendNoteToDian — NC y ND
  * ────────────────────────────────────────────────────────── */
 async function _sendNoteToDian(note, tenant, isDebit = false) {
-  const { Sale, DianEvent, DianResolution } = require('../../models');
+  const { Sale, DianEvent } = require('../../models');
   const transaction = await sequelize.transaction();
   const docLabel = isDebit ? 'ND' : 'NC';
+  const documentType = isDebit ? 'debit_note' : 'credit_note';
 
   try {
     const dianCfg = extractDianConfig(tenant);
@@ -227,20 +283,33 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     const ref = await resolveNoteReference(note);
 
     // ID de la venta original para actualizar estado DIAN y registrar evento
-    const saleId = note.reference_sale_id || note.id;
+    // Bug corregido: antes se priorizaba reference_sale_id (la factura
+    // ORIGINAL referenciada) sobre note.id (la nota crédito/débito en sí),
+    // así que cada envío de una nota terminaba pisando el dian_status/cufe/
+    // dian_invoice_number de la FACTURA ORIGINAL con los datos de la nota —
+    // incluso si la nota fallaba, la factura ya aceptada quedaba marcada
+    // como rechazada con el error de la nota. note.id es siempre el registro
+    // Sale propio de la nota (ver createAndSendCreditNote/voidSale.js).
+    const saleId = note.id;
 
     // Mismo gate que en sendInvoiceToDian — antes de consumir consecutivo.
     assertCustomerDianReadiness(note);
 
-    const resolution = await DianResolution.findOne({
-      where: { tenant_id: tenant.id, branch_id: note.branch_id, is_active: true, is_test: isTest },
-      order: [['created_at', 'DESC']],
-      transaction,
-    });
-    if (!resolution) throw new Error(`No hay resolución DIAN ${isTest ? 'de pruebas ' : ''}activa para esta sede.`);
+    // Bug corregido: las notas crédito/débito requieren su PROPIA resolución
+    // de numeración ante la DIAN (modalidad "Nota Crédito"/"Nota Débito"),
+    // no la misma resolución de la factura — por eso se filtra por
+    // document_type acá, y el número sale de un consecutivo real dentro del
+    // rango autorizado de ESA resolución (antes se inventaba
+    // "NC"+prefijo_factura+timestamp, que nunca iba a corresponder con
+    // ninguna autorización real: exactamente los rechazos FAB05b/07b/08b/
+    // 10b/11b/12b que reportaba la DIAN).
+    const reusableNoteNumber = (note.dian_invoice_number && note.dian_status && note.dian_status !== 'accepted')
+      ? note.dian_invoice_number
+      : null;
 
-    const ts = Date.now().toString().slice(-8);
-    const noteNumber = `${docLabel}${resolution.prefix}${ts}`;
+    const { invoiceNumber: noteNumber, resolution } = await getNextConsecutive(
+      tenant.id, note.branch_id, isTest, transaction, reusableNoteNumber, documentType
+    );
 
     if (saleId) {
       await Sale.update(
@@ -250,14 +319,27 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     }
 
     // Para NC/ND usamos dian-kit para generar XML firmado
+    // OJO: usar parseDateCol (mediodía UTC), NO `new Date(resolution.valid_from)`
+    // directo -- un DATEONLY tipo "2026-08-27" parseado así cae en medianoche
+    // UTC, y con el server en una zona horaria negativa .getFullYear()/
+    // getMonth()/getDate() (que usa formatDate() del SDK) muestran el día
+    // ANTERIOR. La fecha de vigencia declarada en el XML quedaba corrida un
+    // día, exactamente lo que reporta la DIAN como FAB07b/FAB08b. Ver el
+    // mismo fix ya aplicado en dianKitAdapter.createInvoice().
+    //
+    // Las NC/ND no tienen resolución/vigencia DIAN real (a diferencia de la
+    // factura) -- estos campos son opcionales en su resolución. El SDK
+    // igual exige un authorizationNumber no vacío y fechas válidas para
+    // pasar su propio schema, así que se usan valores internos sin
+    // significado ante la DIAN (no los valida para este tipo de documento).
     const kit = dianKit.getKit(tenant);
     kit.config.numbering = {
-      authorizationNumber: resolution.resolution_number,
+      authorizationNumber: resolution.resolution_number || resolution.id,
       prefix: resolution.prefix,
       startNumber: Number(resolution.from_number),
       endNumber: Number(resolution.to_number),
-      startDate: new Date(resolution.valid_from),
-      endDate: new Date(resolution.valid_to),
+      startDate: dianKit.parseDateCol(resolution.valid_from || '2000-01-01'),
+      endDate: dianKit.parseDateCol(resolution.valid_to || '2100-01-01'),
       technicalKey: dianCfg.technical_key,
     };
 
@@ -287,6 +369,10 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       countryName: 'Colombia',
     };
     const noteSchemeID = note.customer_document_type || '13';
+    // Un espacio de más en el NIT (dato capturado en un formulario) corrompe
+    // el CUFE/CUDE: la DIAN normaliza espacios al parsear el XML y el hash
+    // que ellos recalculan deja de coincidir con el que enviamos (FAD06).
+    const noteCustomerNit = (note.customer_tax_id || '').toString().trim() || '13832081';
 
     const noteInput = {
       id: noteNumber,
@@ -294,12 +380,12 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       issueTime: new Date(),
       customer: {
         name: note.customer_name || 'Consumidor Final',
-        identification: { number: note.customer_tax_id || '13832081', type: noteSchemeID, dv: '0' },
+        identification: { number: noteCustomerNit, type: noteSchemeID, dv: '0' },
         personType: '1',
         fiscalResponsibilities: ['R-99-PN'],
         taxInfo: {
           registrationName: note.customer_name || 'Consumidor Final',
-          companyId: { number: note.customer_tax_id || '13832081', type: noteSchemeID, dv: '0' },
+          companyId: { number: noteCustomerNit, type: noteSchemeID, dv: '0' },
           taxLevelCode: 'R-99-PN',
           taxScheme: { code: '01' },
           address: noteAddress,
@@ -355,7 +441,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
         dian_response: dianResponse,
         dian_sent_at: new Date(),
         dian_accepted_at: accepted ? new Date() : null,
-        dian_error_message: accepted ? null : (dianResponse.statusMessage || dianResponse.statusDescription),
+        dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
       }, { where: { id: saleId }, transaction });
     }
 
@@ -366,6 +452,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       document_type: isDebit ? 'DebitNote' : 'CreditNote',
       invoice_number: noteNumber,
       cufe: result.uuid,
+      request_xml: result.signedXml,
       response_raw: dianResponse.raw,
       status: dianStatus,
       error_message: accepted ? null : dianResponse.statusMessage,
@@ -375,12 +462,35 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     await transaction.commit();
 
     logger.info(`[DIAN ${docLabel}] ${noteNumber} → ${dianStatus} | CUDE: ${result.uuid?.substring(0, 16)}...`);
+
+    // Mismo requisito de entrega al comprador que las facturas (ver
+    // sendInvoiceToDian) — también aplica a notas crédito/débito.
+    if (accepted && saleId) {
+      setImmediate(async () => {
+        try {
+          const freshNote = await Sale.findByPk(saleId, {
+            include: [{ model: require('../../models').SaleItem, as: 'items' }],
+          });
+          await require('./dianEmailService').sendElectronicInvoiceEmail(freshNote, tenant, result.signedXml);
+        } catch (emailErr) {
+          logger.error(`[DIAN ${docLabel}] Error enviando correo de ${noteNumber}:`, emailErr.message);
+        }
+      });
+    }
+
     return { sent: true, accepted, noteNumber, cude: result.uuid, dianStatus, dianResponse };
 
   } catch (error) {
     await transaction.rollback();
     logger.error(`[DIAN ${docLabel}] Error:`, error.message);
-    const saleId = note.reference_sale_id || note.id;
+    // Bug corregido: antes se priorizaba reference_sale_id (la factura
+    // ORIGINAL referenciada) sobre note.id (la nota crédito/débito en sí),
+    // así que cada envío de una nota terminaba pisando el dian_status/cufe/
+    // dian_invoice_number de la FACTURA ORIGINAL con los datos de la nota —
+    // incluso si la nota fallaba, la factura ya aceptada quedaba marcada
+    // como rechazada con el error de la nota. note.id es siempre el registro
+    // Sale propio de la nota (ver createAndSendCreditNote/voidSale.js).
+    const saleId = note.id;
     if (saleId) {
       try {
         await Sale.update({ dian_status: 'rejected', dian_error_message: error.message }, { where: { id: saleId } });

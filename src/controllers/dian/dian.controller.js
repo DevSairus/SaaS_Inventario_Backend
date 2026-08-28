@@ -5,8 +5,11 @@
  *   GET    /api/dian/config                    → Obtener config DIAN del tenant
  *   PUT    /api/dian/config                    → Guardar config DIAN del tenant
  *   GET    /api/dian/resolutions               → Listar resoluciones del tenant
- *   POST   /api/dian/resolutions               → Crear/actualizar resolución
+ *   POST   /api/dian/resolutions               → Crear resolución
+ *   PUT    /api/dian/resolutions/:id           → Editar resolución
  *   DELETE /api/dian/resolutions/:id           → Desactivar resolución
+ *   POST   /api/dian/resolutions/:id/reactivate → Reactivar resolución
+ *   DELETE /api/dian/resolutions/:id/permanent  → Eliminar resolución definitivamente
  *   POST   /api/dian/send/:saleId              → Enviar factura a DIAN manualmente
  *   POST   /api/dian/send-credit-note/:saleId  → Enviar nota crédito a DIAN
  *   POST   /api/dian/send-debit-note/:saleId   → Enviar nota débito a DIAN
@@ -28,6 +31,12 @@ const { DIVIPOLA_DEPARTMENTS, DIVIPOLA_CITIES } = require('../../data/divipola-c
 /* ─── Helpers ─── */
 const ok = (res, data, status = 200) => res.status(status).json({ success: true, ...data });
 const fail = (res, message, status = 400) => res.status(status).json({ success: false, message });
+
+// Factura Electrónica y Documento Soporte son documentos ORIGINALES: la DIAN
+// les otorga su propia resolución de numeración (número, fecha, vigencia).
+// Notas crédito/débito NO -- son ajustes que reutilizan la numeración de la
+// factura que referencian, así que solo definen prefijo y rango propios.
+const REQUIRES_DIAN_RESOLUTION = ['invoice', 'support_document'];
 
 // Envío a DIAN: si falló porque al cliente le faltan datos DIAN (ciudad
 // DIVIPOLA, tipo de identificación — ver customerDianReadiness.js), se
@@ -111,19 +120,27 @@ const updateConfig = async (req, res) => {
       ...(buyer_default_scheme_id !== undefined && { buyer_default_scheme_id }),
       ...(buyer_tax_level_code !== undefined && { buyer_tax_level_code }),
       ...(buyer_regime_code !== undefined && { buyer_regime_code }),
-      ...(software_id !== undefined && { software_id }),
+      ...(software_id !== undefined && { software_id: software_id?.trim() }),
       ...(software_provider_nit !== undefined && { software_provider_nit }),
       ...(software_pin !== undefined && { software_pin }),
-      ...(technical_key !== undefined && { technical_key }),
+      ...(technical_key !== undefined && { technical_key: technical_key?.trim() }),
       ...(environment !== undefined && { environment }),
       ...(customization_id !== undefined && { customization_id }),
-      ...(test_set_id !== undefined && { test_set_id }),
+      ...(test_set_id !== undefined && { test_set_id: test_set_id?.trim() }),
       // Solo actualizar certificado si se envía un valor real
       ...(certificate_p12_base64 && certificate_p12_base64 !== '[CONFIGURADO]' && { certificate_p12_base64 }),
       ...(certificate_password && certificate_password !== '[CONFIGURADO]' && { certificate_password }),
     };
 
     await tenant.update({ dian_config: updated });
+
+    // La instancia de DianKit (certificado cargado, ambiente, NIT, etc.) se
+    // cachea en memoria por tenant — si no se invalida acá, los envíos
+    // siguientes seguían usando la configuración vieja aunque ya se hubiera
+    // guardado una nueva (ej. cambiar de Pruebas a Producción sin reiniciar
+    // el backend), causando rechazos DIAN por ambiente/resolución
+    // inconsistentes (ProfileExecutionID, FAB05b, etc.).
+    dianKit.invalidateKit(req.tenant_id);
 
     ok(res, { message: 'Configuración DIAN guardada exitosamente' });
   } catch (e) {
@@ -135,6 +152,16 @@ const updateConfig = async (req, res) => {
 /* ──────────────────────────────────────────────────────────
  * GET /api/dian/resolutions
  * ────────────────────────────────────────────────────────── */
+// No se expone technical_key en crudo al frontend — mismo criterio que
+// tenant.dian_config.technical_key en getConfig(). Se reemplaza por un
+// indicador '[CONFIGURADO]' cuando la resolución trae su propia clave, para
+// que el formulario pueda mostrar "ya configurada" sin filtrar el valor.
+const maskResolution = (r) => {
+  const plain = r.toJSON ? r.toJSON() : { ...r };
+  if (plain.technical_key) plain.technical_key = '[CONFIGURADO]';
+  return plain;
+};
+
 const getResolutions = async (req, res) => {
   try {
     const where = { tenant_id: req.tenant_id };
@@ -144,7 +171,7 @@ const getResolutions = async (req, res) => {
       where,
       order: [['is_active', 'DESC'], ['created_at', 'DESC']],
     });
-    ok(res, { data: resolutions });
+    ok(res, { data: resolutions.map(maskResolution) });
   } catch (e) {
     logger.error('Error getResolutions:', e);
     fail(res, 'Error al obtener resoluciones', 500);
@@ -159,16 +186,36 @@ const createResolution = async (req, res) => {
     const {
       branch_id,
       resolution_number, resolution_date, prefix,
-      from_number, to_number, valid_from, valid_to,
+      from_number, to_number, current_number, valid_from, valid_to,
       document_type = 'invoice', is_test = true, notes,
+      // Clave técnica / test set propios de ESTA resolución — solo
+      // relevantes cuando la habilitación DIAN de este tipo de documento es
+      // distinta a la de facturación de venta (ej. Documento Soporte).
+      // Opcionales: si no vienen, el envío cae al valor global de
+      // tenant.dian_config (ver dianKitAdapter.js#createInvoice).
+      technical_key, test_set_id,
     } = req.body;
+
+    // Un espacio de más al copiar/pegar desde el portal/correo de la DIAN
+    // (ej. test_set_id con un trailing space) hace que la DIAN rechace el
+    // envío por "TestSetId no reconocido" sin ningún otro indicio del motivo.
+    const technicalKeyTrimmed = technical_key?.trim();
+    const testSetIdTrimmed = test_set_id?.trim();
 
     if (!branch_id) {
       return fail(res, 'branch_id es obligatorio: cada resolución pertenece a una sede');
     }
 
-    if (!resolution_number || !resolution_date || !prefix || !from_number || !to_number || !valid_from || !valid_to) {
-      return fail(res, 'Faltan campos obligatorios de la resolución');
+    if (!prefix || !from_number || !to_number) {
+      return fail(res, 'Faltan campos obligatorios: prefijo, desde y hasta');
+    }
+
+    if (REQUIRES_DIAN_RESOLUTION.includes(document_type) && (!resolution_number || !resolution_date || !valid_from || !valid_to)) {
+      return fail(res, 'Faltan campos obligatorios de la resolución (número, fecha, vigencia)');
+    }
+
+    if (prefix.length > 4) {
+      return fail(res, 'El prefijo no puede tener más de 4 caracteres (regla DIAN)');
     }
 
     const branch = await Branch.findOne({ where: { id: branch_id, tenant_id: req.tenant_id } });
@@ -180,30 +227,106 @@ const createResolution = async (req, res) => {
       { where: { tenant_id: req.tenant_id, branch_id, document_type, is_test, is_active: true } }
     );
 
+    // El consecutivo inicial normalmente es from_number, pero si la
+    // numeración ya se venía usando en otro sistema (facturación anterior,
+    // otro software), se puede indicar en qué número va actualmente.
+    const startNumber = current_number !== undefined && current_number !== null && current_number !== ''
+      ? parseInt(current_number)
+      : parseInt(from_number);
+
+    if (startNumber < parseInt(from_number) || startNumber > parseInt(to_number)) {
+      return fail(res, 'El consecutivo actual debe estar dentro del rango autorizado (Desde-Hasta)');
+    }
+
     const resolution = await DianResolution.create({
       tenant_id: req.tenant_id,
       branch_id,
-      resolution_number,
-      resolution_date,
+      resolution_number: resolution_number || null,
+      resolution_date: resolution_date || null,
       prefix,
       from_number: parseInt(from_number),
       to_number: parseInt(to_number),
-      current_number: parseInt(from_number), // Empieza desde el inicio
-      valid_from,
-      valid_to,
+      current_number: startNumber,
+      valid_from: valid_from || null,
+      valid_to: valid_to || null,
       document_type,
       is_active: true,
       is_test,
       notes,
+      ...(technicalKeyTrimmed && technicalKeyTrimmed !== '[CONFIGURADO]' && { technical_key: technicalKeyTrimmed }),
+      ...(testSetIdTrimmed !== undefined && { test_set_id: testSetIdTrimmed }),
     });
 
-    ok(res, { data: resolution, message: 'Resolución creada exitosamente' }, 201);
+    ok(res, { data: maskResolution(resolution), message: 'Resolución creada exitosamente' }, 201);
   } catch (e) {
     logger.error('Error createResolution:', e);
     if (e.name === 'SequelizeUniqueConstraintError') {
       return fail(res, 'Ya existe una resolución activa con ese prefijo. Desactive la anterior primero.');
     }
     fail(res, 'Error al crear resolución', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * PUT /api/dian/resolutions/:id
+ * Editar una resolución existente (datos, rango, consecutivo actual)
+ * ────────────────────────────────────────────────────────── */
+const updateResolution = async (req, res) => {
+  try {
+    const resolution = await DianResolution.findOne({
+      where: { id: req.params.id, tenant_id: req.tenant_id },
+    });
+    if (!resolution) return fail(res, 'Resolución no encontrada', 404);
+
+    const {
+      resolution_number, resolution_date, prefix,
+      from_number, to_number, current_number,
+      valid_from, valid_to, notes,
+      technical_key, test_set_id,
+    } = req.body;
+    const technicalKeyTrimmed = technical_key?.trim();
+    const testSetIdTrimmed = test_set_id?.trim();
+
+    if (prefix !== undefined && prefix.length > 4) {
+      return fail(res, 'El prefijo no puede tener más de 4 caracteres (regla DIAN)');
+    }
+
+    const nextFrom = from_number !== undefined ? parseInt(from_number) : resolution.from_number;
+    const nextTo = to_number !== undefined ? parseInt(to_number) : resolution.to_number;
+    const currentProvided = current_number !== undefined && current_number !== null && current_number !== '';
+    const nextCurrent = currentProvided ? parseInt(current_number) : resolution.current_number;
+
+    // Solo se valida el rango si el usuario efectivamente escribió un nuevo
+    // consecutivo. Dejar "Consecutivo actual" en blanco significa "no
+    // tocarlo" — no debe bloquear el guardado por un valor que ya traía la
+    // resolución (ej. quedó fuera de rango por un consumo indebido de
+    // numeración en un intento anterior, o porque solo se está editando el
+    // rango Desde/Hasta sin cambiar el consecutivo).
+    if (currentProvided && (nextCurrent < nextFrom || nextCurrent > nextTo)) {
+      return fail(res, `El consecutivo actual (${nextCurrent}) debe estar dentro del rango autorizado (${nextFrom}-${nextTo})`);
+    }
+
+    await resolution.update({
+      ...(resolution_number !== undefined && { resolution_number }),
+      ...(resolution_date !== undefined && { resolution_date }),
+      ...(prefix !== undefined && { prefix }),
+      from_number: nextFrom,
+      to_number: nextTo,
+      current_number: nextCurrent,
+      ...(valid_from !== undefined && { valid_from }),
+      ...(valid_to !== undefined && { valid_to }),
+      ...(notes !== undefined && { notes }),
+      // '' o '[CONFIGURADO]' (placeholder que vuelve del frontend sin
+      // tocar) significan "no cambiar" — mismo criterio que
+      // tenant.dian_config.technical_key en updateConfig().
+      ...(technicalKeyTrimmed && technicalKeyTrimmed !== '[CONFIGURADO]' && { technical_key: technicalKeyTrimmed }),
+      ...(testSetIdTrimmed !== undefined && testSetIdTrimmed !== '' && { test_set_id: testSetIdTrimmed }),
+    });
+
+    ok(res, { data: maskResolution(resolution), message: 'Resolución actualizada exitosamente' });
+  } catch (e) {
+    logger.error('Error updateResolution:', e);
+    fail(res, 'Error al actualizar resolución', 500);
   }
 };
 
@@ -221,6 +344,59 @@ const deactivateResolution = async (req, res) => {
     ok(res, { message: 'Resolución desactivada' });
   } catch (e) {
     fail(res, 'Error al desactivar resolución', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/resolutions/:id/reactivate
+ * Reactiva una resolución desactivada (desactiva cualquier otra activa
+ * del mismo tipo/sede, igual que al crear una nueva)
+ * ────────────────────────────────────────────────────────── */
+const reactivateResolution = async (req, res) => {
+  try {
+    const resolution = await DianResolution.findOne({
+      where: { id: req.params.id, tenant_id: req.tenant_id },
+    });
+    if (!resolution) return fail(res, 'Resolución no encontrada', 404);
+
+    await DianResolution.update(
+      { is_active: false },
+      {
+        where: {
+          tenant_id: req.tenant_id,
+          branch_id: resolution.branch_id,
+          document_type: resolution.document_type,
+          is_test: resolution.is_test,
+          is_active: true,
+          id: { [Op.ne]: resolution.id },
+        },
+      }
+    );
+
+    await resolution.update({ is_active: true });
+    ok(res, { data: maskResolution(resolution), message: 'Resolución reactivada' });
+  } catch (e) {
+    logger.error('Error reactivateResolution:', e);
+    fail(res, 'Error al reactivar resolución', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * DELETE /api/dian/resolutions/:id/permanent
+ * Elimina definitivamente una resolución del registro
+ * ────────────────────────────────────────────────────────── */
+const deleteResolution = async (req, res) => {
+  try {
+    const resolution = await DianResolution.findOne({
+      where: { id: req.params.id, tenant_id: req.tenant_id },
+    });
+    if (!resolution) return fail(res, 'Resolución no encontrada', 404);
+
+    await resolution.destroy();
+    ok(res, { message: 'Resolución eliminada permanentemente' });
+  } catch (e) {
+    logger.error('Error deleteResolution:', e);
+    fail(res, 'Error al eliminar resolución', 500);
   }
 };
 
@@ -405,14 +581,7 @@ const getNumberingRange = async (req, res) => {
       return fail(res, 'Configure NIT y Software ID primero');
     }
 
-    const result = await dianApi.getNumberingRange({
-      nit: cfg.nit,
-      softwareId: cfg.software_id,
-      softwarePin: cfg.software_pin,
-      environment: cfg.environment || 'test',
-      p12Base64: cfg.certificate_p12_base64,
-      password:  cfg.certificate_password,
-    });
+    const result = await dianKit.getNumberingRange(tenant);
 
     ok(res, { data: result });
   } catch (e) {
@@ -467,24 +636,40 @@ const sendToTestSet = async (req, res) => {
  * GET /api/dian/habilitacion-status
  * Estado del proceso de habilitación
  * ────────────────────────────────────────────────────────── */
+// DianEvent.document_type usa PascalCase (ver dianService.js) — distinto del
+// enum snake_case de DianResolution.document_type. Mismo mapeo que
+// dianAutoTestService.js#DIAN_EVENT_DOC_TYPE.
+const DIAN_EVENT_DOC_TYPE = { invoice: 'Invoice', support_document: 'SupportDocument' };
+const DOC_TYPE_LABEL_ES = { invoice: 'facturas', support_document: 'documentos soporte' };
+
 const getHabilitacionStatus = async (req, res) => {
   try {
     const tenant = await Tenant.findByPk(req.tenant_id);
     const cfg = tenant.dian_config || {};
+    // La habilitación es POR TIPO DE DOCUMENTO -- haber completado la de
+    // factura no implica que Documento Soporte (u otro tipo agregado
+    // después) también lo esté. Sin este filtro, el checklist se marcaba
+    // "completo" apenas se terminaba de habilitar facturación, y ocultaba
+    // el botón de pruebas para cualquier tipo agregado más tarde.
+    const documentType = req.query.document_type || 'invoice';
 
-    // Contar documentos enviados al set de pruebas
+    const resolution = await DianResolution.findOne({
+      where: { tenant_id: req.tenant_id, is_active: true, is_test: true, document_type: documentType },
+    });
+
+    // Contar documentos de ESTE tipo enviados al set de pruebas
     const testDocs = await DianEvent.count({
       where: {
         tenant_id: req.tenant_id,
         is_test: true,
         event_type: 'SendTestSetAsync',
         status: 'accepted',
+        document_type: DIAN_EVENT_DOC_TYPE[documentType] || 'Invoice',
       },
     });
 
-    const resolution = await DianResolution.findOne({
-      where: { tenant_id: req.tenant_id, is_active: true, is_test: true },
-    });
+    const effectiveTestSetId = resolution?.test_set_id || cfg.test_set_id;
+    const docLabelEs = DOC_TYPE_LABEL_ES[documentType] || documentType;
 
     const steps = [
       {
@@ -508,12 +693,12 @@ const getHabilitacionStatus = async (req, res) => {
       {
         key: 'test_set_id',
         label: 'TestSetId configurado',
-        done: !!cfg.test_set_id,
-        details: cfg.test_set_id ? `ID: ${cfg.test_set_id}` : null,
+        done: !!effectiveTestSetId,
+        details: effectiveTestSetId ? `ID: ${effectiveTestSetId}` : null,
       },
       {
         key: 'test_invoices_sent',
-        label: `Facturas de prueba enviadas (${testDocs}/1 mínimo)`,
+        label: `${docLabelEs[0].toUpperCase()}${docLabelEs.slice(1)} de prueba enviados (${testDocs}/1 mínimo)`,
         done: testDocs >= 1,
         details: `${testDocs} documentos aceptados en set de pruebas`,
       },
@@ -523,6 +708,7 @@ const getHabilitacionStatus = async (req, res) => {
 
     ok(res, {
       data: {
+        document_type: documentType,
         steps,
         all_complete: allDone,
         ready_for_production: allDone,
@@ -552,12 +738,6 @@ const sendAutoTestDocuments = async (req, res) => {
     if (!cfg.nit || !cfg.software_id) {
       return fail(res, 'Configure NIT y Software ID primero');
     }
-    if (!cfg.test_set_id) {
-      return fail(res, 'Configure el TestSetId (se obtiene en el portal de habilitación DIAN)');
-    }
-    if (!cfg.technical_key) {
-      return fail(res, 'Configure la Llave Técnica (Technical Key) de la DIAN');
-    }
     if (!cfg.certificate_p12_base64 || cfg.certificate_p12_base64 === '[CONFIGURADO]') {
       return fail(res, 'Certificado digital no configurado. Cargue el archivo .p12 en la sección de Certificado Digital.');
     }
@@ -565,24 +745,36 @@ const sendAutoTestDocuments = async (req, res) => {
       return fail(res, 'Contraseña del certificado no configurada.');
     }
 
+    const { count = 1, mode = 'invoices', document_type = 'invoice' } = req.body;
+
     const resolution = await DianResolution.findOne({
-      where: { tenant_id: req.tenant_id, is_active: true, is_test: true, document_type: 'invoice' },
+      where: { tenant_id: req.tenant_id, is_active: true, is_test: true, document_type },
     });
     if (!resolution) {
-      return fail(res, 'No hay resolución de habilitación activa. Registre una resolución de pruebas primero.');
+      return fail(res, `No hay resolución de habilitación activa para "${document_type}". Registre una resolución de pruebas primero.`);
     }
 
-    const { count = 1, mode = 'invoices' } = req.body;
+    // La llave técnica y el test_set_id pueden venir de la resolución propia
+    // (habilitación separada por tipo de documento, ej. Documento Soporte) o
+    // del valor global de facturación — mismo criterio que ya aplica al
+    // enviar (ver dianKitAdapter.js#createInvoice y #sendToDian).
+    if (!resolution.test_set_id && !cfg.test_set_id) {
+      return fail(res, 'Configure el TestSetId (se obtiene en el portal de habilitación DIAN) — en la configuración global o en esta resolución.');
+    }
+    if (!resolution.technical_key && !cfg.technical_key) {
+      return fail(res, 'Configure la Llave Técnica (Technical Key) de la DIAN — en la configuración global o en esta resolución.');
+    }
+
     // mode='full'    → set completo (6 facturas + 2 NC + 2 ND = 10 docs)
     // mode='invoices' → solo facturas (1–6)
     const dianAutoTest = require('../../services/dian/dianAutoTestService');
     let results;
 
     if (mode === 'full') {
-      results = await dianAutoTest.sendFullHabilitacionSet({ tenant, cfg, resolution });
+      results = await dianAutoTest.sendFullHabilitacionSet({ tenant, cfg, resolution, documentType: document_type });
     } else {
       const numDocs = Math.min(Math.max(parseInt(count) || 1, 1), 6);
-      results = await dianAutoTest.sendTestDocuments({ tenant, cfg, resolution, count: numDocs });
+      results = await dianAutoTest.sendTestDocuments({ tenant, cfg, resolution, count: numDocs, documentType: document_type });
     }
 
     const allAccepted = results.every(r => r.accepted);
@@ -617,15 +809,19 @@ const testConnectionProd = async (req, res) => {
       return fail(res, 'Certificado no configurado');
     }
 
-    // Forzar PRODUCCIÓN independientemente del cfg.environment
-    const result = await dianApi.getNumberingRange({
-      nit: cfg.nit,
-      softwareId: cfg.software_id,
-      softwarePin: cfg.software_pin,
-      environment: 'production',
-      p12Base64: cfg.certificate_p12_base64,
-      password:  cfg.certificate_password,
-    });
+    // Forzar PRODUCCIÓN independientemente del cfg.environment. Se invalida
+    // la caché del kit antes y después: getKit() cachea por tenant.id, y si
+    // no se limpia, este tenant "de prueba forzada a producción" quedaría
+    // pisando (o siendo pisado por) el kit real del tenant en llamadas
+    // posteriores.
+    const testTenant = { ...tenant.toJSON(), dian_config: { ...cfg, environment: 'production' } };
+    dianKit.invalidateKit(req.tenant_id);
+    let result;
+    try {
+      result = await dianKit.getNumberingRange(testTenant);
+    } finally {
+      dianKit.invalidateKit(req.tenant_id);
+    }
 
     if (result.isFault) {
       return res.status(400).json({
@@ -887,6 +1083,8 @@ const createAndSendCreditNote = async (req, res) => {
     // Crear Sale como nota crédito
     const noteSale = await Sale.create({
       tenant_id: tenantId,
+      branch_id: original.branch_id,
+      reference_sale_id: original.id,
       sale_number: noteNumber,
       document_type: 'nota_credito',
       sale_date: new Date(),
@@ -1056,6 +1254,8 @@ const createAndSendDebitNote = async (req, res) => {
 
     const noteSale = await Sale.create({
       tenant_id: tenantId,
+      branch_id: original.branch_id,
+      reference_sale_id: original.id,
       sale_number: noteNumber,
       document_type: 'nota_debito',
       sale_date: new Date(),
@@ -1162,7 +1362,10 @@ module.exports = {
   updateConfig,
   getResolutions,
   createResolution,
+  updateResolution,
   deactivateResolution,
+  reactivateResolution,
+  deleteResolution,
   sendInvoice,
   sendCreditNote,
   sendDebitNote,
