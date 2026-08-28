@@ -149,7 +149,16 @@ const createExpense = async (req, res) => {
     const {
       category, description, supplier_id, expense_date, due_date,
       total_amount, payment_method, is_recurring, receipt_url, notes,
-      branch_id, paid_now
+      branch_id, paid_now,
+      // Documento Soporte DIAN (Fase 2) — subtotal/tax_rate/tax_amount son
+      // opcionales para no romper llamadas existentes (frontend viejo /
+      // integraciones): si no llega `subtotal`, se mantiene el
+      // comportamiento anterior (total_amount tal cual, sin IVA
+      // discriminado), igual que hizo el backfill de la migración
+      // 2026082815.
+      requires_support_document, subtotal, tax_rate, tax_amount,
+      retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount,
+      reteica_rate, reteica_amount,
     } = req.body;
 
     if (!category || !CATEGORIES.includes(category)) {
@@ -170,6 +179,16 @@ const createExpense = async (req, res) => {
       ? [{ date: expense_date || new Date(), amount: parseFloat(total_amount), method: payment_method || 'Efectivo', user_id: req.user.id, notes: 'Pago al momento de registrar el gasto' }]
       : [];
 
+    // subtotal/tax_amount son la fuente de verdad cuando vienen — total_amount
+    // se recalcula acá, no se toma directo del body, para que nunca queden
+    // desincronizados (ver LEEME de Fase 1).
+    const resolvedSubtotal = subtotal !== undefined ? parseFloat(subtotal) : parseFloat(total_amount);
+    const resolvedTaxAmount = tax_amount !== undefined ? parseFloat(tax_amount) : 0;
+    const resolvedTotal = subtotal !== undefined ? resolvedSubtotal + resolvedTaxAmount : parseFloat(total_amount);
+    const resolvedRetefuenteAmount = retefuente_amount !== undefined ? parseFloat(retefuente_amount) : 0;
+    const resolvedReteivaAmount = reteiva_amount !== undefined ? parseFloat(reteiva_amount) : 0;
+    const resolvedReteicaAmount = reteica_amount !== undefined ? parseFloat(reteica_amount) : 0;
+
     const expense = await Expense.create({
       tenant_id,
       branch_id: branch_id || req.branch_id || null,
@@ -179,7 +198,7 @@ const createExpense = async (req, res) => {
       supplier_id: supplier_id || null,
       expense_date: expense_date || new Date(),
       due_date: due_date || null,
-      total_amount: parseFloat(total_amount),
+      total_amount: resolvedTotal,
       payment_method: payment_method || null,
       payment_status: initialStatus,
       paid_amount: initialPaidAmount,
@@ -187,7 +206,19 @@ const createExpense = async (req, res) => {
       is_recurring: !!is_recurring,
       receipt_url: receipt_url || null,
       notes: notes || null,
-      created_by: req.user.id
+      created_by: req.user.id,
+      // Documento Soporte DIAN
+      requires_support_document: !!requires_support_document,
+      subtotal: resolvedSubtotal,
+      tax_rate: tax_rate !== undefined ? parseFloat(tax_rate) : 0,
+      tax_amount: resolvedTaxAmount,
+      retefuente_rate: retefuente_rate !== undefined ? parseFloat(retefuente_rate) : 0,
+      retefuente_amount: resolvedRetefuenteAmount,
+      reteiva_rate: reteiva_rate !== undefined ? parseFloat(reteiva_rate) : 0,
+      reteiva_amount: resolvedReteivaAmount,
+      reteica_rate: reteica_rate !== undefined ? parseFloat(reteica_rate) : 0,
+      reteica_amount: resolvedReteicaAmount,
+      total_retentions: resolvedRetefuenteAmount + resolvedReteivaAmount + resolvedReteicaAmount,
     }, { transaction });
 
     await transaction.commit();
@@ -224,16 +255,33 @@ const updateExpense = async (req, res) => {
 
     const {
       category, description, supplier_id, expense_date, due_date,
-      total_amount, is_recurring, receipt_url, notes, branch_id
+      total_amount, is_recurring, receipt_url, notes, branch_id,
+      requires_support_document, subtotal, tax_rate, tax_amount,
+      retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount,
+      reteica_rate, reteica_amount,
     } = req.body;
 
     if (category && !CATEGORIES.includes(category)) {
       return res.status(400).json({ success: false, message: 'Categoría inválida' });
     }
+
+    // Igual que en create: si viene subtotal, es la fuente de verdad y
+    // total_amount se recalcula; si no, se respeta total_amount tal cual
+    // (edición que no toca el desglose de IVA).
+    const resolvedSubtotal = subtotal !== undefined ? parseFloat(subtotal) : expense.subtotal;
+    const resolvedTaxAmount = tax_amount !== undefined ? parseFloat(tax_amount) : expense.tax_amount;
+    const resolvedTotal = subtotal !== undefined
+      ? resolvedSubtotal + resolvedTaxAmount
+      : (total_amount !== undefined ? parseFloat(total_amount) : expense.total_amount);
+
     // No permitir bajar el total por debajo de lo ya pagado
-    if (total_amount !== undefined && parseFloat(total_amount) < parseFloat(expense.paid_amount || 0)) {
+    if (resolvedTotal < parseFloat(expense.paid_amount || 0)) {
       return res.status(400).json({ success: false, message: 'El monto no puede ser menor a lo ya pagado' });
     }
+
+    const resolvedRetefuenteAmount = retefuente_amount !== undefined ? parseFloat(retefuente_amount) : expense.retefuente_amount;
+    const resolvedReteivaAmount = reteiva_amount !== undefined ? parseFloat(reteiva_amount) : expense.reteiva_amount;
+    const resolvedReteicaAmount = reteica_amount !== undefined ? parseFloat(reteica_amount) : expense.reteica_amount;
 
     await expense.update({
       category: category ?? expense.category,
@@ -241,11 +289,23 @@ const updateExpense = async (req, res) => {
       supplier_id: supplier_id !== undefined ? supplier_id : expense.supplier_id,
       expense_date: expense_date ?? expense.expense_date,
       due_date: due_date !== undefined ? due_date : expense.due_date,
-      total_amount: total_amount !== undefined ? parseFloat(total_amount) : expense.total_amount,
+      total_amount: resolvedTotal,
       is_recurring: is_recurring !== undefined ? !!is_recurring : expense.is_recurring,
       receipt_url: receipt_url !== undefined ? receipt_url : expense.receipt_url,
       notes: notes !== undefined ? notes : expense.notes,
-      branch_id: branch_id !== undefined ? branch_id : expense.branch_id
+      branch_id: branch_id !== undefined ? branch_id : expense.branch_id,
+      // Documento Soporte DIAN
+      requires_support_document: requires_support_document !== undefined ? !!requires_support_document : expense.requires_support_document,
+      subtotal: resolvedSubtotal,
+      tax_rate: tax_rate !== undefined ? parseFloat(tax_rate) : expense.tax_rate,
+      tax_amount: resolvedTaxAmount,
+      retefuente_rate: retefuente_rate !== undefined ? parseFloat(retefuente_rate) : expense.retefuente_rate,
+      retefuente_amount: resolvedRetefuenteAmount,
+      reteiva_rate: reteiva_rate !== undefined ? parseFloat(reteiva_rate) : expense.reteiva_rate,
+      reteiva_amount: resolvedReteivaAmount,
+      reteica_rate: reteica_rate !== undefined ? parseFloat(reteica_rate) : expense.reteica_rate,
+      reteica_amount: resolvedReteicaAmount,
+      total_retentions: resolvedRetefuenteAmount + resolvedReteivaAmount + resolvedReteicaAmount,
     });
 
     res.json({ success: true, message: 'Gasto actualizado', data: expense });

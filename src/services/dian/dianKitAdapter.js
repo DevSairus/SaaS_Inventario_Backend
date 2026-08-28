@@ -403,6 +403,124 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
 }
 
 /**
+ * Construye el fragmento XML de `cac:WithholdingTaxTotal` para las
+ * retenciones (ReteFuente/ReteIVA/ReteICA) de un Documento Soporte.
+ *
+ * @dian-kit/core v1.0.1 no tiene NINGÚN soporte para WithholdingTaxTotal
+ * (no aparece en su schema ni en su builder de XML) — a diferencia del CUDS
+ * o el ProfileID, esto no es un bug puntual de la librería sino una
+ * ausencia total, ni siquiera para factura (Sale ya tiene las columnas
+ * retefuente_rate/amount desde Fase C pero nunca se envían a la DIAN). Se
+ * inyecta como fragmento de texto en el XML sin firmar, mismo mecanismo que
+ * ya usa createSupportDocument() para CUDS/ProfileID/StandardItemIdentification.
+ *
+ * Reutiliza la MISMA estructura (TaxSubtotal > TaxableAmount, TaxAmount,
+ * TaxCategory > Percent, TaxScheme > ID, Name) que @dian-kit ya genera para
+ * cac:TaxTotal — WithholdingTaxTotal es el mismo tipo UBL, solo cambia el
+ * nombre del contenedor. IDs/Name de TaxScheme tomados literal del propio
+ * TaxCodeName que exporta @dian-kit ('05' ReteIVA, '06' ReteRenta/ReteFuente,
+ * '07' ReteICA).
+ *
+ * Base gravable: ReteFuente y ReteICA se calculan sobre la base gravable del
+ * documento (subtotal); ReteIVA se calcula sobre el IVA generado, no sobre
+ * el subtotal (regla estándar colombiana) -- MEJOR ESFUERZO, no verificado
+ * contra un envío aceptado por la DIAN, igual que el resto de esta
+ * implementación. Validar en habilitación con un caso que sí tenga
+ * retención antes de dar esto por cerrado.
+ *
+ * `payableAmount` en LegalMonetaryTotal NO se reduce por la retención: se
+ * deja el total bruto (mismo criterio que un Invoice UBL estándar, donde
+ * WithholdingTaxTotal es informativo/declarativo y no altera el valor legal
+ * del documento) -- también sin verificar contra un envío real.
+ */
+function buildWithholdingTaxTotals({ subtotal, taxAmount, retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount, reteica_rate, reteica_amount } = {}) {
+  const { formatAmount, formatPercent, TaxCodeName } = require('@dian-kit/core');
+
+  const rows = [
+    { code: '06', base: Number(subtotal || 0), rate: Number(retefuente_rate || 0), amount: Number(retefuente_amount || 0) },
+    { code: '05', base: Number(taxAmount || 0), rate: Number(reteiva_rate || 0), amount: Number(reteiva_amount || 0) },
+    { code: '07', base: Number(subtotal || 0), rate: Number(reteica_rate || 0), amount: Number(reteica_amount || 0) },
+  ].filter(r => r.amount > 0);
+
+  if (rows.length === 0) return '';
+
+  const totalAmount = rows.reduce((s, r) => s + r.amount, 0);
+  const subtotalsXml = rows.map(r => `<cac:TaxSubtotal>` +
+    `<cbc:TaxableAmount currencyID="COP">${formatAmount(r.base)}</cbc:TaxableAmount>` +
+    `<cbc:TaxAmount currencyID="COP">${formatAmount(r.amount)}</cbc:TaxAmount>` +
+    `<cac:TaxCategory>` +
+    `<cbc:Percent>${formatPercent(r.rate)}</cbc:Percent>` +
+    `<cac:TaxScheme>` +
+    `<cbc:ID>${r.code}</cbc:ID>` +
+    `<cbc:Name>${TaxCodeName[r.code]}</cbc:Name>` +
+    `</cac:TaxScheme>` +
+    `</cac:TaxCategory>` +
+    `</cac:TaxSubtotal>`
+  ).join('');
+
+  return `<cac:WithholdingTaxTotal>` +
+    `<cbc:TaxAmount currencyID="COP">${formatAmount(totalAmount)}</cbc:TaxAmount>` +
+    subtotalsXml +
+    `</cac:WithholdingTaxTotal>`;
+}
+
+/**
+ * Party del vendedor (AccountingSupplierParty) de un Documento Soporte, a
+ * partir de un Supplier real. Requiere que ya haya pasado
+ * supplierDianReadiness.assertReadiness() -- acá no se valida completitud,
+ * solo se mapea.
+ *
+ * schemeID: '13' (cédula) para persona natural, '31' (NIT) para jurídica --
+ * mismo criterio que usa el resto del sistema para person_type. Si
+ * Supplier.document_type viene explícito (captura manual), tiene prioridad.
+ */
+function buildSellerFromSupplier(supplier) {
+  const { resolveCity } = require('../../data/divipola-colombia');
+  const schemeID = supplier.document_type || (supplier.person_type === 'natural' ? '13' : '31');
+  const resolved = supplier.city_code ? resolveCity(supplier.city_code) : null;
+
+  return {
+    name: supplier.business_name || supplier.name,
+    nit: supplier.tax_id,
+    dv: schemeID === '31' ? String(computeNitCheckDigit(supplier.tax_id)) : undefined,
+    schemeID,
+    cityCode: supplier.city_code,
+    city: resolved?.cityName || supplier.city,
+    dept: resolved?.departmentName,
+    address: supplier.address,
+    email: supplier.email,
+    regimeCode: Array.isArray(supplier.fiscal_responsibilities) ? supplier.fiscal_responsibilities[0] : undefined,
+  };
+}
+
+/**
+ * Igual que buildSellerFromSupplier pero a partir de los datos capturados
+ * ad-hoc en el modal de generación de Documento Soporte de un gasto sin
+ * Supplier asociado (decisión del usuario: se permite capturar sin crear
+ * la ficha, con opción de crearla después con esos mismos datos). El objeto
+ * ya debe haber pasado supplierDianReadiness.assertReadiness() en el
+ * controller antes de llegar acá.
+ */
+function buildSellerFromAdHoc(adHoc) {
+  const { resolveCity } = require('../../data/divipola-colombia');
+  const schemeID = adHoc.document_type || (adHoc.person_type === 'natural' ? '13' : '31');
+  const resolved = adHoc.city_code ? resolveCity(adHoc.city_code) : null;
+
+  return {
+    name: adHoc.name,
+    nit: adHoc.tax_id,
+    dv: schemeID === '31' ? String(computeNitCheckDigit(adHoc.tax_id)) : undefined,
+    schemeID,
+    cityCode: adHoc.city_code,
+    city: resolved?.cityName || adHoc.city,
+    dept: resolved?.departmentName,
+    address: adHoc.address,
+    email: adHoc.email,
+    regimeCode: adHoc.regimeCode,
+  };
+}
+
+/**
  * Crea y firma un Documento Soporte (tipo 05 — adquisiciones a sujetos no
  * obligados a facturar).
  *
@@ -430,8 +548,14 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
  * contra un envío real aceptado por la DIAN. Trate el resultado de la
  * primera prueba en el set de habilitación como la validación definitiva de
  * esta estructura, no como un hecho ya confirmado.
+ *
+ * `retentions` (opcional, Fase 2): { retefuente_rate, retefuente_amount,
+ * reteiva_rate, reteiva_amount, reteica_rate, reteica_amount } tal cual
+ * vienen de Purchase o Expense -- ver buildWithholdingTaxTotals() arriba.
+ * Parámetro nuevo y opcional: no cambia el comportamiento de
+ * dianAutoTestService.js, que no lo pasa.
  */
-async function createSupportDocument(tenant, { documentNumber, items, resolution, seller, sale }) {
+async function createSupportDocument(tenant, { documentNumber, items, resolution, seller, sale, retentions }) {
   const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
   const {
@@ -526,7 +650,198 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
     .replace(
       /<cbc:Description>[^<]*<\/cbc:Description>/g,
       m => `${m}<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">1</cbc:ID></cac:StandardItemIdentification>`
+    )
+    // Retenciones (ReteFuente/ReteIVA/ReteICA) -- ver buildWithholdingTaxTotals()
+    // arriba. UBL exige que WithholdingTaxTotal vaya después de TaxTotal y
+    // antes de LegalMonetaryTotal; no-op (string vacío) cuando no hay
+    // retención que declarar, así que no afecta a dianAutoTestService.js.
+    .replace(
+      '<cac:LegalMonetaryTotal>',
+      buildWithholdingTaxTotals(retentions) + '<cac:LegalMonetaryTotal>'
     );
+  const { signedXml } = await signXml({
+    xml: unsignedXml,
+    certificate: kit.config.certificateData,
+    signingTime: doc.issueDate,
+  });
+
+  return {
+    xml: unsignedXml,
+    signedXml,
+    cufe: uuid,
+    documentNumber: doc.id,
+  };
+}
+
+/**
+ * Nota de Ajuste al Documento Soporte — tipo DIAN 95 (Resolución 000167 de
+ * 2021, art. 17: "documento electrónico ... por el cual se realizan ajustes
+ * al documento soporte, por errores aritméticos o de contenido"). No es
+ * nota crédito/débito de factura (tipos 91/92) ni nota de ajuste de
+ * documento equivalente (tipos 93/94, que sí trae @dian-kit en su enum
+ * DocumentType) — es un tipo propio que la librería no conoce.
+ *
+ * FASE 5 — corregido contra el Anexo Técnico oficial (Resolución 000167 de
+ * 2021, §6.1.2, §8.2, §10.3.1), que la Fase 4 no había podido consultar
+ * directamente: el Anexo dice explícitamente que la Nota de Ajuste al
+ * Documento Soporte usa **root `<CreditNote>`** (no `<Invoice>` como asumía
+ * la Fase 4) — el DS mismo es "Invoice (Invoic5)" pero su Nota de Ajuste es
+ * "CreditNote", con `CreditNoteLine`/`CreditedQuantity`/`CreditNoteTypeCode`,
+ * igual para el caso crédito Y el caso débito (a diferencia de NC/ND de
+ * factura, para la Nota de Ajuste al Documento Soporte NO existe un root
+ * `DebitNote` — el propio Anexo solo define tres documentos XML para toda
+ * esta familia: Invoice, CreditNote y ApplicationResponse). Confirmado
+ * también por una fuente de integración (TOTVS/Protheus DT de Nota de
+ * Ajuste para Documento Soporte COL), que arma
+ * `<cbc:CreditNoteTypeCode>95</cbc:CreditNoteTypeCode>` para ambos casos.
+ *
+ * Para lograr ese root con @dian-kit (que tampoco conoce "95" — mismo
+ * problema que "05" con el Documento Soporte) se usa
+ * DocumentType.NOTA_AJUSTE_CREDITO_DOC_EQUIV ("94") como placeholder en vez
+ * de DOCUMENTO_SOPORTE ("05"): "94" sí es un valor válido de su schema Y
+ * cae dentro del set CREDIT_NOTE_DOCUMENTS que usa `getDocumentConfig()`
+ * internamente (visto en el código fuente de @dian-kit/core@1.0.1) para
+ * decidir root/línea/campo de cantidad — con "94" como placeholder,
+ * `buildCreditNoteXml()` ya arma root `<CreditNote>`,
+ * `<cac:CreditNoteLine>`/`<cbc:CreditedQuantity>` sin ningún parche de texto,
+ * y solo queda reemplazar el código de tipo "94"→"95" (mismo patrón de
+ * placeholder-y-reemplazo que ya usaba la Fase 4, pero apuntando al
+ * builder/placeholder correctos en vez de Invoice/"05").
+ *
+ * También corregido: la referencia al Documento Soporte original
+ * (`BillingReference/InvoiceDocumentReference/cbc:UUID`) queda con
+ * `@schemeName="CUFE-SHA384"` porque @dian-kit lo deja fijo así en su
+ * builder (pensado para cuando una Nota Crédito de factura referencia una
+ * factura real, identificada por CUFE) — pero el Documento Soporte que
+ * referenciamos tiene CUDS, no CUFE, así que se corrige ese atributo
+ * también (mismo criterio que ya se aplica al UUID del documento principal).
+ *
+ * `discrepancyResponse` ahora solo se emite para ajustes tipo **débito**:
+ * la Fase 4 lo emitía para crédito y débito por igual "hasta ver qué
+ * rechaza el set de habilitación" — una fuente de integración (comentario
+ * de código fuente Protheus/TOTVS, `// DiscrepancyResponse Solo para la
+ * Nota de Débito`) confirma que para esta familia de documento
+ * específicamente el grupo es exclusivo de la Nota de Débito; se aplica ya
+ * ese criterio en vez de esperar el rechazo.
+ *
+ * Sigue MEJOR ESFUERZO, no verificado contra un envío aceptado por la DIAN:
+ * - El texto exacto del ProfileID para tipo 95 sigue sin confirmar contra
+ *   la tabla de reglas de la sección 8.2 del Anexo (no se pudo acceder al
+ *   contenido completo de esa sección, solo a su encabezado e índice) — se
+ *   mantiene el literal de la Fase 4 como mejor esfuerzo. Validar en el
+ *   primer envío al set de habilitación.
+ * - Roles supplier/customer invertidos y fix CUDS-SHA384/
+ *   StandardItemIdentification: igual que createSupportDocument(), sin
+ *   cambios en esta fase.
+ *
+ * @param {object} original - { number, cuds, issueDate } del SupportDocument
+ *   que se está ajustando (support_document_number/cuds/dian_accepted_at).
+ * @param {'credit'|'debit'} adjustmentType
+ */
+async function createSupportDocumentAdjustment(tenant, {
+  documentNumber, items, resolution, seller, retentions, adjustmentType, reason, original,
+}) {
+  const kit = getKit(tenant);
+  const cfg = tenant.dian_config || {};
+  const {
+    buildCreditNoteXml, buildCufeInput, concatenateCufeFields, sha384,
+    generateSoftwareSecurityCode, signXml, DianDocumentSchema, DocumentType,
+  } = require('@dian-kit/core');
+
+  kit.config.numbering = {
+    authorizationNumber: resolution.resolution_number || resolution.id,
+    prefix: resolution.prefix,
+    startNumber: Number(resolution.from_number),
+    endNumber: Number(resolution.to_number),
+    startDate: parseDateCol(resolution.valid_from || '2000-01-01'),
+    endDate: parseDateCol(resolution.valid_to || '2100-01-01'),
+    technicalKey: resolution.technical_key || cfg.technical_key,
+  };
+
+  const issueDate = new Date();
+  const doc = DianDocumentSchema.parse({
+    // Placeholder schema-válido que SÍ cae en el set CREDIT_NOTE_DOCUMENTS
+    // de @dian-kit (root CreditNote) -- se corrige a "95" abajo. Ver nota
+    // arriba: DOCUMENTO_SOPORTE ("05") de la Fase 4 producía root Invoice,
+    // que el Anexo Técnico no contempla para la Nota de Ajuste.
+    documentType: DocumentType.NOTA_AJUSTE_CREDITO_DOC_EQUIV,
+    operationType: '10',
+    environment: kit.config.environment,
+    id: documentNumber,
+    issueDate,
+    issueTime: issueDate,
+    currency: 'COP',
+    supplier: buildCounterpartyData(seller),
+    customer: buildSelfParty(cfg, tenant),
+    lines: mapLines(items),
+    taxTotals: buildDocumentTaxTotals(items),
+    legalMonetaryTotal: buildLegalMonetaryTotal(items),
+    paymentMeans: { paymentForm: '1', paymentMethod: '10' },
+    period: {
+      startDate: new Date(issueDate.getFullYear(), issueDate.getMonth(), 1),
+      endDate: issueDate,
+    },
+    // Referencia al Documento Soporte original.
+    billingReference: {
+      id: original.number,
+      uuid: original.cuds,
+      issueDate: new Date(original.issueDate),
+    },
+    // Solo para débito -- ver nota de fase arriba (confirmado contra fuente
+    // de integración: el grupo es exclusivo de la Nota de Débito para esta
+    // familia de documento).
+    ...(adjustmentType === 'debit' ? {
+      discrepancyResponse: {
+        referenceId: original.number,
+        responseCode: '1',
+        description: reason || 'Nota de ajuste - débito',
+      },
+    } : {}),
+    software: kit.config.software,
+    numbering: kit.config.numbering,
+  });
+
+  const cufeInput = {
+    ...buildCufeInput(doc),
+    nitOFE: doc.customer.identification.number,
+    numAdq: doc.supplier.identification.number,
+  };
+  const uuid = sha384(concatenateCufeFields(cufeInput));
+  const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
+  const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
+  let unsignedXml = buildCreditNoteXml(doc, uuid, softwareSecurityCode)
+    .replace(
+      /(<sts:ProviderID(?:\s+\w+="[^"]*")*?\s+schemeID=")[^"]*("(?:\s+\w+="[^"]*")*>)/,
+      `$1${providerDv}$2`
+    )
+    .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
+    // El UUID del Documento Soporte referenciado en BillingReference es un
+    // CUDS, no un CUFE -- @dian-kit deja ese atributo fijo en "CUFE-SHA384"
+    // (pensado para NC de factura referenciando una factura real).
+    .replace(
+      /(<cac:BillingReference>[\s\S]*?<cbc:UUID schemeName=")CUFE-SHA384("[\s\S]*?<\/cac:BillingReference>)/,
+      '$1CUDS-SHA384$2'
+    )
+    // Código de tipo de documento: "94" (placeholder schema-válido para
+    // @dian-kit, ver nota arriba) → "95" (Nota de Ajuste al Documento
+    // Soporte, real ante la DIAN).
+    .replace(
+      /<cbc:CreditNoteTypeCode>94<\/cbc:CreditNoteTypeCode>/,
+      '<cbc:CreditNoteTypeCode>95</cbc:CreditNoteTypeCode>'
+    )
+    .replace(
+      /<cbc:ProfileID>[^<]*<\/cbc:ProfileID>/,
+      '<cbc:ProfileID>DIAN 2.1: nota de ajuste al documento soporte en adquisiciones efectuadas a no obligados a facturar.</cbc:ProfileID>'
+    )
+    .replace(
+      /<cbc:Description>[^<]*<\/cbc:Description>/g,
+      m => `${m}<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">1</cbc:ID></cac:StandardItemIdentification>`
+    )
+    .replace(
+      '<cac:LegalMonetaryTotal>',
+      buildWithholdingTaxTotals(retentions) + '<cac:LegalMonetaryTotal>'
+    );
+
   const { signedXml } = await signXml({
     xml: unsignedXml,
     certificate: kit.config.certificateData,
@@ -817,10 +1132,15 @@ module.exports = {
   invalidateKit,
   createInvoice,
   createSupportDocument,
+  createSupportDocumentAdjustment,
   sendToDian,
   getStatusByCufe,
   getNumberingRange,
   mapLines,
   buildDocumentTaxTotals,
+  buildWithholdingTaxTotals,
+  buildSellerFromSupplier,
+  buildSellerFromAdHoc,
+  computeNitCheckDigit,
   parseDateCol,
 };

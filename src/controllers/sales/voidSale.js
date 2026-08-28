@@ -224,6 +224,24 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
     // ── 5. Commit ─────────────────────────────────────────────────────────────
     await transaction.commit();
 
+    // ── 5b. Asiento contable de la devolución (async, no bloquea) ─────────────
+    setImmediate(async () => {
+      try {
+        const { generateCustomerReturnEntry } = require('../../services/accounting/autoEntries.service');
+        const itemsForAccounting = validatedItems.map(item => ({
+          saleItem:    item._saleItem,
+          product:     item._product,
+          destination: item.destination,
+          subtotal:    item.subtotal,
+          quantity:    item.quantity,
+          unit_cost:   item.unit_cost,
+        }));
+        await generateCustomerReturnEntry(customerReturn, itemsForAccounting, sale, tenant_id, user_id);
+      } catch (err) {
+        logger.error(`[VOID] Error generando asiento de devolución ${return_number}:`, err.message);
+      }
+    });
+
     // ── 6. Actualizar OT vinculada (fuera de transacción, no bloquea) ─────────
     let workOrderUpdated = null;
     try {

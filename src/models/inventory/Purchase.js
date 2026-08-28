@@ -246,46 +246,18 @@ const Purchase = sequelize.define('Purchase', {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW
   },
-  // ── DIAN — Documento Soporte (espejo de los campos dian_* de Sale) ──
+  // ── DIAN — Documento Soporte ──────────────────────────────────────
+  // Solo el flag de intención vive acá; el estado/CUDS/respuesta DIAN
+  // vive en support_documents (tabla dedicada, ver
+  // models/dian/SupportDocument.js y Documento-Soporte-Plan-v2.md §1).
   // No es una transacción aparte: es un artefacto de cumplimiento sobre
-  // esta misma Purchase. 1 Purchase ↔ máximo 1 Documento Soporte activo.
+  // esta misma Purchase. 1 Purchase ↔ máximo 1 Documento Soporte activo
+  // (UNIQUE parcial en support_documents.purchase_id).
   requires_support_document: {
     type: DataTypes.BOOLEAN,
     allowNull: false,
     defaultValue: false,
     comment: 'Precargado en true cuando supplier.is_obligated_to_invoice=false, editable por el usuario (ver purchases.controller.js).'
-  },
-  dian_status: {
-    type: DataTypes.STRING(30),
-    allowNull: false,
-    defaultValue: 'not_applicable',
-    comment: 'not_applicable | pending | sending | accepted | rejected'
-  },
-  support_document_number: {
-    type: DataTypes.STRING(50),
-    allowNull: true,
-    comment: 'Prefijo + consecutivo — equivalente a Sale.dian_invoice_number'
-  },
-  cuds: {
-    type: DataTypes.STRING(255),
-    allowNull: true,
-    comment: 'Código Único del Documento Soporte — equivalente a Sale.cufe, algoritmo/orden de concatenación distintos (ver plan §4)'
-  },
-  dian_response: {
-    type: DataTypes.JSONB,
-    allowNull: true
-  },
-  dian_sent_at: {
-    type: DataTypes.DATE,
-    allowNull: true
-  },
-  dian_accepted_at: {
-    type: DataTypes.DATE,
-    allowNull: true
-  },
-  dian_error_message: {
-    type: DataTypes.TEXT,
-    allowNull: true
   }
 }, {
   tableName: 'purchases',

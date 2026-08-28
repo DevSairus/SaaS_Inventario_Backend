@@ -31,6 +31,18 @@ router.post('/create-debit-note/:saleId',  ctrl.createAndSendDebitNote);
 router.post('/check-status/:saleId',     ctrl.checkStatus);
 router.post('/test-set/:saleId',         ctrl.sendToTestSet);
 
+// Documento Soporte (adquisiciones a no obligados a facturar) — Purchase o Expense
+router.post('/send-support-document/purchase/:purchaseId',        ctrl.sendSupportDocumentPurchase);
+router.post('/send-support-document/expense/:expenseId',          ctrl.sendSupportDocumentExpense);
+router.get('/support-document/purchase/:purchaseId',              ctrl.getSupportDocumentStatusPurchase);
+router.get('/support-document/expense/:expenseId',                ctrl.getSupportDocumentStatusExpense);
+router.post('/check-status-support-document/purchase/:purchaseId', ctrl.checkSupportDocumentStatusPurchase);
+router.post('/check-status-support-document/expense/:expenseId',   ctrl.checkSupportDocumentStatusExpense);
+
+// Nota de Ajuste al Documento Soporte (tipo DIAN 95) — Fase 4
+router.post('/support-document/:supportDocumentId/adjustment',   ctrl.createSupportDocumentAdjustment);
+router.get('/support-document/:supportDocumentId/adjustments',   ctrl.listSupportDocumentAdjustments);
+
 // Habilitación y diagnóstico
 router.get('/habilitacion-status',   ctrl.getHabilitacionStatus);
 router.post('/test-connection',      ctrl.testConnection);

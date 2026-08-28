@@ -58,6 +58,48 @@ const Expense = sequelize.define('Expense', {
     allowNull: false,
     validate: { min: 0 }
   },
+  // ── DIAN — Documento Soporte (mismo criterio que Purchase) ──────────
+  // requires_support_document es el único flag de intención que vive
+  // acá; el estado/CUDS/respuesta DIAN vive en support_documents
+  // (models/dian/SupportDocument.js). subtotal/tax_rate/tax_amount
+  // existen porque, a diferencia de Purchase (que ya traía desglose vía
+  // PurchaseItem), Expense solo tenía total_amount sin discriminar IVA —
+  // el Documento Soporte necesita base + impuesto por separado.
+  // total_amount = subtotal + tax_amount (recalculado en el controller).
+  requires_support_document: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    comment: 'Precargado en true cuando supplier.is_obligated_to_invoice=false, editable por el usuario.'
+  },
+  subtotal: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: false,
+    defaultValue: 0,
+    comment: 'Base gravable del gasto (sin IVA).'
+  },
+  tax_rate: {
+    type: DataTypes.DECIMAL(5, 2),
+    allowNull: false,
+    defaultValue: 0,
+    comment: '% de IVA aplicado (0 cuando el gasto no genera IVA discriminado).'
+  },
+  tax_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: false,
+    defaultValue: 0
+  },
+  // ── Retenciones — mismo set que ya existe en Purchase desde Fase C
+  // (2026070302-add-multi-tax-system.js). Un gasto a un independiente
+  // (honorarios, arriendo) puede generar autorretención igual que una
+  // compra de inventario.
+  retefuente_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  retefuente_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  reteiva_rate:      { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  reteiva_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  reteica_rate:      { type: DataTypes.DECIMAL(5, 4), defaultValue: 0 },
+  reteica_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
+  total_retentions:  { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   payment_method: {
     type: DataTypes.STRING(50),
     allowNull: true

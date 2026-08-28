@@ -54,6 +54,15 @@ const failDianSend = (res, e, fallbackMessage) => {
       missingFields: e.missingFields,
     });
   }
+  if (e.code === 'DIAN_SUPPLIER_INCOMPLETE') {
+    return res.status(422).json({
+      success: false,
+      code: e.code,
+      message: e.message,
+      supplierId: e.supplierId,
+      missingFields: e.missingFields,
+    });
+  }
   fail(res, e.message || fallbackMessage, 500);
 };
 
@@ -501,6 +510,251 @@ const checkStatus = async (req, res) => {
     ok(res, { data: result });
   } catch (e) {
     fail(res, e.message || 'Error al consultar estado DIAN', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/send-support-document/purchase/:purchaseId
+ * ────────────────────────────────────────────────────────── */
+const sendSupportDocumentPurchase = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const result = await dianService.sendSupportDocumentForPurchase(
+      req.params.purchaseId, tenant, req.user.id
+    );
+    ok(res, { data: result, message: result.accepted ? 'Documento Soporte aceptado por DIAN' : 'Documento Soporte enviado (pendiente de aceptación)' });
+  } catch (e) {
+    failDianSend(res, e, 'Error sendSupportDocumentPurchase:');
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/send-support-document/expense/:expenseId
+ * Body opcional `seller` — datos ad-hoc del vendedor cuando el gasto no
+ * tiene supplier_id (ver dianService.js#sendSupportDocumentForExpense).
+ * ────────────────────────────────────────────────────────── */
+const sendSupportDocumentExpense = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const adHocSeller = req.body?.seller || null;
+    const result = await dianService.sendSupportDocumentForExpense(
+      req.params.expenseId, tenant, req.user.id, adHocSeller
+    );
+    ok(res, { data: result, message: result.accepted ? 'Documento Soporte aceptado por DIAN' : 'Documento Soporte enviado (pendiente de aceptación)' });
+  } catch (e) {
+    failDianSend(res, e, 'Error sendSupportDocumentExpense:');
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * GET /api/dian/support-document/purchase/:purchaseId
+ * GET /api/dian/support-document/expense/:expenseId
+ * Estado guardado localmente (no re-consulta DIAN — para eso está
+ * check-status-support-document, mismo patrón que checkStatus/factura).
+ * ────────────────────────────────────────────────────────── */
+const getSupportDocumentStatus = (sourceType) => async (req, res) => {
+  try {
+    const { SupportDocument } = require('../../models');
+    const sourceId = sourceType === 'purchase' ? req.params.purchaseId : req.params.expenseId;
+    const sourceColumn = sourceType === 'purchase' ? 'purchase_id' : 'expense_id';
+
+    const supportDocument = await SupportDocument.findOne({
+      where: { tenant_id: req.tenant_id, [sourceColumn]: sourceId },
+    });
+    if (!supportDocument) return ok(res, { data: null });
+
+    ok(res, { data: supportDocument });
+  } catch (e) {
+    logger.error('Error getSupportDocumentStatus:', e);
+    fail(res, 'Error al consultar el Documento Soporte', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/check-status-support-document/purchase/:purchaseId
+ * POST /api/dian/check-status-support-document/expense/:expenseId
+ * Re-consulta el estado en la DIAN (mismo criterio que checkStatus).
+ * ────────────────────────────────────────────────────────── */
+const checkSupportDocumentStatus = (sourceType) => async (req, res) => {
+  try {
+    const sourceId = sourceType === 'purchase' ? req.params.purchaseId : req.params.expenseId;
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const result = await dianService.checkSupportDocumentStatus(sourceType, sourceId, tenant);
+    ok(res, { data: result });
+  } catch (e) {
+    fail(res, e.message || 'Error al consultar estado DIAN', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/support-document/:supportDocumentId/adjustment
+ * Crear Nota de Ajuste (tipo 95, crédito o débito) sobre un Documento
+ * Soporte ya aceptado por la DIAN y enviarla.
+ *
+ * Body:
+ *   adjustment_type: 'credit' | 'debit'   ← requerido
+ *   reason: string                        ← requerido
+ *   items: [{ description, quantity, unit_price, tax_percentage }]  ← opcional
+ *   amount: number                        ← opcional, alternativa a items
+ *
+ * Si se envía `items`, se calcula subtotal/IVA por línea (mismo criterio que
+ * createAndSendDebitNote). Si se envía `amount` sin `items`, se toma como
+ * subtotal de una sola línea sin IVA. Uno de los dos es obligatorio.
+ *
+ * Vendedor ad-hoc (Fase 5): si el origen es un gasto (`expense`) sin
+ * proveedor real vinculado, se usa `SupportDocument.seller_snapshot` -- los
+ * datos del vendedor ad-hoc capturados en el envío original del Documento
+ * Soporte (ver AdHocSellerModal / dianService.js#sendSupportDocumentToDian),
+ * que desde esa fase se persisten junto con el documento. Solo falla si
+ * NINGUNO de los dos existe (proveedor real O snapshot) -- caso que solo
+ * debería darse en Documentos Soporte generados ANTES de la Fase 5.
+ * ────────────────────────────────────────────────────────── */
+const createSupportDocumentAdjustment = async (req, res) => {
+  const { sequelize: seq } = require('../../config/database');
+  const { SupportDocument, SupportDocumentAdjustment, Purchase, PurchaseItem, Supplier, Expense } = require('../../models');
+  const transaction = await seq.transaction();
+  try {
+    const { supportDocumentId } = req.params;
+    const tenantId = req.tenant_id;
+    const { adjustment_type, reason, items, amount } = req.body;
+
+    if (!['credit', 'debit'].includes(adjustment_type)) {
+      await transaction.rollback();
+      return fail(res, "adjustment_type debe ser 'credit' o 'debit'");
+    }
+    if (!reason) {
+      await transaction.rollback();
+      return fail(res, 'El motivo es obligatorio');
+    }
+
+    const supportDocument = await SupportDocument.findOne({
+      where: { id: supportDocumentId, tenant_id: tenantId },
+      include: [
+        { model: Purchase, as: 'purchase', include: [{ model: Supplier, as: 'supplier' }] },
+        { model: Expense, as: 'expense', include: [{ model: Supplier, as: 'supplier' }] },
+      ],
+      transaction,
+    });
+    if (!supportDocument) { await transaction.rollback(); return fail(res, 'Documento Soporte no encontrado', 404); }
+    if (supportDocument.dian_status !== 'accepted' || !supportDocument.cuds) {
+      await transaction.rollback();
+      return fail(res, 'El Documento Soporte debe estar aceptado por la DIAN antes de generar una Nota de Ajuste.');
+    }
+
+    const source = supportDocument.source_type === 'purchase' ? supportDocument.purchase : supportDocument.expense;
+    const supplier = source?.supplier;
+    if (!supplier && !supportDocument.seller_snapshot) {
+      await transaction.rollback();
+      return fail(res, 'Esta Nota de Ajuste no se puede generar: el Documento Soporte original no tiene un proveedor real asociado ni datos de vendedor guardados. Vincula un proveedor primero.');
+    }
+
+    // Calcular ítems de la nota de ajuste — mismo criterio que createAndSendDebitNote
+    const noteItems = [];
+    let noteSubtotal = 0;
+    let noteTax = 0;
+
+    if (items && Array.isArray(items) && items.length > 0) {
+      for (const item of items) {
+        const qty = parseFloat(item.quantity) || 1;
+        const price = parseFloat(item.unit_price) || 0;
+        const taxPct = parseFloat(item.tax_percentage) || 0;
+        const subtot = qty * price;
+        const tax = subtot * taxPct / 100;
+
+        noteSubtotal += subtot;
+        noteTax += tax;
+        noteItems.push({
+          id: String(noteItems.length + 1),
+          description: item.description || 'Ajuste',
+          quantity: qty,
+          unit_code: 'EA',
+          unit_price: price,
+          subtotal: subtot,
+          tax_amount: tax,
+          tax_rate: taxPct,
+        });
+      }
+    } else if (amount && parseFloat(amount) > 0) {
+      const amt = parseFloat(amount);
+      noteSubtotal = amt;
+      noteItems.push({
+        id: '1',
+        description: reason || 'Ajuste al Documento Soporte',
+        quantity: 1,
+        unit_code: 'EA',
+        unit_price: amt,
+        subtotal: amt,
+        tax_amount: 0,
+        tax_rate: 0,
+      });
+    } else {
+      await transaction.rollback();
+      return fail(res, 'Debe especificar ítems o un monto para la Nota de Ajuste');
+    }
+
+    const noteTotal = noteSubtotal + noteTax;
+
+    const adjustment = await SupportDocumentAdjustment.create({
+      tenant_id: tenantId,
+      support_document_id: supportDocument.id,
+      adjustment_type,
+      reason,
+      items: noteItems,
+      subtotal: noteSubtotal,
+      tax_amount: noteTax,
+      total_amount: noteTotal,
+      dian_status: 'pending',
+      created_by: req.user.id,
+    }, { transaction });
+
+    await transaction.commit();
+
+    const tenant = await Tenant.findByPk(tenantId);
+    // Prioriza el proveedor real vigente (datos más al día que el snapshot
+    // si el proveedor se editó desde el envío original) -- el snapshot es
+    // solo el fallback para cuando no hay Supplier vinculado (vendedor
+    // ad-hoc, ver nota de Fase 5 arriba).
+    const seller = supplier ? dianKit.buildSellerFromSupplier(supplier) : supportDocument.seller_snapshot;
+    const retentions = {
+      retefuente_rate: source.retefuente_rate, retefuente_amount: source.retefuente_amount,
+      reteiva_rate: source.reteiva_rate, reteiva_amount: source.reteiva_amount,
+      reteica_rate: source.reteica_rate, reteica_amount: source.reteica_amount,
+    };
+
+    setImmediate(async () => {
+      try {
+        await dianService.sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, seller, tenant, retentions);
+        logger.info(`[DIAN] Nota de Ajuste creada para Documento Soporte ${supportDocument.id}`);
+      } catch (err) {
+        logger.error(`[DIAN] Error enviando Nota de Ajuste de ${supportDocument.id}:`, err.message);
+      }
+    });
+
+    ok(res, {
+      data: adjustment,
+      message: 'Nota de Ajuste creada. Envío a DIAN en proceso.',
+    }, 201);
+  } catch (e) {
+    if (transaction && !transaction.finished) await transaction.rollback();
+    logger.error('Error createSupportDocumentAdjustment:', e);
+    fail(res, e.message || 'Error al crear la Nota de Ajuste', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * GET /api/dian/support-document/:supportDocumentId/adjustments
+ * ────────────────────────────────────────────────────────── */
+const listSupportDocumentAdjustments = async (req, res) => {
+  try {
+    const { SupportDocumentAdjustment } = require('../../models');
+    const adjustments = await SupportDocumentAdjustment.findAll({
+      where: { support_document_id: req.params.supportDocumentId, tenant_id: req.tenant_id },
+      order: [['created_at', 'DESC']],
+    });
+    ok(res, { data: adjustments });
+  } catch (e) {
+    logger.error('Error listSupportDocumentAdjustments:', e);
+    fail(res, 'Error al consultar las Notas de Ajuste', 500);
   }
 };
 
@@ -1372,6 +1626,15 @@ module.exports = {
   createAndSendCreditNote,
   createAndSendDebitNote,
   checkStatus,
+  sendSupportDocumentPurchase,
+  sendSupportDocumentExpense,
+  getSupportDocumentStatusPurchase: getSupportDocumentStatus('purchase'),
+  getSupportDocumentStatusExpense: getSupportDocumentStatus('expense'),
+  checkSupportDocumentStatusPurchase: checkSupportDocumentStatus('purchase'),
+  checkSupportDocumentStatusExpense: checkSupportDocumentStatus('expense'),
+
+  createSupportDocumentAdjustment,
+  listSupportDocumentAdjustments,
   getEvents,
   testConnection,
   getNumberingRange,

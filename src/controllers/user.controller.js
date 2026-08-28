@@ -257,13 +257,15 @@ const createUser = async (req, res) => {
       });
     }
 
-    // Verificar si el email ya existe en el tenant
-    let existingWhere = { email };
-    existingWhere = addTenantScope(existingWhere, req);
-
-    const existingUser = await User.findOne({ where: existingWhere });
+    // Verificar si el email ya existe — el email es único a nivel global
+    // (constraint de BD sobre toda la tabla users, no por tenant), así que
+    // el chequeo previo no puede ir scoped al tenant actual: si el email ya
+    // está en uso por OTRO tenant, un findOne con addTenantScope no lo ve, y
+    // el User.create de más abajo revienta con SequelizeUniqueConstraintError
+    // sin que el usuario reciba ningún mensaje claro.
+    const existingUser = await User.findOne({ where: { email } });
     if (existingUser) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: 'El email ya está registrado',
       });
@@ -296,6 +298,14 @@ const createUser = async (req, res) => {
       data: { user: userResponse },
     });
   } catch (error) {
+    // Red de seguridad ante condición de carrera del findOne de arriba
+    // (dos creaciones concurrentes con el mismo email).
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        success: false,
+        message: 'El email ya está registrado',
+      });
+    }
     console.error('Error creando usuario:', error);
     res.status(500).json({
       success: false,
@@ -327,13 +337,11 @@ const createClient = async (req, res) => {
       stratum,
     } = req.body;
 
-    // Verificar si el email ya existe
-    let existingWhere = { email };
-    existingWhere = addTenantScope(existingWhere, req);
-
-    const existingUser = await User.findOne({ where: existingWhere });
+    // Verificar si el email ya existe — email único a nivel global, ver
+    // nota en createUser sobre por qué este chequeo no puede ir scoped al tenant.
+    const existingUser = await User.findOne({ where: { email } });
     if (existingUser) {
-      return res.status(400).json({
+      return res.status(409).json({
         success: false,
         message: 'El email ya está registrado',
       });
@@ -373,6 +381,12 @@ const createClient = async (req, res) => {
       data: { user: userResponse, tempPassword },
     });
   } catch (error) {
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        success: false,
+        message: 'El email ya está registrado',
+      });
+    }
     console.error('Error creando cliente:', error);
     res.status(500).json({
       success: false,

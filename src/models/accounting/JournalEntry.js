@@ -16,7 +16,7 @@ const JournalEntry = sequelize.define(
       type: DataTypes.STRING(40),
       allowNull: false,
       defaultValue: 'manual',
-      validate: { isIn: [['sale', 'purchase', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'manual', 'adjustment', 'customer_advance', 'customer_advance_application', 'customer_advance_refund']] },
+      validate: { isIn: [['sale', 'purchase', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'credit_note', 'debit_note', 'manual', 'adjustment', 'customer_advance', 'customer_advance_application', 'customer_advance_refund']] },
     },
     source_id: { type: DataTypes.UUID, allowNull: true },
     description: { type: DataTypes.STRING(500), allowNull: true },

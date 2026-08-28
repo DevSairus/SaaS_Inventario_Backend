@@ -179,6 +179,20 @@ const Supplier = sequelize.define('Supplier', {
     allowNull: false,
     defaultValue: true,
     comment: 'FALSE = proveedor no obligado a facturar (régimen simplificado histórico, informal, sin resolución propia) — las compras a él requieren Documento Soporte.'
+  },
+  // Necesarios para el Documento Soporte (AccountingSupplierParty) — sin
+  // esto se cae en el fallback hardcodeado de buildCounterpartyData
+  // (Bogotá D.C.), mismo bug que ya se corrigió para Customer. Se completan
+  // en el formulario de proveedor (Fase 3, SupplierModal.jsx).
+  city_code: {
+    type: DataTypes.STRING(5),
+    allowNull: true,
+    comment: 'Código DIVIPOLA del municipio del proveedor (ver data/divipola-colombia.js)'
+  },
+  document_type: {
+    type: DataTypes.STRING(5),
+    allowNull: true,
+    comment: "Tipo de identificación DIAN ('13' cédula, '31' NIT, etc.) — si no se captura, se infiere de person_type"
   }
 }, {
   tableName: 'suppliers',

@@ -541,6 +541,419 @@ async function sendDebitNoteToDian(sale, tenant) {
   return _sendNoteToDian(sale, tenant, true);
 }
 
+/* ──────────────────────────────────────────────────────────
+ * Documento Soporte DIAN (adquisiciones a no obligados a facturar) —
+ * origen Purchase o Expense. Ver Documento-Soporte-Plan-v2.md.
+ *
+ * sendSupportDocumentToDian() es agnóstica al origen: recibe items/seller/
+ * retentions ya armados y solo conoce `sourceType`/`sourceId` para saber en
+ * qué columna de support_documents (purchase_id o expense_id) buscar/crear
+ * el registro. sendSupportDocumentForPurchase/ForExpense son los wrappers
+ * que arman ese payload desde cada modelo.
+ * ────────────────────────────────────────────────────────── */
+async function sendSupportDocumentToDian({ tenant, sourceType, sourceId, branchId, items, seller, retentions, userId }) {
+  const { SupportDocument, DianEvent } = require('../../models');
+
+  if (!['purchase', 'expense'].includes(sourceType)) {
+    throw new Error(`sourceType inválido para Documento Soporte: "${sourceType}" (debe ser 'purchase' o 'expense')`);
+  }
+  if (!items || items.length === 0) {
+    throw new Error('El Documento Soporte necesita al menos un ítem.');
+  }
+
+  const sourceColumn = sourceType === 'purchase' ? 'purchase_id' : 'expense_id';
+  const transaction = await sequelize.transaction();
+
+  try {
+    const dianCfg = extractDianConfig(tenant);
+    const isTest = dianCfg.environment !== 'production';
+
+    let supportDocument = await SupportDocument.findOne({
+      where: { tenant_id: tenant.id, [sourceColumn]: sourceId },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (supportDocument && supportDocument.dian_status === 'accepted') {
+      throw new Error('Este Documento Soporte ya fue aceptado por la DIAN — para corregirlo usa una Nota de Ajuste, no se puede volver a generar.');
+    }
+
+    // Reintento de un intento previo (rechazado o con error): se reutiliza
+    // el mismo consecutivo en vez de tomar uno nuevo — mismo criterio que
+    // sendInvoiceToDian con Sale.
+    const reusableNumber = (supportDocument?.support_document_number && supportDocument.dian_status !== 'accepted')
+      ? supportDocument.support_document_number
+      : null;
+
+    const { invoiceNumber: documentNumber, resolution } = await getNextConsecutive(
+      tenant.id, branchId, isTest, transaction, reusableNumber, 'support_document'
+    );
+
+    // Fase 5 — se guarda el `seller` ya armado (mismo objeto que arma
+    // dianKit.buildSellerFromSupplier/buildSellerFromAdHoc) junto con el
+    // documento. Es lo único que permite generar una Nota de Ajuste después
+    // cuando el origen es un Expense con vendedor ad-hoc (sin Supplier real
+    // vinculado) — ver createSupportDocumentAdjustment en el controller.
+    if (!supportDocument) {
+      supportDocument = await SupportDocument.create({
+        tenant_id: tenant.id,
+        branch_id: branchId,
+        source_type: sourceType,
+        [sourceColumn]: sourceId,
+        support_document_number: documentNumber,
+        dian_status: 'sending',
+        seller_snapshot: seller || null,
+        created_by: userId || null,
+      }, { transaction });
+    } else {
+      await supportDocument.update({
+        support_document_number: documentNumber,
+        dian_status: 'sending',
+        seller_snapshot: seller || supportDocument.seller_snapshot,
+      }, { transaction });
+    }
+
+    const { signedXml, cufe } = await dianKit.createSupportDocument(tenant, {
+      documentNumber,
+      items,
+      resolution,
+      seller,
+      retentions,
+    });
+
+    const dianResponse = await dianKit.sendToDian(tenant, {
+      signedXml,
+      invoiceNumber: documentNumber,
+      cufe,
+    });
+
+    const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+    const dianStatus = accepted ? 'accepted' : 'rejected';
+
+    await supportDocument.update({
+      support_document_number: documentNumber,
+      cuds: cufe,
+      dian_status: dianStatus,
+      dian_response: dianResponse,
+      dian_sent_at: new Date(),
+      dian_accepted_at: accepted ? new Date() : null,
+      dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
+    }, { transaction });
+
+    await DianEvent.create({
+      tenant_id: tenant.id,
+      support_document_id: supportDocument.id,
+      purchase_id: sourceType === 'purchase' ? sourceId : null,
+      event_type: isTest ? 'SendTestSetAsync' : 'SendBillSync',
+      document_type: 'SupportDocument',
+      invoice_number: documentNumber,
+      cufe,
+      request_xml: signedXml,
+      response_raw: dianResponse.raw,
+      status: dianStatus,
+      error_message: accepted ? null : dianResponse.statusMessage,
+      is_test: isTest,
+    }, { transaction });
+
+    await transaction.commit();
+
+    logger.info(`[DIAN] Documento Soporte ${documentNumber} (${sourceType} ${sourceId}) — Status: ${dianStatus} | CUDS: ${cufe?.substring(0, 16)}...`);
+
+    return { sent: true, accepted, documentNumber, cuds: cufe, dianStatus, dianResponse, supportDocumentId: supportDocument.id };
+
+  } catch (error) {
+    await transaction.rollback();
+    logger.error(`[DIAN] Error enviando Documento Soporte (${sourceType} ${sourceId}):`, error);
+
+    try {
+      const existing = await SupportDocument.findOne({ where: { tenant_id: tenant.id, [sourceColumn]: sourceId } });
+      if (existing) {
+        await existing.update({ dian_status: 'rejected', dian_error_message: error.message });
+        await DianEvent.create({
+          tenant_id: tenant.id,
+          support_document_id: existing.id,
+          purchase_id: sourceType === 'purchase' ? sourceId : null,
+          event_type: 'SendBillSync',
+          document_type: 'SupportDocument',
+          status: 'error',
+          error_message: error.message,
+          is_test: (tenant.dian_config?.environment || 'test') !== 'production',
+        });
+      }
+    } catch (e2) {
+      logger.error('[DIAN] Error guardando evento de error de Documento Soporte:', e2);
+    }
+
+    throw error;
+  }
+}
+
+async function sendSupportDocumentForPurchase(purchaseId, tenant, userId) {
+  const { Purchase, PurchaseItem, Supplier } = require('../../models');
+  const { assertReadiness } = require('./supplierDianReadiness');
+
+  const purchase = await Purchase.findByPk(purchaseId, {
+    include: [
+      { model: PurchaseItem, as: 'items' },
+      { model: Supplier, as: 'supplier' },
+    ],
+  });
+  if (!purchase) throw new Error('Compra no encontrada.');
+  if (!purchase.requires_support_document) {
+    throw new Error('Esta compra no está marcada para generar Documento Soporte (revisa el flag en la compra).');
+  }
+  if (!purchase.supplier) {
+    throw new Error('Esta compra no tiene proveedor asociado.');
+  }
+  assertReadiness(purchase.supplier);
+
+  const items = (purchase.items || []).map(it => ({
+    id: it.id,
+    quantity: Number(it.quantity || 1),
+    unit_code: 'EA',
+    description: it.description || it.product_name || 'Item',
+    unit_price: Number(it.unit_price || 0),
+    subtotal: Number(it.subtotal || 0),
+    tax_amount: Number(it.tax_amount || 0),
+    tax_rate: Number(it.tax_rate || 0),
+  }));
+
+  return sendSupportDocumentToDian({
+    tenant,
+    sourceType: 'purchase',
+    sourceId: purchase.id,
+    branchId: purchase.branch_id,
+    items,
+    seller: dianKit.buildSellerFromSupplier(purchase.supplier),
+    retentions: {
+      retefuente_rate: purchase.retefuente_rate, retefuente_amount: purchase.retefuente_amount,
+      reteiva_rate: purchase.reteiva_rate, reteiva_amount: purchase.reteiva_amount,
+      reteica_rate: purchase.reteica_rate, reteica_amount: purchase.reteica_amount,
+    },
+    userId,
+  });
+}
+
+/**
+ * @param {string} expenseId
+ * @param {object} tenant
+ * @param {string} userId
+ * @param {object} [adHocSeller] - Datos del vendedor capturados a mano
+ *   cuando el gasto no tiene supplier_id (decisión del usuario: se permite
+ *   capturar sin crear la ficha). Mismo shape que requiere
+ *   supplierDianReadiness (tax_id, person_type, city_code, ...) — se valida
+ *   en el controller antes de llegar acá y de nuevo acá por seguridad.
+ */
+async function sendSupportDocumentForExpense(expenseId, tenant, userId, adHocSeller) {
+  const { Expense, Supplier } = require('../../models');
+  const { assertReadiness } = require('./supplierDianReadiness');
+
+  const expense = await Expense.findByPk(expenseId, {
+    include: [{ model: Supplier, as: 'supplier' }],
+  });
+  if (!expense) throw new Error('Gasto no encontrado.');
+  if (!expense.requires_support_document) {
+    throw new Error('Este gasto no está marcado para generar Documento Soporte (revisa el flag en el gasto).');
+  }
+
+  let seller;
+  if (expense.supplier) {
+    assertReadiness(expense.supplier);
+    seller = dianKit.buildSellerFromSupplier(expense.supplier);
+  } else if (adHocSeller) {
+    assertReadiness(adHocSeller);
+    seller = dianKit.buildSellerFromAdHoc(adHocSeller);
+  } else {
+    throw new Error('Este gasto no tiene proveedor asociado — captura los datos del vendedor o crea el proveedor primero.');
+  }
+
+  const items = [{
+    id: '1',
+    quantity: 1,
+    unit_code: 'EA',
+    description: expense.description || expense.category || 'Gasto',
+    unit_price: Number(expense.subtotal || 0),
+    subtotal: Number(expense.subtotal || 0),
+    tax_amount: Number(expense.tax_amount || 0),
+    tax_rate: Number(expense.tax_rate || 0),
+  }];
+
+  return sendSupportDocumentToDian({
+    tenant,
+    sourceType: 'expense',
+    sourceId: expense.id,
+    branchId: expense.branch_id,
+    items,
+    seller,
+    retentions: {
+      retefuente_rate: expense.retefuente_rate, retefuente_amount: expense.retefuente_amount,
+      reteiva_rate: expense.reteiva_rate, reteiva_amount: expense.reteiva_amount,
+      reteica_rate: expense.reteica_rate, reteica_amount: expense.reteica_amount,
+    },
+    userId,
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
+ * checkSupportDocumentStatus – Re-consulta estado en DIAN, mismo criterio
+ * que checkInvoiceStatus pero sobre support_documents.
+ * ────────────────────────────────────────────────────────── */
+async function checkSupportDocumentStatus(sourceType, sourceId, tenant) {
+  const { SupportDocument, DianEvent } = require('../../models');
+  const sourceColumn = sourceType === 'purchase' ? 'purchase_id' : 'expense_id';
+
+  const supportDocument = await SupportDocument.findOne({
+    where: { tenant_id: tenant.id, [sourceColumn]: sourceId },
+  });
+  if (!supportDocument) throw new Error('No se ha generado un Documento Soporte para este registro.');
+  if (!supportDocument.cuds) throw new Error('Este Documento Soporte no tiene CUDS registrado.');
+
+  const result = await dianKit.getStatusByCufe(tenant, supportDocument.cuds);
+
+  const accepted = result.isValid || result.statusCode === '00';
+  await supportDocument.update({
+    dian_status: accepted ? 'accepted' : 'rejected',
+    dian_response: result,
+    dian_accepted_at: accepted ? new Date() : null,
+    dian_error_message: accepted ? null : buildRejectionMessage(result),
+  });
+
+  await DianEvent.create({
+    tenant_id: tenant.id,
+    support_document_id: supportDocument.id,
+    purchase_id: sourceType === 'purchase' ? sourceId : null,
+    event_type: 'GetStatus',
+    document_type: 'SupportDocument',
+    invoice_number: supportDocument.support_document_number,
+    cufe: supportDocument.cuds,
+    response_raw: result.raw,
+    status: accepted ? 'accepted' : 'rejected',
+    is_test: (tenant.dian_config?.environment || 'test') !== 'production',
+  });
+
+  return supportDocument;
+}
+
+/* ──────────────────────────────────────────────────────────
+ * sendSupportDocumentAdjustmentToDian – Firma y envía la Nota de Ajuste
+ * (tipo 95) de un Documento Soporte ya aceptado. Mismo reparto de
+ * responsabilidades que createAndSendCreditNote/DebitNote (Sale): el
+ * controller ya creó la fila SupportDocumentAdjustment con
+ * items/subtotal/tax_amount/total_amount calculados y la dejó en
+ * dian_status='pending' dentro de su propia transacción — esta función solo
+ * se encarga de la numeración + firma + envío + actualización del registro,
+ * igual que _sendNoteToDian hace para Sale.
+ *
+ * @param {object} adjustment - instancia SupportDocumentAdjustment (con id,
+ *   adjustment_type, reason, items, subtotal, tax_amount, total_amount)
+ * @param {object} supportDocument - instancia SupportDocument original (con
+ *   branch_id, support_document_number, cuds, dian_accepted_at)
+ * @param {object} seller - construido con dianKit.buildSellerFromSupplier()
+ *   a partir del mismo proveedor del Documento Soporte original.
+ * ────────────────────────────────────────────────────────── */
+async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, seller, tenant, retentions) {
+  const { SupportDocumentAdjustment, DianEvent } = require('../../models');
+  const transaction = await sequelize.transaction();
+
+  try {
+    const dianCfg = extractDianConfig(tenant);
+    const isTest = dianCfg.environment !== 'production';
+
+    if (!supportDocument.cuds || supportDocument.dian_status !== 'accepted') {
+      throw new Error('El Documento Soporte original debe estar aceptado por la DIAN (con CUDS) antes de generar una Nota de Ajuste.');
+    }
+
+    const reusableNumber = (adjustment.adjustment_number && adjustment.dian_status !== 'accepted')
+      ? adjustment.adjustment_number
+      : null;
+
+    const { invoiceNumber: documentNumber, resolution } = await getNextConsecutive(
+      tenant.id, supportDocument.branch_id, isTest, transaction, reusableNumber, 'support_document_adjustment'
+    );
+
+    await adjustment.update({ adjustment_number: documentNumber, dian_status: 'sending' }, { transaction });
+
+    const items = adjustment.items?.length ? adjustment.items : [{
+      id: '1',
+      quantity: 1,
+      unit_code: 'EA',
+      description: adjustment.reason || 'Ajuste al Documento Soporte',
+      unit_price: Number(adjustment.subtotal || 0),
+      subtotal: Number(adjustment.subtotal || 0),
+      tax_amount: Number(adjustment.tax_amount || 0),
+      tax_rate: 0,
+    }];
+
+    const { signedXml, cufe } = await dianKit.createSupportDocumentAdjustment(tenant, {
+      documentNumber,
+      items,
+      resolution,
+      seller,
+      retentions,
+      adjustmentType: adjustment.adjustment_type,
+      reason: adjustment.reason,
+      original: {
+        number: supportDocument.support_document_number,
+        cuds: supportDocument.cuds,
+        issueDate: supportDocument.dian_accepted_at || supportDocument.created_at,
+      },
+    });
+
+    const dianResponse = await dianKit.sendToDian(tenant, {
+      signedXml,
+      invoiceNumber: documentNumber,
+      cufe,
+    });
+
+    const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+    const dianStatus = accepted ? 'accepted' : 'rejected';
+
+    await adjustment.update({
+      adjustment_number: documentNumber,
+      cuds: cufe,
+      dian_status: dianStatus,
+      dian_response: dianResponse,
+      dian_sent_at: new Date(),
+      dian_accepted_at: accepted ? new Date() : null,
+      dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
+    }, { transaction });
+
+    await DianEvent.create({
+      tenant_id: tenant.id,
+      support_document_id: supportDocument.id,
+      purchase_id: supportDocument.source_type === 'purchase' ? supportDocument.purchase_id : null,
+      event_type: isTest ? 'SendTestSetAsync' : 'SendBillSync',
+      document_type: 'SupportDocumentAdjustment',
+      invoice_number: documentNumber,
+      cufe,
+      request_xml: signedXml,
+      response_raw: dianResponse.raw,
+      status: dianStatus,
+      error_message: accepted ? null : dianResponse.statusMessage,
+      is_test: isTest,
+    }, { transaction });
+
+    await transaction.commit();
+
+    logger.info(`[DIAN] Nota de Ajuste ${documentNumber} (Documento Soporte ${supportDocument.id}) — Status: ${dianStatus} | CUDS: ${cufe?.substring(0, 16)}...`);
+
+    return { sent: true, accepted, documentNumber, cuds: cufe, dianStatus, dianResponse, adjustmentId: adjustment.id };
+
+  } catch (error) {
+    await transaction.rollback();
+    logger.error(`[DIAN] Error enviando Nota de Ajuste (SupportDocumentAdjustment ${adjustment.id}):`, error);
+    try {
+      await SupportDocumentAdjustment.update(
+        { dian_status: 'rejected', dian_error_message: error.message },
+        { where: { id: adjustment.id } }
+      );
+    } catch (e2) {
+      logger.error('[DIAN] Error guardando estado de error de la Nota de Ajuste:', e2);
+    }
+    throw error;
+  }
+}
+
 module.exports = {
   sendInvoiceToDian,
   checkInvoiceStatus,
@@ -548,4 +961,9 @@ module.exports = {
   extractDianConfig,
   sendCreditNoteToDian,
   sendDebitNoteToDian,
+  sendSupportDocumentToDian,
+  sendSupportDocumentForPurchase,
+  sendSupportDocumentForExpense,
+  checkSupportDocumentStatus,
+  sendSupportDocumentAdjustmentToDian,
 };

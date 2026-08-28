@@ -25,7 +25,14 @@ const DianEvent = sequelize.define('DianEvent', {
     allowNull: true,
     references: { model: 'purchases', key: 'id' },
     onDelete: 'SET NULL',
-    comment: 'Equivalente a sale_id pero para Documento Soporte / notas de ajuste (compras).',
+    comment: 'Equivalente a sale_id — se conserva para filtrar eventos por compra sin JOIN.',
+  },
+  support_document_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'support_documents', key: 'id' },
+    onDelete: 'SET NULL',
+    comment: 'Enlace al Documento Soporte (origen purchase o expense) o a su nota de ajuste.',
   },
   event_type: {
     type: DataTypes.STRING(50),

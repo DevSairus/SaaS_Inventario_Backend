@@ -24,7 +24,6 @@ const Product = require('./inventory/Product');
 const Supplier = require('./inventory/Supplier');
 const Purchase = require('./inventory/Purchase');
 const PurchaseItem = require('./inventory/PurchaseItem');
-const PurchaseSupportDocumentAdjustment = require('./inventory/PurchaseSupportDocumentAdjustment');
 const Warehouse = require('./inventory/Warehouse');
 const InventoryMovement = require('./inventory/InventoryMovement');
 const InventoryAdjustment = require('./inventory/InventoryAdjustment');
@@ -121,6 +120,10 @@ const VehicleLine = require('./workshop/VehicleLine');
 // DIAN - Facturación Electrónica
 const DianResolution = require('./dian/DianResolution');
 const DianEvent = require('./dian/DianEvent');
+// DIAN - Documento Soporte (adquisiciones a no obligados a facturar) —
+// origen purchase o expense, ver Documento-Soporte-Plan-v2.md §1
+const SupportDocument = require('./dian/SupportDocument');
+const SupportDocumentAdjustment = require('./dian/SupportDocumentAdjustment');
 
 // ✅ NUEVO - Tesorería
 const Expense = require('./finance/Expense');
@@ -633,15 +636,28 @@ Tenant.hasMany(DianEvent, { foreignKey: 'tenant_id', as: 'dian_events' });
 DianEvent.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 Sale.hasMany(DianEvent, { foreignKey: 'sale_id', as: 'dian_events' });
 
-// DianEvent ↔ Purchase (Documento Soporte / ajustes)
+// DianEvent ↔ Purchase (se conserva para filtrar eventos por compra sin JOIN)
 DianEvent.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
 Purchase.hasMany(DianEvent, { foreignKey: 'purchase_id', as: 'dian_events' });
 
-// PurchaseSupportDocumentAdjustment ↔ Tenant / Purchase / User
-PurchaseSupportDocumentAdjustment.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
-PurchaseSupportDocumentAdjustment.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
-Purchase.hasMany(PurchaseSupportDocumentAdjustment, { foreignKey: 'purchase_id', as: 'support_document_adjustments' });
-PurchaseSupportDocumentAdjustment.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+// DianEvent ↔ SupportDocument (Documento Soporte, origen purchase o expense)
+DianEvent.belongsTo(SupportDocument, { foreignKey: 'support_document_id', as: 'support_document' });
+SupportDocument.hasMany(DianEvent, { foreignKey: 'support_document_id', as: 'dian_events' });
+
+// SupportDocument ↔ Tenant / Branch / Purchase / Expense / User
+SupportDocument.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+SupportDocument.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+SupportDocument.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+Purchase.hasOne(SupportDocument, { foreignKey: 'purchase_id', as: 'support_document' });
+SupportDocument.belongsTo(Expense, { foreignKey: 'expense_id', as: 'expense' });
+Expense.hasOne(SupportDocument, { foreignKey: 'expense_id', as: 'support_document' });
+SupportDocument.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
+// SupportDocumentAdjustment ↔ Tenant / SupportDocument / User
+SupportDocumentAdjustment.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+SupportDocumentAdjustment.belongsTo(SupportDocument, { foreignKey: 'support_document_id', as: 'support_document' });
+SupportDocument.hasMany(SupportDocumentAdjustment, { foreignKey: 'support_document_id', as: 'adjustments' });
+SupportDocumentAdjustment.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 
 // Asistente de IA
 AiConversation.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -713,7 +729,6 @@ module.exports = {
   Product,
   Supplier,
   Purchase,
-  PurchaseSupportDocumentAdjustment,
   PurchaseItem,
   Warehouse,
   InventoryMovement,
@@ -759,6 +774,8 @@ module.exports = {
   SaleDiagnosisMark,
   DianResolution,
   DianEvent,
+  SupportDocument,
+  SupportDocumentAdjustment,
   Expense,
   CashSession,
   Receipt,

@@ -1,13 +1,17 @@
-// backend/src/models/inventory/PurchaseSupportDocumentAdjustment.js
+// backend/src/models/dian/SupportDocumentAdjustment.js
+//
+// "Nota de Ajuste al Documento Soporte" — cumple el rol de crédito/débito
+// para el Documento Soporte, pero es un tipo de documento DIAN propio (no
+// es "nota crédito"/"nota débito"). Rename de
+// PurchaseSupportDocumentAdjustment: mismo contenido, la FK pasa de
+// purchase_id a support_document_id (agnóstica al origen — sirve para
+// Documento Soporte de compra o de gasto). Sigue siendo FK real, a
+// diferencia de la nota crédito de factura (que solo enlaza por texto
+// libre en Sale.notes, ver dian.controller.js#createAndSendCreditNote).
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../../config/database');
 
-// "Nota de Ajuste al Documento Soporte" — cumple el rol de crédito/débito
-// para el Documento Soporte, pero es un tipo de documento DIAN propio (no
-// es "nota crédito"/"nota débito"). A diferencia de la nota crédito de
-// factura (que solo queda enlazada por texto libre en `Sale.notes`, ver
-// dian.controller.js#createAndSendCreditNote), acá `purchase_id` es FK real.
-const PurchaseSupportDocumentAdjustment = sequelize.define('PurchaseSupportDocumentAdjustment', {
+const SupportDocumentAdjustment = sequelize.define('SupportDocumentAdjustment', {
   id: {
     type: DataTypes.UUID,
     defaultValue: DataTypes.UUIDV4,
@@ -18,10 +22,10 @@ const PurchaseSupportDocumentAdjustment = sequelize.define('PurchaseSupportDocum
     allowNull: false,
     references: { model: 'tenants', key: 'id' },
   },
-  purchase_id: {
+  support_document_id: {
     type: DataTypes.UUID,
     allowNull: false,
-    references: { model: 'purchases', key: 'id' },
+    references: { model: 'support_documents', key: 'id' },
     comment: 'FK real al Documento Soporte original.',
   },
   adjustment_type: {
@@ -60,8 +64,8 @@ const PurchaseSupportDocumentAdjustment = sequelize.define('PurchaseSupportDocum
   },
   dian_status: {
     type: DataTypes.STRING(30),
-    defaultValue: 'not_applicable',
-    comment: 'not_applicable | pending | sending | accepted | rejected',
+    defaultValue: 'pending',
+    comment: 'pending | sending | accepted | rejected',
   },
   dian_response: {
     type: DataTypes.JSONB,
@@ -85,11 +89,11 @@ const PurchaseSupportDocumentAdjustment = sequelize.define('PurchaseSupportDocum
     references: { model: 'users', key: 'id' },
   },
 }, {
-  tableName: 'purchase_support_document_adjustments',
+  tableName: 'support_document_adjustments',
   timestamps: true,
   underscored: true,
   createdAt: 'created_at',
   updatedAt: 'updated_at',
 });
 
-module.exports = PurchaseSupportDocumentAdjustment;
+module.exports = SupportDocumentAdjustment;

@@ -487,6 +487,172 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
 }
 
 /**
+ * Genera el asiento en borrador de una nota crédito emitida a un cliente
+ * (NC contra una factura ya aceptada por la DIAN, creada desde
+ * `createAndSendCreditNote`). Simétrico a generateCustomerReturnEntry pero
+ * a partir del propio `Sale` de la nota (document_type: 'nota_credito'),
+ * que ya trae subtotal/tax_amount/total_amount calculados.
+ *
+ * `createAndSendCreditNote` siempre deja la NC con `payment_status: 'paid'`
+ * y `paid_amount = total_amount`, así que en la práctica todo el
+ * contravalor se acredita a caja/bancos (mismo medio de pago de la factura
+ * original) — no hay reparto contra cartera hoy en ese flujo.
+ *
+ * No reversa costo de venta/inventario: los ítems de la NC se crean con
+ * `unit_cost: 0` (no hay dato de costo que reversar en este flujo).
+ *
+ * @param {object} noteSale - instancia de Sale con document_type: 'nota_credito'
+ * @param {Array} items - ítems de la nota (con item_type, subtotal)
+ */
+async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const productRevenue = (items || [])
+        .filter((i) => (i.item_type || 'product') === 'product')
+        .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      const serviceRevenue = (items || [])
+        .filter((i) => i.item_type === 'service' || i.item_type === 'free_line')
+        .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      const totalTax = Number(noteSale.tax_amount || 0);
+      const total = Number(noteSale.total_amount || 0);
+      const paid = Math.min(Number(noteSale.paid_amount || 0), total);
+      const pending = total - paid;
+
+      const lines = [];
+
+      // Debe: reversa de ingreso e IVA
+      if (productRevenue > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
+        lines.push({ account_id, debit: productRevenue, credit: 0, description: 'Reversión de ingreso por nota crédito' });
+      }
+      if (serviceRevenue > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
+        lines.push({ account_id, debit: serviceRevenue, credit: 0, description: 'Reversión de ingreso por nota crédito' });
+      }
+      if (totalTax > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
+        lines.push({ account_id, debit: totalTax, credit: 0, description: 'Reversión de IVA por nota crédito' });
+      }
+
+      // Haber: reintegro de caja/bancos y/o reducción de cartera
+      if (paid > 0) {
+        const pm = (noteSale.payment_method || '').toLowerCase();
+        const isCash = pm.includes('efectivo') || pm.includes('cash');
+        const account_id = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+        lines.push({ account_id, debit: 0, credit: paid, description: 'Reintegro por nota crédito' });
+      }
+      if (pending > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_receivable', t);
+        lines.push({ account_id, debit: 0, credit: pending, description: 'Reducción de cartera por nota crédito', third_party_id: noteSale.customer_id || null });
+      }
+
+      if (lines.length === 0) return null;
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: noteSale.branch_id,
+          entryDate: noteSale.sale_date || noteSale.createdAt || new Date(),
+          sourceType: 'credit_note',
+          sourceId: noteSale.id,
+          description: `Nota crédito ${noteSale.sale_number || noteSale.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `nota crédito ${noteSale.id}`);
+}
+
+/**
+ * Genera el asiento en borrador de una nota débito (cargo adicional sobre
+ * una factura ya aceptada por la DIAN, creada desde
+ * `createAndSendDebitNote`). Es un cargo nuevo, mismo signo que una venta
+ * (Debe cartera/caja, Haber ingreso + IVA).
+ *
+ * `createAndSendDebitNote` siempre deja la ND con `payment_status: 'pending'`
+ * y `paid_amount: 0`, así que en la práctica todo el monto queda en cartera.
+ *
+ * @param {object} noteSale - instancia de Sale con document_type: 'nota_debito'
+ * @param {Array} items - ítems de la nota (con item_type, subtotal)
+ */
+async function generateDebitNoteEntry(noteSale, items, tenantId, userId) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const productRevenue = (items || [])
+        .filter((i) => (i.item_type || 'product') === 'product')
+        .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      const serviceRevenue = (items || [])
+        .filter((i) => i.item_type === 'service' || i.item_type === 'free_line')
+        .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      const totalTax = Number(noteSale.tax_amount || 0);
+      const total = Number(noteSale.total_amount || 0);
+      const paid = Math.min(Number(noteSale.paid_amount || 0), total);
+      const pending = total - paid;
+
+      const lines = [];
+
+      // Debe: cobro (si ya se pagó) y/o cartera nueva
+      if (paid > 0) {
+        const pm = (noteSale.payment_method || '').toLowerCase();
+        const isCash = pm.includes('efectivo') || pm.includes('cash');
+        const account_id = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+        lines.push({ account_id, debit: paid, credit: 0, description: 'Cobro de nota débito' });
+      }
+      if (pending > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_receivable', t);
+        lines.push({ account_id, debit: pending, credit: 0, description: 'Cartera por nota débito', third_party_id: noteSale.customer_id || null });
+      }
+
+      // Haber: ingreso e IVA generados por el cargo
+      if (productRevenue > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
+        lines.push({ account_id, debit: 0, credit: productRevenue, description: 'Ingreso por nota débito' });
+      }
+      if (serviceRevenue > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
+        lines.push({ account_id, debit: 0, credit: serviceRevenue, description: 'Ingreso por nota débito' });
+      }
+      if (totalTax > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
+        lines.push({ account_id, debit: 0, credit: totalTax, description: 'IVA generado por nota débito' });
+      }
+
+      if (lines.length === 0) return null;
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: noteSale.branch_id,
+          entryDate: noteSale.sale_date || noteSale.createdAt || new Date(),
+          sourceType: 'debit_note',
+          sourceId: noteSale.id,
+          description: `Nota débito ${noteSale.sale_number || noteSale.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `nota débito ${noteSale.id}`);
+}
+
+/**
  * Genera el asiento en borrador de una devolución a proveedor (nota crédito
  * recibida), simétrico-invertido de generatePurchaseEntry.
  *
@@ -729,6 +895,8 @@ module.exports = {
   generateExpenseEntry,
   generateCashSessionEntry,
   generateCustomerReturnEntry,
+  generateCreditNoteEntry,
+  generateDebitNoteEntry,
   generateSupplierReturnEntry,
   generateAdvanceEntry,
   generateAdvanceApplicationEntry,

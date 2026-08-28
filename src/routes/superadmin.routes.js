@@ -406,6 +406,51 @@ router.post(
       const { seedChartOfAccountsForTenant } = require('../services/accounting/accountingSeed.service');
       await seedChartOfAccountsForTenant(tenant.id, transaction);
 
+      // 3c. Sede y bodega principal por defecto.
+      //
+      // Antes se dependía SOLO del backfill de la migración
+      // 2026070601-create-branches-multisede.js (crea "Sede Principal" al
+      // aprovisionar el schema del tenant en cutoverTenant). Eso tiene dos
+      // huecos que dejaban tenants sin sede real:
+      //   (a) si cutoverTenant falla (red, timeout) el tenant queda en modo
+      //       legado (schema_name null) y esa migración nunca corre para él;
+      //   (b) incluso si cutoverTenant SÍ tiene éxito, migrateTenantData.js
+      //       borra y vuelve a copiar branches desde `public` como fuente de
+      //       verdad -- como `public.branches` nunca tuvo una fila para este
+      //       tenant, la "Sede Principal" recién creada por la migración se
+      //       borra sin reponerse. Tampoco existía ninguna bodega principal
+      //       (la migración solo vincula bodegas YA existentes, nunca crea una).
+      // Crearlas acá, en `public`, en la misma transacción de alta, hace que
+      // ambos caminos (legado o cutover exitoso) partan de una sede real.
+      const { Branch, Warehouse } = require('../models');
+      const branch = await Branch.create(
+        {
+          tenant_id: tenant.id,
+          code: 'PPAL',
+          name: 'Sede Principal',
+          address: req.body.address,
+          phone: req.body.phone,
+          email: req.body.email,
+          is_main: true,
+          is_active: true,
+        },
+        { transaction }
+      );
+      await Warehouse.create(
+        {
+          tenant_id: tenant.id,
+          branch_id: branch.id,
+          code: 'BOD-PPAL',
+          name: 'Bodega Principal',
+          address: req.body.address,
+          phone: req.body.phone,
+          is_main: true,
+          is_default: true,
+          is_active: true,
+        },
+        { transaction }
+      );
+
       // 4. Crear admin
       if (req.body.admin_email && req.body.admin_password) {
         const hashedPassword = await bcrypt.hash(req.body.admin_password, 10);
