@@ -620,18 +620,23 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
   };
   const uuid = sha384(concatenateCufeFields(cufeInput));
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
-  const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
   let unsignedXml = buildInvoiceXml(doc, uuid, softwareSecurityCode)
-    // addDianExtensions() de @dian-kit toma el DV del bloque SoftwareProvider
-    // de doc.supplier.identification.dv -- correcto para factura (donde
-    // supplier eres tú, normalmente el mismo NIT que el proveedor del
-    // software), pero para Documento Soporte doc.supplier es el vendedor: el
-    // DV que quedaba ahí era el del vendedor, no el del proveedor de
-    // software real (regla DSAB22b -- "DV del NIT del Prestador de
-    // Servicios no está correctamente calculado").
+    // addDianExtensions() de @dian-kit arma <sts:ProviderID> tomando
+    // schemeID de doc.supplier.identification.dv y schemeName de
+    // doc.supplier.identification.type -- correcto para factura (donde
+    // supplier eres tú, una persona jurídica NIT=31, así que schemeName ya
+    // sale "31" "por accidente"), pero para Documento Soporte doc.supplier
+    // es el VENDEDOR: si es persona natural (ej. schemeName="13"), ese
+    // valor queda ahí en vez de "31" -- confirmado contra un rechazo real
+    // de la DIAN (reglas DSAB23/DSAJ25a: "Identificador del tipo de
+    // documento del Prestador de Servicios no es igual a 31" /
+    // "El contenido de este atributo no corresponde a '31'"). El Prestador
+    // de Servicios (proveedor del software, doc.software.providerNit) es
+    // siempre persona jurídica ante la DIAN -- se fuerza el literal "31" en
+    // ambos atributos, sin derivar nada de doc.supplier.
     .replace(
-      /(<sts:ProviderID(?:\s+\w+="[^"]*")*?\s+schemeID=")[^"]*("(?:\s+\w+="[^"]*")*>)/,
-      `$1${providerDv}$2`
+      /<sts:ProviderID([^>]*)>/,
+      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="31"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
     )
     .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
     // @dian-kit no conoce el tipo 05: buildInvoiceXml cae al ProfileID
@@ -808,11 +813,14 @@ async function createSupportDocumentAdjustment(tenant, {
   };
   const uuid = sha384(concatenateCufeFields(cufeInput));
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
-  const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
   let unsignedXml = buildCreditNoteXml(doc, uuid, softwareSecurityCode)
+    // Mismo fix que createSupportDocument() -- ver comentario ahí. El
+    // Prestador de Servicios (proveedor del software) es siempre persona
+    // jurídica, así que <sts:ProviderID> debe forzar schemeID/schemeName a
+    // "31" en vez de derivarlos de doc.supplier (el vendedor).
     .replace(
-      /(<sts:ProviderID(?:\s+\w+="[^"]*")*?\s+schemeID=")[^"]*("(?:\s+\w+="[^"]*")*>)/,
-      `$1${providerDv}$2`
+      /<sts:ProviderID([^>]*)>/,
+      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="31"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
     )
     .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
     // El UUID del Documento Soporte referenciado en BillingReference es un
