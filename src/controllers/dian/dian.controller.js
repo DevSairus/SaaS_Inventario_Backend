@@ -292,6 +292,11 @@ const updateResolution = async (req, res) => {
       from_number, to_number, current_number,
       valid_from, valid_to, notes,
       technical_key, test_set_id,
+      // Tipo de resolución (Habilitación/Producción — selector "Tipo de
+      // Resolución" en el formulario de edición). Antes de este fix el
+      // backend los ignoraba por completo: el selector guardaba "sin error"
+      // pero is_test/is_active de la fila nunca cambiaban.
+      is_test, is_active,
     } = req.body;
     const technicalKeyTrimmed = technical_key?.trim();
     const testSetIdTrimmed = test_set_id?.trim();
@@ -315,6 +320,28 @@ const updateResolution = async (req, res) => {
       return fail(res, `El consecutivo actual (${nextCurrent}) debe estar dentro del rango autorizado (${nextFrom}-${nextTo})`);
     }
 
+    // Cambio de tipo (Habilitación → Producción o viceversa): si esta
+    // resolución va a quedar activa con el nuevo is_test, desactiva cualquier
+    // otra resolución activa de la misma sede/tipo de documento/is_test —
+    // mismo criterio que ya aplica createResolution() al crear una nueva.
+    // Sin esto, promover una resolución de Producción deja dos filas
+    // activas compitiendo por el mismo consecutivo.
+    const nextIsTest = is_test !== undefined ? !!is_test : resolution.is_test;
+    const typeChanged = is_test !== undefined && nextIsTest !== resolution.is_test;
+    const nextIsActive = is_active !== undefined ? !!is_active : (typeChanged ? true : resolution.is_active);
+    if (nextIsActive) {
+      await DianResolution.update(
+        { is_active: false },
+        {
+          where: {
+            tenant_id: req.tenant_id, branch_id: resolution.branch_id,
+            document_type: resolution.document_type, is_test: nextIsTest,
+            is_active: true, id: { [Op.ne]: resolution.id },
+          },
+        }
+      );
+    }
+
     await resolution.update({
       ...(resolution_number !== undefined && { resolution_number }),
       ...(resolution_date !== undefined && { resolution_date }),
@@ -325,6 +352,8 @@ const updateResolution = async (req, res) => {
       ...(valid_from !== undefined && { valid_from }),
       ...(valid_to !== undefined && { valid_to }),
       ...(notes !== undefined && { notes }),
+      is_test: nextIsTest,
+      is_active: nextIsActive,
       // '' o '[CONFIGURADO]' (placeholder que vuelve del frontend sin
       // tocar) significan "no cambiar" — mismo criterio que
       // tenant.dian_config.technical_key en updateConfig().
