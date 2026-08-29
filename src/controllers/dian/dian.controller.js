@@ -837,6 +837,69 @@ const createSupportDocumentAdjustment = async (req, res) => {
 };
 
 /* ──────────────────────────────────────────────────────────
+ * POST /api/dian/support-document-adjustment/:adjustmentId/resend
+ * Reintenta el envío de una Nota de Ajuste que quedó en 'rejected' o
+ * 'pending' (ej. por el error de red temporal del webservice DIAN) --
+ * mismo criterio que "Reenviar factura"/"Reintentar" ya tienen Sale y
+ * SupportDocument: reutiliza el registro existente (dianService.js#
+ * sendSupportDocumentAdjustmentToDian ya reutiliza adjustment_number vía
+ * `reusableNumber` cuando dian_status !== 'accepted'), no crea uno nuevo.
+ * A diferencia de createSupportDocumentAdjustment (fire-and-forget con
+ * setImmediate), este SÍ espera la respuesta de la DIAN antes de contestar
+ * -- es una acción explícita de reintento, el usuario quiere ver el
+ * resultado de inmediato, igual que "Reenviar" en DianDetailPanel.
+ * ────────────────────────────────────────────────────────── */
+const resendSupportDocumentAdjustment = async (req, res) => {
+  try {
+    const { SupportDocumentAdjustment, SupportDocument, Purchase, PurchaseItem, Supplier, Expense } = require('../../models');
+    const { adjustmentId } = req.params;
+    const tenantId = req.tenant_id;
+
+    const adjustment = await SupportDocumentAdjustment.findOne({
+      where: { id: adjustmentId, tenant_id: tenantId },
+    });
+    if (!adjustment) return fail(res, 'Nota de Ajuste no encontrada', 404);
+    if (adjustment.dian_status === 'accepted') {
+      return fail(res, 'Esta Nota de Ajuste ya fue aceptada por la DIAN — no se puede reenviar.');
+    }
+
+    const supportDocument = await SupportDocument.findOne({
+      where: { id: adjustment.support_document_id, tenant_id: tenantId },
+      include: [
+        { model: Purchase, as: 'purchase', include: [{ model: Supplier, as: 'supplier' }] },
+        { model: Expense, as: 'expense', include: [{ model: Supplier, as: 'supplier' }] },
+      ],
+    });
+    if (!supportDocument) return fail(res, 'Documento Soporte no encontrado', 404);
+
+    const tenant = await Tenant.findByPk(tenantId);
+    const source = supportDocument.source_type === 'purchase' ? supportDocument.purchase : supportDocument.expense;
+    const supplier = source?.supplier;
+    // Mismo criterio que createSupportDocumentAdjustment: prioriza el
+    // proveedor real vigente sobre el snapshot guardado en el envío original.
+    const seller = supplier ? dianKit.buildSellerFromSupplier(supplier) : supportDocument.seller_snapshot;
+    if (!seller) {
+      return fail(res, 'No se encontró información del vendedor para reenviar esta Nota de Ajuste.');
+    }
+    const retentions = source ? {
+      retefuente_rate: source.retefuente_rate, retefuente_amount: source.retefuente_amount,
+      reteiva_rate: source.reteiva_rate, reteiva_amount: source.reteiva_amount,
+      reteica_rate: source.reteica_rate, reteica_amount: source.reteica_amount,
+    } : {};
+
+    const result = await dianService.sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, seller, tenant, retentions);
+
+    ok(res, {
+      data: result,
+      message: result.accepted ? 'Nota de Ajuste aceptada por la DIAN' : 'Nota de Ajuste enviada (rechazada o pendiente — revise el motivo)',
+    });
+  } catch (e) {
+    logger.error('Error resendSupportDocumentAdjustment:', e);
+    fail(res, e.message || 'Error al reenviar la Nota de Ajuste', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
  * GET /api/dian/support-document/:supportDocumentId/adjustments
  * ────────────────────────────────────────────────────────── */
 const listSupportDocumentAdjustments = async (req, res) => {
@@ -1730,6 +1793,7 @@ module.exports = {
   checkSupportDocumentStatusExpense: checkSupportDocumentStatus('expense'),
 
   createSupportDocumentAdjustment,
+  resendSupportDocumentAdjustment,
   listSupportDocumentAdjustments,
   getEvents,
   testConnection,

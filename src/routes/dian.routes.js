@@ -43,6 +43,7 @@ router.post('/check-status-support-document/expense/:expenseId',   ctrl.checkSup
 // Nota de Ajuste al Documento Soporte (tipo DIAN 95) — Fase 4
 router.post('/support-document/:supportDocumentId/adjustment',   ctrl.createSupportDocumentAdjustment);
 router.get('/support-document/:supportDocumentId/adjustments',   ctrl.listSupportDocumentAdjustments);
+router.post('/support-document-adjustment/:adjustmentId/resend', ctrl.resendSupportDocumentAdjustment);
 
 // Habilitación y diagnóstico
 router.get('/habilitacion-status',   ctrl.getHabilitacionStatus);
