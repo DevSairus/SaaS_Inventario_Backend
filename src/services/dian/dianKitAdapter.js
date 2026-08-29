@@ -908,6 +908,17 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
  *   que se está ajustando (support_document_number/cuds/dian_accepted_at).
  * @param {'credit'|'debit'} adjustmentType
  */
+// Códigos de la tabla oficial ConceptoNotaAjuste-2.1.gc (Caja de Herramientas
+// Documento Soporte), mapeados desde el `value` de motivo que ofrece
+// SupportDocumentAdjustmentModal.jsx en el frontend.
+const CONCEPTO_NOTA_AJUSTE = {
+  error_valor: '4', // Ajuste de precio
+  devolucion: '1', // Devolución parcial de los bienes y/o no aceptación parcial del servicio
+  error_datos: '5', // Otros
+  valor_adicional: '4', // Ajuste de precio
+  other: '5', // Otros
+};
+
 async function createSupportDocumentAdjustment(tenant, {
   documentNumber, items, resolution, seller, retentions, adjustmentType, reason, original,
 }) {
@@ -957,16 +968,21 @@ async function createSupportDocumentAdjustment(tenant, {
       uuid: original.cuds,
       issueDate: new Date(original.issueDate),
     },
-    // Solo para débito -- ver nota de fase arriba (confirmado contra fuente
-    // de integración: el grupo es exclusivo de la Nota de Débito para esta
-    // familia de documento).
-    ...(adjustmentType === 'debit' ? {
-      discrepancyResponse: {
-        referenceId: original.number,
-        responseCode: '1',
-        description: reason || 'Nota de ajuste - débito',
-      },
-    } : {}),
+    // Antes solo se emitía para débito -- una fuente de integración de
+    // terceros (comentario Protheus/TOTVS) decía que el grupo era exclusivo
+    // de la Nota de Débito para esta familia de documento, pero un envío
+    // real a la DIAN lo desmintió: rechazo NSBF01 ("No se encuentra el
+    // grupo DiscrepancyResponse") en una nota tipo CRÉDITO -- el grupo es
+    // obligatorio para los dos tipos. responseCode sale de la tabla oficial
+    // ConceptoNotaAjuste-2.1.gc (Caja de Herramientas Documento Soporte):
+    // 1=devolución parcial, 2=anulación, 3=rebaja/descuento, 4=ajuste de
+    // precio, 5=otros -- mapeado desde el motivo que elige el usuario en
+    // SupportDocumentAdjustmentModal.jsx (ver CONCEPTO_NOTA_AJUSTE arriba).
+    discrepancyResponse: {
+      referenceId: original.number,
+      responseCode: CONCEPTO_NOTA_AJUSTE[reason] || '5',
+      description: reason || `Nota de ajuste - ${adjustmentType === 'debit' ? 'débito' : 'crédito'}`,
+    },
     software: kit.config.software,
     numbering: kit.config.numbering,
   });
