@@ -1026,11 +1026,20 @@ async function createSupportDocumentAdjustment(tenant, {
     .replace(
       /(<cac:Item>[\s\S]*?<cbc:Description>[^<]*<\/cbc:Description>)/g,
       m => `${m}<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">1</cbc:ID></cac:StandardItemIdentification>`
-    )
-    .replace(
-      '<cac:LegalMonetaryTotal>',
-      buildWithholdingTaxTotals(retentions) + '<cac:LegalMonetaryTotal>'
     );
+  // OJO: a diferencia de createSupportDocument() (root <Invoice>), acá NO se
+  // inyecta <cac:WithholdingTaxTotal> -- ese elemento está declarado en el
+  // XSD de UBL-Invoice-2.1 (InvoiceType) pero NO existe en el de
+  // UBL-CreditNote-2.1 (CreditNoteType, ver XSD/maindoc/UBL-CreditNote-2.1.xsd:
+  // su secuencia solo admite TaxTotal/LegalMonetaryTotal en esa posición).
+  // La Nota de Ajuste usa root <CreditNote> (ver nota arriba), así que
+  // agregarlo ahí vuelve el XML inválido contra el esquema -- confirmado
+  // reproduciendo el envío localmente y validando contra el XSD real: es
+  // justo lo que produce el rechazo genérico "ZB01 — Fallo en el esquema
+  // XML del archivo" (sin ninguna regla de negocio puntual) cada vez que la
+  // compra/gasto ajustado tenía retefuente/reteIVA/reteICA. No hay ejemplo
+  // oficial de una Nota de Ajuste con retenciones declaradas, así que se
+  // omite por completo en vez de adivinar dónde sí iría.
   unsignedXml = simplifySupplierParty(unsignedXml);
 
   const { signedXml } = await signXml({
