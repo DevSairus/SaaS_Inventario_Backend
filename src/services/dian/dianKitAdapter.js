@@ -421,6 +421,24 @@ function simplifySupplierParty(xml) {
   return xml.replace(src, rebuilt);
 }
 
+/**
+ * Quita <cac:RegistrationAddress> (dentro de PartyTaxScheme) y
+ * <cac:PartyLegalEntity> del AccountingCustomerParty -- confirmado por un
+ * caso real ajeno con el mismo rechazo (ZB01, Nota de Ajuste al Documento
+ * Soporte, foro facturasyrespuestas.com/4721): esos dos nodos sobran ahí
+ * para esta familia de documento, tanto en el vendedor (ya se quita en
+ * simplifySupplierParty) como en el comprador/adquirente (customer, que acá
+ * eres tú mismo -- ver buildSelfParty()). No se toca nada más del bloque.
+ */
+function simplifyCustomerParty(xml) {
+  const block = xml.match(/<cac:AccountingCustomerParty>[\s\S]*?<\/cac:AccountingCustomerParty>/);
+  if (!block) return xml;
+  let src = block[0];
+  src = src.replace(/<cac:RegistrationAddress>[\s\S]*?<\/cac:RegistrationAddress>/, '');
+  src = src.replace(/<cac:PartyLegalEntity>[\s\S]*?<\/cac:PartyLegalEntity>/, '');
+  return xml.replace(block[0], src);
+}
+
 function buildLegalMonetaryTotal(items) {
   const subtotal = items.reduce((s, it) => s + Number(it.subtotal || it.lineExtensionAmount || 0), 0);
   const taxAmount = items.reduce((s, it) => s + Number(it.tax_amount || 0), 0);
@@ -1081,6 +1099,7 @@ async function createSupportDocumentAdjustment(tenant, {
   // oficial de una Nota de Ajuste con retenciones declaradas, así que se
   // omite por completo en vez de adivinar dónde sí iría.
   unsignedXml = simplifySupplierParty(unsignedXml);
+  unsignedXml = simplifyCustomerParty(unsignedXml);
 
   const { signedXml } = await signXml({
     xml: unsignedXml,
