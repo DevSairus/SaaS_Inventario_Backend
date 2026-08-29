@@ -994,18 +994,30 @@ async function createSupportDocumentAdjustment(tenant, {
       /(<cac:BillingReference>[\s\S]*?<cbc:UUID schemeName=")CUFE-SHA384("[\s\S]*?<\/cac:BillingReference>)/,
       '$1CUDS-SHA384$2'
     )
-    // Código de tipo de documento: "94" (placeholder schema-válido para
-    // @dian-kit, ver nota arriba) → "95" (Nota de Ajuste al Documento
-    // Soporte, real ante la DIAN). Además, el NOMBRE de la etiqueta -- no
-    // solo el valor -- también hay que corregirlo: @dian-kit usa
-    // <cbc:CreditNoteTypeCode> para cualquier root CreditNote (config.
-    // typeCodeTag), pero el ejemplo oficial "NotaDeAjuste.xml" de la Caja
-    // de Herramientas Documento Soporte usa <cbc:InvoiceTypeCode>95</...>
-    // incluso con root CreditNote -- una particularidad de este tipo de
-    // documento específico, no del estándar UBL CreditNote genérico.
+    // Código de tipo de documento: solo el VALOR cambia, "94" (placeholder
+    // schema-válido para @dian-kit, ver nota arriba) → "95" (Nota de Ajuste
+    // al Documento Soporte, real ante la DIAN) -- la ETIQUETA se deja como
+    // <cbc:CreditNoteTypeCode>, que es la que exige el XSD real de
+    // UBL-CreditNote-2.1 para un root <CreditNote> (ver
+    // XSD/maindoc/UBL-CreditNote-2.1.xsd: su secuencia solo admite
+    // CreditNoteTypeCode en esa posición, no InvoiceTypeCode).
+    //
+    // Una fase anterior (Fase 5) había cambiado la etiqueta a
+    // <cbc:InvoiceTypeCode> copiando literal el ejemplo oficial
+    // "NotaDeAjuste.xml" de la Caja de Herramientas -- ese ejemplo SÍ trae
+    // <cbc:InvoiceTypeCode>95</cbc:InvoiceTypeCode> con root <CreditNote>,
+    // pero validando ese mismo ejemplo oficial contra el XSD real (con
+    // lxml) también falla exactamente con el mismo error de esquema, así
+    // que el ejemplo de la Caja de Herramientas está mal armado en este
+    // punto -- no es una particularidad válida de este documento. La prueba
+    // definitiva: se recuperó el XML real que la DIAN rechazó con "ZB01 —
+    // Fallo en el esquema XML del archivo" (tenant_empresa_de_pruebas,
+    // dian_events) y traía exactamente <cbc:InvoiceTypeCode>; parcheándolo
+    // de vuelta a <cbc:CreditNoteTypeCode> pasa la validación de esquema sin
+    // ningún otro error. Revertido a la etiqueta estándar.
     .replace(
       /<cbc:CreditNoteTypeCode>94<\/cbc:CreditNoteTypeCode>/,
-      '<cbc:InvoiceTypeCode>95</cbc:InvoiceTypeCode>'
+      '<cbc:CreditNoteTypeCode>95</cbc:CreditNoteTypeCode>'
     )
     .replace(
       /<cbc:ProfileID>[^<]*<\/cbc:ProfileID>/,
