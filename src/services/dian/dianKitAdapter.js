@@ -792,8 +792,16 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
     // (regla DSAZ09). Se usa el esquema "999" (numeración propia del
     // contribuyente), la convención estándar cuando no hay código UNSPSC
     // real -- MEJOR ESFUERZO, no verificado contra un envío aceptado.
+    // OJO: el match tiene que quedar acotado a la <cbc:Description> que
+    // vive DENTRO de <cac:Item> -- un regex global sobre todo el XML (como
+    // estaba antes) también agarra cualquier otra <cbc:Description> del
+    // documento (p.ej. la de <cac:DiscrepancyResponse> en la Nota de Ajuste
+    // de Documento Soporte, ver createSupportDocumentAdjustment()), e
+    // inyectarle StandardItemIdentification a ESA la vuelve estructuralmente
+    // inválida -- exactamente el rechazo genérico de esquema ("Fallo en el
+    // esquema XML del archivo") que no señala una regla de negocio puntual.
     .replace(
-      /<cbc:Description>[^<]*<\/cbc:Description>/g,
+      /(<cac:Item>[\s\S]*?<cbc:Description>[^<]*<\/cbc:Description>)/g,
       m => `${m}<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">1</cbc:ID></cac:StandardItemIdentification>`
     )
     // Retenciones (ReteFuente/ReteIVA/ReteICA) -- ver buildWithholdingTaxTotals()
@@ -1008,8 +1016,15 @@ async function createSupportDocumentAdjustment(tenant, {
       // de esas tablas).
       '<cbc:ProfileID>DIAN 2.1: Nota de ajuste al documento soporte en adquisiciones efectuadas a sujetos no obligados a expedir factura o documento equivalente </cbc:ProfileID>'
     )
+    // Mismo bug que en createSupportDocument(): acotado a la <cbc:Description>
+    // DENTRO de <cac:Item> -- acá es aún más crítico, porque un ajuste tipo
+    // débito SÍ trae <cac:DiscrepancyResponse><cbc:Description>...</...> (ver
+    // arriba), y un regex global le inyectaba StandardItemIdentification a
+    // esa Description también, rompiendo el esquema (rechazo genérico "Fallo
+    // en el esquema XML del archivo", sin regla de negocio puntual porque ni
+    // siquiera es un documento bien formado según el XSD).
     .replace(
-      /<cbc:Description>[^<]*<\/cbc:Description>/g,
+      /(<cac:Item>[\s\S]*?<cbc:Description>[^<]*<\/cbc:Description>)/g,
       m => `${m}<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">1</cbc:ID></cac:StandardItemIdentification>`
     )
     .replace(
