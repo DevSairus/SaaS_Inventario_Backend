@@ -295,6 +295,22 @@ function buildDocumentTaxTotals(items) {
  * document_type copiados en sales.controller.js), o "Consumidor Final"/
  * Bogotá como último recurso.
  */
+// Divide un nombre completo en FirstName/FamilyName para el grupo cac:Person
+// que la DIAN exige para personas naturales (confirmado contra el ejemplo
+// oficial "Ejemplificacion Muestras Gratis.xml" de la Caja de Herramientas
+// FE: <cac:Person><cbc:FirstName>...</cbc:FirstName></cac:Person>, además
+// del <cbc:AdditionalAccountID>2</cbc:AdditionalAccountID> -- ver más abajo).
+// Heurística simple (sin captura de nombre/apellido por separado en el
+// modelo actual de Supplier/Customer): la última palabra es el apellido, el
+// resto el nombre. Si no hay más de una palabra, se repite -- @dian-kit
+// exige ambos campos no vacíos.
+function splitPersonName(fullName) {
+  const parts = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { firstName: 'N/A', familyName: 'N/A' };
+  if (parts.length === 1) return { firstName: parts[0], familyName: parts[0] };
+  return { firstName: parts.slice(0, -1).join(' '), familyName: parts[parts.length - 1] };
+}
+
 function buildCounterpartyData(counterparty, sale) {
   const cityCode = counterparty?.cityCode || sale?.customer_city_code || '11001';
   const address = {
@@ -307,18 +323,30 @@ function buildCounterpartyData(counterparty, sale) {
     countryName: 'Colombia',
   };
   const schemeID = counterparty?.schemeID || sale?.customer_document_type || '31';
+  const name = counterparty?.name || sale?.customer_name || 'Consumidor Final';
+  // DocumentType.NIT ("31") es el único tipo de identificación exclusivo de
+  // persona jurídica en la tabla 13.2.1 de la DIAN -- cualquier otro (13
+  // cédula, 22 cédula extranjería, 41 pasaporte, etc.) es persona natural.
+  // AdditionalAccountID (tabla 13.2.3) y el grupo cac:Person dependen de
+  // esto -- antes quedaba fijo en personType '1' (jurídica) sin importar el
+  // tipo real, lo que la DIAN rechaza para un vendedor persona natural
+  // (reglas DSAJ08a/DSFC03: "conjunto de elementos" y "código" incorrectos
+  // según la procedencia del vendedor).
+  const isNatural = schemeID !== '31';
+  const personType = isNatural ? '2' : '1';
 
   return {
-    name: counterparty?.name || sale?.customer_name || 'Consumidor Final',
+    name,
     identification: {
       number: cleanId(counterparty?.nit || sale?.customer_tax_id) || '13832081',
       type: schemeID,
       dv: cleanId(counterparty?.dv) || '0',
     },
-    personType: '1',
+    personType,
+    ...(isNatural && { person: splitPersonName(name) }),
     fiscalResponsibilities: [mapFiscalResponsibility(counterparty?.regimeCode || counterparty?.taxLevelCode || 'R-99-PN')],
     taxInfo: {
-      registrationName: counterparty?.name || sale?.customer_name || 'Consumidor Final',
+      registrationName: name,
       companyId: {
         number: cleanId(counterparty?.nit || sale?.customer_tax_id) || '13832081',
         type: schemeID,
@@ -623,20 +651,18 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
   let unsignedXml = buildInvoiceXml(doc, uuid, softwareSecurityCode)
     // addDianExtensions() de @dian-kit arma <sts:ProviderID> tomando
     // schemeID de doc.supplier.identification.dv y schemeName de
-    // doc.supplier.identification.type -- correcto para factura (donde
-    // supplier eres tú, una persona jurídica NIT=31, así que schemeName ya
-    // sale "31" "por accidente"), pero para Documento Soporte doc.supplier
-    // es el VENDEDOR: si es persona natural (ej. schemeName="13"), ese
-    // valor queda ahí en vez de "31" -- confirmado contra un rechazo real
-    // de la DIAN (reglas DSAB23/DSAJ25a: "Identificador del tipo de
-    // documento del Prestador de Servicios no es igual a 31" /
-    // "El contenido de este atributo no corresponde a '31'"). El Prestador
-    // de Servicios (proveedor del software, doc.software.providerNit) es
-    // siempre persona jurídica ante la DIAN -- se fuerza el literal "31" en
-    // ambos atributos, sin derivar nada de doc.supplier.
+    // doc.supplier.identification.type -- correcto "por accidente" para
+    // factura (donde supplier eres tú), incorrecto para Documento Soporte
+    // (doc.supplier es el VENDEDOR). Confirmado contra el ejemplo oficial
+    // "Generica.xml" de la Caja de Herramientas FE de la DIAN: el bloque
+    // sts:SoftwareProvider real usa schemeID="4" (código fijo, NO un DV) y
+    // schemeName="31" -- idéntico al patrón que @dian-kit ya usa bien en
+    // sts:AuthorizationProviderID, unos nodos más abajo en el mismo XML. Se
+    // fuerzan ambos literales, sin derivar nada de doc.supplier ni de
+    // doc.software.providerNit.
     .replace(
       /<sts:ProviderID([^>]*)>/,
-      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="31"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
+      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="4"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
     )
     .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
     // @dian-kit no conoce el tipo 05: buildInvoiceXml cae al ProfileID
@@ -814,13 +840,12 @@ async function createSupportDocumentAdjustment(tenant, {
   const uuid = sha384(concatenateCufeFields(cufeInput));
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
   let unsignedXml = buildCreditNoteXml(doc, uuid, softwareSecurityCode)
-    // Mismo fix que createSupportDocument() -- ver comentario ahí. El
-    // Prestador de Servicios (proveedor del software) es siempre persona
-    // jurídica, así que <sts:ProviderID> debe forzar schemeID/schemeName a
-    // "31" en vez de derivarlos de doc.supplier (el vendedor).
+    // Mismo fix que createSupportDocument() -- ver comentario ahí,
+    // confirmado contra el ejemplo oficial "Generica.xml": schemeID="4"
+    // (código fijo, no un DV) y schemeName="31".
     .replace(
       /<sts:ProviderID([^>]*)>/,
-      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="31"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
+      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="4"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
     )
     .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
     // El UUID del Documento Soporte referenciado en BillingReference es un
