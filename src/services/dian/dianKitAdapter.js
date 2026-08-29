@@ -1037,12 +1037,24 @@ async function createSupportDocumentAdjustment(tenant, {
     )
     .replace(
       /<cbc:ProfileID>[^<]*<\/cbc:ProfileID>/,
-      // Texto literal exacto tomado del ejemplo oficial "NotaDeAjuste.xml"
-      // -- nuestra redacción anterior ("no obligados a facturar") no
-      // coincidía con la oficial (regla DSFC03: "código no corresponde de
-      // acuerdo a tabla de referencia" -- el ProfileID es justamente una
-      // de esas tablas).
-      '<cbc:ProfileID>DIAN 2.1: Nota de ajuste al documento soporte en adquisiciones efectuadas a sujetos no obligados a expedir factura o documento equivalente </cbc:ProfileID>'
+      // La Fase 4 había copiado este texto literal del ejemplo oficial
+      // "NotaDeAjuste.xml" (Caja de Herramientas Documento Soporte),
+      // incluyendo un ESPACIO final en vez de punto -- un envío real a la
+      // DIAN lo rechazó con NSAD03 ("ProfileID no contiene el literal...")
+      // a pesar de que el texto enviado coincidía carácter por carácter con
+      // el que pide el propio mensaje de error (confirmado comparando byte
+      // a byte el XML real que se envió). Eso solo tiene sentido si el
+      // ejemplo de la Caja de Herramientas está mal transcrito en este
+      // punto -- ya habíamos encontrado otro error real en ese mismo
+      // archivo (ver nota de <cbc:CreditNoteTypeCode> arriba). Dos fuentes
+      // sí confirman el texto correcto: (1) el catálogo de referencia
+      // "TipoDocumento-2.1.gc" (no un ejemplo, la tabla real de la DIAN)
+      // da el nombre del tipo 95 SIN espacio final; (2) el ejemplo oficial
+      // de Documento Soporte (DocumentoSoporte-OperacionConResidente.xml,
+      // que si viene aceptado en producción) sigue el patrón
+      // "DIAN 2.1: <nombre>." -- con PUNTO final, no espacio. Se corrige
+      // acá al mismo patrón: sin espacio final, con punto.
+      '<cbc:ProfileID>DIAN 2.1: Nota de ajuste al documento soporte en adquisiciones efectuadas a sujetos no obligados a expedir factura o documento equivalente.</cbc:ProfileID>'
     )
     // Mismo bug que en createSupportDocument(): acotado a la <cbc:Description>
     // DENTRO de <cac:Item> -- acá es aún más crítico, porque un ajuste tipo
