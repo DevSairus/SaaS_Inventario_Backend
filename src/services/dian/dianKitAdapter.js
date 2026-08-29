@@ -1161,10 +1161,27 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe, testSetId: t
  * Consulta el estado de un documento por CUFE.
  */
 async function getStatusByCufe(tenant, cufe) {
-  const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
 
-  const response = await kit.getStatus(cufe);
+  // Igual que sendToDian()/getNumberingRange(): la IP del backend (Railway)
+  // no está en la whitelist de la DIAN, así que si hay un dian-service
+  // remoto configurado (la máquina propia del usuario, vía túnel Cloudflare,
+  // con IP sí autorizada) se usa como proxy -- antes esta función llamaba
+  // kit.getStatus() DIRECTO desde el backend sin pasar por ese proxy, a
+  // diferencia de sendToDian/getNumberingRange, que sí lo hacen. La DIAN
+  // responde HTTP 403 ("verifique credenciales y entorno" es el mensaje
+  // genérico de @dian-kit para cualquier fallo HTTP no-200, no
+  // necesariamente sobre credenciales) al pegarle desde una IP no
+  // autorizada -- por eso enviar/crear documentos funcionaba pero consultar
+  // estado no. dian-service.js ya expone /api/dian/get-status para esto.
+  const dianServiceUrl = process.env.DIAN_SERVICE_URL;
+  let response;
+  if (dianServiceUrl) {
+    response = await callRemoteDianService(dianServiceUrl, '/api/dian/get-status', { config: cfg, cufe });
+  } else {
+    const kit = getKit(tenant);
+    response = await kit.getStatus(cufe);
+  }
 
   return {
     isValid: response.isValid,

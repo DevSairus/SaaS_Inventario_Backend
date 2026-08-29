@@ -272,6 +272,20 @@ const createResolution = async (req, res) => {
     if (e.name === 'SequelizeUniqueConstraintError') {
       return fail(res, 'Ya existe una resolución activa con ese prefijo. Desactive la anterior primero.');
     }
+    // Postgres 22P02 = "invalid input value for enum ..." -- pasa cuando el
+    // ENUM de la columna document_type en la BASE DE DATOS todavía no tiene
+    // el valor que se intenta guardar (ej. 'support_document_adjustment'),
+    // aunque el modelo Sequelize ya lo declare: el modelo NO altera el tipo
+    // real en la BD, eso lo hace la migración correspondiente
+    // (2026082804-add-support-document-to-dian-resolutions-enum.js), y
+    // server.js corre las migraciones envueltas en try/catch al arrancar --
+    // si esa migración falla ahí, el servidor sigue funcionando "a medias"
+    // y el error solo queda en el log de arranque, nunca frente al usuario.
+    // Sin este chequeo, ese caso se veía como un 500 genérico sin pista de
+    // la causa real.
+    if (e.name === 'SequelizeDatabaseError' && e.parent?.code === '22P02') {
+      return fail(res, `Tipo de documento "${document_type}" no reconocido por la base de datos — probablemente falta correr la migración que agrega ese valor al catálogo (contacte soporte técnico).`, 500);
+    }
     fail(res, 'Error al crear resolución', 500);
   }
 };
