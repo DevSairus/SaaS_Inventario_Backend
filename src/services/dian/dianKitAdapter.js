@@ -365,6 +365,43 @@ function buildCounterpartyData(counterparty, sale) {
   };
 }
 
+/**
+ * Reduce el <cac:AccountingSupplierParty> (vendedor) generado por
+ * @dian-kit -- pensado para un Party de factura estándar (PartyIdentification
+ * + PartyName + PartyTaxScheme + PartyLegalEntity + Contact/Person) -- a la
+ * estructura MÍNIMA que exige la DIAN para el vendedor de un Documento
+ * Soporte: solo AdditionalAccountID, PhysicalLocation y PartyTaxScheme
+ * (RegistrationName/CompanyID/TaxLevelCode/TaxScheme). Confirmado contra los
+ * ejemplos oficiales "DocumentoSoporte-OperacionConResidente.xml" y
+ * "NotaDeAjuste.xml" de la Caja de Herramientas Documento Soporte -- ningún
+ * PartyIdentification/PartyName/PartyLegalEntity/Contact/Person aparece ahí
+ * (regla DSAJ08a: "no fue informado el conjunto de elementos correctos de
+ * acuerdo a la procedencia del vendedor" -- @dian-kit informa DE MÁS, no de
+ * menos). El TaxScheme también se fuerza a ZZ/"No aplica" -- el vendedor no
+ * obligado a facturar no tiene por qué estar registrado bajo el régimen de
+ * IVA (01) que sí usamos para el propio OFE.
+ */
+function simplifySupplierParty(xml) {
+  const block = xml.match(/<cac:AccountingSupplierParty>[\s\S]*?<\/cac:AccountingSupplierParty>/);
+  if (!block) return xml;
+  const src = block[0];
+  const additionalAccountId = (src.match(/<cbc:AdditionalAccountID>([^<]*)<\/cbc:AdditionalAccountID>/) || [])[1] || '1';
+  const physicalLocation = (src.match(/<cac:PhysicalLocation>[\s\S]*?<\/cac:PhysicalLocation>/) || [])[0] || '';
+  const registrationName = (src.match(/<cbc:RegistrationName>([^<]*)<\/cbc:RegistrationName>/) || [])[0] || '';
+  const companyId = (src.match(/<cbc:CompanyID[^>]*>[^<]*<\/cbc:CompanyID>/) || [])[0] || '';
+  const taxLevelCode = (src.match(/<cbc:TaxLevelCode[^>]*>[^<]*<\/cbc:TaxLevelCode>/) || [])[0] || '';
+
+  const rebuilt = `<cac:AccountingSupplierParty>` +
+    `<cbc:AdditionalAccountID>${additionalAccountId}</cbc:AdditionalAccountID>` +
+    `<cac:Party>${physicalLocation}` +
+    `<cac:PartyTaxScheme>${registrationName}${companyId}${taxLevelCode}` +
+    `<cac:TaxScheme><cbc:ID>ZZ</cbc:ID><cbc:Name>No aplica</cbc:Name></cac:TaxScheme>` +
+    `</cac:PartyTaxScheme>` +
+    `</cac:Party></cac:AccountingSupplierParty>`;
+
+  return xml.replace(src, rebuilt);
+}
+
 function buildLegalMonetaryTotal(items) {
   const subtotal = items.reduce((s, it) => s + Number(it.subtotal || it.lineExtensionAmount || 0), 0);
   const taxAmount = items.reduce((s, it) => s + Number(it.tax_amount || 0), 0);
@@ -648,21 +685,26 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
   };
   const uuid = sha384(concatenateCufeFields(cufeInput));
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
+  const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
   let unsignedXml = buildInvoiceXml(doc, uuid, softwareSecurityCode)
     // addDianExtensions() de @dian-kit arma <sts:ProviderID> tomando
     // schemeID de doc.supplier.identification.dv y schemeName de
     // doc.supplier.identification.type -- correcto "por accidente" para
     // factura (donde supplier eres tú), incorrecto para Documento Soporte
-    // (doc.supplier es el VENDEDOR). Confirmado contra el ejemplo oficial
-    // "Generica.xml" de la Caja de Herramientas FE de la DIAN: el bloque
-    // sts:SoftwareProvider real usa schemeID="4" (código fijo, NO un DV) y
-    // schemeName="31" -- idéntico al patrón que @dian-kit ya usa bien en
-    // sts:AuthorizationProviderID, unos nodos más abajo en el mismo XML. Se
-    // fuerzan ambos literales, sin derivar nada de doc.supplier ni de
-    // doc.software.providerNit.
+    // (doc.supplier es el VENDEDOR). OJO: el ejemplo oficial "Generica.xml"
+    // de la Caja de Herramientas FE (Resolución 000165, Factura) usa
+    // schemeID="4" fijo, pero esa toolbox NO es la de Documento Soporte
+    // (Resolución 000167) -- el propio comentario original de este archivo
+    // (antes de tocarlo) ya citaba la regla DSAB22b ("DV del NIT del
+    // Prestador de Servicios no está correctamente calculado"), señal de
+    // que YA se había visto ese rechazo real en habilitación y se corrigió
+    // calculando el DV real -- confirmado again al reintroducir "4" acá:
+    // DSAB22b reapareció. Para Documento Soporte, schemeID debe ser el DV
+    // real de doc.software.providerNit; schemeName sí debe ser "31" fijo
+    // (ese cambio sí eliminó DSAB23 en un envío real).
     .replace(
       /<sts:ProviderID([^>]*)>/,
-      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="4"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
+      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, `schemeID="${providerDv}"`).replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
     )
     .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
     // @dian-kit no conoce el tipo 05: buildInvoiceXml cae al ProfileID
@@ -689,7 +731,20 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
     .replace(
       '<cac:LegalMonetaryTotal>',
       buildWithholdingTaxTotals(retentions) + '<cac:LegalMonetaryTotal>'
+    )
+    // @dian-kit arma <cac:InvoicePeriod> con StartDate+EndDate (formato de
+    // factura). Confirmado contra el ejemplo oficial
+    // "DocumentoSoporte-OperacionConResidente.xml": el Documento Soporte
+    // exige StartDate + DescriptionCode + Description ("Por operación"),
+    // SIN EndDate -- por eso la DIAN seguía rechazando por DSFC01 aunque el
+    // grupo ya existiera en el XML.
+    .replace(
+      /<cac:InvoicePeriod>\s*<cbc:StartDate>([^<]*)<\/cbc:StartDate>[\s\S]*?<\/cac:InvoicePeriod>/,
+      '<cac:InvoicePeriod><cbc:StartDate>$1</cbc:StartDate><cbc:DescriptionCode>1</cbc:DescriptionCode><cbc:Description>Por operación</cbc:Description></cac:InvoicePeriod>'
     );
+  // Reduce el vendedor al set mínimo de elementos que exige la DIAN para
+  // Documento Soporte -- ver comentario de simplifySupplierParty() arriba.
+  unsignedXml = simplifySupplierParty(unsignedXml);
   const { signedXml } = await signXml({
     xml: unsignedXml,
     certificate: kit.config.certificateData,
@@ -808,10 +863,10 @@ async function createSupportDocumentAdjustment(tenant, {
     taxTotals: buildDocumentTaxTotals(items),
     legalMonetaryTotal: buildLegalMonetaryTotal(items),
     paymentMeans: { paymentForm: '1', paymentMethod: '10' },
-    period: {
-      startDate: new Date(issueDate.getFullYear(), issueDate.getMonth(), 1),
-      endDate: issueDate,
-    },
+    // Sin InvoicePeriod -- confirmado contra el ejemplo oficial
+    // "NotaDeAjuste.xml" de la Caja de Herramientas Documento Soporte: la
+    // Nota de Ajuste no trae ese grupo (a diferencia del Documento Soporte
+    // original, que sí lo exige con otro formato -- ver createSupportDocument()).
     // Referencia al Documento Soporte original.
     billingReference: {
       id: original.number,
@@ -839,13 +894,14 @@ async function createSupportDocumentAdjustment(tenant, {
   };
   const uuid = sha384(concatenateCufeFields(cufeInput));
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
+  const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
   let unsignedXml = buildCreditNoteXml(doc, uuid, softwareSecurityCode)
-    // Mismo fix que createSupportDocument() -- ver comentario ahí,
-    // confirmado contra el ejemplo oficial "Generica.xml": schemeID="4"
-    // (código fijo, no un DV) y schemeName="31".
+    // Mismo fix que createSupportDocument() -- ver comentario ahí. schemeID
+    // = DV real (no "4" del ejemplo de Factura, que es otra resolución);
+    // schemeName = "31" fijo.
     .replace(
       /<sts:ProviderID([^>]*)>/,
-      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, 'schemeID="4"').replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
+      (m, attrs) => `<sts:ProviderID${attrs.replace(/schemeID="[^"]*"/, `schemeID="${providerDv}"`).replace(/schemeName="[^"]*"/, 'schemeName="31"')}>`
     )
     .replace(/CUDE-SHA384/g, 'CUDS-SHA384')
     // El UUID del Documento Soporte referenciado en BillingReference es un
@@ -857,14 +913,25 @@ async function createSupportDocumentAdjustment(tenant, {
     )
     // Código de tipo de documento: "94" (placeholder schema-válido para
     // @dian-kit, ver nota arriba) → "95" (Nota de Ajuste al Documento
-    // Soporte, real ante la DIAN).
+    // Soporte, real ante la DIAN). Además, el NOMBRE de la etiqueta -- no
+    // solo el valor -- también hay que corregirlo: @dian-kit usa
+    // <cbc:CreditNoteTypeCode> para cualquier root CreditNote (config.
+    // typeCodeTag), pero el ejemplo oficial "NotaDeAjuste.xml" de la Caja
+    // de Herramientas Documento Soporte usa <cbc:InvoiceTypeCode>95</...>
+    // incluso con root CreditNote -- una particularidad de este tipo de
+    // documento específico, no del estándar UBL CreditNote genérico.
     .replace(
       /<cbc:CreditNoteTypeCode>94<\/cbc:CreditNoteTypeCode>/,
-      '<cbc:CreditNoteTypeCode>95</cbc:CreditNoteTypeCode>'
+      '<cbc:InvoiceTypeCode>95</cbc:InvoiceTypeCode>'
     )
     .replace(
       /<cbc:ProfileID>[^<]*<\/cbc:ProfileID>/,
-      '<cbc:ProfileID>DIAN 2.1: nota de ajuste al documento soporte en adquisiciones efectuadas a no obligados a facturar.</cbc:ProfileID>'
+      // Texto literal exacto tomado del ejemplo oficial "NotaDeAjuste.xml"
+      // -- nuestra redacción anterior ("no obligados a facturar") no
+      // coincidía con la oficial (regla DSFC03: "código no corresponde de
+      // acuerdo a tabla de referencia" -- el ProfileID es justamente una
+      // de esas tablas).
+      '<cbc:ProfileID>DIAN 2.1: Nota de ajuste al documento soporte en adquisiciones efectuadas a sujetos no obligados a expedir factura o documento equivalente </cbc:ProfileID>'
     )
     .replace(
       /<cbc:Description>[^<]*<\/cbc:Description>/g,
@@ -874,6 +941,7 @@ async function createSupportDocumentAdjustment(tenant, {
       '<cac:LegalMonetaryTotal>',
       buildWithholdingTaxTotals(retentions) + '<cac:LegalMonetaryTotal>'
     );
+  unsignedXml = simplifySupplierParty(unsignedXml);
 
   const { signedXml } = await signXml({
     xml: unsignedXml,
