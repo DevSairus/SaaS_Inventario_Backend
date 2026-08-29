@@ -321,6 +321,16 @@ function buildCounterpartyData(counterparty, sale) {
     departmentName: counterparty?.dept || sale?.customer_department_name || 'Cundinamarca',
     countryCode: 'CO',
     countryName: 'Colombia',
+    // La regla DSAJ08a exige, entre otros, el elemento PostalZone dentro de
+    // cac:PhysicalLocation/cac:Address del vendedor de un Documento Soporte
+    // -- @dian-kit solo lo emite si `address.postalZone` viene informado
+    // (antes nunca se pasaba, así que el grupo quedaba incompleto). No hay
+    // tabla de códigos postales reales en el sistema (Supplier/Customer no
+    // capturan ese dato) -- MEJOR ESFUERZO: se deriva del código DIVIPOLA de
+    // 5 dígitos con un dígito de relleno para cumplir la estructura de 6
+    // dígitos que exige el código postal colombiano (la regla solo valida
+    // "estructura", no que corresponda a una tabla real de códigos postales).
+    postalZone: counterparty?.postalZone || sale?.customer_postal_code || `${cityCode}0`,
   };
   const schemeID = counterparty?.schemeID || sale?.customer_document_type || '31';
   const name = counterparty?.name || sale?.customer_name || 'Consumidor Final';
@@ -388,7 +398,16 @@ function simplifySupplierParty(xml) {
   const additionalAccountId = (src.match(/<cbc:AdditionalAccountID>([^<]*)<\/cbc:AdditionalAccountID>/) || [])[1] || '1';
   const physicalLocation = (src.match(/<cac:PhysicalLocation>[\s\S]*?<\/cac:PhysicalLocation>/) || [])[0] || '';
   const registrationName = (src.match(/<cbc:RegistrationName>([^<]*)<\/cbc:RegistrationName>/) || [])[0] || '';
-  const companyId = (src.match(/<cbc:CompanyID[^>]*>[^<]*<\/cbc:CompanyID>/) || [])[0] || '';
+  // La regla DSAJ25a exige que @schemeName sea SIEMPRE literal "31" en este
+  // campo específico para Documento Soporte, sin importar el tipo de
+  // documento real del vendedor (persona natural incluida) -- confirmado
+  // contra el ejemplo oficial "DocumentoSoporte-OperacionConResidente.xml",
+  // que lo deja fijo en "31". @dian-kit arma schemeName con el tipo real
+  // (buildCounterpartyData -> party.identification.type, p.ej. "13" para
+  // cédula) porque asume el Party genérico de factura -- se fuerza acá,
+  // mismo patrón que ya se usa para <sts:ProviderID> más abajo.
+  const companyIdMatch = (src.match(/<cbc:CompanyID[^>]*>[^<]*<\/cbc:CompanyID>/) || [])[0] || '';
+  const companyId = companyIdMatch.replace(/schemeName="[^"]*"/, 'schemeName="31"');
   const taxLevelCode = (src.match(/<cbc:TaxLevelCode[^>]*>[^<]*<\/cbc:TaxLevelCode>/) || [])[0] || '';
 
   const rebuilt = `<cac:AccountingSupplierParty>` +
@@ -530,6 +549,61 @@ function buildWithholdingTaxTotals({ subtotal, taxAmount, retefuente_rate, retef
 }
 
 /**
+ * Calcula el CUDS (Código Único de Documento Soporte) según la fórmula EXACTA
+ * del Anexo Técnico de Documento Soporte (Resolución 000167 de 2021, numeral
+ * 14.1.1.1 y 14.1.1.3):
+ *
+ *   CUDS = SHA-384(NumDS + FecDS + HorDS + ValDS + CodImp + ValImp + ValTot +
+ *                   NumSNO + NITABS + Software-PIN + TipoAmbiente)
+ *
+ * Confirmado contra el numeral 14.1.1.3 (XPath de cada campo): NumSNO viene
+ * de /Invoice/cac:AccountingSupplierParty/.../cbc:CompanyID (el VENDEDOR,
+ * doc.supplier acá) y NITABS de /Invoice/cac:AccountingCustomerParty/.../
+ * cbc:CompanyID (TÚ, el adquirente, doc.customer acá) -- en ESE orden. La
+ * versión anterior de este código invertía nitOFE/numAdq asumiendo que el
+ * primer campo de identificación debía ser TÚ ("el verdadero obligado") --
+ * exactamente al revés de lo que dice el Anexo -- y además reutilizaba
+ * @dian-kit/core#buildCufeInput/concatenateCufeFields (pensado para el CUFE
+ * de factura), que difiere del CUDS en dos puntos más, ambos causa directa
+ * de la regla DSAD06 ("Valor del CUDS no está calculado correctamente"):
+ *   1) el Anexo exige un ÚNICO par CodImp/ValImp -- CodImp fijo "01", ValImp
+ *      = la suma del IVA (0.00 si no hay IVA) -- mientras que buildCufeInput
+ *      concatena TRES pares (IVA/INC/ICA) como hace el CUFE de factura.
+ *   2) el Anexo exige el PIN del software (Software-PIN, numeral 14.1.1.2:
+ *      "no está en el XML") como secreto, NO la clave técnica de la
+ *      resolución -- buildCufeInput usa la clave técnica para cualquier tipo
+ *      de documento en su set CUFE_DOCUMENTS, que incluye (incorrectamente
+ *      para este propósito) a DOCUMENTO_SOPORTE.
+ *
+ * ValDS/ValTot sí coinciden con los campos que ya arma buildLegalMonetaryTotal
+ * (lineExtensionAmount/payableAmount) -- ese pedazo del cálculo anterior era
+ * correcto por coincidir con el propio formato del CUFE genérico.
+ */
+function computeCuds(doc, cfg) {
+  const { formatDate, formatTime, truncateDecimals, sha384 } = require('@dian-kit/core');
+
+  const ivaAmount = doc.taxTotals
+    .filter(tt => tt.subtotals.some(s => s.taxScheme.code === '01'))
+    .reduce((sum, tt) => sum + tt.taxAmount, 0);
+
+  const raw = [
+    doc.id,
+    formatDate(doc.issueDate),
+    formatTime(doc.issueTime),
+    truncateDecimals(doc.legalMonetaryTotal.lineExtensionAmount, 2),
+    '01',
+    truncateDecimals(ivaAmount, 2),
+    truncateDecimals(doc.legalMonetaryTotal.payableAmount, 2),
+    doc.supplier.identification.number,
+    doc.customer.identification.number,
+    cfg.software_pin,
+    doc.environment,
+  ].join('');
+
+  return sha384(raw);
+}
+
+/**
  * Party del vendedor (AccountingSupplierParty) de un Documento Soporte, a
  * partir de un Supplier real. Requiere que ya haya pasado
  * supplierDianReadiness.assertReadiness() -- acá no se valida completitud,
@@ -547,7 +621,16 @@ function buildSellerFromSupplier(supplier) {
   return {
     name: supplier.business_name || supplier.name,
     nit: supplier.tax_id,
-    dv: schemeID === '31' ? String(computeNitCheckDigit(supplier.tax_id)) : undefined,
+    // Siempre se calcula un DV real, sin importar el tipo de documento del
+    // vendedor: el Anexo Técnico (regla DSAJ25a) exige que el
+    // cac:PartyTaxScheme/cbc:CompanyID/@schemeName del vendedor sea SIEMPRE
+    // literal "31" en Documento Soporte (confirmado contra el ejemplo
+    // oficial DocumentoSoporte-OperacionConResidente.xml, que lo deja fijo
+    // en "31" aunque el vendedor sea persona natural) -- y esa misma regla
+    // exige que, cuando @schemeName es "31", el DV (@schemeID) esté
+    // informado y sea correcto. Antes solo se calculaba para schemeID==='31'
+    // (persona jurídica), dejando el DV vacío/'0' para personas naturales.
+    dv: String(computeNitCheckDigit(supplier.tax_id)),
     schemeID,
     cityCode: supplier.city_code,
     city: resolved?.cityName || supplier.city,
@@ -574,7 +657,9 @@ function buildSellerFromAdHoc(adHoc) {
   return {
     name: adHoc.name,
     nit: adHoc.tax_id,
-    dv: schemeID === '31' ? String(computeNitCheckDigit(adHoc.tax_id)) : undefined,
+    // Ver comentario en buildSellerFromSupplier() -- mismo criterio: DV real
+    // siempre, sin importar el tipo de documento (regla DSAJ25a).
+    dv: String(computeNitCheckDigit(adHoc.tax_id)),
     schemeID,
     cityCode: adHoc.city_code,
     city: resolved?.cityName || adHoc.city,
@@ -624,7 +709,7 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
   const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
   const {
-    buildInvoiceXml, buildCufeInput, concatenateCufeFields, sha384,
+    buildInvoiceXml, formatDate,
     generateSoftwareSecurityCode, signXml, DianDocumentSchema, DocumentType,
   } = require('@dian-kit/core');
 
@@ -659,31 +744,18 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
     taxTotals: buildDocumentTaxTotals(items),
     legalMonetaryTotal: buildLegalMonetaryTotal(items),
     paymentMeans: { paymentForm: '1', paymentMethod: '10' },
-    // La DIAN exige el grupo InvoicePeriod en Documento Soporte (regla
-    // DSFC01) -- se usa el mes calendario de la emisión, ya que no hay un
-    // periodo de facturación real que declarar en este tipo de documento.
-    period: {
-      startDate: new Date(issueDate.getFullYear(), issueDate.getMonth(), 1),
-      endDate: issueDate,
-    },
+    // El grupo InvoicePeriod (regla DSFC01) NO va a nivel de encabezado --
+    // @dian-kit solo sabe emitirlo ahí (vía este campo `period`), pero el
+    // Anexo Técnico lo exige DENTRO DE CADA InvoiceLine (XPath
+    // /Invoice/cac:InvoiceLine/cac:InvoicePeriod, confirmado contra el
+    // ejemplo oficial DocumentoSoporte-OperacionConResidente.xml, que no
+    // trae ningún InvoicePeriod de encabezado). Se omite acá a propósito y
+    // se inyecta por línea más abajo, después de generar el XML.
     software: kit.config.software,
     numbering: kit.config.numbering,
   });
 
-  // generateCufe(doc) de @dian-kit deriva nitOFE/numAdq de doc.supplier/doc.
-  // customer TAL CUAL -- correcto para factura (donde supplier eres tú, el
-  // Obligado a Facturar Electrónicamente), pero equivocado para Documento
-  // Soporte: ahí supplier es el VENDEDOR (para que la DIAN vea los roles
-  // correctos en el XML, reglas DSAB23/DSAJ25a), mientras que el CUDS debe
-  // seguir calculándose con nitOFE = TÚ (quien genera el documento, el
-  // verdadero obligado) y numAdq = el vendedor -- MEJOR ESFUERZO, no
-  // verificado contra un envío aceptado por la DIAN (regla DSAD06).
-  const cufeInput = {
-    ...buildCufeInput(doc),
-    nitOFE: doc.customer.identification.number,
-    numAdq: doc.supplier.identification.number,
-  };
-  const uuid = sha384(concatenateCufeFields(cufeInput));
+  const uuid = computeCuds(doc, cfg);
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
   const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
   let unsignedXml = buildInvoiceXml(doc, uuid, softwareSecurityCode)
@@ -732,15 +804,19 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
       '<cac:LegalMonetaryTotal>',
       buildWithholdingTaxTotals(retentions) + '<cac:LegalMonetaryTotal>'
     )
-    // @dian-kit arma <cac:InvoicePeriod> con StartDate+EndDate (formato de
-    // factura). Confirmado contra el ejemplo oficial
-    // "DocumentoSoporte-OperacionConResidente.xml": el Documento Soporte
-    // exige StartDate + DescriptionCode + Description ("Por operación"),
-    // SIN EndDate -- por eso la DIAN seguía rechazando por DSFC01 aunque el
-    // grupo ya existiera en el XML.
+    // El grupo InvoicePeriod (regla DSFC01) va DENTRO DE CADA InvoiceLine,
+    // justo después de LineExtensionAmount -- confirmado contra el ejemplo
+    // oficial "DocumentoSoporte-OperacionConResidente.xml" (que no trae
+    // ningún InvoicePeriod de encabezado, solo uno por línea). @dian-kit no
+    // tiene forma de emitirlo ahí, así que se inyecta por línea con /g --
+    // antes se inyectaba una sola vez a nivel de encabezado (vía doc.period
+    // arriba), que la DIAN no reconoce como el grupo exigido y seguía
+    // rechazando por DSFC01/DSFC02/DSFC03 aunque el grupo existiera en el
+    // XML. StartDate = fecha de emisión (debe coincidir con SigningTime,
+    // regla DSFC02b); DescriptionCode "1"/"Por operación" = tabla 16.1.6.
     .replace(
-      /<cac:InvoicePeriod>\s*<cbc:StartDate>([^<]*)<\/cbc:StartDate>[\s\S]*?<\/cac:InvoicePeriod>/,
-      '<cac:InvoicePeriod><cbc:StartDate>$1</cbc:StartDate><cbc:DescriptionCode>1</cbc:DescriptionCode><cbc:Description>Por operación</cbc:Description></cac:InvoicePeriod>'
+      /(<cac:InvoiceLine>[\s\S]*?<cbc:LineExtensionAmount[^>]*>[^<]*<\/cbc:LineExtensionAmount>)/g,
+      `$1<cac:InvoicePeriod><cbc:StartDate>${formatDate(issueDate)}</cbc:StartDate><cbc:DescriptionCode>1</cbc:DescriptionCode><cbc:Description>Por operación</cbc:Description></cac:InvoicePeriod>`
     );
   // Reduce el vendedor al set mínimo de elementos que exige la DIAN para
   // Documento Soporte -- ver comentario de simplifySupplierParty() arriba.
@@ -830,7 +906,7 @@ async function createSupportDocumentAdjustment(tenant, {
   const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
   const {
-    buildCreditNoteXml, buildCufeInput, concatenateCufeFields, sha384,
+    buildCreditNoteXml,
     generateSoftwareSecurityCode, signXml, DianDocumentSchema, DocumentType,
   } = require('@dian-kit/core');
 
@@ -887,12 +963,11 @@ async function createSupportDocumentAdjustment(tenant, {
     numbering: kit.config.numbering,
   });
 
-  const cufeInput = {
-    ...buildCufeInput(doc),
-    nitOFE: doc.customer.identification.number,
-    numAdq: doc.supplier.identification.number,
-  };
-  const uuid = sha384(concatenateCufeFields(cufeInput));
+  // Mismo cálculo de CUDS que createSupportDocument() -- ver computeCuds()
+  // arriba. El Anexo Técnico (numeral 14.1.1.4) usa exactamente la misma
+  // fórmula/orden de campos para la Nota de Ajuste que para el Documento
+  // Soporte original, solo con XPath bajo /CreditNote en vez de /Invoice.
+  const uuid = computeCuds(doc, cfg);
   const softwareSecurityCode = generateSoftwareSecurityCode(doc.software.id, doc.software.pin, doc.id);
   const providerDv = String(computeNitCheckDigit(doc.software.providerNit));
   let unsignedXml = buildCreditNoteXml(doc, uuid, softwareSecurityCode)
