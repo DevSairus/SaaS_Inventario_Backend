@@ -547,6 +547,50 @@ const sendSupportDocumentExpense = async (req, res) => {
 };
 
 /* ──────────────────────────────────────────────────────────
+ * GET /api/dian/support-documents
+ * Listado plano de todos los Documentos Soporte del tenant (Purchase o
+ * Expense), para la pantalla dedicada en Tesorería — antes solo se podían
+ * ver entrando al detalle de la compra/gasto que los originó.
+ * Query: search (número o CUDS), status (dian_status).
+ * ────────────────────────────────────────────────────────── */
+const listSupportDocuments = async (req, res) => {
+  try {
+    const { SupportDocument, Purchase, Expense, Supplier } = require('../../models');
+
+    const where = { tenant_id: req.tenant_id };
+    if (req.query.status) where.dian_status = req.query.status;
+    if (req.query.search) {
+      const term = `%${req.query.search}%`;
+      where[Op.or] = [
+        { support_document_number: { [Op.iLike]: term } },
+        { cuds: { [Op.iLike]: term } },
+      ];
+    }
+
+    const docs = await SupportDocument.findAll({
+      where,
+      include: [
+        {
+          model: Purchase, as: 'purchase', attributes: ['id', 'purchase_number'],
+          include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name'] }],
+        },
+        {
+          model: Expense, as: 'expense', attributes: ['id', 'expense_number', 'description'],
+          include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name'] }],
+        },
+      ],
+      order: [['created_at', 'DESC']],
+      limit: 300,
+    });
+
+    ok(res, { data: docs });
+  } catch (e) {
+    logger.error('Error listSupportDocuments:', e);
+    fail(res, 'Error al listar los Documentos Soporte', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
  * GET /api/dian/support-document/purchase/:purchaseId
  * GET /api/dian/support-document/expense/:expenseId
  * Estado guardado localmente (no re-consulta DIAN — para eso está
@@ -1628,6 +1672,7 @@ module.exports = {
   checkStatus,
   sendSupportDocumentPurchase,
   sendSupportDocumentExpense,
+  listSupportDocuments,
   getSupportDocumentStatusPurchase: getSupportDocumentStatus('purchase'),
   getSupportDocumentStatusExpense: getSupportDocumentStatus('expense'),
   checkSupportDocumentStatusPurchase: checkSupportDocumentStatus('purchase'),

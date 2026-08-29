@@ -32,6 +32,7 @@ router.post('/check-status/:saleId',     ctrl.checkStatus);
 router.post('/test-set/:saleId',         ctrl.sendToTestSet);
 
 // Documento Soporte (adquisiciones a no obligados a facturar) — Purchase o Expense
+router.get('/support-documents',                                  ctrl.listSupportDocuments);
 router.post('/send-support-document/purchase/:purchaseId',        ctrl.sendSupportDocumentPurchase);
 router.post('/send-support-document/expense/:expenseId',          ctrl.sendSupportDocumentExpense);
 router.get('/support-document/purchase/:purchaseId',              ctrl.getSupportDocumentStatusPurchase);
