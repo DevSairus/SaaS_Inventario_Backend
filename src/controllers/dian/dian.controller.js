@@ -357,14 +357,22 @@ const updateResolution = async (req, res) => {
     }
 
     await resolution.update({
-      ...(resolution_number !== undefined && { resolution_number }),
-      ...(resolution_date !== undefined && { resolution_date }),
+      ...(resolution_number !== undefined && { resolution_number: resolution_number || null }),
+      // '' llega del frontend cuando el campo de fecha se deja vacío (ej. al
+      // editar una resolución de Nota de Ajuste de Documento Soporte, que no
+      // exige resolution_date/valid_from/valid_to -- ver REQUIRES_DIAN_RESOLUTION).
+      // Sequelize intenta parsear '' como DATEONLY, obtiene "Invalid Date" y
+      // Postgres lo rechaza con "invalid input syntax for type date". Estas
+      // tres columnas son nullable, así que '' se normaliza a null (permite
+      // además que el usuario limpie la fecha a propósito) en vez de
+      // reenviar la cadena vacía tal cual.
+      ...(resolution_date !== undefined && { resolution_date: resolution_date || null }),
       ...(prefix !== undefined && { prefix }),
       from_number: nextFrom,
       to_number: nextTo,
       current_number: nextCurrent,
-      ...(valid_from !== undefined && { valid_from }),
-      ...(valid_to !== undefined && { valid_to }),
+      ...(valid_from !== undefined && { valid_from: valid_from || null }),
+      ...(valid_to !== undefined && { valid_to: valid_to || null }),
       ...(notes !== undefined && { notes }),
       is_test: nextIsTest,
       is_active: nextIsActive,
