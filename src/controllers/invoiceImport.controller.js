@@ -48,6 +48,10 @@ const importInvoiceInner = async (req, res) => {
     // processInvoiceItems) — un match automático por SKU interno o por nombre
     // aproximado nunca guarda el mapeo por sí solo.
     const manual_links = JSON.parse(req.body.manual_links || '{}');
+    // Datos que el usuario definió en el modal para el producto a crear en
+    // ítems marcados CREATE_NEW: { "2": { sku, barcode, name, category_id,
+    // brand, unit_of_measure, price_includes_tax } } (índice original → datos).
+    const new_product_data = JSON.parse(req.body.new_product_data || '{}');
 
     if (!req.file) {
       return res.status(400).json({
@@ -139,7 +143,7 @@ const importInvoiceInner = async (req, res) => {
       item.total = item.subtotal + item.tax_amount;
     });
 
-    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, margin_multiplier, manual_links);
+    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, margin_multiplier, manual_links, new_product_data);
     const purchase = await createPurchaseFromInvoice(
       invoiceData,
       supplier,
@@ -420,7 +424,7 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
   return supplier;
 }
 
-async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = 30, margin_multiplier = 1.3, manualLinks = {}) {
+async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = 30, margin_multiplier = 1.3, manualLinks = {}, newProductData = {}) {
   const processedItems = [];
 
   for (const item of items) {
@@ -474,17 +478,28 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
     // 5) Crear producto nuevo — comportamiento actual, disparado tanto por
     //    "no se encontró nada" como por la decisión explícita CREATE_NEW.
     if (!product) {
-      const newSku = item.sku && !item.sku.startsWith('TEMP-')
-        ? item.sku 
-        : await generateUniqueSku(item.name, tenant_id, transaction);
+      // Datos que el usuario definió en el panel "Crear producto nuevo" del
+      // modal (código, referencia, nombre, categoría, marca, unidad, IVA
+      // incluido) — permiten dejar el producto bien organizado desde acá en
+      // vez de tener que editarlo después.
+      const overrides = newProductData[String(item.original_index)] || {};
+
+      let newSku = overrides.sku?.trim() || (item.sku && !item.sku.startsWith('TEMP-') ? item.sku : null);
+      if (newSku) {
+        const skuTaken = await Product.findOne({ where: { tenant_id, sku: newSku }, transaction });
+        if (skuTaken) newSku = null; // el código elegido ya existe: caer a autogenerado
+      }
+      if (!newSku) newSku = await generateUniqueSku(overrides.name?.trim() || item.name, tenant_id, transaction);
 
       product = await Product.create({
         tenant_id,
         product_type: 'simple', // valor válido según CHECK constraint de la DB
         sku: newSku,
-        barcode: newSku,  // código de barras = mismo SKU para productos nuevos
-        name: item.name,
-        unit_of_measure: 'unit',
+        barcode: overrides.barcode?.trim() || newSku,  // por defecto, código de barras = mismo SKU
+        name: overrides.name?.trim() || item.name,
+        category_id: overrides.category_id || null,
+        brand: overrides.brand?.trim() || null,
+        unit_of_measure: overrides.unit_of_measure || 'unit',
         average_cost: item.unit_price,
         base_price: Math.round(item.unit_price * margin_multiplier),
         profit_margin_percentage: profit_margin,
@@ -494,7 +509,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
         is_active: true,
         has_tax: item.tax_percentage > 0,
         tax_percentage: item.tax_percentage || 19,
-        price_includes_tax: false
+        price_includes_tax: !!overrides.price_includes_tax
       }, { transaction });
 
       isNew = true;
