@@ -344,13 +344,21 @@ function buildCounterpartyData(counterparty, sale) {
   // según la procedencia del vendedor).
   const isNatural = schemeID !== '31';
   const personType = isNatural ? '2' : '1';
+  const counterpartyNumber = cleanId(counterparty?.nit || sale?.customer_tax_id) || '13832081';
+  // El DV solo aplica a NIT (schemeID 31) -- Customer/Supplier no tienen
+  // columna `dv` en el modelo, así que casi nunca viene explícito. Antes se
+  // caía a '0' fijo, lo que la DIAN rechaza con FAK24 ("DV no corresponde al
+  // NIT informado") salvo que el DV real fuera 0 por casualidad. Se calcula
+  // con el mismo algoritmo módulo 11 que ya se usa para el vendedor de
+  // Documento Soporte (ver computeNitCheckDigit más arriba).
+  const counterpartyDv = cleanId(counterparty?.dv) || (schemeID === '31' ? String(computeNitCheckDigit(counterpartyNumber)) : '0');
 
   return {
     name,
     identification: {
-      number: cleanId(counterparty?.nit || sale?.customer_tax_id) || '13832081',
+      number: counterpartyNumber,
       type: schemeID,
-      dv: cleanId(counterparty?.dv) || '0',
+      dv: counterpartyDv,
     },
     personType,
     ...(isNatural && { person: splitPersonName(name) }),
@@ -358,9 +366,9 @@ function buildCounterpartyData(counterparty, sale) {
     taxInfo: {
       registrationName: name,
       companyId: {
-        number: cleanId(counterparty?.nit || sale?.customer_tax_id) || '13832081',
+        number: counterpartyNumber,
         type: schemeID,
-        dv: cleanId(counterparty?.dv) || '0',
+        dv: counterpartyDv,
       },
       taxLevelCode: counterparty?.taxLevelCode || 'R-99-PN',
       taxScheme: { code: '01' },
