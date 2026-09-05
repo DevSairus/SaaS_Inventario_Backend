@@ -2043,7 +2043,7 @@ router.get(
         where: { is_active: true },
         attributes: [
           'id', 'company_name', 'business_name', 'tax_id', 'email',
-          'subscription_status', 'ncf_ciudad', 'ncf_regimen_code',
+          'subscription_status', 'ncf_city_code', 'ncf_ciudad', 'ncf_regimen_code',
           'ncf_external_ref', 'ncf_last_sync_at', 'ncf_last_status',
           'ncf_payment_link_url', 'ncf_last_error',
         ],
@@ -2054,6 +2054,72 @@ router.get(
     } catch (error) {
       console.error('Error listing tenants NCF status:', error);
       res.status(500).json({ error: 'Error al listar el estado NCF de los tenants' });
+    }
+  }
+);
+
+/**
+ * GET /api/v1/superadmin/divipola
+ * Catálogo DIVIPOLA (departamentos + municipios) para el selector de ciudad
+ * NCF de cada tenant. Mismo catálogo estático que ya usa el módulo DIAN
+ * (data/divipola-colombia.js) -- se expone acá también porque las rutas de
+ * /api/dian/* requieren tenantMiddleware (un tenant específico), y el panel
+ * superadmin no está atado a ningún tenant.
+ */
+router.get(
+  '/divipola',
+  authMiddleware,
+  checkPermission('superadmin.view_all'),
+  async (req, res) => {
+    try {
+      const { DIVIPOLA_DEPARTMENTS, DIVIPOLA_CITIES } = require('../data/divipola-colombia');
+      res.json({ success: true, data: { departments: DIVIPOLA_DEPARTMENTS, cities: DIVIPOLA_CITIES } });
+    } catch (error) {
+      res.status(500).json({ error: 'Error al obtener catálogo DIVIPOLA' });
+    }
+  }
+);
+
+/**
+ * PATCH /api/v1/superadmin/ncf-config/tenants/:tenantId
+ * Ciudad (DIVIPOLA) y régimen fiscal del tenant para la prefactura que se le
+ * envía al Núcleo (ver ncfSyncService.construirPrefactura) -- hasta ahora no
+ * existía ningún endpoint para cargar esto, por eso ncf_ciudad siempre
+ * quedaba vacío.
+ */
+router.patch(
+  '/ncf-config/tenants/:tenantId',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const Tenant = require('../models/Tenant');
+      const tenant = await Tenant.findByPk(req.params.tenantId);
+      if (!tenant) return res.status(404).json({ error: 'Tenant no encontrado' });
+
+      const updates = {};
+
+      if (req.body.ncf_city_code !== undefined) {
+        const { resolveCity } = require('../data/divipola-colombia');
+        const resolved = resolveCity(req.body.ncf_city_code);
+        if (!resolved) return res.status(400).json({ error: 'Código DIVIPOLA inválido' });
+        updates.ncf_city_code = resolved.cityCode;
+        updates.ncf_ciudad = resolved.cityName;
+      }
+
+      if (req.body.ncf_regimen_code !== undefined) {
+        updates.ncf_regimen_code = req.body.ncf_regimen_code || 'O-47';
+      }
+
+      if (!Object.keys(updates).length) {
+        return res.status(400).json({ error: 'Nada para actualizar (ncf_city_code o ncf_regimen_code)' });
+      }
+
+      await tenant.update(updates);
+      res.json({ success: true, tenant: { id: tenant.id, ncf_city_code: tenant.ncf_city_code, ncf_ciudad: tenant.ncf_ciudad, ncf_regimen_code: tenant.ncf_regimen_code } });
+    } catch (error) {
+      console.error('Error actualizando ciudad NCF del tenant:', error);
+      res.status(500).json({ error: 'Error al actualizar la ciudad NCF del tenant' });
     }
   }
 );

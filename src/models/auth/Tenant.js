@@ -192,6 +192,11 @@ const Tenant = sequelize.define('Tenant', {
   // ESC DataCore. No hay tabla aparte -- la sincronización es por sistema
   // completo (ver ncfSyncService.js), esto es solo el estado de la última
   // prefactura enviada para este tenant.
+  ncf_city_code: {
+    type: DataTypes.STRING(5),
+    allowNull: true,
+    comment: 'Código DIVIPOLA (DANE) -- fuente de verdad; ncf_ciudad es el nombre derivado de este código',
+  },
   ncf_ciudad: {
     type: DataTypes.STRING,
     allowNull: true,
