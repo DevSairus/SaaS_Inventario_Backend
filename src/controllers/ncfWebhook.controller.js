@@ -115,6 +115,15 @@ async function handleWebhook(req, res) {
       await tenant.update({ ncf_last_status: 'error', ncf_last_error: payload.error });
       break;
 
+    case 'prefactura.cancelled':
+      // Anulada a mano desde el panel del Núcleo (ej. se creó por error, o
+      // el tenant pagó por otro canal) -- limpiar ncf_external_ref para que
+      // la próxima sincronización no la vea como "ya sincronizado este
+      // ciclo" y genere una prefactura nueva si sigue correspondiendo.
+      await tenant.update({ ncf_last_status: 'cancelled', ncf_last_error: null, ncf_external_ref: null });
+      logger.info(`[NCF Webhook] Prefactura de tenant ${tenant.id} anulada por el Núcleo: ${payload.motivo || 'sin motivo'}`);
+      break;
+
     default:
       logger.warn(`[NCF Webhook] Tipo de evento desconocido: ${eventType}`);
   }

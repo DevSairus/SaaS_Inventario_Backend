@@ -62,7 +62,10 @@ function construirPrefactura(tenant) {
   const externalRef = `PBX-SUB-${tenant.id}-${periodo}`;
 
   const subtotal = Number(sub.amount);
-  const iva = Math.round(subtotal * 0.19 * 100) / 100; // IVA 19% Colombia sobre el servicio SaaS
+  // Servicios SaaS/nube -- excluidos de IVA para este negocio, a diferencia
+  // de una venta de bien o servicio gravado normal. Antes se cobraba 19%
+  // de más sobre cada suscripción.
+  const iva = 0;
 
   return {
     externalRef,
