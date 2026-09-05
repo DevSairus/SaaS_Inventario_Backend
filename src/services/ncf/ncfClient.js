@@ -102,8 +102,8 @@ async function enviarPrefactura({ externalRef, cliente, items, fechaLimitePago, 
 async function verificarFirmaWebhook(rawBody, signatureHeader) {
   const config = await getConfig();
   if (!config?.ncf_webhook_secret) {
-    logger.warn('[NCF] ncf_webhook_secret no configurado -- se omite verificación (inseguro, solo dev)');
-    return true;
+    logger.error('[NCF] ncf_webhook_secret no configurado -- se rechaza el webhook (configúralo en el panel de Facturación Núcleo)');
+    return false;
   }
   if (!signatureHeader) return false;
 

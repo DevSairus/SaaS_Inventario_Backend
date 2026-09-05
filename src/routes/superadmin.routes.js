@@ -1013,6 +1013,67 @@ router.put(
 );
 
 router.put(
+  '/tenants/:tenantId/billing-config',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const subscription = await TenantSubscription.findOne({
+        where: { tenant_id: req.params.tenantId },
+      });
+      if (!subscription) {
+        return res.status(404).json({ error: 'Suscripción no encontrada' });
+      }
+
+      const { next_billing_date, billing_cycle, amount } = req.body;
+      const updates = {};
+
+      if (next_billing_date !== undefined) {
+        const parsed = new Date(next_billing_date);
+        if (Number.isNaN(parsed.getTime())) {
+          return res.status(400).json({ error: 'next_billing_date inválida' });
+        }
+        updates.next_billing_date = parsed;
+      }
+
+      if (billing_cycle !== undefined) {
+        if (!['monthly', 'yearly'].includes(billing_cycle)) {
+          return res.status(400).json({ error: 'billing_cycle debe ser "monthly" o "yearly"' });
+        }
+        updates.billing_cycle = billing_cycle;
+      }
+
+      if (amount !== undefined) {
+        const parsedAmount = Number(amount);
+        if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+          return res.status(400).json({ error: 'amount debe ser un número mayor a 0' });
+        }
+        updates.amount = parsedAmount;
+      }
+
+      if (!Object.keys(updates).length) {
+        return res.status(400).json({ error: 'Nada para actualizar (next_billing_date, billing_cycle o amount)' });
+      }
+
+      await subscription.update(updates);
+
+      // tenants.next_billing_date es un duplicado de reporting -- mantenerlo
+      // sincronizado, mismo patrón que change-subscription-status/extend-trial.
+      if (updates.next_billing_date !== undefined) {
+        await Tenant.update(
+          { next_billing_date: updates.next_billing_date },
+          { where: { id: req.params.tenantId } }
+        );
+      }
+
+      res.json({ subscription });
+    } catch (error) {
+      res.status(500).json({ error: 'Error al actualizar la configuración de facturación' });
+    }
+  }
+);
+
+router.put(
   '/tenants/:tenantId/change-subscription-status',
   authMiddleware,
   checkPermission('superadmin.manage_all'),
