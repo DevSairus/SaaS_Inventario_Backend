@@ -142,7 +142,13 @@ async function sincronizarTodosLosTenants({ forzar = false } = {}) {
       continue;
     }
 
-    if (!forzar && tenant.ncf_external_ref === payload.externalRef) {
+    // "Ya sincronizado" solo debe frenar reenvíos de un ciclo que salió bien
+    // (pendiente de pago, pagado, facturado...) -- si el intento anterior de
+    // ESTE MISMO ciclo quedó 'rejected' o 'error' (ej. faltaba la ciudad del
+    // tenant), hay que reintentarlo solo, sin necesitar el botón "forzar":
+    // ya se corrigió el dato, pero el ciclo (external_ref) es el mismo.
+    const cicloAnteriorFallido = ['rejected', 'error'].includes(tenant.ncf_last_status);
+    if (!forzar && !cicloAnteriorFallido && tenant.ncf_external_ref === payload.externalRef) {
       resultados.push({
         tenant_id: tenant.id,
         tenant: tenant.business_name || tenant.company_name,
