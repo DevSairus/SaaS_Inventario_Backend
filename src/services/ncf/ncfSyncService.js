@@ -111,6 +111,10 @@ async function sincronizarTodosLosTenants({ forzar = false } = {}) {
     where: {
       is_active: true,
       subscription_status: { [Op.in]: ['active', 'past_due', 'trial'] },
+      // Control fino por tenant: aunque el job/botón corra, solo se procesan
+      // los que ya se marcaron "Listo a sincronizar" (después de cargarles
+      // ciudad/tarifa/fecha de cobro) -- ver panel Facturación Núcleo (NCF).
+      ncf_sync_enabled: true,
     },
     include: [{
       model: TenantSubscription,

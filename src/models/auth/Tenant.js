@@ -192,6 +192,12 @@ const Tenant = sequelize.define('Tenant', {
   // ESC DataCore. No hay tabla aparte -- la sincronización es por sistema
   // completo (ver ncfSyncService.js), esto es solo el estado de la última
   // prefactura enviada para este tenant.
+  ncf_sync_enabled: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    comment: 'true = listo para incluirse en la sincronización NCF (cron o botón manual) -- se marca a propósito después de cargar ciudad/tarifa/fecha de cobro',
+  },
   ncf_city_code: {
     type: DataTypes.STRING(5),
     allowNull: true,

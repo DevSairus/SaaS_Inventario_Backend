@@ -64,6 +64,19 @@ const JOBS = [
     name: 'ncf-sync',
     schedule: '0 7 * * *', // 7:00am hora Colombia
     run: async () => {
+      // Genera prefacturas reales en el Núcleo y le manda al cliente un
+      // email con link de pago apenas se crean (ver
+      // emailService.enviarPrefacturaGenerada) -- mientras se está probando
+      // el módulo (ciudad/monto/fecha de cobro por tenant, reintentos de
+      // rechazados, etc.) queda apagado por defecto para no facturarle a
+      // clientes reales por accidente. Activar a propósito con
+      // ENABLE_NCF_AUTOSYNC=true una vez validado. El botón "Sincronizar
+      // tenants ahora" del panel sigue funcionando igual -- es una acción
+      // explícita del usuario, no depende de esta bandera.
+      if (process.env.ENABLE_NCF_AUTOSYNC !== 'true') {
+        logger.log('⏸️  [ncf-sync] Desactivado (activar con ENABLE_NCF_AUTOSYNC=true) -- usa el botón "Sincronizar tenants ahora" del panel mientras tanto');
+        return [];
+      }
       const { sincronizarTodosLosTenants, revisarSuspensiones } = require('../services/ncf/ncfSyncService');
       const sync = await sincronizarTodosLosTenants();
       const suspendidos = await revisarSuspensiones();

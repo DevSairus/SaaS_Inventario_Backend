@@ -2043,7 +2043,7 @@ router.get(
         where: { is_active: true },
         attributes: [
           'id', 'company_name', 'business_name', 'tax_id', 'email',
-          'subscription_status', 'ncf_city_code', 'ncf_ciudad', 'ncf_regimen_code',
+          'subscription_status', 'ncf_sync_enabled', 'ncf_city_code', 'ncf_ciudad', 'ncf_regimen_code',
           'ncf_external_ref', 'ncf_last_sync_at', 'ncf_last_status',
           'ncf_payment_link_url', 'ncf_last_error',
         ],
@@ -2111,12 +2111,22 @@ router.patch(
         updates.ncf_regimen_code = req.body.ncf_regimen_code || 'O-47';
       }
 
+      if (req.body.ncf_sync_enabled !== undefined) {
+        updates.ncf_sync_enabled = !!req.body.ncf_sync_enabled;
+      }
+
       if (!Object.keys(updates).length) {
-        return res.status(400).json({ error: 'Nada para actualizar (ncf_city_code o ncf_regimen_code)' });
+        return res.status(400).json({ error: 'Nada para actualizar (ncf_city_code, ncf_regimen_code o ncf_sync_enabled)' });
       }
 
       await tenant.update(updates);
-      res.json({ success: true, tenant: { id: tenant.id, ncf_city_code: tenant.ncf_city_code, ncf_ciudad: tenant.ncf_ciudad, ncf_regimen_code: tenant.ncf_regimen_code } });
+      res.json({
+        success: true,
+        tenant: {
+          id: tenant.id, ncf_city_code: tenant.ncf_city_code, ncf_ciudad: tenant.ncf_ciudad,
+          ncf_regimen_code: tenant.ncf_regimen_code, ncf_sync_enabled: tenant.ncf_sync_enabled,
+        },
+      });
     } catch (error) {
       console.error('Error actualizando ciudad NCF del tenant:', error);
       res.status(500).json({ error: 'Error al actualizar la ciudad NCF del tenant' });
