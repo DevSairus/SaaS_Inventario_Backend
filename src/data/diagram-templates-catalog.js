@@ -2418,5 +2418,204 @@ module.exports = [
         "part_name": "Rail de combustible"
       }
     ]
+  },
+
+  // "Vista general" — silueta completa del vehículo según su tipo de
+  // carrocería. A propósito NO se llama "carroceria": esta vista sirve para
+  // marcar puntos sobre el auto sin importar el rubro del taller (mecánica
+  // general, latonería/pintura, cambio de llantas, etc.) — el "system" es
+  // solo la agrupación técnica del catálogo, no limita el uso que se le da.
+  // Los `points` nacen vacíos: se calibran visualmente desde el editor
+  // admin (Calibrar puntos de diagrama) una vez que las imágenes .webp
+  // estén en frontend/public/assets/diagrams/bodywork/.
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "automovil",
+    "name": "Automóvil (sedán)",
+    "description": "Silueta de automóvil / sedán, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/automovil.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "camioneta",
+    "system": "vista_general",
+    "configuration": "pickup",
+    "name": "Pick Up",
+    "description": "Silueta de camioneta pick up, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/pickup.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "hatchback",
+    "name": "Hatchback",
+    "description": "Silueta de hatchback, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/hatchback.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "suv",
+    "name": "SUV",
+    "description": "Silueta de SUV, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/suv.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "crossover",
+    "name": "Crossover",
+    "description": "Silueta de crossover, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/crossover.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "coupe",
+    "name": "Coupé",
+    "description": "Silueta de coupé, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/coupe.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "convertible",
+    "name": "Convertible",
+    "description": "Silueta de convertible, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/convertible.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "station_wagon",
+    "name": "Station Wagon",
+    "description": "Silueta de station wagon, vista general del vehículo.",
+    "view_box": "0 0 600 600",
+    "image_path": "bodywork/station-wagon.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "camioneta",
+    "system": "vista_general",
+    "configuration": "van",
+    "name": "Van",
+    "description": "Silueta de van, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/van.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "camioneta",
+    "system": "vista_general",
+    "configuration": "minivan",
+    "name": "Minivan",
+    "description": "Silueta de minivan, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/minivan.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "camioneta",
+    "system": "vista_general",
+    "configuration": "furgon",
+    "name": "Furgón",
+    "description": "Silueta de furgón, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/furgon.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "monovolumen",
+    "name": "Monovolumen",
+    "description": "Silueta de monovolumen, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/monovolumen.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "fastback",
+    "name": "Fastback",
+    "description": "Silueta de fastback, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/fastback.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "liftback",
+    "name": "Liftback",
+    "description": "Silueta de liftback, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/liftback.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "roadster",
+    "name": "Roadster",
+    "description": "Silueta de roadster, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/roadster.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "shooting_brake",
+    "name": "Shooting Brake",
+    "description": "Silueta de shooting brake, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/shooting-brake.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "limusina",
+    "name": "Limusina",
+    "description": "Silueta de limusina, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/limusina.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "automovil",
+    "system": "vista_general",
+    "configuration": "targa",
+    "name": "Targa",
+    "description": "Silueta de targa, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/targa.webp",
+    "points": []
+  },
+  {
+    "vehicle_type": "camion",
+    "system": "vista_general",
+    "configuration": "chasis_cabina",
+    "name": "Chasis Cabina",
+    "description": "Silueta de camión chasis cabina, vista general del vehículo.",
+    "view_box": "0 0 600 400",
+    "image_path": "bodywork/chasis-cabina.webp",
+    "points": []
   }
 ];
