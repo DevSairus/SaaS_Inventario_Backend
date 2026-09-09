@@ -188,34 +188,6 @@ function parseDIANFormat(xml) {
 }
 
 /**
- * Parsear formato genérico de factura
- */
-function parseGenericFormat(xml) {
-  const invoice = xml.factura || xml;
-
-  return {
-    supplier: {
-      tax_id: extractText(invoice.emisor?.nit || invoice.proveedor?.nit),
-      name: extractText(invoice.emisor?.nombre || invoice.proveedor?.nombre),
-      email: extractText(invoice.emisor?.email || invoice.proveedor?.email),
-      phone: extractText(invoice.emisor?.telefono || invoice.proveedor?.telefono),
-      address: extractText(invoice.emisor?.direccion || invoice.proveedor?.direccion)
-    },
-    invoice: {
-      number: extractText(invoice.numero || invoice.id),
-      date: extractText(invoice.fecha),
-      due_date: extractText(invoice.fechavencimiento || invoice.fecha_vencimiento)
-    },
-    items: parseGenericItems(invoice.items || invoice.productos || invoice.lineas),
-    totals: {
-      subtotal: parseFloat(invoice.subtotal || 0),
-      tax: parseFloat(invoice.iva || invoice.impuesto || 0),
-      total: parseFloat(invoice.total || 0)
-    }
-  };
-}
-
-/**
  * Parsear AttachedDocument de DIAN (contenedor)
  * La factura real está embebida dentro en un CDATA
  */

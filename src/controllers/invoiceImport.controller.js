@@ -188,6 +188,20 @@ const importInvoiceInner = async (req, res) => {
     if (transaction && !transaction.finished) {
       await transaction.rollback();
     }
+
+    // Carrera entre dos importaciones concurrentes de la misma factura (doble
+    // clic, reintento): ambas pasan el chequeo previo de duplicado (findOne)
+    // antes de que la primera confirme, y la segunda choca acá contra el
+    // índice único tenant_invoice_number_unique. Mismo resultado 409 que el
+    // chequeo normal, en vez de un 500 genérico.
+    if (error.name === 'SequelizeUniqueConstraintError' && error.original?.constraint === 'tenant_invoice_number_unique') {
+      return res.status(409).json({
+        success: false,
+        message: 'Esta factura ya fue importada anteriormente',
+        error: 'DUPLICATE_INVOICE'
+      });
+    }
+
     console.error('❌ Error importando factura:', error);
     res.status(500).json({
       success: false,
@@ -607,8 +621,6 @@ async function generateUniqueSku(productName, tenant_id, transaction) {
 }
 
 async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id, user_id, transaction, shipping_cost = 0, discount_amount = 0, branch_id = null) {
-  const purchaseNumber = await generatePurchaseNumber(tenant_id, transaction);
-
   const subtotal     = items.reduce((sum, item) => sum + parseFloat(item.subtotal), 0);
   const tax_amount   = items.reduce((sum, item) => sum + parseFloat(item.tax_amount), 0);
   const total_amount = subtotal + tax_amount + shipping_cost - discount_amount;
@@ -637,27 +649,51 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
   // se marca pagada de inmediato y no debe aparecer en cuentas por pagar.
   const isCash = payment_terms === 0;
 
-  const purchase = await Purchase.create({
-    tenant_id,
-    branch_id,
-    purchase_number: purchaseNumber,
-    supplier_id: supplier.id,
-    purchase_date,
-    expected_delivery_date: invoiceData.invoice.due_date || new Date(),
-    due_date: isCash ? null : due_date,
-    payment_terms,
-    payment_status: isCash ? 'paid' : 'pending',
-    paid_amount: isCash ? total_amount : 0,
-    subtotal,
-    tax_amount,
-    discount_amount,
-    shipping_cost,
-    total_amount,
-    status: 'draft',
-    notes: `Importada desde factura electrónica: ${invoiceData.invoice.number}`,
-    invoice_number: invoiceData.invoice.number,
-    created_by: user_id
-  }, { transaction });
+  // generatePurchaseNumber lee el último número y le suma 1 -- no es atómico,
+  // así que dos importaciones concurrentes (mismo problema que ya vimos con el
+  // SKU de producto) pueden calcular el mismo purchase_number y la segunda
+  // choca contra el índice único (tenant_id, purchase_number). Reintentamos
+  // con un savepoint: si choca, generamos el siguiente número disponible y
+  // probamos de nuevo, en vez de tumbar toda la importación.
+  let purchase;
+  let attempts = 0;
+  while (true) {
+    const purchaseNumber = await generatePurchaseNumber(tenant_id, transaction);
+    try {
+      purchase = await sequelize.transaction({ transaction }, (t) => Purchase.create({
+        tenant_id,
+        branch_id,
+        purchase_number: purchaseNumber,
+        supplier_id: supplier.id,
+        purchase_date,
+        expected_delivery_date: invoiceData.invoice.due_date || new Date(),
+        due_date: isCash ? null : due_date,
+        payment_terms,
+        payment_status: isCash ? 'paid' : 'pending',
+        paid_amount: isCash ? total_amount : 0,
+        subtotal,
+        tax_amount,
+        discount_amount,
+        shipping_cost,
+        total_amount,
+        status: 'draft',
+        notes: `Importada desde factura electrónica: ${invoiceData.invoice.number}`,
+        invoice_number: invoiceData.invoice.number,
+        created_by: user_id
+      }, { transaction: t }));
+      break;
+    } catch (err) {
+      // Solo reintentamos la colisión de purchase_number (el número calculado
+      // por generatePurchaseNumber ya no era el siguiente disponible). Una
+      // colisión de invoice_number (índice tenant_invoice_number_unique) es
+      // una factura duplicada de verdad -- no tiene sentido reintentar, se
+      // relanza para que el catch de importInvoiceInner la convierta en 409.
+      attempts++;
+      const isPurchaseNumberClash = err.name === 'SequelizeUniqueConstraintError'
+        && err.original?.constraint === 'tenant_purchase_number_unique';
+      if (!isPurchaseNumberClash || attempts >= 5) throw err;
+    }
+  }
 
   for (const [index, item] of items.entries()) {
     await PurchaseItem.create({
