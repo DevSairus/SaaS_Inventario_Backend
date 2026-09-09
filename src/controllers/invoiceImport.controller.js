@@ -491,29 +491,47 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
       }
       if (!newSku) newSku = await generateUniqueSku(overrides.name?.trim() || item.name, tenant_id, transaction);
 
-      product = await Product.create({
-        tenant_id,
-        product_type: 'simple', // valor válido según CHECK constraint de la DB
-        sku: newSku,
-        barcode: overrides.barcode?.trim() || newSku,  // por defecto, código de barras = mismo SKU
-        name: overrides.name?.trim() || item.name,
-        category_id: overrides.category_id || null,
-        brand: overrides.brand?.trim() || null,
-        unit_of_measure: overrides.unit_of_measure || 'unit',
-        average_cost: item.unit_price,
-        base_price: Math.round(item.unit_price * margin_multiplier),
-        profit_margin_percentage: profit_margin,
-        current_stock: 0,
-        min_stock: 1,
-        track_inventory: true,
-        is_active: true,
-        has_tax: item.tax_percentage > 0,
-        tax_percentage: item.tax_percentage || 19,
-        price_includes_tax: !!overrides.price_includes_tax
-      }, { transaction });
+      // Usamos un savepoint (nested transaction sobre la misma transacción) porque
+      // en Postgres un error dentro de una transacción la deja abortada para
+      // cualquier query posterior -- si dos importaciones concurrentes (doble
+      // click, reintento) generan el mismo SKU para el mismo tenant, sin el
+      // savepoint no podríamos recuperar la transacción para ir a buscar el
+      // producto que ya quedó creado por la otra.
+      try {
+        product = await sequelize.transaction({ transaction }, (t) => Product.create({
+          tenant_id,
+          product_type: 'simple', // valor válido según CHECK constraint de la DB
+          sku: newSku,
+          barcode: overrides.barcode?.trim() || newSku,  // por defecto, código de barras = mismo SKU
+          name: overrides.name?.trim() || item.name,
+          category_id: overrides.category_id || null,
+          brand: overrides.brand?.trim() || null,
+          unit_of_measure: overrides.unit_of_measure || 'unit',
+          average_cost: item.unit_price,
+          base_price: Math.round(item.unit_price * margin_multiplier),
+          profit_margin_percentage: profit_margin,
+          current_stock: 0,
+          min_stock: 1,
+          track_inventory: true,
+          is_active: true,
+          has_tax: item.tax_percentage > 0,
+          tax_percentage: item.tax_percentage || 19,
+          price_includes_tax: !!overrides.price_includes_tax
+        }, { transaction: t }));
 
-      isNew = true;
-      matchType = manualLink === 'CREATE_NEW' ? 'new_confirmed' : 'new';
+        isNew = true;
+        matchType = manualLink === 'CREATE_NEW' ? 'new_confirmed' : 'new';
+      } catch (err) {
+        if (err.name !== 'SequelizeUniqueConstraintError') throw err;
+
+        // Otra importación concurrente ganó la carrera y ya creó el producto
+        // con este mismo SKU: lo reutilizamos en vez de tumbar la importación.
+        product = await Product.findOne({ where: { tenant_id, sku: newSku }, transaction });
+        if (!product) throw err;
+
+        isNew = false;
+        matchType = 'sku_race_recovered';
+      }
     }
 
     // 6) Guardar/actualizar el mapeo código-proveedor → producto SOLO cuando la
