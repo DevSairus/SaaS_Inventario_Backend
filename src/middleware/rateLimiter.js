@@ -47,12 +47,20 @@ const makeStore = (prefix) => {
 
 /**
  * Rate limiter general para todas las rutas
- * 500 requests por 15 minutos por IP real
- * (antes 100 — demasiado bajo: búsquedas con debounce consumen ~1 req/300ms)
+ * 3000 requests por 15 minutos por IP real
+ * (antes 500 -- ese número asumía, sin saberlo, que cada réplica llevaba su
+ * propio contador en memoria: con 5 réplicas el límite EFECTIVO real era
+ * ~2500/15min repartido al azar entre ellas. Al mover el store a Redis
+ * -- necesario para que el límite se respete de verdad entre réplicas, ver
+ * revisión de multi-réplica -- el conteo pasó a ser el correcto y compartido,
+ * y 500 resultó insuficiente para el tráfico real de varios tenants detrás
+ * de la misma IP (oficina/NAT) sumado entre 5 réplicas, tumbando la API
+ * completa -- incluido el login -- para todo el mundo. Subido a un valor
+ * generoso que sigue frenando abuso real sin bloquear tráfico legítimo.)
  */
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 500,
+  max: 3000,
   store: makeStore('general'),
   message: {
     success: false,
@@ -85,7 +93,7 @@ const generalLimiter = rateLimit({
  */
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 10,
+  max: 50, // antes 10 -- mismo motivo que generalLimiter: ahora el conteo es real y compartido entre réplicas
   store: makeStore('auth'),
   skipSuccessfulRequests: true, // No cuenta requests exitosos
   keyGenerator: ipKey,
@@ -114,7 +122,7 @@ const authLimiter = rateLimit({
  */
 const createResourceLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 20,
+  max: 100, // antes 20 -- ver nota en generalLimiter (conteo ahora real y compartido vía Redis entre réplicas)
   store: makeStore('create-resource'),
   keyGenerator: ipKey,
   message: {
@@ -144,7 +152,7 @@ const createResourceLimiter = rateLimit({
  */
 const paymentLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 10,
+  max: 50, // antes 10 -- ver nota en generalLimiter
   store: makeStore('payment'),
   keyGenerator: ipKey,
   message: {
@@ -172,7 +180,7 @@ const paymentLimiter = rateLimit({
  */
 const pdfLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 20,
+  max: 100, // antes 20 -- ver nota en generalLimiter
   store: makeStore('pdf'),
   keyGenerator: ipKey,
 
@@ -196,7 +204,7 @@ const pdfLimiter = rateLimit({
  */
 const exportLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 10,
+  max: 50, // antes 10 -- ver nota en generalLimiter
   store: makeStore('export'),
   keyGenerator: ipKey,
 
@@ -220,7 +228,7 @@ const exportLimiter = rateLimit({
  */
 const importLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 5,
+  max: 25, // antes 5 -- ver nota en generalLimiter
   store: makeStore('import'),
   keyGenerator: ipKey,
 
@@ -244,7 +252,7 @@ const importLimiter = rateLimit({
  */
 const notificationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 50,
+  max: 250, // antes 50 -- ver nota en generalLimiter
   store: makeStore('notification'),
   keyGenerator: ipKey,
 
@@ -270,7 +278,7 @@ const notificationLimiter = rateLimit({
  */
 const aiChatLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
-  max: 25,
+  max: 60, // antes 25 -- ya estaba keyed por usuario (no por IP), pero el mismo conteo diluido entre 5 réplicas aplicaba igual
   store: makeStore('ai-chat'),
   standardHeaders: true,
   legacyHeaders: false,
@@ -325,7 +333,7 @@ const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
  */
 const quoteResponseLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 20,
+  max: 100, // antes 20 -- ver nota en generalLimiter
   store: makeStore('quote-response'),
   keyGenerator: ipKey,
   message: {
@@ -355,7 +363,7 @@ const quoteResponseLimiter = rateLimit({
  */
 const appointmentBookingLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
-  max: 20,
+  max: 100, // antes 20 -- ver nota en generalLimiter
   store: makeStore('appointment-booking'),
   keyGenerator: ipKey,
   handler: (req, res) => {
