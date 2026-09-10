@@ -14,6 +14,7 @@
 // decide usar Railway Cron Job / un servicio externo en su lugar, para no
 // terminar corriendo el mismo job dos veces).
 const cron = require('node-cron');
+const { withAdvisoryLockTry } = require('../utils/advisoryLock');
 const logger = console; // este proyecto usa console.log/error directo en los jobs existentes
 
 const JOBS = [
@@ -117,9 +118,18 @@ function iniciarScheduler() {
 
     return cron.schedule(schedule, async () => {
       const startedAt = new Date();
-      logger.log(`🔔 [Scheduler] Iniciando "${name}"...`);
+      logger.log(`🔔 [Scheduler] "${name}" disparado, intentando tomar el lock...`);
       try {
-        const result = await run();
+        // noOverlap:true de node-cron solo evita que ESTE proceso solape una
+        // corrida con la siguiente -- con varias réplicas, cada una dispara
+        // el cron a la misma hora igual. El advisory lock (a nivel de
+        // Postgres, compartido entre réplicas) asegura que solo una de ellas
+        // realmente ejecute el job en cada disparo; las demás lo saltan.
+        const { acquired, result } = await withAdvisoryLockTry(`pitbox:cron:${name}`, run);
+        if (!acquired) {
+          logger.log(`⏭️  [Scheduler] "${name}" ya se está ejecutando en otra réplica, se omite esta corrida`);
+          return;
+        }
         logger.log(`✅ [Scheduler] "${name}" terminó en ${Date.now() - startedAt.getTime()}ms`, result?.length !== undefined ? `(${result.length} elementos)` : '');
       } catch (error) {
         logger.error(`❌ [Scheduler] Error en "${name}":`, error.message);

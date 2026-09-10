@@ -14,6 +14,8 @@
 
 const rateLimit = require('express-rate-limit');
 const { ipKeyGenerator } = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
+const { redisClient } = require('../config/redisClient');
 const logger = require('../config/logger');
 
 // ============================================
@@ -22,6 +24,22 @@ const logger = require('../config/logger');
 // Con app.set('trust proxy', 1), express-rate-limit puede calcular correctamente la llave
 // incluso para IPv6 usando su helper. Esto evita bypasses y pasa la validación v8+.
 const ipKey = (req) => ipKeyGenerator(req);
+
+// ============================================
+// STORE — Redis compartido entre réplicas si está configurado
+// ============================================
+// Sin esto, el MemoryStore por defecto de express-rate-limit vive dentro del
+// proceso: con N réplicas cada una lleva su propio contador y el límite
+// efectivo se multiplica por N (ej. 10 intentos de login se vuelven ~10×N
+// repartidos entre réplicas). Cada limiter usa un prefix distinto para que
+// sus contadores no se mezclen entre sí dentro de la misma llave de Redis.
+const makeStore = (prefix) => {
+  if (!redisClient) return undefined; // cae al MemoryStore por defecto
+  return new RedisStore({
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: `rl:${prefix}:`,
+  });
+};
 
 // ============================================
 // CONFIGURACIONES DE RATE LIMITING
@@ -35,6 +53,7 @@ const ipKey = (req) => ipKeyGenerator(req);
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
   max: 500,
+  store: makeStore('general'),
   message: {
     success: false,
     error: 'Demasiadas peticiones desde esta IP, intenta de nuevo más tarde',
@@ -67,6 +86,7 @@ const generalLimiter = rateLimit({
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
+  store: makeStore('auth'),
   skipSuccessfulRequests: true, // No cuenta requests exitosos
   keyGenerator: ipKey,
   message: {
@@ -95,6 +115,7 @@ const authLimiter = rateLimit({
 const createResourceLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  store: makeStore('create-resource'),
   keyGenerator: ipKey,
   message: {
     success: false,
@@ -124,6 +145,7 @@ const createResourceLimiter = rateLimit({
 const paymentLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+  store: makeStore('payment'),
   keyGenerator: ipKey,
   message: {
     success: false,
@@ -151,6 +173,7 @@ const paymentLimiter = rateLimit({
 const pdfLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  store: makeStore('pdf'),
   keyGenerator: ipKey,
 
   handler: (req, res) => {
@@ -174,6 +197,7 @@ const pdfLimiter = rateLimit({
 const exportLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
+  store: makeStore('export'),
   keyGenerator: ipKey,
 
   handler: (req, res) => {
@@ -197,6 +221,7 @@ const exportLimiter = rateLimit({
 const importLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 5,
+  store: makeStore('import'),
   keyGenerator: ipKey,
 
   handler: (req, res) => {
@@ -220,6 +245,7 @@ const importLimiter = rateLimit({
 const notificationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 50,
+  store: makeStore('notification'),
   keyGenerator: ipKey,
 
   handler: (req, res) => {
@@ -245,6 +271,7 @@ const notificationLimiter = rateLimit({
 const aiChatLimiter = rateLimit({
   windowMs: 10 * 60 * 1000,
   max: 25,
+  store: makeStore('ai-chat'),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req) => req.user?.id?.toString() || ipKeyGenerator(req),
@@ -274,6 +301,7 @@ const aiChatLimiter = rateLimit({
 const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
   return rateLimit({
     windowMs: 15 * 60 * 1000,
+    store: makeStore(`role-based-${maxForUser}-${maxForAdmin}`),
     max: (req) => {
       if (req.user?.role === 'admin' || req.user?.role === 'super_admin') {
         return maxForAdmin;
@@ -298,6 +326,7 @@ const createRoleBasedLimiter = (maxForUser = 50, maxForAdmin = 200) => {
 const quoteResponseLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  store: makeStore('quote-response'),
   keyGenerator: ipKey,
   message: {
     success: false,
@@ -327,6 +356,7 @@ const quoteResponseLimiter = rateLimit({
 const appointmentBookingLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  store: makeStore('appointment-booking'),
   keyGenerator: ipKey,
   handler: (req, res) => {
     logger.warn('Appointment booking rate limit exceeded', { ip: req.ip, path: req.path });

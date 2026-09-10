@@ -11,6 +11,7 @@ const swaggerSpec = require('./config/swagger');
 
 const { testConnection } = require('./config/database');
 const { runMigrations } = require('./database/migrator');
+const { withAdvisoryLockBlocking } = require('./utils/advisoryLock');
 const { authMiddleware, checkRole } = require('./middleware/auth');
 const { tenantMiddleware } = require('./middleware/tenant');
 const { branchMiddleware } = require('./middleware/branch');
@@ -366,6 +367,27 @@ if (!isVercel) {
       credentials: true,
     },
   });
+
+  // Sin esto, con varias réplicas cada una lleva su propio set de sockets
+  // conectados en memoria: un evento emitido (io.emit / io.to(room).emit)
+  // desde la réplica que procesó una acción nunca llegaría a un cliente
+  // conectado a otra réplica. El adapter de Redis publica cada evento a
+  // todas las réplicas suscritas al mismo canal.
+  const { redisClient } = require('./config/redisClient');
+  if (redisClient) {
+    const { createAdapter } = require('@socket.io/redis-adapter');
+    const subClient = redisClient.duplicate();
+    subClient.on('error', (err) => console.error('[Socket.io] Error en subClient de Redis:', err.message));
+    subClient.connect()
+      .then(() => {
+        io.adapter(createAdapter(redisClient, subClient));
+        console.log('[Socket.io] Redis adapter activo -- eventos compartidos entre réplicas');
+      })
+      .catch((err) => console.error('[Socket.io] No se pudo activar el Redis adapter:', err.message));
+  } else {
+    console.warn('[Socket.io] REDIS_URL no configurado -- notificaciones en tiempo real NO se comparten entre réplicas');
+  }
+
   require('./services/remoteSupportSignaling')(io);
 
   // Notificaciones en vivo de tickets
@@ -387,27 +409,39 @@ if (!isVercel) {
 
     // Ejecutar migraciones pendientes automáticamente
     if (connected) {
+      // Con varias réplicas, todas arrancan a la vez y todas verían las
+      // mismas migraciones como pendientes -- sin coordinación, dos réplicas
+      // podrían correr el mismo ALTER TABLE/CREATE INDEX en paralelo. El
+      // advisory lock (bloqueante) hace que la primera réplica que llega
+      // corra las migraciones mientras las demás esperan; cuando les toca su
+      // turno ya no hay nada pendiente y siguen de largo.
       try {
-        await runMigrations();
-      } catch (err) {
-        console.error('[Migrator] Error ejecutando migraciones:', err.message);
-      }
+        await withAdvisoryLockBlocking('pitbox:schema-migrations', async () => {
+          try {
+            await runMigrations();
+          } catch (err) {
+            console.error('[Migrator] Error ejecutando migraciones:', err.message);
+          }
 
-      // Propagar esas mismas migraciones a cada schema de tenant ya
-      // cortado (schema-per-tenant) -- sin esto, runMigrations() de arriba
-      // solo deja `public` al día y cada tenant migrado se va desalineando
-      // con cada release nueva. Desactivable con
-      // ENABLE_TENANT_SCHEMA_MIGRATIONS=false (ej. para correrlo aparte a
-      // mano en vez de en cada arranque, si el número de tenants crece
-      // demasiado para hacerlo en cada deploy).
-      if (process.env.ENABLE_TENANT_SCHEMA_MIGRATIONS !== 'false') {
-        try {
-          const { migrateAllTenantSchemas } = require('./scripts/migrateAllTenantSchemas');
-          const result = await migrateAllTenantSchemas();
-          console.log(`[Migrator] Schemas de tenant: ${result.ok.length}/${result.total} al día` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
-        } catch (err) {
-          console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
-        }
+          // Propagar esas mismas migraciones a cada schema de tenant ya
+          // cortado (schema-per-tenant) -- sin esto, runMigrations() de arriba
+          // solo deja `public` al día y cada tenant migrado se va desalineando
+          // con cada release nueva. Desactivable con
+          // ENABLE_TENANT_SCHEMA_MIGRATIONS=false (ej. para correrlo aparte a
+          // mano en vez de en cada arranque, si el número de tenants crece
+          // demasiado para hacerlo en cada deploy).
+          if (process.env.ENABLE_TENANT_SCHEMA_MIGRATIONS !== 'false') {
+            try {
+              const { migrateAllTenantSchemas } = require('./scripts/migrateAllTenantSchemas');
+              const result = await migrateAllTenantSchemas();
+              console.log(`[Migrator] Schemas de tenant: ${result.ok.length}/${result.total} al día` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
+            } catch (err) {
+              console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
+            }
+          }
+        });
+      } catch (err) {
+        console.error('[Migrator] Error obteniendo el lock de migraciones:', err.message);
       }
 
       // Siembrar diagramas base si no existen (o actualizar si cambiaron)
@@ -437,22 +471,29 @@ if (!isVercel) {
       console.error('[Vercel] No se pudo conectar a la BD al iniciar');
       return;
     }
-    // Ejecutar migraciones pendientes en serverless
+    // Ejecutar migraciones pendientes en serverless -- mismo advisory lock
+    // que la rama Railway/local, por si hay cold starts concurrentes.
     try {
-      await runMigrations();
+      await withAdvisoryLockBlocking('pitbox:schema-migrations', async () => {
+        try {
+          await runMigrations();
+        } catch (err) {
+          console.error('[Migrator] Error ejecutando migraciones:', err.message);
+        }
+        // Propagar a cada schema de tenant ya cortado -- ver comentario en la
+        // rama Railway/local más arriba.
+        if (process.env.ENABLE_TENANT_SCHEMA_MIGRATIONS !== 'false') {
+          try {
+            const { migrateAllTenantSchemas } = require('./scripts/migrateAllTenantSchemas');
+            const result = await migrateAllTenantSchemas();
+            console.log(`[Migrator] Schemas de tenant: ${result.ok.length}/${result.total} al día` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
+          } catch (err) {
+            console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
+          }
+        }
+      });
     } catch (err) {
-      console.error('[Migrator] Error ejecutando migraciones:', err.message);
-    }
-    // Propagar a cada schema de tenant ya cortado -- ver comentario en la
-    // rama Railway/local más arriba.
-    if (process.env.ENABLE_TENANT_SCHEMA_MIGRATIONS !== 'false') {
-      try {
-        const { migrateAllTenantSchemas } = require('./scripts/migrateAllTenantSchemas');
-        const result = await migrateAllTenantSchemas();
-        console.log(`[Migrator] Schemas de tenant: ${result.ok.length}/${result.total} al día` + (result.failed.length ? `, ${result.failed.length} con errores (ver log arriba)` : ''));
-      } catch (err) {
-        console.error('[Migrator] Error propagando migraciones a schemas de tenant:', err.message);
-      }
+      console.error('[Migrator] Error obteniendo el lock de migraciones:', err.message);
     }
     // Siembrar diagramas base
     try {
