@@ -40,11 +40,11 @@ const Supplier = sequelize.define('Supplier', {
     allowNull: true
   },
   phone: {
-    type: DataTypes.STRING(20),
+    type: DataTypes.STRING(50),
     allowNull: true
   },
   mobile: {
-    type: DataTypes.STRING(20),
+    type: DataTypes.STRING(50),
     allowNull: true
   },
   website: {
@@ -80,7 +80,7 @@ const Supplier = sequelize.define('Supplier', {
     allowNull: true
   },
   contact_phone: {
-    type: DataTypes.STRING(20),
+    type: DataTypes.STRING(50),
     allowNull: true
   },
   contact_position: {

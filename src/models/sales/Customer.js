@@ -37,10 +37,10 @@ const Customer = sequelize.define('Customer', {
     type: DataTypes.STRING(255),
   },
   phone: {
-    type: DataTypes.STRING(20),
+    type: DataTypes.STRING(50),
   },
   mobile: {
-    type: DataTypes.STRING(20),
+    type: DataTypes.STRING(50),
   },
   address: {
     type: DataTypes.TEXT,
