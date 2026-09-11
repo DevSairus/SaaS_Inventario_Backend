@@ -92,7 +92,14 @@ const User = sequelize.define('User', {
   timestamps: true,
   underscored: true,
   createdAt: 'created_at',
-  updatedAt: 'updated_at'
+  updatedAt: 'updated_at',
+  hooks: {
+    beforeValidate(user) {
+      if (user.email) {
+        user.email = String(user.email).toLowerCase().trim();
+      }
+    }
+  }
 });
 
 module.exports = User; 

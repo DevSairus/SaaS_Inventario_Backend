@@ -204,12 +204,19 @@ async function handleWebhook(req, res) {
   const payload = req.body;
 
   // Un tenant en modo "own" con App propia firma sus webhooks con SU
-  // app_secret, no con el de Pitbox -- hay que resolver cuál usar según la
-  // página del primer entry ANTES de verificar (ver resolveAppSecretForPage).
-  // Todo un mismo request viene de una sola App, así que alcanza con el
-  // primer entry para elegir el secret candidato.
-  const firstPageId = payload?.entry?.[0]?.id;
-  const { appSecret } = await metaClient.resolveAppSecretForPage(firstPageId);
+  // app_secret, no con el de Pitbox -- hay que resolver cuál usar a partir
+  // del primer entry ANTES de verificar. Todo un mismo request viene de una
+  // sola App, así que alcanza con el primer entry para elegir el candidato.
+  //
+  // Ojo con el significado de `entry[0].id`: en Lead Ads es el page_id, pero
+  // en WhatsApp es el WABA ID. Resolver siempre por página hacía que un
+  // tenant con App propia y solo WhatsApp conectado nunca hiciera match y
+  // cayera al secret de Pitbox -- su firma no validaba y los mensajes se
+  // descartaban en silencio.
+  const firstEntryId = payload?.entry?.[0]?.id;
+  const { appSecret } = payload?.object === 'whatsapp_business_account'
+    ? await metaClient.resolveAppSecretForWaba(firstEntryId)
+    : await metaClient.resolveAppSecretForPage(firstEntryId);
 
   const valid = await metaClient.verificarFirmaWebhook(rawBody, signature, appSecret);
   if (!valid) {

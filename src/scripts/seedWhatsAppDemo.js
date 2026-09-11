@@ -43,10 +43,15 @@ async function main() {
       wa_coexistence: true,
     },
   });
+  const displayPhone =
+    slug === 'motos-estrada'
+      ? 'Demo Pitbox · Motos Estrada'
+      : meta.own_display_phone || 'Demo Pitbox · Empresa de Pruebas';
+
   await meta.update({
     is_active: true,
     wa_demo_mode: true,
-    own_display_phone: meta.own_display_phone || 'Demo Pitbox · Empresa de Pruebas',
+    own_display_phone: displayPhone,
     wa_coexistence: true,
     last_error: null,
   });
@@ -68,7 +73,7 @@ async function main() {
       order: [['created_at', 'ASC']],
     });
 
-    const scenarios = [
+    const autoScenarios = [
       {
         phone: '573001112233',
         name: 'Laura Gómez',
@@ -160,6 +165,101 @@ async function main() {
       },
     ];
 
+    // Escenarios de concesionario / taller de motos (App Review + demo comercial)
+    const motosScenarios = [
+      {
+        phone: '573001112233',
+        name: 'Andrés López',
+        customer: customers[0] || null,
+        assignee: advisorA?.id,
+        priority: 'high',
+        marks: ['hot_lead', 'waiting_customer'],
+        is_pinned: true,
+        follow_up_hours: 2,
+        note: 'Interesado en XR 190 nueva. Seguir hoy con disponibilidad y financiación.',
+        messages: [
+          { direction: 'in', body: 'Buenas, ¿tienen Honda XR 190 disponibles en Yarumal?', hoursAgo: 5 },
+          { direction: 'out', body: '¡Hola Andrés! Sí, tenemos Motocicleta nueva XR 190 en Bodega Yarumal. ¿La quieres de contado o financiación?', hoursAgo: 4.8, user: advisorA },
+          { direction: 'in', body: 'Financiación. ¿Qué papeles necesito?', hoursAgo: 4.5 },
+          { direction: 'out', body: 'Cédula, recibo de servicio público y referencias. Te armo la cotización formal ahora.', hoursAgo: 4.2, user: advisorA },
+          { direction: 'in', body: 'Perfecto, estoy por la zona esta tarde', hoursAgo: 0.3 },
+        ],
+      },
+      {
+        phone: '573104445566',
+        name: 'Juliana Restrepo',
+        customer: customers[1] || null,
+        assignee: advisorB?.id,
+        priority: 'normal',
+        marks: ['quote_sent'],
+        is_pinned: false,
+        follow_up_hours: 26,
+        note: 'Cotización de servicio enviada. Ventana 24h cerrada — responder con plantilla.',
+        messages: [
+          { direction: 'in', body: 'Hola, ¿cuánto vale el mantenimiento de una CB190R?', hoursAgo: 30 },
+          { direction: 'out', body: 'Hola Juliana. Incluye aceite, filtro y revisión. ¿Cuántos km tiene la moto?', hoursAgo: 29, user: advisorB },
+          { direction: 'in', body: '8.500 km', hoursAgo: 28 },
+          { direction: 'out', body: 'Te envié la cotización por WhatsApp. Cuando quieras agendamos en taller.', hoursAgo: 27, user: advisorB },
+        ],
+      },
+      {
+        phone: '573207778899',
+        name: 'Santiago Mejía',
+        customer: customers[2] || null,
+        assignee: null,
+        priority: 'urgent',
+        marks: ['payment_pending'],
+        is_pinned: false,
+        follow_up_hours: 1,
+        note: 'Cola sin asignar. Cliente pide factura de compra.',
+        messages: [
+          { direction: 'in', body: 'Hola, ayer compré un casco y no me llegó la factura', hoursAgo: 1.2 },
+          { direction: 'in', body: '¿Me ayudan? Mi cédula es la de la factura de ayer en Yarumal', hoursAgo: 0.9 },
+        ],
+      },
+      {
+        phone: '573159990011',
+        name: 'Taller Rutas del Norte',
+        customer: customers[3] || null,
+        assignee: advisorA?.id,
+        priority: 'normal',
+        marks: ['appointment'],
+        is_pinned: true,
+        follow_up_hours: 48,
+        note: 'Cliente B2B. Retiro de repuestos mañana 9am.',
+        messages: [
+          { direction: 'in', body: 'Necesitamos kit de arrastre para XR 150. ¿Hay stock?', hoursAgo: 8 },
+          { direction: 'out', body: 'Sí hay en Bodega Yarumal. ¿Lo enviamos o pasan?', hoursAgo: 7.5, user: advisorA },
+          { direction: 'in', body: 'Pasamos mañana a las 9', hoursAgo: 7 },
+          { direction: 'out', body: 'Queda separado a nombre de Taller Rutas del Norte. ¡Los esperamos!', hoursAgo: 6.8, user: advisorA },
+        ],
+      },
+      {
+        phone: '573001234567',
+        name: 'Demo Cliente Foto',
+        customer: null,
+        assignee: advisorA?.id,
+        priority: 'normal',
+        marks: [],
+        is_pinned: false,
+        follow_up_hours: null,
+        note: null,
+        messages: [
+          { direction: 'in', body: 'Les mando foto de la pastilla de freno que necesito', hoursAgo: 2, type: 'text' },
+          {
+            direction: 'in',
+            body: '[imagen]',
+            type: 'image',
+            media_url: 'https://placehold.co/400x300/png?text=Pastilla+Freno+Moto',
+            hoursAgo: 1.9,
+          },
+          { direction: 'out', body: 'Recibido. Es pastilla delantera para XR. Te confirmo precio y stock en un momento.', hoursAgo: 1.7, user: advisorA },
+        ],
+      },
+    ];
+
+    const scenarios = slug === 'motos-estrada' ? motosScenarios : autoScenarios;
+
     let created = 0;
     for (const sc of scenarios) {
       const phone = sc.phone.replace(/\D/g, '');
@@ -239,7 +339,7 @@ async function main() {
     console.log('  Admin ve todas; cada seller solo las suyas + cola.');
   });
 
-  console.log('\nDemo listo. Entra a /crm/whatsapp en Empresa de Pruebas.');
+  console.log(`\nDemo listo. Entra a /crm/whatsapp en ${tenant.company_name}.`);
   process.exit(0);
 }
 

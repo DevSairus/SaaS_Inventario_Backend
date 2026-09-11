@@ -72,6 +72,18 @@ const TenantMetaConfig = sequelize.define(
       comment: 'Token cifrado (enc:v1:...) de larga duración — Meta / Embedded Signup',
     },
     own_token_expires_at: { type: DataTypes.DATE, allowNull: true },
+    own_token_is_permanent: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      comment: 'true = token de System User de Meta Business (no expira). false = Embedded Signup (vence, hay que reconectar)',
+    },
+    own_token_source: {
+      type: DataTypes.STRING(30),
+      allowNull: true,
+      comment: 'embedded_signup | system_user | test_number',
+    },
+    own_business_id: { type: DataTypes.STRING(100), allowNull: true },
     wa_coexistence: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     last_wa_message_at: { type: DataTypes.DATE, allowNull: true },
     wa_history_synced_at: { type: DataTypes.DATE, allowNull: true },

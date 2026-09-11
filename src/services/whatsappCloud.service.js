@@ -120,6 +120,7 @@ async function completeEmbeddedSignup({
   await config.update({
     provider_mode: config.provider_mode || 'own',
     is_active: true,
+    wa_demo_mode: false,
     own_waba_id: String(wabaId),
     own_phone_number_id: String(phoneNumberId),
     own_display_phone: display,
@@ -149,6 +150,9 @@ async function completeEmbeddedSignup({
     }
   }
 
+  const tenant = await Tenant.findByPk(tenantId);
+  await purgeDemoConversations({ tenantId, schemaName: tenant?.schema_name });
+
   return {
     own_waba_id: config.own_waba_id,
     own_phone_number_id: config.own_phone_number_id,
@@ -158,11 +162,129 @@ async function completeEmbeddedSignup({
   };
 }
 
+/**
+ * Conecta un número usando un access token que ya tiene el negocio, sin pasar
+ * por Embedded Signup.
+ *
+ * Dos casos reales:
+ *  - **System User de Meta Business** -> token PERMANENTE (no expira mientras
+ *    el usuario del sistema conserve permisos sobre el WABA). Es la forma
+ *    soportada de dejar producción conectada sin reautenticar cada ~60 días.
+ *  - **Número de prueba** de la App -> token temporal (24h), útil para
+ *    validar el flujo completo antes de tener la WABA de producción.
+ *
+ * A diferencia de Embedded Signup acá no hay `code` que canjear, así que la
+ * única garantía de que el token corresponde al número es preguntárselo a
+ * Meta: se valida el token con /debug_token y se confirma que el
+ * phone_number_id aparece entre los números del WABA. Sin esas dos
+ * verificaciones, un token pegado a mano solo se descubriría inválido al
+ * fallar el primer envío a un cliente real.
+ */
+async function connectWithToken({
+  tenantId,
+  accessToken,
+  wabaId,
+  phoneNumberId,
+  displayPhone,
+  coexistence = true,
+  tokenSource = 'system_user',
+}) {
+  if (!accessToken || !wabaId || !phoneNumberId) {
+    const err = new Error('access_token, waba_id y phone_number_id son requeridos');
+    err.status = 400;
+    throw err;
+  }
+
+  let tokenInfo = null;
+  try {
+    tokenInfo = await metaClient.debugToken(accessToken);
+  } catch (err) {
+    logger.warn('[WA Cloud] debug_token no disponible:', err.response?.data?.error?.message || err.message);
+  }
+  if (tokenInfo && !tokenInfo.valid) {
+    const err = new Error(`Meta rechazó el token: ${tokenInfo.error || 'token inválido o expirado'}`);
+    err.status = 400;
+    throw err;
+  }
+
+  // El token tiene que poder VER el número que se dice estar conectando.
+  const wabaPhoneNumbers = await metaClient.listWabaPhoneNumbers(wabaId, accessToken);
+  const ownedNumber = wabaPhoneNumbers.find((p) => String(p.id) === String(phoneNumberId));
+  if (!ownedNumber) {
+    const err = new Error('El phone_number_id no pertenece a ese WABA (o el token no tiene permiso sobre él)');
+    err.status = 403;
+    throw err;
+  }
+
+  const clash = await TenantMetaConfig.findOne({
+    where: {
+      own_phone_number_id: String(phoneNumberId),
+      is_active: true,
+      tenant_id: { [Op.ne]: tenantId },
+    },
+  });
+  if (clash) {
+    logger.error(`[WA Cloud] phone_number_id=${phoneNumberId} ya activo en tenant ${clash.tenant_id}`);
+    const err = new Error('Este número de WhatsApp ya está conectado a otra cuenta de Pitbox.');
+    err.status = 409;
+    throw err;
+  }
+
+  const isPermanent = tokenSource === 'system_user' && (tokenInfo ? tokenInfo.never_expires : true);
+
+  const [config] = await TenantMetaConfig.findOrCreate({ where: { tenant_id: tenantId } });
+  await config.update({
+    provider_mode: config.provider_mode || 'own',
+    is_active: true,
+    wa_demo_mode: false,
+    own_waba_id: String(wabaId),
+    own_phone_number_id: String(phoneNumberId),
+    own_display_phone: ownedNumber.display_phone_number || displayPhone || null,
+    own_access_token: encryptToken(accessToken),
+    own_token_expires_at: tokenInfo?.never_expires ? null : (tokenInfo?.expires_at || null),
+    own_token_is_permanent: isPermanent,
+    own_token_source: tokenSource,
+    wa_coexistence: !!coexistence,
+    connected_at: new Date(),
+    disconnected_at: null,
+    last_error: null,
+  });
+
+  if (coexistence) {
+    try {
+      await metaClient.requestCoexistenceSync({
+        phoneNumberId,
+        accessToken,
+        syncType: 'smb_app_state_sync',
+      });
+      await config.update({ wa_history_synced_at: new Date() });
+    } catch (err) {
+      logger.warn('[WA Cloud] Sync coexistencia diferido:', err.response?.data || err.message);
+    }
+  }
+
+  const tenant = await Tenant.findByPk(tenantId);
+  await purgeDemoConversations({ tenantId, schemaName: tenant?.schema_name });
+
+  return {
+    own_waba_id: config.own_waba_id,
+    own_phone_number_id: config.own_phone_number_id,
+    own_display_phone: config.own_display_phone,
+    wa_coexistence: config.wa_coexistence,
+    own_token_is_permanent: config.own_token_is_permanent,
+    own_token_source: config.own_token_source,
+    token_expires_at: config.own_token_expires_at,
+    quality_rating: ownedNumber.quality_rating || null,
+    connected_at: config.connected_at,
+  };
+}
+
 async function getWhatsAppStatus(tenantId) {
   const config = await TenantMetaConfig.findOne({ where: { tenant_id: tenantId } });
   const metaConfig = await metaClient.getConfig();
   const connected = !!(config?.own_phone_number_id && config?.own_access_token && config?.is_active);
   const demoMode = !!config?.wa_demo_mode;
+  const expiresAt = config?.own_token_expires_at || null;
   return {
     connected,
     demo_mode: demoMode,
@@ -175,10 +297,78 @@ async function getWhatsAppStatus(tenantId) {
     connected_at: config?.connected_at || null,
     last_wa_message_at: config?.last_wa_message_at || null,
     last_error: config?.last_error || null,
+    token_is_permanent: !!config?.own_token_is_permanent,
+    token_source: config?.own_token_source || null,
+    token_expires_at: expiresAt,
+    token_expired: !!(expiresAt && new Date(expiresAt).getTime() < Date.now()),
     embedded_signup_config_id: metaConfig?.embedded_signup_config_id || null,
     app_id: metaConfig?.app_id || null,
     graph_version: metaClient.GRAPH_VERSION,
+    // Verify token del webhook -- SIEMPRE el propio del tenant (own_webhook_verify_token),
+    // no el compartido de Superadmin: en modo 'own' cada tenant trae su propia
+    // config, ver setOwnWebhookVerifyToken().
+    has_webhook_verify_token: !!config?.own_webhook_verify_token,
+    webhook_callback_path: '/api/webhooks/meta',
   };
+}
+
+/**
+ * Guarda el verify token que el admin del tenant registra en el producto
+ * Webhooks de Meta (handshake GET hub.verify_token). A propósito vive en
+ * TenantMetaConfig.own_webhook_verify_token -- NO en el meta_config
+ * compartido de Superadmin -- porque en provider_mode='own' la config es
+ * del tenant, no de Pitbox (ver verificarHandshake() en metaClient.js, que
+ * ya revisa este campo como alternativa al de Superadmin).
+ */
+async function setOwnWebhookVerifyToken({ tenantId, verifyToken }) {
+  if (!verifyToken || !verifyToken.trim()) {
+    const err = new Error('El verify token no puede estar vacío');
+    err.status = 400;
+    throw err;
+  }
+  const [config] = await TenantMetaConfig.findOrCreate({ where: { tenant_id: tenantId } });
+  await config.update({ own_webhook_verify_token: verifyToken.trim() });
+  return { has_webhook_verify_token: true };
+}
+
+/**
+ * Borra las conversaciones/mensajes de la siembra demo (`WaMessage.source =
+ * 'demo'`, ver seedWhatsAppDemo.js) de un tenant. Se llama justo después de
+ * que conecta un WhatsApp REAL (Embedded Signup o token) -- si no se
+ * limpiara, el inbox seguiría mostrando las conversaciones falsas junto a
+ * las reales, aunque wa_demo_mode ya esté en false.
+ *
+ * Solo borra conversaciones que quedan sin NINGÚN mensaje real después de
+ * quitar los demo -- si una conversación tiene mezcla (no debería pasar,
+ * pero por si acaso) se conserva con lo real que le quede.
+ */
+async function purgeDemoConversations({ tenantId, schemaName }) {
+  const run = async () => {
+    const { WaConversation, WaMessage } = require('../models');
+    const deletedMessages = await WaMessage.destroy({ where: { tenant_id: tenantId, source: 'demo' } });
+    if (deletedMessages > 0) {
+      const withRemainingMessages = await WaMessage.findAll({
+        where: { tenant_id: tenantId },
+        attributes: [[fn('DISTINCT', col('conversation_id')), 'conversation_id']],
+        raw: true,
+      });
+      const keepIds = withRemainingMessages.map((r) => r.conversation_id);
+      await WaConversation.destroy({
+        where: {
+          tenant_id: tenantId,
+          ...(keepIds.length ? { id: { [Op.notIn]: keepIds } } : {}),
+        },
+      });
+    }
+    return deletedMessages;
+  };
+  try {
+    const deleted = schemaName ? await runWithTenantSchema(schemaName, run) : await run();
+    if (deleted > 0) logger.info(`[WA Cloud] Limpieza demo tenant=${tenantId}: ${deleted} mensajes demo borrados`);
+  } catch (err) {
+    // Best-effort -- una falla acá no debe tumbar la conexión real que sí funcionó.
+    logger.warn('[WA Cloud] No se pudo limpiar data demo tras conectar:', err.message);
+  }
 }
 
 async function findOrCreateConversation({ tenantId, schemaName, phone, name, customerId }) {
@@ -455,17 +645,87 @@ async function resolverTenantByPhoneNumberId(phoneNumberId) {
   });
 }
 
+const INBOUND_MEDIA_TYPES = ['image', 'audio', 'video', 'document', 'sticker', 'voice'];
+
+const MEDIA_LABELS = {
+  image: '📷 Imagen',
+  audio: '🎤 Audio',
+  voice: '🎤 Audio',
+  video: '🎬 Video',
+  sticker: '🩷 Sticker',
+  document: '📎 Archivo',
+};
+
 function extractInboundText(message) {
-  if (!message) return { type: 'unknown', body: null };
-  if (message.type === 'text') return { type: 'text', body: message.text?.body || null };
-  if (message.type === 'button') return { type: 'button', body: message.button?.text || message.button?.payload || null };
+  if (!message) return { type: 'unknown', body: null, mediaId: null };
+  if (message.type === 'text') return { type: 'text', body: message.text?.body || null, mediaId: null };
+  if (message.type === 'button') {
+    return { type: 'button', body: message.button?.text || message.button?.payload || null, mediaId: null };
+  }
   if (message.type === 'interactive') {
     const title = message.interactive?.button_reply?.title
       || message.interactive?.list_reply?.title
       || null;
-    return { type: 'interactive', body: title };
+    return { type: 'interactive', body: title, mediaId: null };
   }
-  return { type: message.type || 'unknown', body: `[${message.type || 'media'}]` };
+
+  if (INBOUND_MEDIA_TYPES.includes(message.type)) {
+    const node = message[message.type] || {};
+    const label = node.caption
+      || node.filename
+      || MEDIA_LABELS[message.type]
+      || `[${message.type}]`;
+    return {
+      type: message.type === 'voice' ? 'audio' : message.type,
+      body: label,
+      mediaId: node.id || null,
+      mimeType: node.mime_type || null,
+      filename: node.filename || null,
+    };
+  }
+
+  return { type: message.type || 'unknown', body: `[${message.type || 'media'}]`, mediaId: null };
+}
+
+/**
+ * Descarga un media entrante de Meta y lo guarda en nuestro storage.
+ *
+ * El webhook solo trae un `media_id` y la URL que devuelve Meta es temporal y
+ * exige el header Authorization -- no se puede guardar tal cual ni mostrarla
+ * en el inbox. Antes esto no se hacía: los mensajes con foto/audio/PDF del
+ * cliente se guardaban como `[image]` sin archivo, así que el asesor veía que
+ * "algo" llegó pero no podía abrirlo. Es best-effort a propósito: si la
+ * descarga falla, igual se persiste el mensaje con su etiqueta para no perder
+ * la traza de la conversación.
+ */
+async function downloadInboundMedia({ mediaId, accessToken, tenantId, type, filename, mimeType }) {
+  if (!mediaId || !accessToken) return null;
+  try {
+    const meta = await metaClient.getMediaUrl(mediaId, accessToken);
+    if (!meta?.url) return null;
+
+    const buffer = await metaClient.downloadMedia(meta.url, accessToken);
+    const { uploadToCloudinary } = require('../utils/uploadToCloudinary');
+    const uploaded = await uploadToCloudinary(
+      buffer,
+      filename || `wa-in-${type}-${Date.now()}`,
+      `whatsapp/${tenantId}/inbound`,
+      { mimeType: meta.mime_type || mimeType, waType: type }
+    );
+
+    let url = uploaded.url;
+    if (url && url.startsWith('/')) {
+      const port = process.env.PORT || 5001;
+      const base = (process.env.BACKEND_URL || `http://localhost:${port}`)
+        .replace(/\/$/, '')
+        .replace(/\/api$/, '');
+      url = `${base}${url}`;
+    }
+    return url || null;
+  } catch (err) {
+    logger.warn(`[WA Cloud] No se pudo descargar media ${mediaId}: ${err.response?.data?.error?.message || err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -486,9 +746,22 @@ async function ingestInboundWhatsApp({
   const tenant = await Tenant.findByPk(tenantConfig.tenant_id);
   if (!tenant) return null;
 
-  const { type, body } = extractInboundText(message);
+  const { type, body, mediaId, mimeType, filename } = extractInboundText(message);
   const phone = normalizePhone(contactPhone || message?.from);
   if (!phone) return null;
+
+  let mediaUrl = null;
+  if (mediaId) {
+    const token = await resolveAccessToken(tenantConfig);
+    mediaUrl = await downloadInboundMedia({
+      mediaId,
+      accessToken: token,
+      tenantId: tenant.id,
+      type,
+      filename,
+      mimeType,
+    });
+  }
 
   let customerId = null;
   const findCustomer = async () => {
@@ -535,6 +808,7 @@ async function ingestInboundWhatsApp({
     direction: source === 'app_echo' ? 'out' : 'in',
     type,
     body,
+    mediaUrl,
     metaMessageId: message?.id || null,
     status: source === 'app_echo' ? 'sent' : 'received',
     source,
@@ -553,14 +827,33 @@ async function ingestInboundWhatsApp({
   return { tenantId: tenant.id, conversationId: conv.id, messageId: msg.id };
 }
 
+/**
+ * Aplica un cambio de estado (sent/delivered/read/failed) que llega por
+ * webhook a la fila local del mensaje.
+ *
+ * El webhook entra SIN sesión autenticada, así que no hay search_path de
+ * tenant fijado: `WaMessage.update()` a secas apuntaba al schema por defecto
+ * y en los tenants con schema propio (la mayoría) no encontraba la fila --
+ * los ticks de entregado/leído quedaban congelados en "sent" aunque el
+ * evento de socket sí se emitiera. Por eso acá se resuelve el schema del
+ * tenant igual que en ingestInboundWhatsApp.
+ */
 async function updateMessageStatus({ metaMessageId, status, tenantId = null }) {
   if (!metaMessageId || !status) return;
   try {
     const { WaMessage } = require('../models');
-    await WaMessage.update(
+    const run = async () => WaMessage.update(
       { status },
       { where: { meta_message_id: metaMessageId } }
     );
+
+    let schemaName = null;
+    if (tenantId) {
+      const tenant = await Tenant.findByPk(tenantId);
+      schemaName = tenant?.schema_name || null;
+    }
+    await (schemaName ? runWithTenantSchema(schemaName, run) : run());
+
     if (tenantId) {
       try {
         const { emitWaTenant } = require('./whatsappNotifications.socket');
@@ -717,6 +1010,22 @@ async function sendMediaFromTenant({
     throw err;
   }
 
+  // Igual que en sendTextFromTenant: fuera de la ventana de 24h Meta solo
+  // acepta plantillas aprobadas, así que un adjunto se rechaza. Se avisa
+  // antes de gastar la subida del binario a Meta.
+  const convForWindow = await findOrCreateConversation({
+    tenantId,
+    schemaName: tenant?.schema_name,
+    phone: to,
+  });
+  const win = windowStatus(convForWindow.last_inbound_at);
+  if (!win.open) {
+    const err = new Error('La ventana de 24h de este contacto está cerrada -- usa una plantilla aprobada para reiniciar la conversación');
+    err.status = 409;
+    err.code = 'WA_WINDOW_CLOSED';
+    throw err;
+  }
+
   const uploadedMeta = await metaClient.uploadWhatsAppMediaBinary({
     phoneNumberId: config.own_phone_number_id,
     accessToken: token,
@@ -767,9 +1076,35 @@ async function sendMediaFromTenant({
 }
 
 
+/**
+ * Confirma la lectura en WhatsApp (checks azules del lado del cliente).
+ * Best-effort: el inbox local ya se marcó leído aunque Meta falle.
+ */
+async function markReadOnMeta({ tenantId, metaMessageId }) {
+  if (!metaMessageId || String(metaMessageId).startsWith('demo_')) return null;
+  const config = await getTenantWaConfig(tenantId);
+  if (!config?.own_phone_number_id) return null;
+  const token = await resolveAccessToken(config);
+  if (!token) return null;
+  try {
+    return await metaClient.markMessageRead({
+      phoneNumberId: config.own_phone_number_id,
+      accessToken: token,
+      metaMessageId,
+    });
+  } catch (err) {
+    logger.debug?.(`[WA Cloud] markRead skip: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   normalizePhone,
   completeEmbeddedSignup,
+  connectWithToken,
+  setOwnWebhookVerifyToken,
+  markReadOnMeta,
+  extractInboundText,
   getWhatsAppStatus,
   sendTemplateFromTenant,
   sendTextFromTenant,

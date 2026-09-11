@@ -138,6 +138,29 @@ async function resolveAppSecretForPage(pageId) {
 }
 
 /**
+ * WABA (WhatsApp Business Account) que administra un App propia de tenant.
+ *
+ * Los webhooks de WhatsApp NO traen page_id: en `entry[0].id` viene el WABA
+ * ID. Resolver el secret solo por página (resolveAppSecretForPage) hacía que
+ * un tenant en modo "own" con App propia y únicamente WhatsApp conectado
+ * cayera al app_secret de Pitbox -- y la verificación de firma fallara
+ * (webhook descartado) o, peor, se validara contra el secret equivocado.
+ */
+async function resolveAppSecretForWaba(wabaId) {
+  if (wabaId) {
+    const tenantConfig = await TenantMetaConfig.findOne({
+      where: { provider_mode: 'own', own_waba_id: String(wabaId) },
+    });
+    if (tenantConfig?.own_app_secret) {
+      return { appSecret: tenantConfig.own_app_secret, source: 'own' };
+    }
+  }
+  const config = await getConfig();
+  if (config?.app_secret) return { appSecret: config.app_secret, source: 'pitbox' };
+  return { appSecret: null, source: null };
+}
+
+/**
  * Verifica la firma `X-Hub-Signature-256: sha256=<hex>` que Meta manda en
  * cada webhook, calculada como HMAC-SHA256 del body crudo usando el App
  * Secret correspondiente (ver resolveAppSecretForPage -- el caller ya lo
@@ -401,6 +424,81 @@ async function listWabaMessageTemplates(wabaId, accessToken) {
 }
 
 /**
+ * Inspecciona un access token contra la App de Pitbox.
+ *
+ * Se usa al conectar un número con token PERMANENTE (System User): permite
+ * confirmar, antes de guardarlo, que el token es válido, de qué App es y si
+ * realmente no expira (`expires_at === 0` en la respuesta de Meta significa
+ * "nunca"). Sin esto, un token pegado a mano solo se descubría inválido
+ * cuando fallaba el primer envío real a un cliente.
+ */
+async function debugToken(inputToken) {
+  const config = await getConfig();
+  if (!config?.app_id || !config?.app_secret) {
+    throw new Error('Pitbox no tiene App de Meta configurada (app_id / app_secret)');
+  }
+  const appToken = `${config.app_id}|${config.app_secret}`;
+  const { data } = await axios.get(`${GRAPH_BASE_URL}/debug_token`, {
+    params: { input_token: inputToken, access_token: appToken },
+    timeout: 15000,
+  });
+  const info = data?.data || {};
+  return {
+    valid: !!info.is_valid,
+    app_id: info.app_id || null,
+    scopes: info.scopes || [],
+    type: info.type || null,
+    // Meta usa 0 para "no expira" (tokens de System User)
+    expires_at: info.expires_at ? new Date(info.expires_at * 1000) : null,
+    never_expires: info.expires_at === 0,
+    error: info.error?.message || null,
+  };
+}
+
+/**
+ * URL temporal de descarga de un media entrante.
+ * El webhook solo trae el `media_id`; el binario se pide en dos pasos.
+ */
+async function getMediaUrl(mediaId, accessToken) {
+  const { data } = await axios.get(`${GRAPH_BASE_URL}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    timeout: 15000,
+  });
+  return data; // { url, mime_type, sha256, file_size, id }
+}
+
+/**
+ * Descarga el binario de un media de WhatsApp.
+ * La URL de Meta exige el header Authorization (no es pública).
+ */
+async function downloadMedia(mediaUrl, accessToken) {
+  const { data } = await axios.get(mediaUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    maxContentLength: 30 * 1024 * 1024,
+  });
+  return Buffer.from(data);
+}
+
+/**
+ * Marca un mensaje entrante como leído en WhatsApp (doble check azul del
+ * lado del cliente). Best-effort: si falla, el inbox local igual queda leído.
+ */
+async function markMessageRead({ phoneNumberId, accessToken, metaMessageId }) {
+  const { data } = await axios.post(
+    `${GRAPH_BASE_URL}/${phoneNumberId}/messages`,
+    { messaging_product: 'whatsapp', status: 'read', message_id: metaMessageId },
+    {
+      headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 15000,
+      validateStatus: (s) => s < 500,
+    }
+  );
+  return data;
+}
+
+/**
  * Dispara sync de historial / contactos de coexistencia (solo una vez, <24h
  * tras onboarding). Docs: smb_app_state_sync + history.
  */
@@ -430,6 +528,7 @@ module.exports = {
   listLeadForms,
   getLeadDetails,
   resolveAppSecretForPage,
+  resolveAppSecretForWaba,
   listWabaPhoneNumbers,
   getPhoneNumberDetails,
   sendWhatsAppTemplate,
@@ -438,6 +537,10 @@ module.exports = {
   sendWhatsAppMedia,
   listWabaMessageTemplates,
   requestCoexistenceSync,
+  debugToken,
+  getMediaUrl,
+  downloadMedia,
+  markMessageRead,
   verificarFirmaWebhook,
   verificarHandshake,
   probarConexion,

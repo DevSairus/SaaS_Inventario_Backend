@@ -3,8 +3,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const audit = require('../../utils/audit');
 
+const { Op, fn, col, where: sqlWhere } = require('sequelize');
+
 const User = require('../../models/auth/User');
 const Tenant = require('../../models/auth/Tenant');
+
+const emailLookupWhere = (email) =>
+  sqlWhere(fn('lower', col('email')), String(email).toLowerCase().trim());
 
 const JWT_SECRET = process.env.JWT_SECRET;
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h'; // Configurable via env, default 24h
@@ -38,20 +43,20 @@ const login = async (req, res) => {
 
     let user;
 
+    const emailWhere = emailLookupWhere(email);
+
     // 🔐 Si se envía tenant_id → login multi-tenant
     if (tenant_id) {
       user = await User.findOne({
         where: {
-          email: email.toLowerCase().trim(),
-          tenant_id: tenant_id
+          tenant_id: tenant_id,
+          [Op.and]: emailWhere
         }
       });
     } else {
       // ⚠️ Permitir login sin tenant SOLO para super_admin
       user = await User.findOne({
-        where: {
-          email: email.toLowerCase().trim()
-        }
+        where: emailWhere
       });
     }
 

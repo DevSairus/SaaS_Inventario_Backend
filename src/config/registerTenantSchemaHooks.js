@@ -88,9 +88,27 @@ const PUBLIC_SCHEMA_MODELS = new Set([
 
 function registerTenantSchemaHooks(sequelize) {
   for (const modelName in sequelize.models) {
-    if (PUBLIC_SCHEMA_MODELS.has(modelName)) continue; // se quedan en public siempre
-
     const model = sequelize.models[modelName];
+    const isPublicModel = PUBLIC_SCHEMA_MODELS.has(modelName);
+
+    // ANTES: los modelos de PUBLIC_SCHEMA_MODELS se saltaban por completo
+    // (ver `continue` en el historial de este archivo), asumiendo que
+    // "no tocar `_schema`" alcanzaba para que Sequelize generara SQL SIN
+    // prefijo de schema y cayera en `public` por ser el default del
+    // `search_path` de la conexión. Esa asunción es la que falló: si la
+    // conexión física (pooled, ej. Neon `-pooler`) llega con el
+    // `search_path` ya apuntando a un schema de tenant -- por lo que sea,
+    // una conexión reciclada del pool que no se reseteó -- esas queries
+    // SIN prefijo resuelven contra el schema de tenant en vez de `public`,
+    // y si ahí existe una tabla homónima (ej. `tenant_meta_configs`, sobra
+    // de un diseño anterior) la query "funciona" pero contra la tabla
+    // equivocada -- entre otros, así se disparó "column ... does not
+    // exist" en TenantMetaConfig más de una vez.
+    //
+    // AHORA: se les da `_schema` igual que a los modelos de tenant, pero
+    // FIJO en 'public' -- así Sequelize SIEMPRE genera SQL
+    // schema-calificado (`"public"."tenant_meta_configs"`), sin importar
+    // qué `search_path` traiga la conexión física en ese momento.
     Object.defineProperty(model, '_schema', {
       configurable: true,
       get() {
@@ -100,7 +118,7 @@ function registerTenantSchemaHooks(sequelize) {
         if (Object.prototype.hasOwnProperty.call(this, '_fixedSchema')) {
           return this._fixedSchema;
         }
-        return getCurrentSchema();
+        return isPublicModel ? 'public' : getCurrentSchema();
       },
       set(value) {
         Object.defineProperty(this, '_fixedSchema', { value, writable: true, configurable: true });

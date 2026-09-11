@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
+    "test": "jest",
     "ensambladora:activate-test-tenant": "node src/scripts/ensambladora/activateTestTenant.js",
     "ensambladora:send-test-event": "node src/scripts/ensambladora/sendTestEvent.js"
   },
@@ -48,6 +49,7 @@
   },
   "devDependencies": {
     "eslint": "^8.54.0",
+    "jest": "^30.4.2",
     "nodemon": "^3.0.2",
     "prettier": "^3.1.0"
   }

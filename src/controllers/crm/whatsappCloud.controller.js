@@ -9,6 +9,24 @@ const {
 } = require('../../utils/waConversationScope');
 const { mergePrefs, MARK_OPTIONS, windowStatus } = require('../../utils/waWorkspacePrefs');
 
+// Conectar/desconectar el número de WhatsApp del negocio no es una acción de
+// uso diario del inbox: cambia el canal de TODO el tenant (y con un token
+// permanente, la credencial queda guardada). Antes cualquier usuario con el
+// módulo CRM podía hacerlo -- un asesor podía dejar al taller sin WhatsApp,
+// o apuntar el número a otra cuenta.
+const CONNECTION_ROLES = ['admin', 'manager', 'super_admin'];
+
+function ensureCanManageConnection(req, res) {
+  if (!CONNECTION_ROLES.includes(req.user?.role)) {
+    res.status(403).json({
+      success: false,
+      message: 'Solo un administrador puede conectar o desconectar WhatsApp',
+    });
+    return false;
+  }
+  return true;
+}
+
 const getWhatsAppStatus = async (req, res) => {
   try {
     const data = await waCloud.getWhatsAppStatus(req.tenant_id);
@@ -19,7 +37,51 @@ const getWhatsAppStatus = async (req, res) => {
   }
 };
 
+/**
+ * Conexión con token propio del negocio (System User permanente o número de
+ * prueba). Alternativa a Embedded Signup para producción y para validar el
+ * flujo antes de tener la WABA definitiva.
+ */
+const connectWithToken = async (req, res) => {
+  if (!ensureCanManageConnection(req, res)) return;
+  try {
+    const {
+      access_token: accessToken,
+      waba_id: wabaId,
+      phone_number_id: phoneNumberId,
+      display_phone: displayPhone,
+      coexistence,
+      token_source: tokenSource,
+    } = req.body || {};
+
+    const data = await waCloud.connectWithToken({
+      tenantId: req.tenant_id,
+      accessToken,
+      wabaId,
+      phoneNumberId,
+      displayPhone,
+      coexistence: coexistence !== false,
+      tokenSource: tokenSource || 'system_user',
+    });
+
+    res.json({
+      success: true,
+      message: data.own_token_is_permanent
+        ? 'WhatsApp conectado con token permanente. No hay que reconectar periódicamente.'
+        : 'WhatsApp conectado. Ojo: este token expira, para producción usa un System User.',
+      data,
+    });
+  } catch (error) {
+    logger.error('[WA Cloud] connect-token:', error.response?.data || error.message);
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.response?.data?.error?.message || error.message || 'No se pudo conectar WhatsApp',
+    });
+  }
+};
+
 const completeEmbeddedSignup = async (req, res) => {
+  if (!ensureCanManageConnection(req, res)) return;
   try {
     const {
       code,
@@ -53,7 +115,27 @@ const completeEmbeddedSignup = async (req, res) => {
   }
 };
 
+/**
+ * Guarda el verify token del webhook de Meta -- vive en TenantMetaConfig
+ * (por tenant), no en la config compartida de Superadmin. Ver
+ * setOwnWebhookVerifyToken() en whatsappCloud.service.js.
+ */
+const setWebhookVerifyToken = async (req, res) => {
+  if (!ensureCanManageConnection(req, res)) return;
+  try {
+    const { webhook_verify_token: verifyToken } = req.body || {};
+    const data = await waCloud.setOwnWebhookVerifyToken({ tenantId: req.tenant_id, verifyToken });
+    res.json({ success: true, message: 'Verify token guardado', data });
+  } catch (error) {
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'No se pudo guardar el verify token',
+    });
+  }
+};
+
 const disconnect = async (req, res) => {
+  if (!ensureCanManageConnection(req, res)) return;
   try {
     const data = await waCloud.disconnectWhatsApp(req.tenant_id);
     res.json({ success: true, message: 'WhatsApp desconectado', data });
@@ -256,6 +338,22 @@ const markRead = async (req, res) => {
     const conv = await loadAccessibleConversation(req, req.params.id);
     if (!conv) return res.status(404).json({ success: false, message: 'Conversación no encontrada' });
     await conv.update({ unread_count: 0 });
+
+    // Además de limpiar el contador local, confirmar la lectura en WhatsApp
+    // para que el cliente vea los checks azules -- si no, del lado del
+    // cliente la conversación parece ignorada aunque el asesor ya la leyó.
+    const lastInbound = await WaMessage.findOne({
+      where: { conversation_id: conv.id, tenant_id: req.tenant_id, direction: 'in' },
+      order: [['created_at', 'DESC']],
+      attributes: ['id', 'meta_message_id'],
+    });
+    if (lastInbound?.meta_message_id) {
+      waCloud.markReadOnMeta({
+        tenantId: req.tenant_id,
+        metaMessageId: lastInbound.meta_message_id,
+      }).catch(() => { /* best-effort */ });
+    }
+
     res.json({ success: true, data: { id: conv.id, unread_count: 0 } });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error al marcar como leída' });
@@ -655,6 +753,8 @@ const sendConversationMedia = async (req, res) => {
 module.exports = {
   getWhatsAppStatus,
   completeEmbeddedSignup,
+  connectWithToken,
+  setWebhookVerifyToken,
   disconnect,
   sendTemplate,
   sendText,
