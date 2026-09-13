@@ -145,6 +145,16 @@ const AiConversation = require('./ai/AiConversation');
 const AiMessage = require('./ai/AiMessage');
 const AiProposal = require('./ai/AiProposal');
 
+// ✅ NUEVO - Nómina Electrónica (Fase 1: modelo de datos núcleo — ver
+// Plan-Implementacion-Nomina-Electronica-Nexora.md)
+const Employee = require('./payroll/Employee');
+const PayrollConcept = require('./payroll/PayrollConcept');
+const PayrollPeriod = require('./payroll/PayrollPeriod');
+const PayrollDocument = require('./payroll/PayrollDocument');
+const PayrollDocumentAdjustment = require('./payroll/PayrollDocumentAdjustment');
+const PayrollNovedad = require('./payroll/PayrollNovedad');
+const PayrollSetting = require('./payroll/PayrollSetting');
+
 // ✅ NUEVO - Módulo de Soporte
 const SupportFaqCategory = require('./support/SupportFaqCategory');
 const SupportFaqArticle = require('./support/SupportFaqArticle');
@@ -729,6 +739,48 @@ User.hasMany(RemoteSupportSession, { foreignKey: 'agent_id', as: 'agent_remote_s
 RemoteSupportSession.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(RemoteSupportSession, { foreignKey: 'user_id', as: 'client_remote_sessions' });
 
+// Nómina — Employee ↔ Tenant / Branch / User
+Employee.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Employee.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Employee.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
+// Nómina — PayrollConcept ↔ Tenant
+PayrollConcept.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+// Nómina — PayrollPeriod ↔ Tenant / Branch / User
+PayrollPeriod.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+PayrollPeriod.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+PayrollPeriod.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+PayrollPeriod.belongsTo(User, { foreignKey: 'closed_by', as: 'closer' });
+
+// Nómina — PayrollDocument ↔ Tenant / Branch / Employee / PayrollPeriod
+PayrollDocument.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+PayrollDocument.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+PayrollDocument.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+PayrollDocument.belongsTo(PayrollPeriod, { foreignKey: 'payroll_period_id', as: 'period' });
+PayrollDocument.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+PayrollPeriod.hasMany(PayrollDocument, { foreignKey: 'payroll_period_id', as: 'documents' });
+Employee.hasMany(PayrollDocument, { foreignKey: 'employee_id', as: 'payrollDocuments' });
+
+// Nómina — PayrollDocumentAdjustment ↔ Tenant / PayrollDocument
+PayrollDocumentAdjustment.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+PayrollDocumentAdjustment.belongsTo(PayrollDocument, { foreignKey: 'payroll_document_id', as: 'payrollDocument' });
+PayrollDocumentAdjustment.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+PayrollDocument.hasMany(PayrollDocumentAdjustment, { foreignKey: 'payroll_document_id', as: 'adjustments' });
+
+// Nómina — PayrollNovedad ↔ Tenant / Employee / PayrollPeriod / PayrollConcept
+PayrollNovedad.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+PayrollNovedad.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+PayrollNovedad.belongsTo(PayrollPeriod, { foreignKey: 'payroll_period_id', as: 'period' });
+PayrollNovedad.belongsTo(PayrollConcept, { foreignKey: 'payroll_concept_id', as: 'concept' });
+PayrollNovedad.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+PayrollPeriod.hasMany(PayrollNovedad, { foreignKey: 'payroll_period_id', as: 'novedades' });
+Employee.hasMany(PayrollNovedad, { foreignKey: 'employee_id', as: 'novedades' });
+
+// Nómina — PayrollSetting ↔ Tenant / User (1:1 por tenant)
+PayrollSetting.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+PayrollSetting.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
+
 // Debe correr DESPUÉS de que todos los modelos/asociaciones ya se registraron
 // en sequelize.models -- de lo contrario los hooks no se agregan a ninguno.
 // Sin esto, tenantMiddleware marca el schema del tenant en el contexto pero
@@ -847,4 +899,11 @@ module.exports = {
   EnsambladoraRuntSolicitud,
   EnsambladoraCotizacion,
   EnsambladoraAuditLog,
+  Employee,
+  PayrollConcept,
+  PayrollPeriod,
+  PayrollDocument,
+  PayrollDocumentAdjustment,
+  PayrollNovedad,
+  PayrollSetting,
 };

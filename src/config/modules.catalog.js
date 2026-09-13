@@ -26,6 +26,12 @@ const MODULES_CATALOG = [
   // el patrón WorkOrder para alistamiento/entrega/revisión/garantía (que a su
   // vez ya trae 'sales' e 'inventory' por dependencia transitiva).
   { key: 'ensambladora', label: 'Ensambladora', dependsOn: ['workshop'], reserved: false },
+  // Nómina Electrónica -- genera comprobantes de nómina (devengos/deducciones,
+  // Fase 1: Employee/PayrollConcept/PayrollPeriod/PayrollDocument/Ajuste).
+  // Depende de 'accounting' porque cada comprobante genera un asiento
+  // automático, y de 'treasury' porque el pago al empleado se concilia como
+  // egreso.
+  { key: 'payroll', label: 'Nómina Electrónica', dependsOn: ['accounting', 'treasury'], reserved: false },
 ];
 
 const MODULES_BY_KEY = MODULES_CATALOG.reduce((acc, m) => {

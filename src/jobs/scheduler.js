@@ -49,8 +49,8 @@ const JOBS = [
     schedule: '* * * * *', // cada minuto
     run: async () => {
       const { processDueReminders } = require('../services/waCampaigns.service');
-      const result = await processDueReminders();
-      return [result];
+      const { processed } = await processDueReminders();
+      return processed; // número real de recordatorios enviados en esta corrida
     },
   },
   {
@@ -58,8 +58,8 @@ const JOBS = [
     schedule: '* * * * *', // cada minuto — rate-limit interno ~15/min por tenant
     run: async () => {
       const { processQueuedCampaigns } = require('../services/waCampaigns.service');
-      const result = await processQueuedCampaigns();
-      return [result];
+      const { sent } = await processQueuedCampaigns();
+      return sent; // número real de mensajes de campaña enviados en esta corrida
     },
   },
   {
@@ -148,7 +148,15 @@ function iniciarScheduler() {
           logger.log(`⏭️  [Scheduler] "${name}" ya se está ejecutando en otra réplica, se omite esta corrida`);
           return;
         }
-        logger.log(`✅ [Scheduler] "${name}" terminó en ${Date.now() - startedAt.getTime()}ms`, result?.length !== undefined ? `(${result.length} elementos)` : '');
+        // `result` puede venir como array (longitud = elementos procesados,
+        // ej. vehicle-reminders) o como número directo (ej. wa-reminders/
+        // wa-campaigns, que reportan cuántos mensajes salieron de verdad en
+        // esta corrida en vez de envolver un resumen en un array de 1 solo
+        // elemento -- eso hacía que el log dijera "(1 elementos)" en CADA
+        // corrida sin importar si había 0 o 5 pendientes, dando a entender
+        // que siempre se enviaba algo cuando casi nunca era el caso).
+        const count = typeof result === 'number' ? result : result?.length;
+        logger.log(`✅ [Scheduler] "${name}" terminó en ${Date.now() - startedAt.getTime()}ms`, count !== undefined ? `(${count} elementos)` : '');
       } catch (error) {
         logger.error(`❌ [Scheduler] Error en "${name}":`, error.message);
       }

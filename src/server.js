@@ -210,6 +210,17 @@ const ensambladoraTecnicosRoutes    = require('./routes/ensambladora/tecnicos.ro
 const ensambladoraRuntRoutes        = require('./routes/ensambladora/runt.routes');
 const ensambladoraAuditoriaRoutes   = require('./routes/ensambladora/auditoria.routes');
 
+// Nómina Electrónica
+const employeesRoutes               = require('./routes/payroll/employees.routes');
+const payrollConceptsRoutes         = require('./routes/payroll/payrollConcepts.routes');
+const payrollPeriodsRoutes          = require('./routes/payroll/payrollPeriods.routes');
+const payrollNovedadesRoutes        = require('./routes/payroll/payrollNovedades.routes');
+const payrollDocumentsRoutes        = require('./routes/payroll/payrollDocuments.routes');
+const payrollSettingsRoutes         = require('./routes/payroll/payrollSettings.routes');
+const payrollCertificatesRoutes     = require('./routes/payroll/payrollCertificates.routes');
+const payrollTerminationRoutes      = require('./routes/payroll/payrollTermination.routes');
+const payrollDashboardRoutes        = require('./routes/payroll/payrollDashboard.routes');
+
 // Rate limiting global
 app.use('/api/', generalLimiter);
 
@@ -320,6 +331,17 @@ app.use('/api/ensambladora/runt',               authMiddleware, tenantMiddleware
 app.use('/api/ensambladora/auditoria',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraAuditoriaRoutes);
 app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraLiquidacionesRoutes);
 app.use('/api/ensambladora',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraCicloVidaRoutes);
+
+// ── Nómina Electrónica (Fase 1: Employee/PayrollConcept/PayrollPeriod) ──
+app.use('/api/payroll/employees',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), employeesRoutes);
+app.use('/api/payroll/concepts',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollConceptsRoutes);
+app.use('/api/payroll/periods',                authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollPeriodsRoutes);
+app.use('/api/payroll/novedades',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollNovedadesRoutes);
+app.use('/api/payroll/documents',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollDocumentsRoutes);
+app.use('/api/payroll/settings',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollSettingsRoutes);
+app.use('/api/payroll/certificates',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollCertificatesRoutes);
+app.use('/api/payroll/termination',            authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollTerminationRoutes);
+app.use('/api/payroll/dashboard',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollDashboardRoutes);
 
 const path = require('path');
 // /uploads/logos eliminado — logos ahora en Cloudinary (Vercel stateless)
