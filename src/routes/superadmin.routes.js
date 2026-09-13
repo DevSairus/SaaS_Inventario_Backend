@@ -406,6 +406,14 @@ router.post(
       const { seedChartOfAccountsForTenant } = require('../services/accounting/accountingSeed.service');
       await seedChartOfAccountsForTenant(tenant.id, transaction);
 
+      // 3b-bis. Catálogo estándar de conceptos de nómina (horas extra,
+      // bonificaciones, comisiones, libranza, etc.) — mismo criterio que el
+      // PUC: se crea siempre en el alta, sin importar si el módulo 'payroll'
+      // ya está habilitado para este tenant, para que quede listo apenas lo
+      // activen sin depender de un paso manual aparte.
+      const { seedPayrollConceptsForTenant } = require('../services/payroll/payrollConceptsSeed.service');
+      await seedPayrollConceptsForTenant(tenant.id, transaction);
+
       // 3c. Sede y bodega principal por defecto.
       //
       // Antes se dependía SOLO del backfill de la migración
