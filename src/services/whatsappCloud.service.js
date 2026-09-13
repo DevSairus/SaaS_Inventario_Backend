@@ -502,8 +502,24 @@ async function sendTextFromTenant({ tenantId, to, body, userId = null, source = 
   const status = await getWhatsAppStatus(tenantId);
   const tenant = await Tenant.findByPk(tenantId);
 
-  // Modo demo: persiste localmente sin llamar a Meta
-  if (!status.connected && status.demo_mode) {
+  // Modo demo: persiste localmente sin llamar a Meta.
+  //
+  // wa_demo_mode es un interruptor EXPLÍCITO que el admin prende a propósito
+  // (para mostrarle el producto a un cliente sin arriesgar el número real) --
+  // antes esta condición era `!status.connected && status.demo_mode`, así
+  // que si el tenant además tenía un número de prueba de Meta conectado
+  // (own_phone_number_id/own_access_token con token_source='test_number',
+  // caso típico de "Empresa de Pruebas"), `connected` daba true y el demo
+  // quedaba completamente inerte: cada envío intentaba la Cloud API real,
+  // que para un número de prueba solo admite destinatarios pre-registrados
+  // en Meta y además exige la ventana de 24h (`WA_WINDOW_CLOSED` si el
+  // contacto nunca escribió primero -- el caso normal al compartir una OT).
+  // Esa excepción la absorbía el catch de sendWhatsApp() y caía al enlace
+  // wa.me sin avisar, dando la impresión de que "el modo demo no sirve".
+  // Ahora wa_demo_mode manda siempre que esté prendido, sin importar si
+  // también hay una conexión real -- para usar la conexión real, el admin
+  // apaga el demo desde Configuración → WhatsApp.
+  if (status.demo_mode) {
     const conv = await findOrCreateConversation({
       tenantId,
       schemaName: tenant?.schema_name,

@@ -89,12 +89,18 @@ if (DATABASE_URL) {
     // así que no tiene sentido limitar a 2 conexiones compartidas por todos
     // los requests + el propio scheduler). Ajustar `max` según el límite de
     // conexiones que permita el plan de Neon (revisar antes de subir más).
-    // `min: 10` mantiene conexiones vivas contra Neon incluso en horas de
-    // tráfico bajo (madrugada) para evitar el handshake TLS repetido que
-    // ocurría con `min: 0` + `idle: 10000` (ver analisis-consumo-neon.md).
+    // `min: 0` (antes 10): con Neon (Postgres serverless con autosuspend),
+    // mantener conexiones mínimas abiertas 24/7 le impide a Neon suspender
+    // el compute en horas sin tráfico real -- se paga cómputo activo todo el
+    // día sin importar cuántos tenants estén usando la app. El costo es una
+    // latencia extra (~1s) en la primera consulta tras un rato de
+    // inactividad (Neon "despierta" el compute), aceptable a cambio de no
+    // pagar cómputo 24/7. Revisar junto con la frecuencia de los cron jobs
+    // en src/jobs/scheduler.js (wa-reminders/wa-campaigns) -- esos también
+    // deben dejar ventanas sin conexión para que el autosuspend sirva de algo.
     pool: {
       max: 15,
-      min: 10,
+      min: 0,
       acquire: 15000,
       idle: 10000
     },

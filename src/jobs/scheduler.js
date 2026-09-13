@@ -46,7 +46,15 @@ const JOBS = [
   },
   {
     name: 'wa-reminders',
-    schedule: '* * * * *', // cada minuto
+    // Antes cada minuto: junto con `wa-campaigns`, era el job más frecuente
+    // del scheduler -- corriendo 24/7 en las 5 réplicas, cada disparo abre
+    // al menos 1 conexión/query a Neon (Tenant.findAll + advisory lock) sin
+    // ninguna condición de "no hay nada pendiente, no toco la BD". Eso le
+    // quitaba a Neon cualquier ventana de más de 60s para poder
+    // autosuspender el compute en horas sin tráfico real (ver también
+    // pool.min en config/database.js). 5 min sigue siendo puntual para un
+    // recordatorio de WhatsApp -- nadie nota la diferencia frente a 1 min.
+    schedule: '*/5 * * * *',
     run: async () => {
       const { processDueReminders } = require('../services/waCampaigns.service');
       const { processed } = await processDueReminders();
@@ -55,7 +63,12 @@ const JOBS = [
   },
   {
     name: 'wa-campaigns',
-    schedule: '* * * * *', // cada minuto — rate-limit interno ~15/min por tenant
+    // Mismo motivo que wa-reminders arriba. El rate-limit interno de
+    // ~15/min por tenant sigue aplicando dentro de cada corrida (no depende
+    // de la frecuencia del cron, sino del sleep interno en
+    // waCampaigns.service.js), así que espaciar el disparador a 5 min no
+    // cambia el throughput real de envío, solo la latencia entre corridas.
+    schedule: '*/5 * * * *',
     run: async () => {
       const { processQueuedCampaigns } = require('../services/waCampaigns.service');
       const { sent } = await processQueuedCampaigns();
