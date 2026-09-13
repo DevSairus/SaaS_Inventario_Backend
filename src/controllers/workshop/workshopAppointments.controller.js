@@ -472,9 +472,9 @@ const cancelAppointment = async (req, res) => {
   }
 };
 
-// Mensajes construidos server-side, enviados como link wa.me click-to-send
-// -- mismo mecanismo que sales.controller.js#sendWhatsApp (no hay push
-// automático de WhatsApp Business API disponible en este proyecto).
+// Mensajes construidos server-side. Preferimos WhatsApp Cloud API si el
+// tenant la tiene conectada; si no, caen a un link wa.me click-to-send
+// -- mismo patrón que sales.controller.js#sendWhatsApp.
 const MESSAGE_BUILDERS = {
   confirmacion: (a, tenant) =>
     `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* quedó *confirmada* para el ${formatDateEs(a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
@@ -497,11 +497,35 @@ const sendAppointmentWhatsApp = async (req, res) => {
 
     const tenant = await Tenant.findByPk(tenant_id);
     const message = MESSAGE_BUILDERS[type](appointment, tenant);
-    const result = await whatsappService.sendText(appointment.customer_phone, message);
+
+    let channel = 'wa_me';
+    let conversation_id = null;
+    try {
+      const waCloud = require('../../services/whatsappCloud.service');
+      const status = await waCloud.getWhatsAppStatus(tenant_id);
+      if (status.operational) {
+        const sent = await waCloud.sendTextFromTenant({
+          tenantId: tenant_id,
+          to: appointment.customer_phone,
+          body: message,
+          userId: req.user?.id || null,
+          source: 'api',
+        });
+        channel = 'cloud_api';
+        conversation_id = sent.conversation_id;
+      }
+    } catch (cloudErr) {
+      logger.warn('[WhatsApp] Cloud fallback a wa.me cita:', cloudErr.message);
+    }
 
     if (type === 'recordatorio') await appointment.update({ reminder_sent_at: new Date() });
 
-    res.json({ success: true, waLink: result.waLink });
+    if (channel === 'cloud_api') {
+      return res.json({ success: true, channel, conversation_id, message: 'Mensaje enviado por WhatsApp Cloud API.' });
+    }
+
+    const result = await whatsappService.sendText(appointment.customer_phone, message);
+    res.json({ success: true, channel, waLink: result.waLink });
   } catch (error) {
     logger.error('Error generando WhatsApp de cita:', error);
     res.status(500).json({ success: false, message: 'Error al generar el enlace de WhatsApp' });

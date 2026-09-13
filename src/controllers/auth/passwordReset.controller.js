@@ -2,7 +2,7 @@ const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { sequelize } = require('../../config/database');
-const { DataTypes } = require('sequelize');
+const { DataTypes, fn, col, where: sqlWhere } = require('sequelize');
 const { sendEmail } = require('../../services/emailService');
 
 // Minimal User model reference
@@ -37,7 +37,9 @@ const forgotPassword = async (req, res) => {
     }
 
     // Always return success to avoid user enumeration
-    const user = await User.findOne({ where: { email: email.toLowerCase().trim() } });
+    const user = await User.findOne({
+      where: sqlWhere(fn('lower', col('email')), String(email).toLowerCase().trim())
+    });
 
     if (user && user.is_active) {
       const token = crypto.randomBytes(32).toString('hex');

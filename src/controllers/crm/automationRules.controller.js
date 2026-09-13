@@ -8,7 +8,7 @@ const logger = require('../../config/logger');
 const { CrmAutomationRule, User } = require('../../models');
 
 const TRIGGER_TYPES = ['unattended_lead', 'stage_stale', 'opportunity_created'];
-const ACTION_TYPES = ['create_task', 'assign_round_robin'];
+const ACTION_TYPES = ['create_task', 'assign_round_robin', 'send_whatsapp_template'];
 
 const list = async (req, res) => {
   try {
