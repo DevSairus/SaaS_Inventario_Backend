@@ -337,7 +337,12 @@ const generateSalePDF = async (res, sale, tenant) => {
     // para el cliente de lo que se le está cotizando. Se evita en factura y
     // remisión a propósito: esos documentos se generan/reimprimen todo el
     // tiempo y no vale la pena sumarles N descargas de imagen cada vez.
-    const isQuoteDoc = sale.document_type === 'cotizacion';
+    // Mismo criterio que generateShareLink/SaleDetailPage#isQuote: una venta
+    // sin document_type todavía (borrador recién creado, ver isDraftDoc arriba)
+    // se trata como cotización -- si no, el borrador de una cotización nunca
+    // mostraba ninguna miniatura porque document_type sigue null hasta que la
+    // venta se confirma.
+    const isQuoteDoc = !sale.document_type || sale.document_type === 'cotizacion';
     const THUMB = 46;
     const productImages = {};
     if (isQuoteDoc) {
