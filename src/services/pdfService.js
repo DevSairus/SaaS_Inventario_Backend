@@ -38,6 +38,19 @@ const downloadImageWithTimeout = (url, ms = 4000) =>
     new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
   ]);
 
+// pdfkit solo puede dibujar JPEG/PNG (ver uso de doc.image más abajo) -- pero
+// el upload de imagen de producto acepta también WEBP (uploadProductImage.js),
+// formato que hoy en día es el default de "Guardar imagen como" en Chrome, y
+// que Cloudinary devuelve tal cual si no se pide otra cosa. Sin este forzado,
+// el thumbnail se descargaba bien pero doc.image() fallaba en silencio (catch
+// vacío) y la fila quedaba sin ninguna imagen, sin ningún error visible.
+// Insertar `f_jpg` como transformación en la URL le pide a Cloudinary que
+// entregue ese archivo puntual como JPEG, sin tocar el original guardado.
+const toJpgUrl = (url) => {
+  if (!url || !url.includes('res.cloudinary.com')) return url;
+  return url.replace('/upload/', '/upload/f_jpg/');
+};
+
 /**
  * Contenido del código QR de la representación gráfica DIAN — mismo formato
  * (líneas NumFac/FecFac/.../CUFE + URL de verificación) que arma el propio
@@ -325,21 +338,21 @@ const generateSalePDF = async (res, sale, tenant) => {
     // remisión a propósito: esos documentos se generan/reimprimen todo el
     // tiempo y no vale la pena sumarles N descargas de imagen cada vez.
     const isQuoteDoc = sale.document_type === 'cotizacion';
-    const THUMB = 26;
+    const THUMB = 46;
     const productImages = {};
     if (isQuoteDoc) {
       await Promise.all(items.map(async (item) => {
         const url = item.product?.image_url || item.Product?.image_url;
         if (!url) return;
         try {
-          productImages[item.id] = await downloadImageWithTimeout(url);
+          productImages[item.id] = await downloadImageWithTimeout(toJpgUrl(url));
         } catch {
           // URL rota, imagen inalcanzable o timeout -- la fila cae de vuelta
           // a solo texto, no debe tumbar la generación del PDF completo.
         }
       }));
     }
-    const ROW_H = isQuoteDoc ? 34 : 20;
+    const ROW_H = isQuoteDoc ? 56 : 20;
 
     items.forEach((item, index) => {
       if (y > 620) { doc.addPage(); y = 40; }
@@ -361,7 +374,7 @@ const generateSalePDF = async (res, sale, tenant) => {
         }
       }
       const descX = thumb ? cols.desc + 6 + THUMB + 8 : cols.desc + 6;
-      const descW = thumb ? 264 - THUMB - 8 : 264;
+      const descW = (cols.qty - 6) - descX;
       const textY = y + (ROW_H - 9) / 2;
 
       doc.font('Helvetica').fontSize(9).fillColor(black)
