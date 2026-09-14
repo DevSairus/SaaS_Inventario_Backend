@@ -42,6 +42,11 @@ const Customer = sequelize.define('Customer', {
   mobile: {
     type: DataTypes.STRING(50),
   },
+  mobile_country_code: {
+    type: DataTypes.STRING(5),
+    defaultValue: '57',
+    comment: 'Indicativo de país del celular (sin "+", ej. "57" = Colombia) — se antepone a `mobile` al enviar por WhatsApp/Meta, que exige el número completo en formato E.164.',
+  },
   address: {
     type: DataTypes.TEXT,
   },

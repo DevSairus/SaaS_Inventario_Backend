@@ -400,7 +400,7 @@ const createClient = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { first_name, last_name, phone, address, stratum, cedula, is_active, role } =
+    const { first_name, last_name, phone, address, stratum, cedula, is_active, role, password } =
       req.body;
 
     let where = { id };
@@ -430,6 +430,22 @@ const updateUser = async (req, res) => {
       address,
       stratum,
     };
+
+    if (password) {
+      if (!['admin', 'super_admin'].includes(req.user.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permiso para cambiar la contraseña de este usuario',
+        });
+      }
+      if (password.length < 8) {
+        return res.status(400).json({
+          success: false,
+          message: 'La contraseña debe tener al menos 8 caracteres',
+        });
+      }
+      updateData.password_hash = await bcrypt.hash(password, 12);
+    }
 
     if (cedula !== undefined) {
       updateData.cedula = cedula;

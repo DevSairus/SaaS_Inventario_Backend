@@ -3,6 +3,7 @@ const { Op } = require('sequelize');
 const logger = require('../config/logger') || console;
 const metaClient = require('./meta/metaClient');
 const waCloud = require('./whatsappCloud.service');
+const { getCustomerWhatsappNumber } = require('../utils/customerWhatsappPhone');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const {
   Tenant,
@@ -186,7 +187,7 @@ async function resolveAudiencePhones(tenantId, audienceFilter = {}) {
   const phones = [];
   const seen = new Set();
   for (const c of list) {
-    const phone = waCloud.normalizePhone(c.mobile || c.phone);
+    const phone = waCloud.normalizePhone(getCustomerWhatsappNumber(c));
     if (!phone || seen.has(phone) || blocked.has(phone)) continue;
     seen.add(phone);
     phones.push({ customer_id: c.id, phone });

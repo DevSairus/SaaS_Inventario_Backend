@@ -27,6 +27,17 @@ const downloadImage = (url) => {
   });
 };
 
+// Con timeout -- a diferencia del logo del tenant (una sola imagen, ya
+// subida/validada por el propio tenant), las imágenes de producto pueden
+// ser docenas por cotización y su URL puede quedar rota con el tiempo. Sin
+// esto, una sola URL colgada dejaría la generación del PDF esperando para
+// siempre.
+const downloadImageWithTimeout = (url, ms = 4000) =>
+  Promise.race([
+    downloadImage(url),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+
 /**
  * Contenido del código QR de la representación gráfica DIAN — mismo formato
  * (líneas NumFac/FecFac/.../CUFE + URL de verificación) que arma el propio
@@ -308,9 +319,31 @@ const generateSalePDF = async (res, sale, tenant) => {
 
     const items = sale.SaleItems || sale.items || [];
     const itemsTop = y;
+
+    // Miniaturas de producto -- solo en cotizaciones, como referencia visual
+    // para el cliente de lo que se le está cotizando. Se evita en factura y
+    // remisión a propósito: esos documentos se generan/reimprimen todo el
+    // tiempo y no vale la pena sumarles N descargas de imagen cada vez.
+    const isQuoteDoc = sale.document_type === 'cotizacion';
+    const THUMB = 26;
+    const productImages = {};
+    if (isQuoteDoc) {
+      await Promise.all(items.map(async (item) => {
+        const url = item.product?.image_url || item.Product?.image_url;
+        if (!url) return;
+        try {
+          productImages[item.id] = await downloadImageWithTimeout(url);
+        } catch {
+          // URL rota, imagen inalcanzable o timeout -- la fila cae de vuelta
+          // a solo texto, no debe tumbar la generación del PDF completo.
+        }
+      }));
+    }
+    const ROW_H = isQuoteDoc ? 34 : 20;
+
     items.forEach((item, index) => {
       if (y > 620) { doc.addPage(); y = 40; }
-      if (index % 2 === 0) doc.rect(MARGIN, y, INNER_W, 20).fill(lightBg);
+      if (index % 2 === 0) doc.rect(MARGIN, y, INNER_W, ROW_H).fill(lightBg);
 
       // Precio unitario: en remisión mostrar precio con IVA incluido (unit_price + tax por unidad)
       const qty = parseFloat(item.quantity) || 1;
@@ -318,13 +351,26 @@ const generateSalePDF = async (res, sale, tenant) => {
         ? parseFloat(item.total) / qty          // total ya tiene IVA incluido
         : parseFloat(item.unit_price);
 
+      const thumb = productImages[item.id];
+      if (thumb) {
+        try {
+          doc.image(thumb, cols.desc + 6, y + (ROW_H - THUMB) / 2, { fit: [THUMB, THUMB] });
+        } catch {
+          // Buffer descargado pero en un formato que pdfkit no soporta
+          // (solo lee JPEG/PNG) -- se ignora, la fila queda solo con texto.
+        }
+      }
+      const descX = thumb ? cols.desc + 6 + THUMB + 8 : cols.desc + 6;
+      const descW = thumb ? 264 - THUMB - 8 : 264;
+      const textY = y + (ROW_H - 9) / 2;
+
       doc.font('Helvetica').fontSize(9).fillColor(black)
-        .text(item.Product?.name || item.product_name, cols.desc + 6, y + 5, { width: 264 })
-        .text(String(item.quantity),              cols.qty,   y + 5)
-        .text(formatCurrency(unitPriceDisplay),   cols.price, y + 5)
-        .text(formatCurrency(item.total),         cols.total, y + 5);
-      doc.rect(MARGIN, y, INNER_W, 20).strokeColor(border).lineWidth(0.4).stroke();
-      y += 20;
+        .text(item.Product?.name || item.product_name, descX, textY, { width: descW })
+        .text(String(item.quantity),              cols.qty,   textY)
+        .text(formatCurrency(unitPriceDisplay),   cols.price, textY)
+        .text(formatCurrency(item.total),         cols.total, textY);
+      doc.rect(MARGIN, y, INNER_W, ROW_H).strokeColor(border).lineWidth(0.4).stroke();
+      y += ROW_H;
     });
 
     // Recuadro exterior con esquinas redondeadas para toda la tabla

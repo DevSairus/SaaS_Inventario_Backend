@@ -6,6 +6,7 @@ const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer } = require('../../services/pdfService');
 const whatsappService = require('../../services/whatsappService');
+const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const dianService = require('../../services/dian/dianService');
@@ -1699,7 +1700,7 @@ const sendWhatsApp = async (req, res) => {
     });
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
 
-    const customerPhone = sale.customer?.phone || sale.customer?.mobile || sale.customer_phone;
+    const customerPhone = getCustomerWhatsappNumber(sale.customer) || sale.customer_phone;
     if (!customerPhone) {
       return res.status(400).json({ success: false, message: 'El cliente no tiene número de teléfono registrado.' });
     }
@@ -1835,7 +1836,7 @@ const getPublicSale = async (req, res) => {
 async function getPublicSaleBody(saleId, res) {
   const sale = await Sale.findOne({
     where: { id: saleId },
-    include: [{ model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }] }],
+    include: [{ model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'image_url'] }] }],
   });
   if (!sale) return res.status(404).json({ success: false, message: 'Documento no encontrado' });
 
@@ -1861,6 +1862,7 @@ async function getPublicSaleBody(saleId, res) {
       items: (sale.items || []).map(i => ({
         id: i.id,
         product_name: i.product?.name || i.description,
+        image_url: i.product?.image_url || null,
         quantity: i.quantity,
         unit_price: i.unit_price,
         subtotal: i.subtotal,

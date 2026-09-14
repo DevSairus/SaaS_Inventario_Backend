@@ -31,12 +31,17 @@ try {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
-/** Normaliza número colombiano → "573001234567" */
+/**
+ * Normaliza el número → "573001234567". Los llamadores ya deberían pasar el
+ * número con su indicativo real (ver utils/customerWhatsappPhone.js), así
+ * que aquí solo se limpia el formato; "57" solo se antepone como
+ * compatibilidad para celulares colombianos de 10 dígitos sin indicativo.
+ */
 const formatColombianPhone = (phone) => {
   const digits = String(phone).replace(/\D/g, '');
-  if (digits.startsWith('57') && digits.length >= 12) return digits;
-  if (digits.startsWith('3') && digits.length === 10) return `57${digits}`;
-  return `57${digits}`;
+  if (digits.length >= 11) return digits;
+  if (digits.length === 10) return `57${digits}`;
+  return digits;
 };
 
 /** Construye un enlace wa.me con mensaje pre-cargado */

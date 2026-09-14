@@ -78,6 +78,11 @@ const WorkshopAppointment = sequelize.define('WorkshopAppointment', {
   confirmed_at:     { type: DataTypes.DATE, allowNull: true },
   cancelled_reason: { type: DataTypes.STRING, allowNull: true },
   reminder_sent_at: { type: DataTypes.DATE, allowNull: true },
+  seen_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    comment: 'Cuándo se vio en el panel de notificaciones (NotificationsCenter.jsx) -- no altera status ni el flujo real de confirmación/cancelación, solo saca la fila de la campana la próxima vez que se abra.',
+  },
   source: {
     type: DataTypes.ENUM('public', 'staff'),
     allowNull: false,

@@ -17,4 +17,7 @@ router.get('/alerts', dashboardController.getAlerts);
 // GET /api/dashboard/workshop - KPIs del taller
 router.get('/workshop', dashboardController.getWorkshopKPIs);
 
+// GET /api/dashboard/suggestions - "Para ti ahora": sugerencias accionables por rol
+router.get('/suggestions', dashboardController.getSuggestions);
+
 module.exports = router;

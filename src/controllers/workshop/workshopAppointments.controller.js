@@ -422,7 +422,11 @@ const getPending = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
     const appointments = await WorkshopAppointment.findAll({
-      where: { tenant_id, branch_id: req.branch_id, status: 'pendiente' },
+      // seen_at=null -- una vez que el staff abrió el panel de
+      // notificaciones y se marcaron como vistas (markPendingSeen), dejan
+      // de aparecer acá aunque sigan en status='pendiente'. La cita real
+      // sigue intacta y visible en /workshop/appointments (usa `list`).
+      where: { tenant_id, branch_id: req.branch_id, status: 'pendiente', seen_at: null },
       order: [['created_at', 'DESC']],
       limit: 20,
     });
@@ -430,6 +434,28 @@ const getPending = async (req, res) => {
   } catch (error) {
     logger.error('Error obteniendo citas pendientes:', error);
     res.status(500).json({ success: false, message: 'Error al obtener citas pendientes' });
+  }
+};
+
+/**
+ * POST /workshop/appointments/pending/seen
+ * Marca como vistas todas las citas pendientes sin confirmar todavía --
+ * se llama al abrir el panel de notificaciones (NotificationsCenter.jsx),
+ * no cuando el staff las confirma/cancela. "Vista" es por tenant+sede (no
+ * por usuario individual), mismo criterio que ya usa
+ * markQuoteNotificationSeen para las cotizaciones.
+ */
+const markPendingSeen = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    await WorkshopAppointment.update(
+      { seen_at: new Date() },
+      { where: { tenant_id, branch_id: req.branch_id, status: 'pendiente', seen_at: null } }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Error marcando citas pendientes como vistas:', error);
+    res.status(500).json({ success: false, message: 'Error al marcar las citas como vistas' });
   }
 };
 
@@ -641,6 +667,6 @@ module.exports = {
   // públicos
   getPublicBranches, getPublicConfig, getPublicAvailability, createPublicAppointment, getPublicAppointmentStatus,
   // staff
-  getConfig, updateConfig, list, getPending, createStaffAppointment,
+  getConfig, updateConfig, list, getPending, markPendingSeen, createStaffAppointment,
   confirmAppointment, cancelAppointment, sendAppointmentWhatsApp, convertToWorkOrder,
 };

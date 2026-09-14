@@ -11,6 +11,7 @@ router.get('/config', checkRole('admin', 'manager'), ctrl.getConfig);
 router.put('/config', checkRole('admin', 'manager'), ctrl.updateConfig);
 
 router.get('/pending', ctrl.getPending);
+router.post('/pending/seen', ctrl.markPendingSeen);
 router.get('/', ctrl.list);
 router.post('/', ctrl.createStaffAppointment);
 

@@ -1586,6 +1586,28 @@ const markQuoteNotificationSeen = async (req, res) => {
   }
 };
 
+/**
+ * POST /work-orders/quote-notifications/seen-all
+ * Marca como vistas TODAS las rondas de cotización respondidas y no vistas
+ * de una vez -- se llama al abrir el panel de notificaciones
+ * (NotificationsCenter.jsx), a diferencia de markQuoteNotificationSeen que
+ * marca una sola (se sigue usando cuando el staff hace clic en "Ir" desde
+ * la fila individual).
+ */
+const markAllQuoteNotificationsSeen = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    await WorkOrderQuoteRequest.update(
+      { staff_seen_at: new Date() },
+      { where: { tenant_id, status: 'respondida', staff_seen_at: null } }
+    );
+    res.json({ success: true });
+  } catch (error) {
+    logger.error('Error marcando notificaciones de cotización como vistas:', error);
+    res.status(500).json({ success: false, message: 'Error al marcar las notificaciones' });
+  }
+};
+
 const sendQuoteRequest = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
@@ -2515,6 +2537,7 @@ const getPaymentHistory = async (req, res) => {
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
 const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrderPDFBuffer, generateTechSheetBuffer } = require('../../services/workshopPdfService');
 const whatsappService = require('../../services/whatsappService');
+const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 
 async function getOrderWithTenant(id, tenant_id) {
   const { WorkOrderDiagnosisMark, DiagramTemplate } = require('../../models');
@@ -3083,7 +3106,7 @@ const sendWhatsApp = async (req, res) => {
 
     // Datos del cliente y la orden
     const { order } = await getOrderWithTenant(id, tenant_id);
-    const phone = order?.customer?.mobile || order?.customer?.phone;
+    const phone = getCustomerWhatsappNumber(order?.customer);
     if (!phone) {
       return res.status(400).json({ success: false, message: 'El cliente no tiene número de teléfono registrado.' });
     }
@@ -3132,4 +3155,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
