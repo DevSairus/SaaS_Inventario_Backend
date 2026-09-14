@@ -1,6 +1,6 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
-const { getCurrentSchema } = require('../../config/tenantContext');
+const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
 const { Product, Category } = require('../../models/inventory');
 const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
@@ -661,7 +661,22 @@ const extractPublicId = (url) => {
 };
 
 // ── Subir imagen de producto ──────────────────────────────────────────────────
-const uploadProductImage = async (req, res) => {
+// El upload de archivo (multer/busboy, ver uploadProductImage.js) corre entre
+// tenantMiddleware y este controller, y rompe la propagación del
+// AsyncLocalStorage que tenantMiddleware usa para fijar el schema del tenant
+// (ver tenantContext.js y el mismo problema ya resuelto en
+// productsBulkImport.controller.js) -- para cuando este handler arranca,
+// getCurrentSchema() ya da undefined y la query de Product cae silenciosamente
+// a `public` en vez del schema real del tenant. Fix: re-fijar el contexto acá
+// mismo con el schema_name que tenantMiddleware ya dejó en req.tenant.
+const uploadProductImage = (req, res) => {
+  if (req.tenant?.schema_name) {
+    return runWithTenantSchema(req.tenant.schema_name, () => uploadProductImageInner(req, res));
+  }
+  return uploadProductImageInner(req, res);
+};
+
+const uploadProductImageInner = async (req, res) => {
   try {
     const { id } = req.params;
     const tenantId = req.user?.tenant_id;
