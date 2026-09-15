@@ -61,6 +61,8 @@ const TenantMetaConfig = require('./payments/TenantMetaConfig');
 const Announcement = require('./Announcement');
 const UserAnnouncementView = require('./UserAnnouncementView');
 const AuditLog = require('../models/AuditLog');
+// ✅ NUEVO - Blog (superadmin)
+const BlogPost = require('./BlogPost');
 // ✅ NUEVO - Taller
 const Vehicle = require('./workshop/Vehicle');
 const WorkOrder = require('./workshop/WorkOrder');
@@ -464,6 +466,12 @@ User.hasMany(UserAnnouncementView, { foreignKey: 'user_id', as: 'announcement_vi
 // UserAnnouncementView - Announcement
 UserAnnouncementView.belongsTo(Announcement, { foreignKey: 'announcement_id', as: 'announcement' });
 Announcement.hasMany(UserAnnouncementView, { foreignKey: 'announcement_id', as: 'views' });
+
+// ✅ NUEVAS RELACIONES - BLOG =============
+
+// BlogPost - User (author)
+BlogPost.belongsTo(User, { foreignKey: 'author_id', as: 'author' });
+User.hasMany(BlogPost, { foreignKey: 'author_id', as: 'blog_posts' });
 // ============= RELACIONES - CATÁLOGO VEHÍCULOS =============
 
 // VehicleBrand ↔ VehicleLine (1:N)
@@ -829,6 +837,7 @@ module.exports = {
   InternalConsumptionItem,
   Announcement,
   UserAnnouncementView,
+  BlogPost,
   AuditLog,
   Vehicle,
   WorkOrder,

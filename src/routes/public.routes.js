@@ -11,6 +11,7 @@ const {
   createPublicAppointment, getPublicAppointmentStatus,
 } = require('../controllers/workshop/workshopAppointments.controller');
 const { quoteResponseLimiter, appointmentBookingLimiter } = require('../middleware/rateLimiter');
+const { getPublicPosts, getPublicPostBySlug } = require('../controllers/public/blog.controller');
 
 // GET /api/public/work-orders/:token
 // El cliente consulta el estado de su OT con el token compartido por WhatsApp.
@@ -44,5 +45,11 @@ router.get('/workshop/:slug/:branchId/config', getPublicConfig);
 router.get('/workshop/:slug/:branchId/availability', getPublicAvailability);
 router.post('/workshop/:slug/:branchId/appointments', appointmentBookingLimiter, createPublicAppointment);
 router.get('/workshop/appointments/:token', getPublicAppointmentStatus);
+
+// ── Blog editorial (SEO) ─────────────────────────────────────────────────
+// GET /api/public/blog — listado paginado de artículos publicados.
+// GET /api/public/blog/:slug — un artículo + hasta 3 relacionados.
+router.get('/blog', getPublicPosts);
+router.get('/blog/:slug', getPublicPostBySlug);
 
 module.exports = router;

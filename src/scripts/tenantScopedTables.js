@@ -24,7 +24,7 @@ const PUBLIC_ONLY_TABLES = new Set([
   'tenants', 'users', 'subscription_plans', 'tenant_subscriptions',
   'subscription_invoices', 'super_admin_mercadopago_config',
   'permissions', 'role_permissions', 'announcements',
-  'user_announcement_views', 'sequelize_migrations', 'SequelizeMeta',
+  'user_announcement_views', 'blog_posts', 'sequelize_migrations', 'SequelizeMeta',
 ]);
 
 async function getAllFkEdges(sequelize) {

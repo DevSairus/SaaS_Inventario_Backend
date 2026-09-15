@@ -180,6 +180,9 @@ const announcementsRoutes           = require('./routes/announcements.routes');
 const supportRoutes                 = require('./routes/support.routes');
 const superadminSupportRoutes       = require('./routes/superadmin/support.routes');
 
+// Blog editorial (SEO)
+const superadminBlogRoutes          = require('./routes/superadmin/blog.routes');
+
 // Cartera
 const accountsReceivableRoutes      = require('./routes/accounts-receivable.routes');
 const accountsPayableRoutes         = require('./routes/accounts-payable.routes');
@@ -234,6 +237,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/public/pdf', publicPdfRoutes);
 
 app.use('/api/superadmin', authMiddleware, superadminRoutes);
+app.use('/api/superadmin/blog', authMiddleware, superadminBlogRoutes);
 app.use('/api/superadmin/support', authMiddleware, superadminSupportRoutes);
 app.use('/api/webhooks/ncf', ncfWebhookRoutes);
 app.use('/api/webhooks/meta', metaWebhookRoutes);
