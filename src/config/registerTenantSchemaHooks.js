@@ -84,6 +84,14 @@ const PUBLIC_SCHEMA_MODELS = new Set([
   // el search_path del tenant. Ver ensambladora/EnsambladoraSyncCredential.js.
   'EnsambladoraSyncCredential',
   'EnsambladoraEventoSync',
+  // FAQ del Centro de Soporte: gestionadas por SuperAdmin (FaqManagement.jsx,
+  // /api/superadmin/support, sin tenantMiddleware => siempre 'public') y
+  // leídas por los tenants vía /api/support/faq (SÍ pasa por tenantMiddleware).
+  // Mismo bug que SupportTicket de arriba: si un tenant ya migrado a su propio
+  // schema consulta este modelo, resolvería contra "<schema_tenant>".support_faq_*
+  // en vez de "public", y nunca vería el contenido cargado por SuperAdmin.
+  'SupportFaqCategory',
+  'SupportFaqArticle',
 ]);
 
 function registerTenantSchemaHooks(sequelize) {
