@@ -670,6 +670,7 @@ const confirmPurchase = async (req, res) => {
   try {
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
+    const { payment_method, paid_amount, credit_days } = req.body || {};
 
     const purchase = await Purchase.findOne({
       where: { id, tenant_id }
@@ -680,13 +681,51 @@ const confirmPurchase = async (req, res) => {
     }
 
     if (purchase.status !== 'draft') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Solo se pueden confirmar compras en estado borrador' 
+      return res.status(400).json({
+        success: false,
+        message: 'Solo se pueden confirmar compras en estado borrador'
       });
     }
 
-    await purchase.update({ status: 'confirmed' });
+    const total = parseFloat(purchase.total_amount);
+    const updates = { status: 'confirmed' };
+
+    // Si el modal de confirmación envió datos de pago (contado/parcial/crédito),
+    // se aplican aquí — antes esto se ignoraba y la compra quedaba en
+    // payment_status='pending' para siempre, aunque el usuario hubiera
+    // marcado "Contado" (ver Contabilidad-Declaraciones-Periodicas-Analisis-y-Plan.md).
+    if (payment_method !== undefined || paid_amount !== undefined || credit_days !== undefined) {
+      const effectiveAmount = Math.min(Math.max(parseFloat(paid_amount) || 0, 0), total);
+
+      let payment_status = 'pending';
+      if (effectiveAmount >= total) payment_status = 'paid';
+      else if (effectiveAmount > 0) payment_status = 'partial';
+
+      updates.payment_method = payment_method || purchase.payment_method;
+      updates.paid_amount = effectiveAmount;
+      updates.payment_status = payment_status;
+
+      if (effectiveAmount > 0) {
+        updates.payment_history = [
+          ...(purchase.payment_history || []),
+          {
+            date: new Date(),
+            amount: effectiveAmount,
+            method: payment_method || purchase.payment_method || 'Efectivo',
+            user_id: req.user.id,
+            notes: 'Pago registrado al confirmar la compra'
+          }
+        ];
+      }
+
+      if (payment_status !== 'paid' && credit_days) {
+        const dueDate = new Date();
+        dueDate.setDate(dueDate.getDate() + parseInt(credit_days));
+        updates.due_date = dueDate.toISOString().split('T')[0];
+      }
+    }
+
+    await purchase.update(updates);
 
     // 🔔 Verificación automática de alertas de cuentas por pagar
     markPurchaseForAlertCheck(res, purchase.id, tenant_id);
