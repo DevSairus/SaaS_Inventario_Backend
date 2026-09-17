@@ -3,6 +3,7 @@ const logger = require('../config/logger');
 const { Product, Sale, SaleItem, Purchase, Customer, InventoryMovement, Warehouse, WorkOrder, WorkOrderItem, Vehicle, User, PayableAlert, CustomerAdvanceAlert, Supplier, WorkshopAppointment } = require('../models');
 const { Op, fn, col, literal } = require('sequelize');
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../utils/branchFilter');
+const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 
 // Qué roles necesitan ver cada categoría de alerta en el dashboard general.
 // Mismo criterio que ya se usa en el frontend (SALES_FINANCE_ROLES /
@@ -345,6 +346,8 @@ exports.getAlerts = async (req, res) => {
   try {
     const tenantId = req.user.tenant_id;
     const alerts = [];
+    const enabledModules = await getEffectiveModulesForTenantId(tenantId);
+    const hasTreasury = enabledModules.includes('treasury');
 
     // Alerta 1: Productos con stock bajo
     const lowStockWhere = {
@@ -417,7 +420,8 @@ exports.getAlerts = async (req, res) => {
     // Mismo patrón de "recheck bajo demanda" que ya usa payableAlerts.controller.js:
     // no se fuerza un barrido acá, se confía en que el middleware de eventos
     // (autoCheckPayableAlerts) ya las mantiene al día en cada compra/pago.
-    const overduePayables = await PayableAlert.findAll({
+    // Sin módulo de tesorería no debe mostrarse nada de esto.
+    const overduePayables = hasTreasury ? await PayableAlert.findAll({
       where: { tenant_id: tenantId, status: 'active', alert_type: 'overdue' },
       attributes: ['id', 'balance', 'days_to_due', 'severity'],
       include: [{
@@ -426,7 +430,7 @@ exports.getAlerts = async (req, res) => {
       }],
       order: [['days_to_due', 'ASC']],
       limit: 10
-    });
+    }) : [];
 
     if (overduePayables.length > 0) {
       const totalOverdueBalance = overduePayables.reduce((sum, a) => sum + parseFloat(a.balance || 0), 0);
@@ -448,11 +452,11 @@ exports.getAlerts = async (req, res) => {
     }
 
     // Alerta 4: Cuentas por pagar próximas a vencer (alert_type='due_soon')
-    const duePayables = await PayableAlert.findAll({
+    const duePayables = hasTreasury ? await PayableAlert.findAll({
       where: { tenant_id: tenantId, status: 'active', alert_type: 'due_soon' },
       attributes: ['id', 'balance', 'days_to_due'],
       limit: 10
-    });
+    }) : [];
 
     if (duePayables.length > 0) {
       const totalDueBalance = duePayables.reduce((sum, a) => sum + parseFloat(a.balance || 0), 0);
@@ -708,6 +712,8 @@ exports.getSuggestions = async (req, res) => {
     const tenantId = req.user.tenant_id;
     const role = req.user.role;
     const canSee = (roles) => role === 'super_admin' || roles.includes(role);
+    const enabledModules = await getEffectiveModulesForTenantId(tenantId);
+    const hasTreasury = enabledModules.includes('treasury');
 
     // work_orders no tiene branch_id propio -- se deriva de warehouse_id
     // (mismo criterio que workOrders.controller.js#list). WorkshopAppointment
@@ -731,8 +737,8 @@ exports.getSuggestions = async (req, res) => {
       todaysAppointments,
     ] = await Promise.all([
       WorkOrder.count({ where: { tenant_id: tenantId, status: 'listo', ...woBranchWhere } }),
-      PayableAlert.count({ where: { tenant_id: tenantId, status: 'active', alert_type: 'overdue' } }),
-      PayableAlert.count({ where: { tenant_id: tenantId, status: 'active', alert_type: 'due_soon' } }),
+      hasTreasury ? PayableAlert.count({ where: { tenant_id: tenantId, status: 'active', alert_type: 'overdue' } }) : 0,
+      hasTreasury ? PayableAlert.count({ where: { tenant_id: tenantId, status: 'active', alert_type: 'due_soon' } }) : 0,
       CustomerAdvanceAlert.count({ where: { tenant_id: tenantId, status: 'active' } }),
       Product.count({ where: { tenant_id: tenantId, current_stock: 0, is_active: true } }),
       WorkshopAppointment.findAll({

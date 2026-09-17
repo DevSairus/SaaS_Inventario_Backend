@@ -53,18 +53,22 @@ const getNotificationsBundle = async (req, res) => {
       : await getEffectiveModulesForTenantId(tenant_id);
     const hasCrm = modules.includes('crm');
     const hasWorkshop = modules.includes('workshop');
+    const hasTreasury = modules.includes('treasury');
 
-    // Stock/cuentas por pagar/anticipos: igual que hoy, sin gate de módulo
-    // acá (las campanas ya se auto-ocultan si vienen 0 resultados).
+    // Stock/anticipos: igual que hoy, sin gate de módulo acá (las campanas
+    // ya se auto-ocultan si vienen 0 resultados). Cuentas por pagar sí se
+    // gatea explícitamente: sin módulo de tesorería no debe mostrarse nada.
     const tasks = {
       stock: invoke(stockAlertsController.getStockAlerts, req, { status: 'active', limit: 500 }),
-      payable: invoke(payableAlertsController.getPayableAlerts, req, {
-        status: 'active', limit: 500, sort_by: 'days_to_due', sort_order: 'ASC',
-      }),
       advance: invoke(advanceAlertsController.getAdvanceAlerts, req, {
         status: 'active', limit: 500, sort_by: 'days_since_received', sort_order: 'DESC',
       }),
     };
+    if (hasTreasury) {
+      tasks.payable = invoke(payableAlertsController.getPayableAlerts, req, {
+        status: 'active', limit: 500, sort_by: 'days_to_due', sort_order: 'ASC',
+      });
+    }
     if (hasCrm) {
       tasks.crm = invoke(crmDashboardController.getNotificationsSummary, req);
     }

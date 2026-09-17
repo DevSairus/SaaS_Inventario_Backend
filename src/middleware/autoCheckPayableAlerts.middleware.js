@@ -1,6 +1,7 @@
 // backend/src/middleware/autoCheckPayableAlerts.middleware.js
 const { PayableAlert, Purchase } = require('../models');
 const { Op } = require('sequelize');
+const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 
 /**
  * Middleware para verificar y crear alertas automáticamente
@@ -25,6 +26,22 @@ function calcDaysToDue(dueDate) {
  */
 async function checkAlertsForPurchase(purchase_id, tenant_id) {
   try {
+    // Sin módulo de tesorería, un tenant no debe acumular alertas de
+    // cuentas por pagar -- se resuelve cualquier alerta activa que quedara
+    // de cuando el módulo sí estaba habilitado, y no se generan nuevas.
+    const modules = await getEffectiveModulesForTenantId(tenant_id);
+    if (!modules.includes('treasury')) {
+      await PayableAlert.update(
+        {
+          status: 'resolved',
+          resolved_date: new Date(),
+          resolution_notes: 'Módulo de tesorería no habilitado'
+        },
+        { where: { tenant_id, purchase_id, status: 'active' } }
+      );
+      return;
+    }
+
     const purchase = await Purchase.findOne({
       where: { id: purchase_id, tenant_id },
       attributes: [
@@ -145,6 +162,8 @@ async function checkAllPayableAlerts(tenant_id = null) {
   });
 
   for (const purchase of purchases) {
+    // checkAlertsForPurchase ya valida el módulo de tesorería por tenant y
+    // resuelve/ignora según corresponda.
     await checkAlertsForPurchase(purchase.id, purchase.tenant_id);
   }
 

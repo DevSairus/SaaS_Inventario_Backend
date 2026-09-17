@@ -76,6 +76,11 @@ const corsOptions = {
   // indicar la sede activa en cada request; sin incluirlo aquí el navegador bloquea
   // el preflight de TODAS las rutas que lo envían (branches, warehouses, sales, etc.)
   allowedHeaders: ['Content-Type', 'Authorization', 'x-branch-id'],
+  // Sin esto, el frontend (dominio distinto en producción) no puede leer
+  // Content-Disposition en respuestas blob -- necesario para que
+  // ExogenaPage.jsx tome el nombre de archivo real (Dmuisca_...) que arma
+  // el backend en vez de inventar uno genérico.
+  exposedHeaders: ['Content-Disposition'],
   optionsSuccessStatus: 200, // algunos navegadores (IE11) usan 204 y fallan
 };
 
@@ -270,7 +275,7 @@ app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware,
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
-app.use('/api/payable-alerts',                 authMiddleware, tenantMiddleware, payableAlertsRoutes);
+app.use('/api/payable-alerts',                 authMiddleware, tenantMiddleware, requireModule('treasury'), payableAlertsRoutes);
 app.use('/api/notifications',                  authMiddleware, tenantMiddleware, branchMiddleware, notificationsBundleRoutes);
 app.use('/api/dashboard',                      authMiddleware, tenantMiddleware, dashboardRoutes);
 
