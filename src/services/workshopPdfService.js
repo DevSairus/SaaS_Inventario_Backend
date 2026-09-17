@@ -667,6 +667,33 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
       y += 28;
     }
 
+    // ── Mano de obra / servicios discriminados (antes se colapsaban en un
+    //    solo total dentro de la caja de "Proceso Calidad") ────────────────
+    if (laborItems.length > 0) {
+      y += 14;
+      if (y + 30 > 700) { doc.addPage(); y = 40; }
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(C.dark)
+        .text('MANO DE OBRA / SERVICIOS', MARGIN, y);
+      y += 14;
+
+      doc.rect(MARGIN, y, INNER, 20).fill(C.primary);
+      tableRow(doc, TH, y + 1);
+      y += 22;
+
+      laborItems.forEach((item, idx) => {
+        if (y + 20 > 700) { doc.addPage(); y = 40; }
+        const bg = idx % 2 === 0 ? '#f8fafc' : null;
+        tableRow(doc, [
+          { x: MARGIN + 4,   text: item.quantity,                                       w: 40,  align: 'right' },
+          { x: MARGIN + 50,  text: item.product_name || item.product?.name || item.description || '—', w: 290 },
+          { x: MARGIN + 346, text: COP(item.unit_price),                                w: 78,  align: 'right' },
+          { x: MARGIN + 430, text: COP(item.total),                                     w: 68,  align: 'right', bold: true },
+        ], y, 20, bg);
+        doc.rect(MARGIN, y, INNER, 20).strokeColor(C.border).lineWidth(0.3).stroke();
+        y += 20;
+      });
+    }
+
     y += 10;
 
     // ── Proceso Calidad y Servicio al Cliente + Resumen de Valores ────────

@@ -11,6 +11,7 @@ const { Op } = require('sequelize');
 const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
 const { getAccountingCashFlow } = require('../../services/accounting/cashReconciliation.service');
+const { resolveBranchFilter } = require('../../utils/branchFilter');
 
 // Tolerancia para considerar que Tesorería y Contabilidad "coinciden" —
 // 1 peso de redondeo no es una alerta real.
@@ -203,7 +204,8 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
 const getCashFlow = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { from_date, to_date, branch_id } = req.query;
+    const { from_date, to_date } = req.query;
+    const branch_id = resolveBranchFilter(req);
 
     const cashFlow = await buildCashFlow(tenant_id, { from_date, to_date, branch_id });
 
@@ -226,7 +228,8 @@ const getCashFlow = async (req, res) => {
 const getCashFlowPDF = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { from_date, to_date, branch_id } = req.query;
+    const { from_date, to_date } = req.query;
+    const branch_id = resolveBranchFilter(req);
 
     const [tenant, cashFlow] = await Promise.all([
       Tenant.findByPk(tenant_id),
@@ -252,7 +255,8 @@ const getCashFlowPDF = async (req, res) => {
 const getCashFlowExcel = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { from_date, to_date, branch_id } = req.query;
+    const { from_date, to_date } = req.query;
+    const branch_id = resolveBranchFilter(req);
 
     const [tenant, cashFlow] = await Promise.all([
       Tenant.findByPk(tenant_id),
@@ -287,7 +291,8 @@ const getCashFlowExcel = async (req, res) => {
 const getCashFlowReconciliation = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { from_date, to_date, branch_id } = req.query;
+    const { from_date, to_date } = req.query;
+    const branch_id = resolveBranchFilter(req);
 
     const [treasury, accounting] = await Promise.all([
       buildCashFlow(tenant_id, { from_date, to_date, branch_id }),

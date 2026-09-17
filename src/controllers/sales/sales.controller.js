@@ -1449,6 +1449,8 @@ const getStats = async (req, res) => {
     // Los borradores son cotizaciones, no ventas confirmadas — no deben
     // sumar en los totales de Ventas (mismo criterio que getAll/quote_view).
     const where = { tenant_id: tenantId, status: { [Op.ne]: 'draft' } };
+    const branch_id = resolveBranchFilter(req);
+    if (branch_id) where.branch_id = branch_id;
     if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
     else if (from_date) where.sale_date = { [Op.gte]: from_date };
     else if (to_date) where.sale_date = { [Op.lte]: to_date };
