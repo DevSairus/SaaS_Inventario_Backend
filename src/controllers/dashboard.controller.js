@@ -2,6 +2,7 @@ const logger = require('../config/logger');
 // backend/src/controllers/dashboard.controller.js
 const { Product, Sale, SaleItem, Purchase, Customer, InventoryMovement, Warehouse, WorkOrder, WorkOrderItem, Vehicle, User, PayableAlert, CustomerAdvanceAlert, Supplier, WorkshopAppointment } = require('../models');
 const { Op, fn, col, literal } = require('sequelize');
+const { resolveBranchFilter, getBranchWarehouseIds } = require('../utils/branchFilter');
 
 // Qué roles necesitan ver cada categoría de alerta en el dashboard general.
 // Mismo criterio que ya se usa en el frontend (SALES_FINANCE_ROLES /
@@ -24,8 +25,9 @@ function roleCanSeeAlertCategory(role, category) {
 exports.getKPIs = async (req, res) => {
   try {
     const tenantId = req.user.tenant_id;
+    const branchId = resolveBranchFilter(req);
     const { period = '30' } = req.query; // días
-    
+
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -40,6 +42,15 @@ exports.getKPIs = async (req, res) => {
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+
+    // Sale/SaleItem sí tienen branch_id propio. Para labor cost (basado en
+    // WorkOrder, que no tiene branch_id) se deriva la primera bodega de la
+    // sede -- mismo criterio ya usado en reports.controller.js.
+    const saleBranchWhere = branchId ? { branch_id: branchId } : {};
+    const saleItemBranchWhere = branchId ? { '$sale.branch_id$': branchId } : {};
+    const branchWarehouseId = branchId
+      ? (await getBranchWarehouseIds(tenantId, branchId))[0] || '00000000-0000-0000-0000-000000000000'
+      : null;
 
     // Las 9 consultas de acá abajo son independientes entre sí -- ninguna
     // usa el resultado de otra, solo se combinan al armar la respuesta. Antes
@@ -63,7 +74,8 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: dateFrom },
-          status: { [Op.in]: ['completed'] }
+          status: { [Op.in]: ['completed'] },
+          ...saleBranchWhere
         },
         attributes: [
           [fn('COUNT', col('id')), 'count'],
@@ -82,7 +94,8 @@ exports.getKPIs = async (req, res) => {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: dateFrom },
           '$sale.status$': { [Op.in]: ['completed'] },
-          '$product.product_type$': { [Op.ne]: 'service' }
+          '$product.product_type$': { [Op.ne]: 'service' },
+          ...saleItemBranchWhere
         },
         attributes: [
           [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'total_profit']
@@ -94,13 +107,14 @@ exports.getKPIs = async (req, res) => {
         raw: true
       }),
 
-      getLaborCostForPeriod({ tenantId, dateFrom, dateTo: new Date() }),
+      getLaborCostForPeriod({ tenantId, branchWarehouseId, dateFrom, dateTo: new Date() }),
 
       Sale.findOne({
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: today },
-          status: { [Op.in]: ['completed'] }
+          status: { [Op.in]: ['completed'] },
+          ...saleBranchWhere
         },
         attributes: [
           [fn('COUNT', col('id')), 'count'],
@@ -136,7 +150,8 @@ exports.getKPIs = async (req, res) => {
         where: {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: dateFrom },
-          '$sale.status$': { [Op.in]: ['completed'] }
+          '$sale.status$': { [Op.in]: ['completed'] },
+          ...saleItemBranchWhere
         },
         attributes: [
           'product_id',
@@ -166,7 +181,8 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: dateFrom },
-          status: { [Op.in]: ['completed'] }
+          status: { [Op.in]: ['completed'] },
+          ...saleBranchWhere
         },
         attributes: [
           [fn('DATE', col('sale_date')), 'date'],
@@ -182,7 +198,8 @@ exports.getKPIs = async (req, res) => {
         where: {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: dateFrom },
-          '$sale.status$': { [Op.in]: ['completed'] }
+          '$sale.status$': { [Op.in]: ['completed'] },
+          ...saleItemBranchWhere
         },
         attributes: [
           [fn('DATE', col('sale.sale_date')), 'date'],
@@ -204,7 +221,8 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: prevDateFrom, [Op.lt]: prevDateTo },
-          status: { [Op.in]: ['completed'] }
+          status: { [Op.in]: ['completed'] },
+          ...saleBranchWhere
         },
         attributes: [
           [fn('COUNT', col('id')), 'count'],
@@ -218,7 +236,8 @@ exports.getKPIs = async (req, res) => {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: prevDateFrom, [Op.lt]: prevDateTo },
           '$sale.status$': { [Op.in]: ['completed'] },
-          '$product.product_type$': { [Op.ne]: 'service' }
+          '$product.product_type$': { [Op.ne]: 'service' },
+          ...saleItemBranchWhere
         },
         attributes: [
           [fn('SUM', literal('(unit_price - unit_cost) * quantity')), 'total_profit']
@@ -230,7 +249,7 @@ exports.getKPIs = async (req, res) => {
         raw: true
       }),
 
-      getLaborCostForPeriod({ tenantId, dateFrom: prevDateFrom, dateTo: prevDateTo }),
+      getLaborCostForPeriod({ tenantId, branchWarehouseId, dateFrom: prevDateFrom, dateTo: prevDateTo }),
     ]);
 
     // Combinar salesByDay con profitByDay
@@ -510,9 +529,16 @@ exports.getWorkshopKPIs = async (req, res) => {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
 
+    // work_orders no tiene branch_id propio -- se deriva de warehouse_id
+    // (mismo criterio que workOrders.controller.js#list).
+    const branchId = resolveBranchFilter(req);
+    const woBranchWhere = branchId
+      ? { warehouse_id: { [Op.in]: await getBranchWarehouseIds(tenantId, branchId) } }
+      : {};
+
     // OTs por estado
     const otsByStatus = await WorkOrder.findAll({
-      where: { tenant_id: tenantId },
+      where: { tenant_id: tenantId, ...woBranchWhere },
       attributes: ['status', [fn('COUNT', col('id')), 'count']],
       group: ['status'],
       raw: true
@@ -533,7 +559,8 @@ exports.getWorkshopKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           status: { [Op.in]: ['listo', 'entregado'] },
-          completed_at: { [Op.gte]: startOfMonth }
+          completed_at: { [Op.gte]: startOfMonth },
+          ...woBranchWhere
         },
         attributes: []
       }],
@@ -550,7 +577,8 @@ exports.getWorkshopKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           status: { [Op.in]: ['listo', 'entregado'] },
-          completed_at: { [Op.gte]: startOfMonth }
+          completed_at: { [Op.gte]: startOfMonth },
+          ...woBranchWhere
         },
         attributes: []
       }],
@@ -564,7 +592,8 @@ exports.getWorkshopKPIs = async (req, res) => {
       where: {
         tenant_id: tenantId,
         status: 'entregado',
-        delivered_at: { [Op.gte]: startOfMonth }
+        delivered_at: { [Op.gte]: startOfMonth },
+        ...woBranchWhere
       }
     });
 
@@ -576,6 +605,8 @@ exports.getWorkshopKPIs = async (req, res) => {
     // nada y avg_resolution_days quedaba en 0 sin ningún error visible.
     const { getCurrentSchema } = require('../config/tenantContext');
     const schema = getCurrentSchema() || 'public';
+    const branchWarehouseIds = branchId ? await getBranchWarehouseIds(tenantId, branchId) : null;
+    const avgTimeBranchFilter = branchWarehouseIds ? `AND warehouse_id IN (:branchWarehouseIds)` : '';
     const avgTime = await sequelize.query(`
       SELECT ROUND(AVG(EXTRACT(EPOCH FROM (delivered_at - created_at)) / 86400), 1) as avg_days
       FROM "${schema}"."work_orders"
@@ -583,20 +614,29 @@ exports.getWorkshopKPIs = async (req, res) => {
         AND status = 'entregado'
         AND delivered_at IS NOT NULL
         AND created_at >= NOW() - INTERVAL '90 days'
-    `, { replacements: { tenantId }, type: QueryTypes.SELECT });
+        ${avgTimeBranchFilter}
+    `, {
+      replacements: { tenantId, branchWarehouseIds: branchWarehouseIds || [] },
+      type: QueryTypes.SELECT,
+    });
 
     // Costo de mano de obra del mes (real si liquidado, estimado si no) --
     // usa criterio 'entregado' (no 'listo'), que es un subconjunto un poco
     // más estricto que labor_revenue_month de arriba (incluye 'listo').
     const { getLaborCostForPeriod } = require('../services/workshop/laborCost.service');
-    const laborCostMonth = await getLaborCostForPeriod({ tenantId, dateFrom: startOfMonth, dateTo: now });
+    const laborCostMonth = await getLaborCostForPeriod({
+      tenantId,
+      branchWarehouseId: branchWarehouseIds ? (branchWarehouseIds[0] || '00000000-0000-0000-0000-000000000000') : null,
+      dateFrom: startOfMonth,
+      dateTo: now,
+    });
 
     // Últimas OTs actualizadas (bug fix: el frontend ya esperaba este campo
     // en `workshopStats.recentOrders`, pero nunca se consultaba ni se
     // devolvía desde aquí, así que la sección "Últimas órdenes" del
     // dashboard jamás se renderizaba).
     const recentOrdersRaw = await WorkOrder.findAll({
-      where: { tenant_id: tenantId },
+      where: { tenant_id: tenantId, ...woBranchWhere },
       attributes: ['id', 'order_number', 'status', 'total_amount', 'updated_at'],
       include: [
         { model: Vehicle, as: 'vehicle', attributes: ['plate'] },
@@ -669,6 +709,14 @@ exports.getSuggestions = async (req, res) => {
     const role = req.user.role;
     const canSee = (roles) => role === 'super_admin' || roles.includes(role);
 
+    // work_orders no tiene branch_id propio -- se deriva de warehouse_id
+    // (mismo criterio que workOrders.controller.js#list). WorkshopAppointment
+    // sí tiene branch_id propio.
+    const branchId = resolveBranchFilter(req);
+    const woBranchWhere = branchId
+      ? { warehouse_id: { [Op.in]: await getBranchWarehouseIds(tenantId, branchId) } }
+      : {};
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
@@ -682,7 +730,7 @@ exports.getSuggestions = async (req, res) => {
       outOfStockCount,
       todaysAppointments,
     ] = await Promise.all([
-      WorkOrder.count({ where: { tenant_id: tenantId, status: 'listo' } }),
+      WorkOrder.count({ where: { tenant_id: tenantId, status: 'listo', ...woBranchWhere } }),
       PayableAlert.count({ where: { tenant_id: tenantId, status: 'active', alert_type: 'overdue' } }),
       PayableAlert.count({ where: { tenant_id: tenantId, status: 'active', alert_type: 'due_soon' } }),
       CustomerAdvanceAlert.count({ where: { tenant_id: tenantId, status: 'active' } }),
@@ -691,7 +739,8 @@ exports.getSuggestions = async (req, res) => {
         where: {
           tenant_id: tenantId,
           status: 'pendiente',
-          scheduled_at: { [Op.gte]: today, [Op.lt]: tomorrow }
+          scheduled_at: { [Op.gte]: today, [Op.lt]: tomorrow },
+          ...(branchId ? { branch_id: branchId } : {}),
         },
         attributes: ['id', 'scheduled_at', 'customer_name'],
         order: [['scheduled_at', 'ASC']],

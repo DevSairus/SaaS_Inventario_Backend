@@ -4,9 +4,11 @@ const router = express.Router();
 const dashboardController = require('../controllers/dashboard.controller');
 const { authMiddleware } = require('../middleware/auth');
 const { tenantMiddleware } = require('../middleware/tenant');
+const { branchMiddleware } = require('../middleware/branch');
 
 router.use(authMiddleware);
 router.use(tenantMiddleware);
+router.use(branchMiddleware);
 
 // GET /api/dashboard/kpis - KPIs principales
 router.get('/kpis', dashboardController.getKPIs);

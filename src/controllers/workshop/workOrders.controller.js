@@ -10,7 +10,7 @@ const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
 const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
-const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/branchFilter');
 
 // Los endpoints PÚBLICOS (sin autenticación: getPublicOrder, respondQuoteRequest)
 // no tienen tenantMiddleware -- nadie les setea el schema del tenant antes de
@@ -171,11 +171,7 @@ const list = async (req, res) => {
     // (warehouse_id → warehouses.branch_id), igual que al asignarla en create().
     const branch_id = resolveBranchFilter(req);
     if (branch_id) {
-      const branchWarehouses = await Warehouse.findAll({
-        where: { tenant_id, branch_id },
-        attributes: ['id'],
-      });
-      where.warehouse_id = { [Op.in]: branchWarehouses.map(w => w.id) };
+      where.warehouse_id = { [Op.in]: await getBranchWarehouseIds(tenant_id, branch_id) };
     }
     if (status) {
       // Soportar múltiples estados separados por coma: "recibido,en_proceso,listo"

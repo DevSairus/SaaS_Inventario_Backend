@@ -34,4 +34,23 @@ function resolveBranchFilter(req) {
   return req.branch_id || null;
 }
 
-module.exports = { resolveBranchFilter };
+/**
+ * work_orders no tiene `branch_id` propio -- la sede se deriva de la bodega
+ * (`warehouse_id` → `warehouses.branch_id`), igual que al asignarla en
+ * `workOrders.controller.js#create`. Devuelve los IDs de bodega de esa sede,
+ * para usar en un `where: { warehouse_id: { [Op.in]: ... } }`.
+ *
+ * @param {string} tenantId
+ * @param {string} branchId
+ * @returns {Promise<string[]>}
+ */
+async function getBranchWarehouseIds(tenantId, branchId) {
+  const { Warehouse } = require('../models');
+  const warehouses = await Warehouse.findAll({
+    where: { tenant_id: tenantId, branch_id: branchId },
+    attributes: ['id'],
+  });
+  return warehouses.map(w => w.id);
+}
+
+module.exports = { resolveBranchFilter, getBranchWarehouseIds };
