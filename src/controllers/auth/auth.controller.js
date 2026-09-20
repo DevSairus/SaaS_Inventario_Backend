@@ -74,6 +74,17 @@ const login = async (req, res) => {
       });
     }
 
+    // Técnicos sin acceso al sistema (has_system_access = false) no tienen
+    // password_hash y nunca pueden iniciar sesión. Se valida ANTES del
+    // bcrypt.compare (no hay hash contra el cual comparar) y con el mismo
+    // mensaje genérico, para no revelar que el usuario existe.
+    if (!user.has_system_access || !user.password_hash) {
+      return res.status(403).json({
+        success: false,
+        message: 'Credenciales inválidas'
+      });
+    }
+
     /* =====================================================
        VALIDAR TENANT SI APLICA
     ===================================================== */

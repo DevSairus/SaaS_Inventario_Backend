@@ -38,7 +38,12 @@ async function parseInvoiceXML(xmlContent) {
     // Buscar diferentes variantes de factura
     if (result.invoice || result['fe:invoice'] || rootKey.toLowerCase().includes('invoice')) {
       console.log('✅ Detectado formato DIAN/UBL');
-      return parseDIANFormat(result);
+      const parsed = parseDIANFormat(result);
+      // RADIAN necesita el CUFE (cbc:UUID) y el XML original tal cual llegó,
+      // no solo los campos derivados que ya extraía este parser — ver
+      // RADIAN-Analisis-y-Plan.md §3.1 ("El parser descarta el UUID").
+      parsed.xmlContent = xmlContent;
+      return parsed;
     } else if (result.factura || rootKey.toLowerCase().includes('factura')) {
       console.log('✅ Detectado formato genérico');
       return parseGenericFormat(result);
@@ -158,8 +163,13 @@ function parseDIANFormat(xml) {
   const invoiceNumber = extractText(getField(invoice, 'id', 'numero'));
   const invoiceDate = extractText(getField(invoice, 'issuedate', 'fecha'));
   const dueDate = extractText(getField(invoice, 'duedate', 'fechavencimiento'));
-  
-  console.log('📄 Invoice info:', { number: invoiceNumber, date: invoiceDate });
+  // CUFE (cbc:UUID) y hora de emisión (cbc:IssueTime) — necesarios para
+  // poder emitir eventos RADIAN sobre esta factura (030, 032, ...). Antes se
+  // descartaban por completo (ver RADIAN-Analisis-y-Plan.md §3.1).
+  const cufe = extractText(getField(invoice, 'uuid'));
+  const issueTime = extractText(getField(invoice, 'issuetime'));
+
+  console.log('📄 Invoice info:', { number: invoiceNumber, date: invoiceDate, cufe, issueTime });
 
   // Items de la factura
   const invoiceLines = getField(invoice, 'invoiceline', 'lineas');
@@ -179,7 +189,9 @@ function parseDIANFormat(xml) {
     invoice: {
       number: invoiceNumber,
       date: invoiceDate,
-      due_date: dueDate
+      due_date: dueDate,
+      cufe: cufe,
+      issue_time: issueTime
     },
     items: items,
     totals: totals,
@@ -236,7 +248,11 @@ async function parseAttachedDocument(attachedDoc) {
     
     // El XML embebido debería ser un Invoice
     if (embeddedResult.invoice || embeddedResult['fe:invoice']) {
-      return parseDIANFormat(embeddedResult);
+      const parsed = parseDIANFormat(embeddedResult);
+      // El CUFE/XML válidos para RADIAN son los de la factura EMBEBIDA, no
+      // los del AttachedDocument contenedor (que trae su propio UUID/firma).
+      parsed.xmlContent = embeddedXml;
+      return parsed;
     } else {
       throw new Error('El XML embebido no es una factura válida');
     }
@@ -300,7 +316,18 @@ function parseItems(invoiceLines, getField) {
       itemName = extractText(getField(item, 'description', 'nombre', 'descripcion'));
     }
     console.log('Item name:', itemName);
-    
+
+    // Marca (cbc:BrandName). Algunos proveedores (repuestos de suspensión/
+    // frenos genéricos) no traen SellersItemIdentification propio y describen
+    // el ítem por aplicación de vehículo ("RENAULT CLIO 98-02 / LOGAN 98") en
+    // vez de por nombre de repuesto -- sin la marca, ese nombre por sí solo no
+    // alcanza para identificar el producto real.
+    let brand = null;
+    if (item) {
+      brand = extractText(getField(item, 'brandname', 'marca'));
+    }
+    console.log('Brand:', brand);
+
     // Buscar SKU
     let sku = null;
     if (item) {
@@ -376,6 +403,7 @@ function parseItems(invoiceLines, getField) {
     
     const parsedItem = {
       name: itemName || 'Producto sin nombre',
+      brand: brand || null,
       sku: sku || `TEMP-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       quantity: quantity,
       unit_price: unitPrice,

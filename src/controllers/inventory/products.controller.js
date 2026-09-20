@@ -4,6 +4,7 @@ const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantCo
 const { Product, Category } = require('../../models/inventory');
 const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
 
 // Debe reflejar exactamente el CHECK constraint de la tabla products
 // (ver 20260101000000-baseline-core-inventory-tables.js) -- si diverge,
@@ -69,7 +70,8 @@ const getAllProducts = async (req, res) => {
     const {
       page = 1, limit = 10, search = '', category_id = '', is_active = '',
       sort_by = 'name', sort_order = 'ASC',
-      applies_to_vehicle_id, applies_to_brand, applies_to_line, applies_to_year
+      applies_to_vehicle_id, applies_to_brand, applies_to_line, applies_to_year,
+      exclude_sale_id, exclude_work_order_id,
     } = req.query;
 
     // ── Seguridad: whitelist ORDER BY — Sequelize NO parametriza ORDER BY ────
@@ -252,6 +254,31 @@ const getAllProducts = async (req, res) => {
       data = data.map(p => ({ ...p, _vehicleMatch: vehicleMatchIds.has(p.id) }));
     }
 
+    // ── Cantidad en trámite (Sprint 3) ────────────────────────────────────
+    // Una sola consulta agrupada por dimensión (ventas / OT) para todos los
+    // ids de la página actual (máx. 200 por el cap de paginación de arriba)
+    // -- no N+1. `exclude_sale_id`/`exclude_work_order_id` permiten que el
+    // documento que se está editando no se cuente a sí mismo.
+    if (data.length > 0) {
+      const tenantIdForInProcess = req.user.role === 'super_admin' ? null : req.user.tenant_id;
+      if (tenantIdForInProcess) {
+        const inProcessMap = await getInProcessMap(tenantIdForInProcess, data.map(p => p.id), {
+          excludeSaleId: exclude_sale_id || undefined,
+          excludeWorkOrderId: exclude_work_order_id || undefined,
+        });
+        data = data.map(p => {
+          const inProcess = inProcessMap[p.id] || { sales: 0, work_orders: 0, total: 0 };
+          return {
+            ...p,
+            in_process_qty: inProcess.total,
+            in_process_sales: inProcess.sales,
+            in_process_work_orders: inProcess.work_orders,
+            available_real: parseFloat(p.current_stock || 0) - inProcess.total,
+          };
+        });
+      }
+    }
+
     res.json({ success: true, data, pagination: { total: count, page: safePage, limit: safeLimit, totalPages: Math.ceil(count / safeLimit) } });
   } catch (error) {
     console.error('Error en getAllProducts:', error);
@@ -270,7 +297,27 @@ const getProductById = async (req, res) => {
     }
     const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
-    res.json({ success: true, data: product });
+
+    // ── Cantidad en trámite (Sprint 3) ────────────────────────────────────
+    const tenantIdForInProcess = req.user.role === 'super_admin' ? product.tenant_id : req.user.tenant_id;
+    const { exclude_sale_id, exclude_work_order_id } = req.query;
+    let data = product.toJSON();
+    if (tenantIdForInProcess) {
+      const inProcessMap = await getInProcessMap(tenantIdForInProcess, [product.id], {
+        excludeSaleId: exclude_sale_id || undefined,
+        excludeWorkOrderId: exclude_work_order_id || undefined,
+      });
+      const inProcess = inProcessMap[product.id] || { sales: 0, work_orders: 0, total: 0 };
+      data = {
+        ...data,
+        in_process_qty: inProcess.total,
+        in_process_sales: inProcess.sales,
+        in_process_work_orders: inProcess.work_orders,
+        available_real: parseFloat(data.current_stock || 0) - inProcess.total,
+      };
+    }
+
+    res.json({ success: true, data });
   } catch (error) {
     console.error('Error en getProductById:', error);
     res.status(500).json({ success: false, message: 'Error al obtener producto' });
@@ -731,9 +778,113 @@ const deleteProductImage = async (req, res) => {
   }
 };
 
+// ── Documentos "en trámite" que comprometen este producto ─────────────────
+// GET /products/:id/in-process — lista de ventas en borrador y de ítems de
+// OT aprobados sin aplicar que comprometen este producto, para que el
+// usuario pueda navegar y cerrar esos documentos (ver services/inventory/
+// stockInProcess.service.js para la definición exacta de "en trámite").
+const getProductInProcess = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!req.user) return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
+
+    let productWhere = { id };
+    if (req.user.role !== 'super_admin') {
+      if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
+      productWhere.tenant_id = req.user.tenant_id;
+    }
+    const product = await Product.findOne({ where: productWhere });
+    if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    const tenantId = req.user.role === 'super_admin' ? product.tenant_id : req.user.tenant_id;
+    const { exclude_sale_id, exclude_work_order_id } = req.query;
+
+    const { Sale, SaleItem, WorkOrder, WorkOrderItem, Customer } = require('../../models');
+
+    // ── Ventas en borrador ───────────────────────────────────────────────
+    const saleItemWhere = {
+      product_id: id,
+      item_type: { [Op.notIn]: ['service', 'free_line'] },
+      approval_status: { [Op.ne]: 'rechazado' },
+    };
+    if (exclude_sale_id) saleItemWhere.sale_id = { [Op.ne]: exclude_sale_id };
+
+    const saleItems = await SaleItem.findAll({
+      where: saleItemWhere,
+      include: [{
+        model: Sale,
+        as: 'sale',
+        required: true,
+        where: { tenant_id: tenantId, status: 'draft', document_type: null },
+        attributes: ['id', 'sale_number', 'customer_name', 'status', 'sale_date', 'created_at'],
+      }],
+    });
+
+    const ventas = saleItems.map(item => ({
+      tipo: 'venta',
+      id: item.sale.id,
+      numero: item.sale.sale_number,
+      cliente: item.sale.customer_name,
+      cantidad: parseFloat(item.quantity),
+      estado: item.sale.status,
+      fecha: item.sale.sale_date || item.sale.created_at,
+    }));
+
+    // ── Ítems de OT aprobados, aún sin aplicar ────────────────────────────
+    const woItemWhere = {
+      product_id: id,
+      item_type: 'repuesto',
+      approval_status: 'aprobado',
+      inventory_movement_id: null,
+    };
+    if (exclude_work_order_id) woItemWhere.work_order_id = { [Op.ne]: exclude_work_order_id };
+
+    const woItems = await WorkOrderItem.findAll({
+      where: woItemWhere,
+      include: [{
+        model: WorkOrder,
+        as: 'work_order',
+        required: true,
+        where: {
+          tenant_id: tenantId,
+          status: { [Op.notIn]: ['cancelado', 'entregado'] },
+          sale_id: null,
+        },
+        attributes: ['id', 'order_number', 'status', 'created_at'],
+        include: [{ model: Customer, as: 'customer', attributes: ['first_name', 'last_name', 'business_name'] }],
+      }],
+    });
+
+    const workOrders = woItems.map(item => {
+      const wo = item.work_order;
+      const customer = wo.customer;
+      const clienteName = customer
+        ? (customer.business_name || `${customer.first_name || ''} ${customer.last_name || ''}`.trim())
+        : null;
+      return {
+        tipo: 'work_order',
+        id: wo.id,
+        numero: wo.order_number,
+        cliente: clienteName,
+        cantidad: parseFloat(item.quantity),
+        estado: wo.status,
+        fecha: wo.created_at,
+      };
+    });
+
+    const data = [...ventas, ...workOrders].sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error en getProductInProcess:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener documentos en trámite' });
+  }
+};
+
 module.exports = {
   getAllProducts,
   getProductById,
+  getProductInProcess,
   getProductSuppliers,
   createProduct,
   updateProduct,

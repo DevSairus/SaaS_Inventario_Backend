@@ -12,13 +12,13 @@ const {
 // Obtener todos los usuarios (admin)
 const getAllUsers = async (req, res) => {
   try {
-    const { page = 1, limit = 10, role, search, is_active } = req.query;
+    const { page = 1, limit = 10, role, search, is_active, has_system_access } = req.query;
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 10), 200);
     const safePage   = Math.max(1, parseInt(page) || 1);
 
     let where = {
-      role: { 
-        [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'] 
+      role: {
+        [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician']
       },
       // Por defecto mostrar solo activos; el frontend puede pedir todos con is_active=all
       is_active: true,
@@ -32,6 +32,14 @@ const getAllUsers = async (req, res) => {
       where.is_active = false;
     } else if (is_active === 'all') {
       delete where.is_active; // sin filtro → muestra todos
+    }
+
+    // Por defecto "all" (no romper los selectores de técnico de OT/venta/
+    // comisiones, que deben seguir listando a todos los técnicos activos).
+    if (has_system_access === 'true') {
+      where.has_system_access = true;
+    } else if (has_system_access === 'false') {
+      where.has_system_access = false;
     }
 
     if (search) {
@@ -246,6 +254,8 @@ const createUser = async (req, res) => {
       first_name,
       last_name,
       phone,
+      cedula,
+      has_system_access,
     } = req.body;
 
     // Validar rol (excluir super_admin que solo se crea desde backend)
@@ -257,31 +267,48 @@ const createUser = async (req, res) => {
       });
     }
 
-    // Verificar si el email ya existe — el email es único a nivel global
-    // (constraint de BD sobre toda la tabla users, no por tenant), así que
-    // el chequeo previo no puede ir scoped al tenant actual: si el email ya
-    // está en uso por OTRO tenant, un findOne con addTenantScope no lo ve, y
-    // el User.create de más abajo revienta con SequelizeUniqueConstraintError
-    // sin que el usuario reciba ningún mensaje claro.
-    const existingUser = await User.findOne({ where: { email } });
-    if (existingUser) {
-      return res.status(409).json({
+    // Técnico sin acceso al sistema: no tiene email ni contraseña, y su rol
+    // solo puede ser 'technician' (ver diseño en User.js / user.routes.js).
+    const grantsAccess = has_system_access !== false;
+
+    if (!grantsAccess && role && role !== 'technician') {
+      return res.status(400).json({
         success: false,
-        message: 'El email ya está registrado',
+        message: 'Un usuario sin acceso al sistema solo puede tener el rol Técnico',
       });
     }
 
-    // Hash de la contraseña
-    const hashedPassword = await bcrypt.hash(password, 12);
+    let hashedPassword = null;
+
+    if (grantsAccess) {
+      // Verificar si el email ya existe — el email es único a nivel global
+      // (constraint de BD sobre toda la tabla users, no por tenant), así que
+      // el chequeo previo no puede ir scoped al tenant actual: si el email ya
+      // está en uso por OTRO tenant, un findOne con addTenantScope no lo ve, y
+      // el User.create de más abajo revienta con SequelizeUniqueConstraintError
+      // sin que el usuario reciba ningún mensaje claro.
+      const existingUser = await User.findOne({ where: { email } });
+      if (existingUser) {
+        return res.status(409).json({
+          success: false,
+          message: 'El email ya está registrado',
+        });
+      }
+
+      // Hash de la contraseña
+      hashedPassword = await bcrypt.hash(password, 12);
+    }
 
     // Crear usuario con tenant_id
     let userData = {
-      email,
-      password_hash: hashedPassword,
-      role: role || 'user',
+      email: grantsAccess ? email : null,
+      password_hash: grantsAccess ? hashedPassword : null,
+      role: grantsAccess ? (role || 'user') : 'technician',
       first_name,
       last_name,
       phone,
+      cedula: cedula || null,
+      has_system_access: grantsAccess,
       is_active: true,
     };
 
@@ -400,7 +427,7 @@ const createClient = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { id } = req.params;
-    const { first_name, last_name, phone, address, stratum, cedula, is_active, role, password } =
+    const { first_name, last_name, phone, address, stratum, cedula, is_active, role, password, email, has_system_access } =
       req.body;
 
     let where = { id };
@@ -451,6 +478,43 @@ const updateUser = async (req, res) => {
       updateData.cedula = cedula;
     }
 
+    // Habilitar/revocar acceso al sistema (solo admin/super_admin) — un
+    // técnico sin acceso puede "habilitarse" (recibe email + password) y un
+    // usuario con acceso puede revocársele (queda sin password_hash).
+    if (['admin', 'super_admin'].includes(req.user.role) && has_system_access !== undefined) {
+      if (has_system_access === true && !user.has_system_access) {
+        if (!email || !password) {
+          return res.status(400).json({
+            success: false,
+            message: 'Para habilitar el acceso se requiere email y contraseña',
+          });
+        }
+        if (password.length < 8) {
+          return res.status(400).json({
+            success: false,
+            message: 'La contraseña debe tener al menos 8 caracteres',
+          });
+        }
+        // Email único a nivel global (ver nota en createUser).
+        const existingUser = await User.findOne({ where: { email: String(email).toLowerCase().trim() } });
+        if (existingUser && existingUser.id !== user.id) {
+          return res.status(409).json({
+            success: false,
+            message: 'El email ya está registrado',
+          });
+        }
+        updateData.email = email;
+        updateData.password_hash = await bcrypt.hash(password, 12);
+        updateData.has_system_access = true;
+      } else if (has_system_access === false && user.has_system_access) {
+        // Revocar acceso: anula el hash de contraseña. Los tokens ya
+        // emitidos siguen vigentes hasta que expiren (24h, limitación de
+        // authMiddleware que solo valida el JWT, no consulta la BD).
+        updateData.password_hash = null;
+        updateData.has_system_access = false;
+      }
+    }
+
     if (['admin', 'super_admin'].includes(req.user.role)) {
       if (is_active !== undefined) {
         updateData.is_active = is_active;
@@ -459,6 +523,15 @@ const updateUser = async (req, res) => {
         const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'];
         if (!validRoles.includes(role)) {
           return res.status(400).json({ success: false, message: `Rol inválido: ${role}` });
+        }
+        const willHaveAccess = updateData.has_system_access !== undefined
+          ? updateData.has_system_access
+          : user.has_system_access;
+        if (!willHaveAccess && role !== 'technician') {
+          return res.status(400).json({
+            success: false,
+            message: 'Un usuario sin acceso al sistema solo puede tener el rol Técnico',
+          });
         }
         updateData.role = role;
       }
@@ -475,6 +548,14 @@ const updateUser = async (req, res) => {
       data: { user: userResponse },
     });
   } catch (error) {
+    // Red de seguridad ante condición de carrera del findOne de arriba
+    // (dos "habilitar acceso" concurrentes con el mismo email).
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({
+        success: false,
+        message: 'El email ya está registrado',
+      });
+    }
     console.error('Error actualizando usuario:', error);
     res.status(500).json({
       success: false,
@@ -614,6 +695,24 @@ const deleteUser = async (req, res) => {
       });
     }
 
+    // Es un hard delete: si el usuario tiene historial como técnico (OT,
+    // ventas, comisiones), borrarlo le quitaría la atribución a esos
+    // registros (technician_id es ON DELETE SET NULL, y las comisiones ni
+    // siquiera eso). Se rechaza y se sugiere desactivar en su lugar.
+    const { WorkOrder, Sale, CommissionSettlement } = require('../models');
+    const [workOrderCount, saleCount, commissionCount] = await Promise.all([
+      WorkOrder.count({ where: { technician_id: id } }),
+      Sale.count({ where: { technician_id: id } }),
+      CommissionSettlement.count({ where: { technician_id: id } }),
+    ]);
+
+    if (workOrderCount > 0 || saleCount > 0 || commissionCount > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'No se puede eliminar: este usuario tiene órdenes de trabajo, ventas o comisiones asociadas. Desactívalo en su lugar.',
+      });
+    }
+
     // Hard delete — eliminar permanentemente de la BD
     await user.destroy();
 
@@ -666,9 +765,11 @@ const getLimitsStatus = async (req, res) => {
     }
 
     // Contar usuarios (admin + manager + seller + warehouse_keeper + user + viewer) - usando addTenantScope
+    // Técnicos sin acceso al sistema no cuentan para el límite del plan (D2).
     let usersWhere = {
       role: { [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician'] },
       is_active: true,
+      has_system_access: true,
     };
     usersWhere = addTenantScope(usersWhere, req);
 

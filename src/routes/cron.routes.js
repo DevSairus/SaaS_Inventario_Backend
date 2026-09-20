@@ -62,6 +62,23 @@ router.get('/vehicle-reminders', cronAuth, async (req, res) => {
 });
 
 /**
+ * GET /api/cron/radian-deadlines
+ * Genera/resuelve avisos de plazo RADIAN (031/033 por vencer/vencido en
+ * Compras; 034 disponible en Ventas). Corre solo vía scheduler.js 2 veces
+ * al día -- NUNCA emite eventos, solo avisa (ver radianDeadlinesJob.js).
+ */
+router.get('/radian-deadlines', cronAuth, async (req, res) => {
+  try {
+    const { runRadianDeadlinesJob } = require('../services/radian/radianDeadlinesJob');
+    const result = await runRadianDeadlinesJob();
+    res.json({ success: true, message: 'Avisos RADIAN procesados', result, timestamp: new Date().toISOString() });
+  } catch (error) {
+    console.error('❌ [CRON] Error en radian-deadlines:', error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+/**
  * GET /api/cron/ncf-sync
  * Sincronización de facturación centralizada con el Núcleo NCF (ESC DataCore).
  * Genera la prefactura de cada tenant con NCF_ANTICIPATION_DAYS (7 por

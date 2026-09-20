@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   getAllProducts,
   getProductById,
+  getProductInProcess,
   getProductSuppliers,
   createProduct,
   updateProduct,
@@ -77,6 +78,9 @@ router.delete('/:id', deleteProductPermanently);
 
 // Proveedores por producto (para stock alerts)
 router.get('/:id/suppliers', getProductSuppliers);
+
+// Cantidad en trámite: documentos (ventas en borrador / OT) que comprometen este producto
+router.get('/:id/in-process', getProductInProcess);
 
 // Equivalencias por producto
 router.get('/:id/equivalents', getProductEquivalents);

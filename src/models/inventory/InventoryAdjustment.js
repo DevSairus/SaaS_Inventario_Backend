@@ -66,6 +66,11 @@ const InventoryAdjustment = sequelize.define('InventoryAdjustment', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  physical_count_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Sesión de conteo físico que generó este ajuste (entrada o salida), si aplica'
+  },
   created_at: {
     type: DataTypes.DATE,
     defaultValue: DataTypes.NOW

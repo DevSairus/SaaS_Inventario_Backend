@@ -6,8 +6,8 @@
 // un seller ve sus propios números, manager/admin ven el consolidado.
 const logger = require('../../config/logger');
 const { Op, fn, col } = require('sequelize');
-const { Opportunity, Customer, FollowUpTask, User, CustomerInteraction } = require('../../models');
-const { applyOwnershipScope } = require('../../utils/crmScope');
+const { Opportunity, Customer, FollowUpTask, User, CustomerInteraction, CrmGoalProgress, CrmGoal, CrmGamificationSettings, Branch } = require('../../models');
+const { applyOwnershipScope, sellersInManagerBranches, SCOPE_BYPASS_ROLES } = require('../../utils/crmScope');
 const { loadStageMap, keysByType, resolveEntryStageKey } = require('../../utils/crmPipelineStages');
 
 const customerLabel = c => {
@@ -248,6 +248,76 @@ const getDashboard = async (req, res) => {
 // asesor dueño de la oportunidad, no necesariamente a quien arrastró la
 // tarjeta (ej. un manager moviendo la oportunidad de un vendedor). Es una
 // aproximación razonable, no una bitácora de auditoría.
+// Gamificación §5.2 — "el hito también aparece brevemente en el feed de
+// actividad del equipo" cuando board_visibility lo permite. Se apoya en
+// CrmGoalProgress (misma caché que ya escribe crmGamificationService en
+// cada evento en tiempo real) filtrando por las filas cuyo
+// last_milestone_reached se actualizó dentro de la ventana del feed — no
+// se crea una tabla de eventos nueva, mismo criterio que el resto de B.5.
+// Con board_visibility = 'own_only' no se agrega nada (cada quien ve su
+// propio camino en el widget, no hace falta duplicarlo en el feed).
+async function loadGoalMilestoneActivity(tenant_id, req, since, limit) {
+  const settings = await CrmGamificationSettings.findOne({ where: { tenant_id } });
+  const boardVisibility = settings?.board_visibility || 'own_only';
+  if (!settings?.enabled || boardVisibility === 'own_only') return [];
+
+  const rows = await CrmGoalProgress.findAll({
+    where: { tenant_id, last_milestone_reached: { [Op.ne]: null }, updated_at: { [Op.gte]: since } },
+    include: [{ model: CrmGoal, as: 'goal' }],
+    order: [['updated_at', 'DESC']],
+    limit,
+  });
+  if (!rows.length) return [];
+
+  // Visibilidad 'team': un manager solo ve los hitos de metas individuales
+  // de su(s) sede(s) (mismo patrón que resolveVisibleTargets en
+  // goals.controller.js); metas de sede/tenant no dependen de un vendedor
+  // puntual, así que se muestran igual que en 'all'.
+  const role = req.user?.role;
+  const bypass = SCOPE_BYPASS_ROLES.includes(role);
+  let allowedUserIds = null;
+  if (boardVisibility === 'team' && !bypass && role === 'manager') {
+    allowedUserIds = new Set(await sellersInManagerBranches(tenant_id, req.user.id));
+  }
+
+  const visibleRows = rows.filter(r => {
+    if (r.goal.scope !== 'individual' || !allowedUserIds) return true;
+    return allowedUserIds.has(r.target_id);
+  });
+  if (!visibleRows.length) return [];
+
+  // Nombres en lote — misma idea que attachTargetLabels en goals.controller.js.
+  const userIds = visibleRows.filter(r => r.goal.scope === 'individual').map(r => r.target_id);
+  const branchIds = visibleRows.filter(r => r.goal.scope === 'branch').map(r => r.target_id);
+  const [users, branches] = await Promise.all([
+    userIds.length ? User.findAll({ where: { id: { [Op.in]: userIds } }, attributes: ['id', 'first_name', 'last_name'] }) : [],
+    branchIds.length ? Branch.findAll({ where: { id: { [Op.in]: branchIds } }, attributes: ['id', 'name'] }) : [],
+  ]);
+  const userMap = Object.fromEntries(users.map(u => [u.id, advisorLabel(u)]));
+  const branchMap = Object.fromEntries(branches.map(b => [b.id, b.name]));
+
+  return visibleRows
+    .map(row => {
+      const goal = row.goal;
+      const milestone = (goal.milestones || [])[row.last_milestone_reached];
+      if (!milestone) return null;
+      const actor = goal.scope === 'individual' ? (userMap[row.target_id] || 'Alguien')
+        : goal.scope === 'branch' ? (branchMap[row.target_id] || 'Una sede')
+        : 'El equipo'; // scope 'tenant': meta colectiva, sin nombre de persona puntual
+      return {
+        type: 'goal_milestone_reached',
+        at: row.updated_at,
+        customer: null,
+        customer_id: null,
+        actor,
+        goal_name: goal.name,
+        milestone_percent: milestone.percent,
+        milestone_message: milestone.message,
+      };
+    })
+    .filter(Boolean);
+}
+
 const getActivityFeed = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
@@ -261,7 +331,7 @@ const getActivityFeed = async (req, res) => {
     const taskWhere = await applyOwnershipScope(req, { tenant_id }, 'assigned_to_user_id');
     const interactionWhere = await applyOwnershipScope(req, { tenant_id }, 'user_id');
 
-    const [createdOpps, movedOpps, completedTasks, interactions] = await Promise.all([
+    const [createdOpps, movedOpps, completedTasks, interactions, goalMilestones] = await Promise.all([
       Opportunity.findAll({
         where: { ...oppWhere, created_at: { [Op.gte]: since } },
         include: [
@@ -298,6 +368,7 @@ const getActivityFeed = async (req, res) => {
         order: [['created_at', 'DESC']],
         limit,
       }),
+      loadGoalMilestoneActivity(tenant_id, req, since, limit).catch(() => []),
     ]);
 
     // Evita el evento redundante "se movió" para una oportunidad que ya
@@ -341,6 +412,7 @@ const getActivityFeed = async (req, res) => {
         actor: advisorLabel(i.user) || 'Sistema',
         interaction_type: i.type,
       })),
+      ...goalMilestones,
     ]
       .sort((a, b) => new Date(b.at) - new Date(a.at))
       .slice(0, limit);

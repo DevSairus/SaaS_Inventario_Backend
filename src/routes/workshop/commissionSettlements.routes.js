@@ -12,5 +12,6 @@ router.post('/products',       ctrl.createProductSettlement);   // liquidar prod
 router.get('/', ctrl.list);
 router.get('/:id', ctrl.getById);
 router.post('/', ctrl.create);
+router.post('/:id/retry-payroll', ctrl.retryPayroll);
 
 module.exports = router;

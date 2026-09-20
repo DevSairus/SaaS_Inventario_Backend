@@ -12,8 +12,11 @@ const {
   SaleItem,
   User,
   Expense,
+  CommissionCategory,
+  Employee,
 } = require('../../models');
 const { generateExpenseNumber } = require('../finance/expenses.controller');
+const { getOrCreateDefaultCategory, getEffectivePercentage } = require('../../services/workshop/commissionCategory.service');
 const logger = require('../../config/logger');
 
 // Tipos de ítem que cuentan como mano de obra (servicios)
@@ -261,6 +264,60 @@ function calcAmountsFromOrder(order) {
   return { labor_amount, product_amount, total_amount: labor_amount + product_amount };
 }
 
+// ── Desglose de mano de obra por categoría de comisión ───────────────────────
+// Devuelve Map<commission_category_id|null, monto>. La clave `null` agrupa
+// ítems legados sin categoría (creados antes de esta funcionalidad) o mano de
+// obra de ventas directas (SaleItem no tiene commission_category_id) -- esos
+// montos se liquidan bajo la categoría "Otros" del tenant (ver
+// resolveSettlementCategoryBuckets).
+function calcLaborByCategory(items) {
+  const map = new Map();
+  for (const item of (items || [])) {
+    if (!SERVICE_TYPES.includes(item.item_type)) continue;
+    const total = parseFloat(item.total || 0);
+    if (total <= 0) continue;
+    const key = item.commission_category_id || null;
+    map.set(key, (map.get(key) || 0) + total);
+  }
+  return map;
+}
+
+function mergeCategoryMaps(target, source) {
+  for (const [key, amount] of source.entries()) {
+    target.set(key, (target.get(key) || 0) + amount);
+  }
+  return target;
+}
+
+// Para un Map<commission_category_id|null, monto> agregado, resuelve cada
+// bucket a su CommissionCategory real (creando "Otros" si hace falta para el
+// bucket `null`) y calcula el % efectivo para ese técnico.
+async function resolveSettlementCategoryBuckets(tenant_id, technician_id, categoryAmounts, transaction) {
+  const breakdown = [];
+  for (const [rawCategoryId, base_amount] of categoryAmounts.entries()) {
+    if (base_amount <= 0) continue;
+    let commission_category_id = rawCategoryId;
+    let category = null;
+    if (commission_category_id) {
+      category = await CommissionCategory.findOne({ where: { id: commission_category_id, tenant_id }, transaction });
+    }
+    if (!category) {
+      category = await getOrCreateDefaultCategory(tenant_id, transaction);
+      commission_category_id = category.id;
+    }
+    const percentage = await getEffectivePercentage(tenant_id, technician_id, commission_category_id, transaction);
+    const commission_amount = Math.round(base_amount * percentage / 100);
+    breakdown.push({
+      commission_category_id,
+      name: category.name,
+      base_amount,
+      percentage,
+      commission_amount,
+    });
+  }
+  return breakdown;
+}
+
 // ── INFORME DE COMISIONES POR PRODUCTOS (sin liquidar) ───────────────────────
 const productCommissionReport = async (req, res) => {
   try {
@@ -327,7 +384,7 @@ const productCommissionReport = async (req, res) => {
 const preview = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { technician_id, date_from, date_to, commission_percentage } = req.query;
+    const { technician_id, date_from, date_to } = req.query;
     if (!technician_id)
       return res.status(400).json({ success: false, message: 'El técnico es requerido' });
 
@@ -340,7 +397,7 @@ const preview = async (req, res) => {
     }
     const orders = await WorkOrder.findAll({
       where: woWhere,
-      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total'] }],
+      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total', 'commission_category_id'] }],
       order: [['received_at', 'DESC']],
     });
 
@@ -359,12 +416,22 @@ const preview = async (req, res) => {
         .filter(s => s.labor_amount > 0),
     ];
 
-    const base_amount = items.reduce((s, i) => s + i.labor_amount, 0);
-    const pct = parseFloat(commission_percentage) || 0;
+    // Desglose por categoría de comisión (Frenos, Suspensión, Otros...) —
+    // reemplaza el % único plano por el % efectivo de cada categoría
+    // (override del técnico > % de la categoría), ver sección 4.5 del plan.
+    const categoryAmounts = new Map();
+    for (const order of orders) mergeCategoryMaps(categoryAmounts, calcLaborByCategory(order.items));
+    for (const sale of directSales) mergeCategoryMaps(categoryAmounts, calcLaborByCategory(sale.items));
+    const categories = await resolveSettlementCategoryBuckets(tenant_id, technician_id, categoryAmounts);
+
+    const base_amount = categories.reduce((s, c) => s + c.base_amount, 0);
+    const commission_amount = categories.reduce((s, c) => s + c.commission_amount, 0);
 
     res.json({ success: true, data: {
-      technician_id, date_from, date_to, commission_percentage: pct,
-      base_amount, commission_amount: Math.round(base_amount * pct / 100),
+      technician_id, date_from, date_to,
+      base_amount, commission_amount,
+      commission_percentage: base_amount > 0 ? Math.round((commission_amount / base_amount) * 10000) / 100 : 0,
+      categories,
       orders: items, total_orders: items.length,
     }});
   } catch (error) {
@@ -378,10 +445,10 @@ const create = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
     const tenant_id = req.user.tenant_id;
-    const { technician_id, date_from, date_to, commission_percentage, notes } = req.body;
-    if (!technician_id || !commission_percentage) {
+    const { technician_id, date_from, date_to, notes } = req.body;
+    if (!technician_id) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Técnico y porcentaje son requeridos' });
+      return res.status(400).json({ success: false, message: 'El técnico es requerido' });
     }
 
     const technician = await User.findOne({ where: { id: technician_id, tenant_id }, transaction });
@@ -396,7 +463,7 @@ const create = async (req, res) => {
     }
     const orders = await WorkOrder.findAll({
       where: woWhere,
-      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total'] }],
+      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total', 'commission_category_id'] }],
       transaction,
     });
 
@@ -414,24 +481,61 @@ const create = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No hay mano de obra pendiente de liquidar en el período' });
     }
 
-    const base_amount = [...eligibleOrders.map(e => e.labor), ...eligibleSales.map(e => e.labor)].reduce((s, v) => s + v, 0);
-    const pct = parseFloat(commission_percentage);
-    const commission_amount = Math.round(base_amount * pct / 100);
     const settlement_number = await generateSettlementNumber(tenant_id, transaction);
+
+    // Snapshot congelado AL LIQUIDAR: por cada OT/venta elegible se resuelve
+    // su propio desglose por categoría y el % efectivo vigente en este
+    // instante (no el de cuando se agregó el ítem) — ver sección 5, punto 2.
+    let base_amount = 0;
+    let commission_amount = 0;
+    const settlementItemsData = [];
+
+    for (const { order } of eligibleOrders) {
+      const breakdown = await resolveSettlementCategoryBuckets(tenant_id, technician_id, calcLaborByCategory(order.items), transaction);
+      for (const row of breakdown) {
+        settlementItemsData.push({ work_order_id: order.id, order_number: order.order_number, sale_id: null, sale_number: null, ...row });
+        base_amount += row.base_amount;
+        commission_amount += row.commission_amount;
+      }
+    }
+    for (const { sale } of eligibleSales) {
+      const breakdown = await resolveSettlementCategoryBuckets(tenant_id, technician_id, calcLaborByCategory(sale.items), transaction);
+      for (const row of breakdown) {
+        settlementItemsData.push({ work_order_id: null, order_number: null, sale_id: sale.id, sale_number: sale.sale_number, ...row });
+        base_amount += row.base_amount;
+        commission_amount += row.commission_amount;
+      }
+    }
+
+    // % efectivo promedio ponderado — queda a nivel de settlement solo como
+    // dato informativo/compatibilidad con reportes viejos que lo leen; la
+    // fuente de verdad ahora es CommissionSettlementItem.commission_percentage.
+    const effective_percentage = base_amount > 0 ? Math.round((commission_amount / base_amount) * 10000) / 100 : 0;
 
     const settlement = await CommissionSettlement.create({
       tenant_id, settlement_number, technician_id,
       date_from: date_from || null, date_to: date_to || null,
-      commission_percentage: pct, base_amount, commission_amount,
+      commission_percentage: effective_percentage, base_amount, commission_amount,
       notes: notes || null, created_by: req.user.id,
     }, { transaction });
 
-    for (const { order, labor } of eligibleOrders) {
-      await CommissionSettlementItem.create({ settlement_id: settlement.id, work_order_id: order.id, order_number: order.order_number, labor_amount: labor }, { transaction });
+    for (const row of settlementItemsData) {
+      await CommissionSettlementItem.create({
+        settlement_id: settlement.id,
+        work_order_id: row.work_order_id,
+        order_number: row.order_number,
+        sale_id: row.sale_id,
+        sale_number: row.sale_number,
+        labor_amount: row.base_amount,
+        commission_category_id: row.commission_category_id,
+        commission_percentage: row.percentage,
+        commission_amount: row.commission_amount,
+      }, { transaction });
+    }
+    for (const { order } of eligibleOrders) {
       await WorkOrder.update({ settled_at: new Date(), settlement_id: settlement.id }, { where: { id: order.id }, transaction });
     }
-    for (const { sale, labor } of eligibleSales) {
-      await CommissionSettlementItem.create({ settlement_id: settlement.id, sale_id: sale.id, sale_number: sale.sale_number, labor_amount: labor }, { transaction });
+    for (const { sale } of eligibleSales) {
       await Sale.update({ labor_settled_at: new Date(), labor_settlement_id: settlement.id }, { where: { id: sale.id }, transaction });
     }
 
@@ -441,13 +545,35 @@ const create = async (req, res) => {
       entity: 'settlement', entity_id: String(Date.now()),
       changes: { technician_id }, req }));
 
+    // Cruce con nómina (categoría DIAN "Comisiones"), si el tenant tiene el
+    // módulo habilitado y el técnico tiene un empleado de nómina vinculado
+    // (por email/documento) -- ver commissionPayroll.service.js. Se intenta
+    // ANTES del gasto operativo de abajo: si la comisión ya queda cargada
+    // como devengado formal de nómina, el Expense/asiento de
+    // "comisiones_tecnicos" se omite para no contarla dos veces.
+    let payrollStatus = 'not_applicable';
+    if (commission_amount > 0) {
+      try {
+        const { chargeCommissionToPayroll } = require('../../services/workshop/commissionPayroll.service');
+        payrollStatus = await chargeCommissionToPayroll(settlement, technician);
+      } catch (err) {
+        logger.warn(`[payroll] Error cargando comisión a nómina ${settlement.id}: ${err.message}`);
+      }
+    }
+
     // Gasto operativo automático por la comisión pagada -- cierra el loop
     // financiero: antes de esto, el costo de mano de obra liquidado quedaba
     // aislado del motor de gastos/contabilidad (ver plan de rentabilidad).
     // Se crea DESPUÉS del commit del settlement (no en la misma transacción):
     // si esto falla, el settlement ya quedó registrado -- solo se loguea, no
     // se bloquea el pago real al técnico. Se reconcilia manualmente si hace falta.
-    if (commission_amount > 0) {
+    // Se omite si la comisión ya se cargó a nómina (payrollStatus ===
+    // 'cargada_nomina'): ahí el asiento correcto es el de la emisión de
+    // nómina, no un Expense operativo aparte -- sumar los dos duplicaría el
+    // costo de mano de obra (mismo criterio ya documentado en
+    // reports.controller.js para excluir 'comisiones_tecnicos' de
+    // operating_expenses).
+    if (commission_amount > 0 && payrollStatus !== 'cargada_nomina') {
       try {
         const expenseNumber = await generateExpenseNumber(tenant_id);
         const expense = await Expense.create({
@@ -479,6 +605,7 @@ const create = async (req, res) => {
       include: [
         { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
         { model: CommissionSettlementItem, as: 'items' },
+        { model: Employee, as: 'employee', attributes: ['id', 'first_name', 'first_surname'], required: false },
       ],
     });
     res.status(201).json({ success: true, message: 'Liquidación creada correctamente', data: full });
@@ -529,9 +656,13 @@ const getById = async (req, res) => {
       include: [
         { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name', 'phone'] },
         { model: User, as: 'creator_cs', attributes: ['id', 'first_name', 'last_name'] },
+        { model: Employee, as: 'employee', attributes: ['id', 'first_name', 'first_surname'], required: false },
         {
           model: CommissionSettlementItem, as: 'items',
-          include: [{ model: WorkOrder, as: 'work_order', attributes: ['id', 'order_number', 'received_at', 'status'] }],
+          include: [
+            { model: WorkOrder, as: 'work_order', attributes: ['id', 'order_number', 'received_at', 'status'] },
+            { model: CommissionCategory, as: 'commission_category', attributes: ['id', 'name', 'code'] },
+          ],
         },
       ],
     });
@@ -540,6 +671,44 @@ const getById = async (req, res) => {
   } catch (error) {
     logger.error('Error obteniendo liquidación:', error);
     res.status(500).json({ success: false, message: 'Error al obtener la liquidación' });
+  }
+};
+
+// ── RETRY PAYROLL (reintento manual del cruce con nómina) ─────────────────────
+// Útil cuando la liquidación quedó en 'sin_empleado_vinculado' (el admin
+// corrigió el email/documento después) o 'pendiente_periodo' (ya se abrió el
+// período de nómina) -- ver commissionPayroll.service.js.
+const retryPayroll = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const settlement = await CommissionSettlement.findOne({ where: { id: req.params.id, tenant_id } });
+    if (!settlement) return res.status(404).json({ success: false, message: 'Liquidación no encontrada' });
+    if (settlement.payroll_novedad_id) {
+      return res.status(400).json({ success: false, message: 'Esta liquidación ya está cargada a nómina' });
+    }
+
+    const technician = await User.findOne({ where: { id: settlement.technician_id, tenant_id }, attributes: ['id', 'first_name', 'last_name', 'email', 'cedula'] });
+    if (!technician) return res.status(404).json({ success: false, message: 'Técnico no encontrado' });
+
+    // Si antes no encontró empleado, se limpia employee_id para forzar un
+    // nuevo intento de emparejamiento por email/documento (no solo reintentar
+    // con el mismo employee_id nulo).
+    if (settlement.payroll_status === 'sin_empleado_vinculado') {
+      await settlement.update({ employee_id: null });
+    }
+
+    const { chargeCommissionToPayroll } = require('../../services/workshop/commissionPayroll.service');
+    const status = await chargeCommissionToPayroll(settlement, technician);
+    await settlement.reload();
+
+    res.json({
+      success: true,
+      message: status === 'cargada_nomina' ? 'Liquidación cargada a nómina' : 'No se pudo cargar todavía',
+      data: { id: settlement.id, payroll_status: settlement.payroll_status, payroll_error: settlement.payroll_error },
+    });
+  } catch (error) {
+    logger.error('Error reintentando cruce con nómina:', error);
+    res.status(500).json({ success: false, message: 'Error al reintentar el cruce con nómina' });
   }
 };
 
@@ -739,4 +908,4 @@ const getProductSettlementById = async (req, res) => {
   }
 };
 
-module.exports = { preview, create, list, getById, getTechnicians, productCommissionReport, productPreview, createProductSettlement, listProductSettlements, getProductSettlementById };
+module.exports = { preview, create, list, getById, getTechnicians, retryPayroll, productCommissionReport, productPreview, createProductSettlement, listProductSettlements, getProductSettlementById };

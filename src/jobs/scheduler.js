@@ -27,12 +27,38 @@ const JOBS = [
     },
   },
   {
+    name: 'radian-deadlines',
+    // Dos veces al día -- el plazo de 3 días hábiles se cuenta desde el
+    // 032, así que una sola corrida diaria a las 8am podía dejar hasta 20
+    // horas sin aviso de "por vencer" (ventana de 24h, ver
+    // radianDeadlinesJob.js) si el 032 se aceptó ya entrada la tarde.
+    schedule: '0 8,16 * * *',
+    run: async () => {
+      const { runRadianDeadlinesJob } = require('../services/radian/radianDeadlinesJob');
+      return runRadianDeadlinesJob();
+    },
+  },
+  {
     name: 'crm-lifecycle',
     schedule: '30 5 * * *', // 5:30am hora Colombia — antes de que arranque operación
     run: async () => {
       const { runCrmLifecycleJob } = require('../services/crmLifecycleService');
       const result = await runCrmLifecycleJob();
       return [result]; // envuelto en array para que el log de "elementos" del scheduler tenga sentido
+    },
+  },
+  {
+    name: 'crm-rewards',
+    // 6:00am, media hora después de crm-lifecycle: para entonces el
+    // progreso del período ya cerrado está consolidado. Corre a diario
+    // (no solo el día 1) porque las metas semanales, mensuales y de
+    // campaña cierran en fechas distintas, y porque también reintenta
+    // las recompensas que esperaban un período de nómina abierto.
+    schedule: '0 6 * * *',
+    run: async () => {
+      const { runCrmRewardsJob } = require('../services/crmRewardService');
+      const result = await runCrmRewardsJob();
+      return [result];
     },
   },
   {
@@ -90,6 +116,30 @@ const JOBS = [
       const { checkAllAdvanceAlerts } = require('../middleware/autoCheckAdvanceAlerts.middleware');
       const result = await checkAllAdvanceAlerts();
       return [result]; // envuelto en array para que el log de "elementos" del scheduler tenga sentido
+    },
+  },
+  {
+    name: 'fixed-asset-depreciation',
+    // Día 1 de cada mes, 4:00am hora Colombia -- corre DESPUÉS de que el mes
+    // anterior ya cerró por completo, así se deprecia en firme (ver
+    // fixedAssetDepreciation.service.js: procesa lastClosedPeriod(), no el
+    // mes en curso). Naturalmente hace catch-up si el job se saltó algún mes.
+    schedule: '0 4 1 * *',
+    run: async () => {
+      const { runMonthlyDepreciationAllTenants } = require('../services/accounting/fixedAssetDepreciation.service');
+      return runMonthlyDepreciationAllTenants();
+    },
+  },
+  {
+    name: 'loan-installments-overdue-check',
+    // Diario, 5:00am hora Colombia -- marca 'vencida' cualquier cuota
+    // 'pendiente' cuyo due_date ya pasó. Solo actualiza el status; no
+    // genera ningún asiento (el asiento del pago solo se genera cuando de
+    // verdad se paga, vía registerPayment).
+    schedule: '0 5 * * *',
+    run: async () => {
+      const { flagOverdueInstallments } = require('../services/accounting/loanAmortization.service');
+      return flagOverdueInstallments();
     },
   },
   {

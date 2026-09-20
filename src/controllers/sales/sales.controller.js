@@ -13,6 +13,7 @@ const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
 // que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
@@ -566,10 +567,31 @@ const create = async (req, res) => {
       ],
     });
 
+    // ── Advertencia (NO bloqueante) de "cantidad en trámite" ──────────────
+    // La venta recién creada queda en 'draft' con document_type null (se
+    // asigna al confirmar), así que ya cuenta como "en trámite" para sí
+    // misma -- se excluye con excludeSaleId. No bloquea la respuesta 201.
+    let stockWarnings = [];
+    try {
+      const warningRequests = saleItems
+        .filter(i => i.item_type === 'product' && i.product_id)
+        .map(i => ({
+          product_id: i.product_id,
+          product_name: i.product_name,
+          quantity: i.quantity,
+          current_stock: parseFloat(productMap[i.product_id]?.current_stock || 0),
+          track_inventory: productMap[i.product_id]?.track_inventory,
+        }));
+      stockWarnings = await buildStockWarnings(tenantId, warningRequests, { excludeSaleId: sale.id });
+    } catch (warnError) {
+      logger.warn('No se pudo calcular advertencia de cantidad en trámite:', warnError.message);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Venta creada exitosamente',
-      data: completeSale
+      data: completeSale,
+      ...(stockWarnings.length > 0 ? { warnings: stockWarnings } : {}),
     });
 
   } catch (error) {
@@ -670,6 +692,7 @@ const update = async (req, res) => {
     }
 
     let lineItemsTotal; // total pre-descuento-global -- solo se resuelve si cambian ítems o el descuento
+    let stockWarnings = [];
 
     if (items && Array.isArray(items) && items.length > 0) {
       await SaleItem.destroy({ where: { sale_id: id }, transaction });
@@ -743,6 +766,24 @@ const update = async (req, res) => {
       updateData.subtotal        = subtotal;
       updateData.tax_amount      = tax_amount;
       updateData.discount_amount = discount_amount;
+
+      // Advertencia (NO bloqueante) de "cantidad en trámite" — excluye esta
+      // misma venta (excludeSaleId) para que sus propios ítems recién
+      // reemplazados no se cuenten a sí mismos.
+      try {
+        const warningRequests = newItems
+          .filter(i => i.item_type === 'product' && i.product_id)
+          .map(i => ({
+            product_id: i.product_id,
+            product_name: i.product_name,
+            quantity: i.quantity,
+            current_stock: parseFloat(productMap[i.product_id]?.current_stock || 0),
+            track_inventory: productMap[i.product_id]?.track_inventory,
+          }));
+        stockWarnings = await buildStockWarnings(tenantId, warningRequests, { excludeSaleId: id });
+      } catch (warnError) {
+        logger.warn('No se pudo calcular advertencia de cantidad en trámite:', warnError.message);
+      }
     } else if (discountFieldsChanged) {
       // Ítems no cambiaron pero sí el descuento global -- reconstruir el
       // total pre-descuento-global desde lo ya persistido (total_amount
@@ -765,7 +806,12 @@ const update = async (req, res) => {
       include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
 
-    res.json({ success: true, message: 'Venta actualizada exitosamente', data: updatedSale });
+    res.json({
+      success: true,
+      message: 'Venta actualizada exitosamente',
+      data: updatedSale,
+      ...(stockWarnings.length > 0 ? { warnings: stockWarnings } : {}),
+    });
 
   } catch (error) {
     await transaction.rollback();

@@ -40,10 +40,14 @@ router.post(
   checkRole('admin', 'super_admin'),
   checkLimits('users'),
   [
+    // Técnico sin acceso al sistema (has_system_access === false): no tiene
+    // email ni contraseña, así que esos campos dejan de ser obligatorios.
     body('email')
+      .if((value, { req }) => req.body.has_system_access !== false)
       .isEmail().withMessage('Ingresa un correo electrónico válido')
       .normalizeEmail(),
     body('password')
+      .if((value, { req }) => req.body.has_system_access !== false)
       .isLength({ min: 8 }).withMessage('Mínimo 8 caracteres')
       .matches(/[A-Z]/).withMessage('Debe contener al menos una letra mayúscula (A-Z)')
       .matches(/[0-9]/).withMessage('Debe contener al menos un número (0-9)'),
@@ -54,9 +58,19 @@ router.post(
     body('role')
       .isIn(['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'])
       .withMessage('Selecciona un rol válido'),
+    body('role')
+      .if((value, { req }) => req.body.has_system_access === false)
+      .equals('technician').withMessage('Un usuario sin acceso al sistema solo puede tener el rol Técnico'),
     body('phone')
       .optional({ checkFalsy: true })
       .isMobilePhone().withMessage('Número de teléfono inválido'),
+    body('cedula')
+      .optional({ checkFalsy: true })
+      .isString(),
+    body('has_system_access')
+      .optional()
+      .isBoolean().withMessage('has_system_access debe ser true o false')
+      .toBoolean(),
   ],
   validate,
   userController.createUser

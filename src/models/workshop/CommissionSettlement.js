@@ -56,6 +56,27 @@ const CommissionSettlement = sequelize.define('CommissionSettlement', {
     type: DataTypes.UUID,
     allowNull: true,
   },
+  // Cruce automático con nómina (categoría DIAN "Comisiones"), calcado del
+  // mismo patrón usado por CrmReward -- ver
+  // services/workshop/commissionPayroll.service.js.
+  employee_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
+  payroll_novedad_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
+  payroll_status: {
+    type: DataTypes.STRING(30),
+    allowNull: false,
+    defaultValue: 'not_applicable',
+    validate: { isIn: [['not_applicable', 'sin_empleado_vinculado', 'pendiente_periodo', 'cargada_nomina']] },
+  },
+  payroll_error: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  },
 }, {
   tableName: 'commission_settlements',
   timestamps: true,

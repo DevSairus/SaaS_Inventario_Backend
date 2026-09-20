@@ -4,13 +4,20 @@ const { sequelize } = require('../../config/database');
 const {
   WorkOrder, WorkOrderItem, WorkOrderQuoteRequest, Vehicle, Customer, User,
   Warehouse, Product, InventoryMovement, Sale, SaleItem,
-  DiagramTemplate, WorkOrderDiagnosisMark,
+  DiagramTemplate, WorkOrderDiagnosisMark, CommissionCategory,
 } = require('../../models');
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
 const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/branchFilter');
+const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
+const { resolveCategoryForProduct, resolveCategoryForDiagramSystem } = require('../../services/workshop/commissionCategory.service');
+
+// Tipos de ítem que cuentan como mano de obra para comisión (ver
+// commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
+// commission_category_id al crearse (sección 5, punto 3 del plan).
+const COMMISSION_ITEM_TYPES = ['servicio', 'mano_obra'];
 
 // Los endpoints PÚBLICOS (sin autenticación: getPublicOrder, respondQuoteRequest)
 // no tienen tenantMiddleware -- nadie les setea el schema del tenant antes de
@@ -54,6 +61,11 @@ const WO_SAFE_ATTRS = [
 // Include para cargar el técnico responsable de cada ítem
 const ITEM_TECHNICIAN_INCLUDE = {
   model: User, as: 'item_technician', attributes: ['id', 'first_name', 'last_name'], required: false,
+};
+
+// Include para el chip "Categoría · %" en la OT (ver WorkOrderDetailPage.jsx)
+const ITEM_COMMISSION_CATEGORY_INCLUDE = {
+  model: CommissionCategory, as: 'commission_category', attributes: ['id', 'name', 'default_percentage'], required: false,
 };
 
 async function generateOrderNumber(tenant_id, transaction) {
@@ -132,7 +144,14 @@ async function applyItemStockMovement(item, order, product, tenant_id, user_id, 
 
   const movement_number = await generateMovementNumber(tenant_id, transaction);
 
-  await product.update({ current_stock: new_stock }, { transaction });
+  // Este movimiento no pasa por createMovement (movements.controller.js) --
+  // sincronizar available_stock acá también, igual que se hizo ahí (H3),
+  // para que el descuento al agregar un repuesto a la OT no deje el campo
+  // desincronizado.
+  await product.update({
+    current_stock: new_stock,
+    available_stock: new_stock - parseFloat(product.reserved_stock || 0)
+  }, { transaction });
 
   const movement = await InventoryMovement.create({
     tenant_id,
@@ -254,6 +273,7 @@ const getById = async (req, res) => {
           include: [
             { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'current_stock', 'product_type'] },
             ITEM_TECHNICIAN_INCLUDE,
+            ITEM_COMMISSION_CATEGORY_INCLUDE,
           ],
         },
         {
@@ -697,7 +717,10 @@ const changeStatus = async (req, res) => {
         const prevStock = parseFloat(product.current_stock) || 0;
         const newStock  = prevStock + qty;
 
-        await product.update({ current_stock: newStock }, { transaction });
+        await product.update({
+          current_stock: newStock,
+          available_stock: newStock - parseFloat(product.reserved_stock || 0)
+        }, { transaction });
 
         // Eliminar el movimiento de salida original para mantener el historial limpio
         await InventoryMovement.destroy({
@@ -784,6 +807,24 @@ const revertStatus = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Esta OT no está bloqueada — no hay nada que reversar' });
     }
 
+    // Fase 0 (corrección de doble descuento, H2): repuestos que la propia OT
+    // ya descontó al agregarse (inventory_movement_id todavía apuntando a su
+    // movimiento de salida de work_order). Con generateSale ya corregido para
+    // no volver a descontarlos, la remisión/factura generada no tiene un
+    // movimiento propio para estos ítems -- reversarla no debe reingresarlos:
+    // el repuesto sigue consumido por la OT, coherente con que al reabrirla
+    // ese repuesto ya salió del estante (Opción B, ver documento de análisis).
+    const retainedItems = await WorkOrderItem.findAll({
+      where: {
+        work_order_id: order.id,
+        tenant_id,
+        item_type: 'repuesto',
+        inventory_movement_id: { [Op.ne]: null },
+      },
+      attributes: ['product_id'],
+    });
+    const retainedProductIds = [...new Set(retainedItems.map(i => i.product_id).filter(Boolean))];
+
     let documentVoidInfo = null;
     const sale = order.sale;
 
@@ -809,6 +850,7 @@ const revertStatus = async (req, res) => {
           items: fullItems.map(si => ({ sale_item_id: si.id, quantity: si.quantity, condition: 'used' })),
           reason: `Reversión de OT ${order.order_number} por administrador — ${reason}`,
           work_order_target_status: target_status,
+          retained_product_ids: retainedProductIds,
         });
         documentVoidInfo = {
           method: 'nota_credito',
@@ -823,6 +865,10 @@ const revertStatus = async (req, res) => {
           const items = await SaleItem.findAll({ where: { sale_id: sale.id, tenant_id }, transaction });
           for (const item of items) {
             if (!item.product_id) continue;
+            // Ver nota de retainedProductIds arriba: estos ítems nunca tuvieron
+            // un movimiento propio de la venta (generateSale los saltó), así
+            // que no hay salida de venta que reingresar aquí.
+            if (retainedProductIds.includes(item.product_id)) continue;
             const product = await Product.findOne({ where: { id: item.product_id, tenant_id }, transaction });
             if (!product || !product.track_inventory) continue;
             await createMovement({
@@ -932,6 +978,7 @@ const addItem = async (req, res) => {
     const qty = parseFloat(quantity);
 
     let item;
+    let stockWarnings = [];
 
     if (item_type === 'free_line') {
       // Línea libre ad-hoc: sin producto de catálogo, sin descuento de inventario.
@@ -1022,6 +1069,14 @@ const addItem = async (req, res) => {
       }
       const total = subtotal + tax_amount;
 
+      // Categoría de comisión (Frenos, Suspensión...), resuelta desde
+      // product.category_id -- solo aplica a mano de obra/servicio, no a
+      // repuestos (esos siguen liquidándose aparte, sin categoría).
+      let commission_category_id = null;
+      if (COMMISSION_ITEM_TYPES.includes(item_type)) {
+        commission_category_id = await resolveCategoryForProduct(tenant_id, product, transaction);
+      }
+
       // Crear ítem
       item = await WorkOrderItem.create({
         tenant_id,
@@ -1038,7 +1093,30 @@ const addItem = async (req, res) => {
         total,
         technician_id: itemTechnicianId || null,
         approval_status: requiresApproval ? 'pendiente' : 'aprobado',
+        commission_category_id,
       }, { transaction });
+
+      // Advertencia (NO bloqueante) de "cantidad en trámite": el chequeo de
+      // stock insuficiente de arriba compara contra current_stock crudo, así
+      // que puede pasar aunque otros documentos (ventas en borrador / ítems
+      // de OT aprobados sin aplicar) ya estén comprometiendo esas mismas
+      // unidades. Se calcula con el current_stock ANTES de que este ítem
+      // descuente el suyo (ver services/inventory/stockInProcess.service.js)
+      // y excluyendo esta misma OT para que un ítem 'pendiente' de aprobación
+      // no se cuente a sí mismo.
+      if (item_type === 'repuesto' && product.track_inventory) {
+        try {
+          stockWarnings = await buildStockWarnings(tenant_id, [{
+            product_id: product.id,
+            product_name: product.name,
+            quantity: qty,
+            current_stock: parseFloat(product.current_stock || 0),
+            track_inventory: true,
+          }], { excludeWorkOrderId: order.id, transaction });
+        } catch (warnError) {
+          logger.warn('No se pudo calcular advertencia de cantidad en trámite:', warnError.message);
+        }
+      }
 
       // Descontar inventario si es repuesto físico con track_inventory —
       // salvo que requiera aprobación del cliente: en ese caso queda
@@ -1062,7 +1140,12 @@ const addItem = async (req, res) => {
 
     await transaction.commit();
 
-    res.status(201).json({ success: true, message: 'Ítem agregado', data: item });
+    res.status(201).json({
+      success: true,
+      message: 'Ítem agregado',
+      data: item,
+      ...(stockWarnings.length > 0 ? { warnings: stockWarnings } : {}),
+    });
   } catch (error) {
     await transaction.rollback();
     logger.error('Error agregando ítem a OT:', error);
@@ -1092,7 +1175,10 @@ const removeItem = async (req, res) => {
       const product = await Product.findByPk(item.product_id, { transaction });
       if (product && product.track_inventory) {
         const restored = parseFloat(product.current_stock) + parseFloat(item.quantity);
-        await product.update({ current_stock: restored }, { transaction });
+        await product.update({
+          current_stock: restored,
+          available_stock: restored - parseFloat(product.reserved_stock || 0)
+        }, { transaction });
         await InventoryMovement.destroy({ where: { id: item.inventory_movement_id }, transaction });
       }
     }
@@ -1357,7 +1443,11 @@ const generateItemsFromMarks = async (req, res) => {
     const where = { work_order_id: order.id, tenant_id, generated_item_id: null, suggested_product_id: { [Op.ne]: null } };
     if (Array.isArray(mark_ids) && mark_ids.length) where.id = { [Op.in]: mark_ids };
 
-    const marks = await WorkOrderDiagnosisMark.findAll({ where, transaction });
+    const marks = await WorkOrderDiagnosisMark.findAll({
+      where,
+      include: [{ model: DiagramTemplate, as: 'diagram_template', attributes: ['id', 'system'], required: false }],
+      transaction,
+    });
     if (!marks.length) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'No hay marcas pendientes con producto sugerido para generar' });
@@ -1392,7 +1482,16 @@ const generateItemsFromMarks = async (req, res) => {
         tax_amount = Math.round(subtotal * (taxPct / 100));
       }
 
-      const item_type = product.product_type === 'service' ? 'servicio' : 'repuesto';
+      const item_type = product.is_labor ? 'mano_obra' : (product.product_type === 'service' ? 'servicio' : 'repuesto');
+
+      // Categoría de comisión heredada del sistema del diagrama (frenos,
+      // suspensión...) -- el técnico no elige nada, ya la eligió
+      // implícitamente al marcar sobre ese diagrama (sección 4.3 del plan).
+      let commission_category_id = null;
+      if (COMMISSION_ITEM_TYPES.includes(item_type)) {
+        commission_category_id = await resolveCategoryForDiagramSystem(tenant_id, mark.diagram_template?.system, transaction);
+      }
+
       const item = await WorkOrderItem.create({
         tenant_id,
         work_order_id: order.id,
@@ -1407,6 +1506,7 @@ const generateItemsFromMarks = async (req, res) => {
         subtotal,
         total: subtotal + tax_amount,
         approval_status: 'pendiente',
+        commission_category_id,
       }, { transaction });
 
       await mark.update({ generated_item_id: item.id }, { transaction });
@@ -2143,6 +2243,23 @@ const generateSale = async (req, res) => {
         unit_cost = product?.average_cost || 0;
       }
 
+      // Fase 0 (corrección de doble descuento, H2): si el ítem ya tiene
+      // inventory_movement_id, addItem() ya descontó el stock cuando el
+      // repuesto se agregó a la OT (ver applyItemStockMovement) -- crear otro
+      // movimiento de salida acá lo descontaría por segunda vez, y si la OT
+      // consumió las últimas unidades esto hacía fallar la remisión con
+      // "Stock insuficiente" contra un current_stock que ya había bajado de
+      // más. Se reutiliza el costo del movimiento original para que el costo
+      // de venta del SaleItem coincida con el que ya quedó en el kardex.
+      let originalMovement = null;
+      if (item.inventory_movement_id) {
+        originalMovement = await InventoryMovement.findOne({
+          where: { id: item.inventory_movement_id, tenant_id },
+          transaction,
+        });
+        if (originalMovement) unit_cost = parseFloat(originalMovement.unit_cost) || unit_cost;
+      }
+
       await SaleItem.create({
         tenant_id,
         sale_id:          sale.id,
@@ -2161,8 +2278,11 @@ const generateSale = async (req, res) => {
         technician_id:    item.technician_id || null,
       }, { transaction });
 
-      // Crear movimiento de salida de inventario
-      if (product && product.track_inventory && item.product_id) {
+      // Crear movimiento de salida de inventario -- solo si este ítem todavía
+      // no había descontado stock (ver nota arriba). Si ya lo hizo vía
+      // addItem/applyItemStockMovement, el kardex ya refleja la salida y no
+      // hay nada que validar ni descontar de nuevo.
+      if (!item.inventory_movement_id && product && product.track_inventory && item.product_id) {
         // Validar stock si no permite negativos
         if (!product.allow_negative_stock) {
           const disponible = parseFloat(product.current_stock || 0);

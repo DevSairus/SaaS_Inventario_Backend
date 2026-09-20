@@ -17,6 +17,7 @@ const stockAlertsController = require('./stockAlerts.controller');
 const payableAlertsController = require('./payableAlerts.controller');
 const advanceAlertsController = require('./finance/customerAdvanceAlerts.controller');
 const crmDashboardController = require('./crm/dashboard.controller');
+const crmGoalsController = require('./crm/goals.controller');
 const workOrdersController = require('./workshop/workOrders.controller');
 const appointmentsController = require('./workshop/workshopAppointments.controller');
 const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
@@ -71,6 +72,10 @@ const getNotificationsBundle = async (req, res) => {
     }
     if (hasCrm) {
       tasks.crm = invoke(crmDashboardController.getNotificationsSummary, req);
+      // Fase 6 — metas propias con período por vencer + cuánto falta.
+      // Mismo endpoint que la bandeja completa (goals.controller.js →
+      // getGoalAlerts); la campana solo cuenta las 'critica' para el badge.
+      tasks.crm_goals = invoke(crmGoalsController.getGoalAlerts, req);
     }
     if (hasWorkshop) {
       tasks.quotes = invoke(workOrdersController.getPendingQuoteNotifications, req);

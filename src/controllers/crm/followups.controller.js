@@ -3,6 +3,7 @@ const logger = require('../../config/logger');
 const { Op } = require('sequelize');
 const { FollowUpTask, Customer, Opportunity, User } = require('../../models');
 const { applyOwnershipScope } = require('../../utils/crmScope');
+const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 
 // Bandeja de seguimiento — por defecto trae lo del usuario actual (o de su
 // equipo, si es manager/admin), ordenado por vencimiento más próximo primero.
@@ -87,7 +88,14 @@ const complete = async (req, res) => {
     if (!task) return res.status(404).json({ success: false, message: 'Tarea no encontrada' });
 
     await task.update({ status: 'hecha', completed_at: new Date() });
-    res.json({ success: true, message: 'Tarea marcada como hecha', data: task });
+
+    // Gamificación §4 — mueve followups_completed del asesor asignado.
+    const gamification = await applyGoalProgressEvent({
+      tenant_id, event_type: 'followup_completed',
+      user_id: task.assigned_to_user_id, branch_id: task.branch_id,
+    });
+
+    res.json({ success: true, message: 'Tarea marcada como hecha', data: task, gamification });
   } catch (error) {
     logger.error('Error completando tarea de seguimiento:', error);
     res.status(500).json({ success: false, message: 'Error al actualizar la tarea' });

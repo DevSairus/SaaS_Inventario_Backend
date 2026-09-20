@@ -5,14 +5,17 @@ const { sequelize } = require('../../config/database');
 const { DataTypes, fn, col, where: sqlWhere } = require('sequelize');
 const { sendEmail } = require('../../services/emailService');
 
-// Minimal User model reference
+// Minimal User model reference — email/password_hash son nullable porque un
+// técnico sin acceso (has_system_access = false) no tiene ninguno de los dos;
+// forgotPassword/resetPassword lo tratan como "no encontrado" (ver abajo).
 const User = sequelize.define('User', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-  email: { type: DataTypes.STRING, allowNull: false, unique: true },
-  password_hash: { type: DataTypes.STRING, allowNull: false },
+  email: { type: DataTypes.STRING, allowNull: true, unique: true },
+  password_hash: { type: DataTypes.STRING, allowNull: true },
   first_name: { type: DataTypes.STRING },
   last_name: { type: DataTypes.STRING },
   is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
+  has_system_access: { type: DataTypes.BOOLEAN, defaultValue: true },
   password_reset_token: { type: DataTypes.STRING, allowNull: true },
   password_reset_expires: { type: DataTypes.DATE, allowNull: true },
 }, {
@@ -41,7 +44,10 @@ const forgotPassword = async (req, res) => {
       where: sqlWhere(fn('lower', col('email')), String(email).toLowerCase().trim())
     });
 
-    if (user && user.is_active) {
+    // Técnicos sin acceso (has_system_access = false) nunca reciben reset —
+    // no tienen email real ni forma de iniciar sesión. Se ignora en silencio,
+    // igual que un email inexistente, para no revelar su estado.
+    if (user && user.is_active && user.has_system_access) {
       const token = crypto.randomBytes(32).toString('hex');
       const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
@@ -113,7 +119,9 @@ const resetPassword = async (req, res) => {
       },
     });
 
-    if (!user) {
+    if (!user || !user.has_system_access) {
+      // Defensa en profundidad: un técnico sin acceso nunca debería tener un
+      // token de reset (forgotPassword no se lo genera), pero por si acaso.
       return res.status(400).json({ success: false, message: 'Token inválido o expirado' });
     }
 

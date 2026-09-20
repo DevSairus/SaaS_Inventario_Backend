@@ -12,6 +12,8 @@ const InventoryAdjustmentItem = require('./InventoryAdjustmentItem');
 const ProductEquivalenceGroup = require('./ProductEquivalenceGroup');
 const ProductEquivalenceGroupMember = require('./ProductEquivalenceGroupMember');
 const ProductVehicleApplication = require('./ProductVehicleApplication');
+const PhysicalCount = require('./PhysicalCount');
+const PhysicalCountItem = require('./PhysicalCountItem');
 
 // ========== RELACIONES ==========
 
@@ -70,6 +72,26 @@ Product.hasMany(InventoryAdjustmentItem, {
   as: 'adjustment_items'
 });
 
+// PhysicalCount - PhysicalCountItem (1:N)
+PhysicalCount.hasMany(PhysicalCountItem, { foreignKey: 'count_id', as: 'items' });
+PhysicalCountItem.belongsTo(PhysicalCount, { foreignKey: 'count_id', as: 'count' });
+
+// PhysicalCountItem - Product (N:1)
+PhysicalCountItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Product.hasMany(PhysicalCountItem, { foreignKey: 'product_id', as: 'physical_count_items' });
+
+// PhysicalCount - Warehouse / Category (N:1, filtros usados al generar)
+PhysicalCount.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'warehouse' });
+PhysicalCount.belongsTo(Category, { foreignKey: 'category_id', as: 'category' });
+
+// PhysicalCount - InventoryAdjustment (los dos ajustes que genera al aplicar)
+PhysicalCount.belongsTo(InventoryAdjustment, { foreignKey: 'entry_adjustment_id', as: 'entry_adjustment' });
+PhysicalCount.belongsTo(InventoryAdjustment, { foreignKey: 'exit_adjustment_id', as: 'exit_adjustment' });
+
+// InventoryAdjustment - PhysicalCount (de dónde vino el ajuste, si aplica)
+InventoryAdjustment.belongsTo(PhysicalCount, { foreignKey: 'physical_count_id', as: 'physical_count' });
+PhysicalCount.hasMany(InventoryAdjustment, { foreignKey: 'physical_count_id', as: 'adjustments' });
+
 // ProductVehicleApplication - Product (N:1)
 ProductVehicleApplication.belongsTo(Product, {
   foreignKey: 'product_id',
@@ -94,5 +116,7 @@ module.exports = {
   InventoryAdjustmentItem,
   ProductEquivalenceGroup,
   ProductEquivalenceGroupMember,
-  ProductVehicleApplication
+  ProductVehicleApplication,
+  PhysicalCount,
+  PhysicalCountItem
 };

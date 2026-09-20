@@ -137,6 +137,7 @@ const suppliersRoutes               = require('./routes/inventory/suppliers.rout
 const purchasesRoutes               = require('./routes/inventory/purchases.routes');
 const movementsRoutes               = require('./routes/inventory/movements.routes');
 const adjustmentsRoutes             = require('./routes/inventory/adjustments.routes');
+const physicalCountsRoutes          = require('./routes/inventory/physicalCounts.routes');
 const warehousesRoutes              = require('./routes/inventory/warehouses.routes');
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
@@ -156,6 +157,7 @@ const vehiclesRoutes                = require('./routes/workshop/vehicles.routes
 const workOrdersRoutes              = require('./routes/workshop/workOrders.routes');
 const appointmentsRoutes            = require('./routes/workshop/appointments.routes');
 const commissionSettlementsRoutes   = require('./routes/workshop/commissionSettlements.routes');
+const commissionCategoriesRoutes    = require('./routes/workshop/commissionCategories.routes');
 const runtRoutes                    = require('./routes/workshop/runt.routes');
 const diagramTemplatesRoutes        = require('./routes/workshop/diagramTemplates.routes');
 const userRoutes                    = require('./routes/user.routes');
@@ -176,6 +178,10 @@ const crmPipelineStagesRoutes       = require('./routes/crm/pipelineStages.route
 const crmLossReasonsRoutes          = require('./routes/crm/lossReasons.routes');
 const crmMessageTemplatesRoutes     = require('./routes/crm/messageTemplates.routes');
 const crmAutomationRulesRoutes      = require('./routes/crm/automationRules.routes');
+const crmGoalsRoutes                = require('./routes/crm/goals.routes');
+const crmRewardRulesRoutes          = require('./routes/crm/rewardRules.routes');
+const crmRewardsRoutes              = require('./routes/crm/rewards.routes');
+const crmGamificationSettingsRoutes = require('./routes/crm/gamificationSettings.routes');
 const crmWhatsappCloudRoutes        = require('./routes/crm/whatsappCloud.routes');
 
 // Anuncios
@@ -208,6 +214,7 @@ const publicPdfRoutes = require('./routes/publicPdf.routes');
 const ncfWebhookRoutes = require('./routes/ncfWebhook.routes');
 const metaWebhookRoutes = require('./routes/metaWebhook.routes');
 const dianRoutes                    = require('./routes/dian.routes');
+const radianRoutes                  = require('./routes/radian.routes');
 const ensambladoraSyncRoutes        = require('./routes/ensambladora/sync.routes');
 const ensambladoraEventsRoutes      = require('./routes/ensambladora/events.routes');
 const ensambladoraVehiculosRoutes   = require('./routes/ensambladora/vehiculos.routes');
@@ -263,6 +270,7 @@ app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware,
 app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, branchMiddleware, workOrdersRoutes);
 app.use('/api/workshop/appointments',          authMiddleware, tenantMiddleware, branchMiddleware, appointmentsRoutes);
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
+app.use('/api/workshop/commission-categories', authMiddleware, tenantMiddleware, commissionCategoriesRoutes);
 app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware, diagramTemplatesRoutes);
 
 // ── Inventario ──
@@ -272,6 +280,7 @@ app.use('/api/inventory/suppliers',            authMiddleware, tenantMiddleware,
 app.use('/api/inventory/purchases',            authMiddleware, tenantMiddleware, branchMiddleware, purchasesRoutes);
 app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, branchMiddleware, movementsRoutes);
 app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, adjustmentsRoutes);
+app.use('/api/inventory/physical-counts',      authMiddleware, tenantMiddleware, physicalCountsRoutes);
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
@@ -303,6 +312,10 @@ app.use('/api/crm/pipeline-stages',            authMiddleware, tenantMiddleware,
 app.use('/api/crm/loss-reasons',                authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmLossReasonsRoutes);
 app.use('/api/crm/message-templates',          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmMessageTemplatesRoutes);
 app.use('/api/crm/automation-rules',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmAutomationRulesRoutes);
+app.use('/api/crm/goals',                      authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmGoalsRoutes);
+app.use('/api/crm/reward-rules',                authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmRewardRulesRoutes);
+app.use('/api/crm/rewards',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmRewardsRoutes);
+app.use('/api/crm/gamification-settings',      authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmGamificationSettingsRoutes);
 app.use('/api/crm/whatsapp',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmWhatsappCloudRoutes);
 app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
 app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);
@@ -320,6 +333,7 @@ app.use('/api/users',                          authMiddleware, tenantMiddleware,
 // ✅ DIAN — Facturación Electrónica (con tenant)
 app.use('/api/whatsapp',                      authMiddleware, whatsappRoutes);
 app.use('/api/dian',                           authMiddleware, tenantMiddleware, branchMiddleware, dianRoutes);
+app.use('/api/radian',                         authMiddleware, tenantMiddleware, branchMiddleware, radianRoutes);
 // Contabilidad: mismo mecanismo que ya usa el resto de la app (checkRole +
 // requireModule). Roles reales del sistema (ver User.js): super_admin, admin,
 // manager, seller, warehouse_keeper, accountant, user, viewer, technician,

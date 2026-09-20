@@ -259,6 +259,34 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.TEXT,
     allowNull: true,
   },
+  // ── RADIAN — eventos de terceros sobre esta factura + 034 propio ───
+  // (ver 00 - Documentación/RADIAN-Analisis-y-Plan.md §5.1 Fase 3). Espejo
+  // de purchases.radian_status/radian_deadline_at, pero acá el flujo es al
+  // revés: 032/033/031 los emite el CLIENTE (se registran como "received"
+  // en radian_events), y el 034 (aceptación tácita) lo emitimos NOSOTROS si
+  // vence el plazo sin que el cliente responda.
+  radian_status: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    defaultValue: 'none',
+    comment: 'none | 032_received | 033_received | 031_received | 034 — último evento registrado sobre esta venta.',
+  },
+  radian_deadline_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    comment: 'Vencimiento del plazo de 3 días hábiles para que el cliente responda (033/031), fijado al registrar el 032 recibido.',
+  },
+  // Fase 4 (§4/§6 del plan) — estado de circulación como título valor tras
+  // inscribirse (036): tenedor legítimo si se endosó, restricción de
+  // circulación, mandato activo. Un solo JSONB en vez de varias columnas —
+  // ver comentario de la migración 2026091901-create-radian-fase4.js.
+  // Forma: { inscribed_at, holder_nit, holder_name, circulation_restricted,
+  //          mandate_nit, mandate_name }
+  radian_circulation: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: {},
+  },
   reference_sale_id: {
     type: DataTypes.UUID,
     allowNull: true,

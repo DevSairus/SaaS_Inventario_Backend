@@ -41,10 +41,13 @@ async function getLaborCostByWorkOrderIds(tenantId, workOrderIds, defaultPct = n
   const pct = defaultPct !== null ? defaultPct : await getDefaultLaborCostPercentage(tenantId);
   const schema = getCurrentSchema() || 'public';
 
+  // csi.commission_amount es el snapshot por categoría (ver plan de
+  // comisiones por sistema); las filas legadas (previas a esa migración) no
+  // lo tienen, así que se recalculan con el % plano del settlement padre.
   const rows = await sequelize.query(
     `
       SELECT csi.work_order_id,
-        SUM(csi.labor_amount * cs.commission_percentage / 100.0)::numeric as real_cost,
+        SUM(COALESCE(csi.commission_amount, csi.labor_amount * cs.commission_percentage / 100.0))::numeric as real_cost,
         SUM(csi.labor_amount)::numeric as settled_labor_amount
       FROM "${schema}"."commission_settlement_items" csi
       INNER JOIN "${schema}"."commission_settlements" cs ON cs.id = csi.settlement_id
@@ -102,7 +105,7 @@ async function getLaborCostForPeriod({ tenantId, branchWarehouseId = null, dateF
       ),
       settled AS (
         SELECT csi.work_order_id,
-          SUM(csi.labor_amount * cs.commission_percentage / 100.0) AS real_cost
+          SUM(COALESCE(csi.commission_amount, csi.labor_amount * cs.commission_percentage / 100.0)) AS real_cost
         FROM "${schema}"."commission_settlement_items" csi
         INNER JOIN "${schema}"."commission_settlements" cs ON cs.id = csi.settlement_id
         WHERE cs.tenant_id = :tenantId

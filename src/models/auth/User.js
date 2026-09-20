@@ -17,16 +17,25 @@ const User = sequelize.define('User', {
     }
   },
   email: {
+    // Nullable: un técnico con has_system_access = false no tiene email
+    // (nunca inicia sesión). Ver validador de modelo más abajo.
     type: DataTypes.STRING,
-    allowNull: false,
+    allowNull: true,
     unique: true,
     validate: {
       isEmail: true
     }
   },
   password_hash: {
+    // Nullable por el mismo motivo que email (ver has_system_access).
     type: DataTypes.STRING,
-    allowNull: false
+    allowNull: true
+  },
+  has_system_access: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true,
+    comment: 'false = técnico solo para asignación de trabajos (sin login, sin email/password_hash)'
   },
   first_name: {
     type: DataTypes.STRING,
@@ -97,6 +106,23 @@ const User = sequelize.define('User', {
     beforeValidate(user) {
       if (user.email) {
         user.email = String(user.email).toLowerCase().trim();
+      }
+    }
+  },
+  validate: {
+    // Si el usuario tiene acceso al sistema, email y password_hash son
+    // obligatorios (login los necesita). Un técnico sin acceso
+    // (has_system_access = false) puede tener ambos en null.
+    accessRequiresCredentials() {
+      if (this.has_system_access) {
+        if (!this.email) {
+          throw new Error('El email es requerido cuando el usuario tiene acceso al sistema');
+        }
+        if (!this.password_hash) {
+          throw new Error('La contraseña es requerida cuando el usuario tiene acceso al sistema');
+        }
+      } else if (this.role !== 'technician') {
+        throw new Error('Un usuario sin acceso al sistema solo puede tener el rol technician');
       }
     }
   }

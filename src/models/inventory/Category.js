@@ -34,6 +34,16 @@ const Category = sequelize.define('Category', {
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  // Mapeo hacia la categoría de comisión de mano de obra (Frenos, Suspensión...)
+  // -- ver plan-comisiones-tecnicos-por-sistema.md sección 2 y 4.1.
+  commission_category_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: {
+      model: 'commission_categories',
+      key: 'id'
+    }
   }
 }, {
   tableName: 'categories',

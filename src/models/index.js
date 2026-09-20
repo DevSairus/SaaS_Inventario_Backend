@@ -17,6 +17,17 @@ const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
 const AccountMappingAudit = require('./accounting/AccountMappingAudit');
 const OpeningBalance = require('./accounting/OpeningBalance');
+const FixedAsset = require('./accounting/FixedAsset');
+const FixedAssetDepreciationEntry = require('./accounting/FixedAssetDepreciationEntry');
+const Loan = require('./accounting/Loan');
+const LoanInstallment = require('./accounting/LoanInstallment');
+const BankAccount = require('./accounting/BankAccount');
+const BankImportTemplate = require('./accounting/BankImportTemplate');
+const BankTransaction = require('./accounting/BankTransaction');
+const ExogenaFormatConfig = require('./accounting/ExogenaFormatConfig');
+const ExogenaConceptMapping = require('./accounting/ExogenaConceptMapping');
+const ExogenaManualRecord = require('./accounting/ExogenaManualRecord');
+const ExogenaShareholder = require('./accounting/ExogenaShareholder');
 
 // Inventario
 const Category = require('./inventory/Category');
@@ -28,6 +39,8 @@ const Warehouse = require('./inventory/Warehouse');
 const InventoryMovement = require('./inventory/InventoryMovement');
 const InventoryAdjustment = require('./inventory/InventoryAdjustment');
 const InventoryAdjustmentItem = require('./inventory/InventoryAdjustmentItem');
+const PhysicalCount = require('./inventory/PhysicalCount');
+const PhysicalCountItem = require('./inventory/PhysicalCountItem');
 const StockAlert = require('./StockAlert');
 const PayableAlert = require('./PayableAlert');
 
@@ -78,6 +91,11 @@ const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSet
 const DiagramTemplate = require('./workshop/DiagramTemplate');
 const WorkOrderDiagnosisMark = require('./workshop/WorkOrderDiagnosisMark');
 const SaleDiagnosisMark = require('./sales/SaleDiagnosisMark');
+// ✅ NUEVO - Comisiones de técnicos por categoría de trabajo (ver
+// plan-comisiones-tecnicos-por-sistema.md)
+const CommissionCategory = require('./workshop/CommissionCategory');
+const TechnicianCommissionRate = require('./workshop/TechnicianCommissionRate');
+const DiagramSystemCommissionMap = require('./workshop/DiagramSystemCommissionMap');
 
 // ✅ NUEVO - CRM (Fase 1)
 const CustomerInteraction = require('./crm/CustomerInteraction');
@@ -93,6 +111,12 @@ const CrmMessageTemplate = require('./crm/CrmMessageTemplate');
 // ✅ NUEVO - CRM (Fase C.1) — motor de automatizaciones configurables
 const CrmAutomationRule = require('./crm/CrmAutomationRule');
 const CrmAutomationRuleLog = require('./crm/CrmAutomationRuleLog');
+// ✅ NUEVO - CRM Gamificación (Fase 1) — metas, progreso y settings por tenant
+const CrmGoal = require('./crm/CrmGoal');
+const CrmGoalProgress = require('./crm/CrmGoalProgress');
+const CrmGamificationSettings = require('./crm/CrmGamificationSettings');
+const CrmRewardRule = require('./crm/CrmRewardRule');
+const CrmReward = require('./crm/CrmReward');
 // WhatsApp Cloud API + coexistencia
 const WaConversation = require('./crm/WaConversation');
 const WaMessage = require('./crm/WaMessage');
@@ -133,6 +157,9 @@ const DianEvent = require('./dian/DianEvent');
 // origen purchase o expense, ver Documento-Soporte-Plan-v2.md §1
 const SupportDocument = require('./dian/SupportDocument');
 const SupportDocumentAdjustment = require('./dian/SupportDocumentAdjustment');
+// RADIAN — eventos 030/031/032/033/034 sobre facturas electrónicas
+const RadianEvent = require('./dian/RadianEvent');
+const RadianAlert = require('./dian/RadianAlert');
 
 // ✅ NUEVO - Tesorería
 const Expense = require('./finance/Expense');
@@ -278,6 +305,10 @@ User.hasMany(InventoryMovement, { foreignKey: 'user_id', as: 'movements' });
 InventoryAdjustment.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 User.hasMany(InventoryAdjustment, { foreignKey: 'user_id', as: 'adjustments' });
 
+PhysicalCount.belongsTo(User, { foreignKey: 'generated_by', as: 'generated_by_user' });
+PhysicalCount.belongsTo(User, { foreignKey: 'applied_by', as: 'applied_by_user' });
+User.hasMany(PhysicalCount, { foreignKey: 'generated_by', as: 'generated_physical_counts' });
+
 StockAlert.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(StockAlert, { foreignKey: 'product_id', as: 'alerts' });
 
@@ -334,6 +365,65 @@ ChartOfAccount.hasMany(JournalEntryLine, { foreignKey: 'account_id', as: 'lines'
 Tenant.hasMany(AccountMapping, { foreignKey: 'tenant_id', as: 'account_mappings' });
 AccountMapping.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 AccountMapping.belongsTo(ChartOfAccount, { foreignKey: 'account_id', as: 'account' });
+
+// FixedAsset ↔ Tenant / Branch / ChartOfAccount / FixedAssetDepreciationEntry
+Tenant.hasMany(FixedAsset, { foreignKey: 'tenant_id', as: 'fixed_assets' });
+FixedAsset.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(FixedAsset, { foreignKey: 'branch_id', as: 'fixed_assets' });
+FixedAsset.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+FixedAsset.belongsTo(ChartOfAccount, { foreignKey: 'asset_account_id', as: 'asset_account' });
+FixedAsset.belongsTo(ChartOfAccount, { foreignKey: 'accumulated_depreciation_account_id', as: 'accumulated_depreciation_account' });
+FixedAsset.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
+
+FixedAsset.hasMany(FixedAssetDepreciationEntry, { foreignKey: 'fixed_asset_id', as: 'depreciation_entries' });
+FixedAssetDepreciationEntry.belongsTo(FixedAsset, { foreignKey: 'fixed_asset_id', as: 'fixed_asset' });
+FixedAssetDepreciationEntry.belongsTo(JournalEntry, { foreignKey: 'journal_entry_id', as: 'journal_entry' });
+Tenant.hasMany(FixedAssetDepreciationEntry, { foreignKey: 'tenant_id', as: 'fixed_asset_depreciation_entries' });
+FixedAssetDepreciationEntry.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+// Loan ↔ Tenant / Branch / ChartOfAccount / LoanInstallment
+Tenant.hasMany(Loan, { foreignKey: 'tenant_id', as: 'loans' });
+Loan.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Branch.hasMany(Loan, { foreignKey: 'branch_id', as: 'loans' });
+Loan.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Loan.belongsTo(ChartOfAccount, { foreignKey: 'liability_account_id', as: 'liability_account' });
+Loan.belongsTo(ChartOfAccount, { foreignKey: 'interest_expense_account_id', as: 'interest_expense_account' });
+Loan.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
+
+Loan.hasMany(LoanInstallment, { foreignKey: 'loan_id', as: 'installments' });
+LoanInstallment.belongsTo(Loan, { foreignKey: 'loan_id', as: 'loan' });
+
+// ExogenaFormatConfig / ExogenaConceptMapping / ExogenaManualRecord ↔ Tenant
+Tenant.hasMany(ExogenaFormatConfig, { foreignKey: 'tenant_id', as: 'exogena_format_configs' });
+ExogenaFormatConfig.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(ExogenaConceptMapping, { foreignKey: 'tenant_id', as: 'exogena_concept_mappings' });
+ExogenaConceptMapping.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+Tenant.hasMany(ExogenaManualRecord, { foreignKey: 'tenant_id', as: 'exogena_manual_records' });
+ExogenaManualRecord.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+ExogenaManualRecord.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
+Tenant.hasMany(ExogenaShareholder, { foreignKey: 'tenant_id', as: 'exogena_shareholders' });
+ExogenaShareholder.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+ExogenaShareholder.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
+LoanInstallment.belongsTo(JournalEntry, { foreignKey: 'journal_entry_id', as: 'journal_entry' });
+Tenant.hasMany(LoanInstallment, { foreignKey: 'tenant_id', as: 'loan_installments' });
+LoanInstallment.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+// BankAccount ↔ Tenant / ChartOfAccount / BankImportTemplate / BankTransaction
+Tenant.hasMany(BankAccount, { foreignKey: 'tenant_id', as: 'bank_accounts' });
+BankAccount.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+BankAccount.belongsTo(ChartOfAccount, { foreignKey: 'chart_of_account_id', as: 'chart_of_account' });
+BankAccount.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
+
+BankAccount.hasMany(BankImportTemplate, { foreignKey: 'bank_account_id', as: 'import_templates' });
+BankImportTemplate.belongsTo(BankAccount, { foreignKey: 'bank_account_id', as: 'bank_account' });
+Tenant.hasMany(BankImportTemplate, { foreignKey: 'tenant_id', as: 'bank_import_templates' });
+BankImportTemplate.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+BankAccount.hasMany(BankTransaction, { foreignKey: 'bank_account_id', as: 'transactions' });
+BankTransaction.belongsTo(BankAccount, { foreignKey: 'bank_account_id', as: 'bank_account' });
+BankTransaction.belongsTo(JournalEntryLine, { foreignKey: 'matched_journal_entry_line_id', as: 'matched_line' });
+Tenant.hasMany(BankTransaction, { foreignKey: 'tenant_id', as: 'bank_transactions' });
+BankTransaction.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
 Tenant.hasMany(AccountMappingAudit, { foreignKey: 'tenant_id', as: 'account_mapping_audits' });
 AccountMappingAudit.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -607,6 +697,20 @@ WaCampaign.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'created_by' 
 CrmAutomationRuleLog.belongsTo(CrmAutomationRule, { foreignKey: 'automation_rule_id', as: 'rule' });
 CrmAutomationRuleLog.belongsTo(Opportunity, { foreignKey: 'opportunity_id', as: 'opportunity' });
 
+// ── CRM Gamificación (Fase 1) ─────────────────────────────────────────────
+CrmGoal.belongsTo(User, { foreignKey: 'created_by_user_id', as: 'created_by' });
+CrmGoal.hasMany(CrmGoalProgress, { foreignKey: 'goal_id', as: 'progress_entries' });
+CrmGoalProgress.belongsTo(CrmGoal, { foreignKey: 'goal_id', as: 'goal' });
+// Fase 5 (§10) — recompensas colgadas de la meta y de su regla.
+CrmGoal.hasMany(CrmRewardRule, { foreignKey: 'goal_id', as: 'reward_rules' });
+CrmRewardRule.belongsTo(CrmGoal, { foreignKey: 'goal_id', as: 'goal' });
+CrmRewardRule.hasMany(CrmReward, { foreignKey: 'reward_rule_id', as: 'rewards' });
+CrmReward.belongsTo(CrmRewardRule, { foreignKey: 'reward_rule_id', as: 'rule' });
+CrmReward.belongsTo(CrmGoal, { foreignKey: 'goal_id', as: 'goal' });
+CrmReward.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+CrmReward.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+CrmReward.belongsTo(PayrollNovedad, { foreignKey: 'payroll_novedad_id', as: 'payroll_novedad' });
+
 // WorkOrderItem ↔ User (técnico responsable del ítem)
 WorkOrderItem.belongsTo(User, { foreignKey: 'technician_id', as: 'item_technician' });
 User.hasMany(WorkOrderItem, { foreignKey: 'technician_id', as: 'work_order_items_assigned' });
@@ -659,6 +763,30 @@ CommissionSettlementItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 // ProductCommissionSettlementItem ↔ Sale (item de venta directa)
 ProductCommissionSettlementItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 
+// ── Comisiones por categoría de trabajo ──────────────────────────────────
+CommissionCategory.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+
+CommissionCategory.hasMany(TechnicianCommissionRate, { foreignKey: 'commission_category_id', as: 'technician_rates' });
+TechnicianCommissionRate.belongsTo(CommissionCategory, { foreignKey: 'commission_category_id', as: 'category' });
+TechnicianCommissionRate.belongsTo(User, { foreignKey: 'technician_id', as: 'technician' });
+User.hasMany(TechnicianCommissionRate, { foreignKey: 'technician_id', as: 'commission_rates' });
+
+CommissionCategory.hasMany(DiagramSystemCommissionMap, { foreignKey: 'commission_category_id', as: 'diagram_mappings' });
+DiagramSystemCommissionMap.belongsTo(CommissionCategory, { foreignKey: 'commission_category_id', as: 'category' });
+
+CommissionCategory.hasMany(Category, { foreignKey: 'commission_category_id', as: 'catalog_categories' });
+Category.belongsTo(CommissionCategory, { foreignKey: 'commission_category_id', as: 'commission_category' });
+
+CommissionCategory.hasMany(WorkOrderItem, { foreignKey: 'commission_category_id', as: 'work_order_items' });
+WorkOrderItem.belongsTo(CommissionCategory, { foreignKey: 'commission_category_id', as: 'commission_category' });
+
+CommissionCategory.hasMany(CommissionSettlementItem, { foreignKey: 'commission_category_id', as: 'settlement_items' });
+CommissionSettlementItem.belongsTo(CommissionCategory, { foreignKey: 'commission_category_id', as: 'commission_category' });
+
+// ── Cruce con nómina (categoría DIAN "Comisiones") ───────────────────────
+CommissionSettlement.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+CommissionSettlement.belongsTo(PayrollNovedad, { foreignKey: 'payroll_novedad_id', as: 'payroll_novedad' });
+
 // ============= RELACIONES - DIAN =============
 
 // DianResolution ↔ Tenant
@@ -680,6 +808,21 @@ Purchase.hasMany(DianEvent, { foreignKey: 'purchase_id', as: 'dian_events' });
 // DianEvent ↔ SupportDocument (Documento Soporte, origen purchase o expense)
 DianEvent.belongsTo(SupportDocument, { foreignKey: 'support_document_id', as: 'support_document' });
 SupportDocument.hasMany(DianEvent, { foreignKey: 'support_document_id', as: 'dian_events' });
+
+// RadianEvent ↔ Tenant / Purchase / Sale
+RadianEvent.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+RadianEvent.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+Purchase.hasMany(RadianEvent, { foreignKey: 'purchase_id', as: 'radian_events' });
+RadianEvent.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+Sale.hasMany(RadianEvent, { foreignKey: 'sale_id', as: 'radian_events' });
+RadianEvent.belongsTo(User, { foreignKey: 'issuer_user_id', as: 'issuer' });
+
+// RadianAlert ↔ Tenant / Purchase / Sale
+RadianAlert.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+RadianAlert.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+Purchase.hasMany(RadianAlert, { foreignKey: 'purchase_id', as: 'radian_alerts' });
+RadianAlert.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+Sale.hasMany(RadianAlert, { foreignKey: 'sale_id', as: 'radian_alerts' });
 
 // SupportDocument ↔ Tenant / Branch / Purchase / Expense / User
 SupportDocument.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -813,6 +956,8 @@ module.exports = {
   InventoryMovement,
   InventoryAdjustment,
   InventoryAdjustmentItem,
+  PhysicalCount,
+  PhysicalCountItem,
   StockAlert,
   PayableAlert,
   Invoice,
@@ -845,6 +990,9 @@ module.exports = {
   WorkOrderQuoteRequest,
   WorkshopAppointmentConfig,
   WorkshopAppointment,
+  CommissionCategory,
+  TechnicianCommissionRate,
+  DiagramSystemCommissionMap,
   CommissionSettlement,
   CommissionSettlementItem,
   ProductCommissionSettlement,
@@ -854,6 +1002,8 @@ module.exports = {
   SaleDiagnosisMark,
   DianResolution,
   DianEvent,
+  RadianEvent,
+  RadianAlert,
   SupportDocument,
   SupportDocumentAdjustment,
   Expense,
@@ -869,6 +1019,17 @@ module.exports = {
   AccountMapping,
   AccountMappingAudit,
   OpeningBalance,
+  FixedAsset,
+  FixedAssetDepreciationEntry,
+  Loan,
+  ExogenaFormatConfig,
+  ExogenaConceptMapping,
+  ExogenaManualRecord,
+  ExogenaShareholder,
+  LoanInstallment,
+  BankAccount,
+  BankImportTemplate,
+  BankTransaction,
   AiConversation,
   AiMessage,
   AiProposal,
@@ -890,6 +1051,11 @@ module.exports = {
   CrmMessageTemplate,
   CrmAutomationRule,
   CrmAutomationRuleLog,
+  CrmGoal,
+  CrmGoalProgress,
+  CrmGamificationSettings,
+  CrmRewardRule,
+  CrmReward,
   WaConversation,
   WaMessage,
   WaTemplate,

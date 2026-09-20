@@ -57,8 +57,18 @@ async function generateReturnNumber(tenant_id, transaction) {
 // Devuelve { customerReturn, return_number, subtotal, tax, dian_status,
 //            work_order_updated } o lanza un Error con .statusCode y .payload
 // (para que el wrapper HTTP pueda responder con el mismo formato de antes).
-async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes, work_order_target_status = 'cancelado' }) {
+// retained_product_ids: Fase 0 (corrección de doble descuento, H2) -- lo usa
+// revertStatus de OT cuando la factura ya aceptada por DIAN se anula vía nota
+// crédito. Son los product_id que la propia OT ya había descontado al
+// agregarse el repuesto (inventory_movement_id todavía activo); como
+// generateSale ya no crea un movimiento de venta aparte para esos ítems (ver
+// workOrders.controller.js#generateSale), la nota crédito tampoco debe
+// reingresarlos a inventario -- solo reversa lo que la venta descontó por su
+// cuenta. La devolución normal de cliente post-entrega (voidSale HTTP,
+// llamado sin este parámetro) no se ve afectada: sigue reingresando todo.
+async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes, work_order_target_status = 'cancelado', retained_product_ids = [] }) {
   const transaction = await sequelize.transaction();
+  const retainedProductIdSet = new Set(retained_product_ids || []);
 
   const httpError = (statusCode, payload) => {
     const err = new Error(payload.message);
@@ -146,7 +156,11 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
         unit_price:   parseFloat(saleItem.unit_price),
         unit_cost:    parseFloat(saleItem.unit_cost || saleItem.product?.average_cost || saleItem.unit_price || 0),
         condition:    reqItem.condition || 'used',
-        destination:  reqItem.condition === 'defective' ? 'quarantine' : 'inventory',
+        // 'retained': el repuesto sigue consumido por la OT que generó esta
+        // venta -- no vuelve a inventario (ver retained_product_ids arriba).
+        destination:  retainedProductIdSet.has(saleItem.product_id)
+          ? 'retained'
+          : (reqItem.condition === 'defective' ? 'quarantine' : 'inventory'),
         subtotal:     itemSubtot,
         tax:          itemTax,
         total:        itemSubtot + itemTax,

@@ -35,4 +35,4 @@ async function applyOwnershipScope(req, where = {}, ownerField = 'owner_user_id'
   return { ...where, [ownerField]: req.user.id };
 }
 
-module.exports = { applyOwnershipScope };
+module.exports = { applyOwnershipScope, sellersInManagerBranches, SCOPE_BYPASS_ROLES };

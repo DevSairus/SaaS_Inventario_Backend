@@ -6,6 +6,7 @@ const { applyOwnershipScope } = require('../../utils/crmScope');
 const { computeLeadPriority } = require('../../utils/crmLeadScore');
 const { loadStageMap, resolveEntryStageKey } = require('../../utils/crmPipelineStages');
 const { applyOpportunityCreatedRules } = require('../../services/crmAutomationEngine');
+const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 
 // Listado para el tablero Kanban — agrupado por stage en el frontend, acá
 // se entrega plano y ya filtrado por visibilidad (§5-bis, capa A).
@@ -169,7 +170,18 @@ const changeStage = async (req, res) => {
       lost_reason: targetStage.stage_type === 'lost' ? lost_reason : null,
     });
 
-    res.json({ success: true, message: 'Etapa actualizada', data: opportunity });
+    // Gamificación §4 — solo al entrar a una etapa tipo "ganado" se mueve
+    // opportunities_won/revenue_won/conversion_rate. No bloquea ni revierte
+    // el cambio de etapa si falla (mismo criterio que las automatizaciones).
+    let gamification;
+    if (targetStage.stage_type === 'won') {
+      gamification = await applyGoalProgressEvent({
+        tenant_id, event_type: 'opportunity_won',
+        user_id: opportunity.owner_user_id, branch_id: opportunity.branch_id,
+      });
+    }
+
+    res.json({ success: true, message: 'Etapa actualizada', data: opportunity, ...(gamification ? { gamification } : {}) });
   } catch (error) {
     logger.error('Error cambiando etapa de oportunidad:', error);
     res.status(500).json({ success: false, message: 'Error al actualizar la etapa' });

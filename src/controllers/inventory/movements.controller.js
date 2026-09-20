@@ -383,9 +383,13 @@ const createMovement = async (movementData, transaction) => {
     notes
   }, { transaction });
 
-  // Actualizar stock del producto
+  // Actualizar stock del producto -- available_stock también se sincroniza
+  // aquí (H3): antes solo lo hacían compras/transferencias/consumos
+  // internos/devoluciones/voidSale a mano, y ventas/OT/ajustes (que pasan
+  // por este mismo createMovement) lo dejaban desincronizado.
   await product.update({
-    current_stock: new_stock
+    current_stock: new_stock,
+    available_stock: new_stock - parseFloat(product.reserved_stock || 0)
   }, { transaction });
 
   // Si es entrada, actualizar costo promedio

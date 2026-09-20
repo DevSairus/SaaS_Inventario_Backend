@@ -194,7 +194,8 @@ const importInvoiceInner = async (req, res) => {
     // antes de que la primera confirme, y la segunda choca acá contra el
     // índice único tenant_invoice_number_unique. Mismo resultado 409 que el
     // chequeo normal, en vez de un 500 genérico.
-    if (error.name === 'SequelizeUniqueConstraintError' && error.original?.constraint === 'tenant_invoice_number_unique') {
+    if (error.name === 'SequelizeUniqueConstraintError' &&
+        ['tenant_invoice_number_unique', 'purchases_tenant_cufe_unique'].includes(error.original?.constraint)) {
       return res.status(409).json({
         success: false,
         message: 'Esta factura ya fue importada anteriormente',
@@ -679,7 +680,15 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
         status: 'draft',
         notes: `Importada desde factura electrónica: ${invoiceData.invoice.number}`,
         invoice_number: invoiceData.invoice.number,
-        created_by: user_id
+        created_by: user_id,
+        // RADIAN (ver RADIAN-Analisis-y-Plan.md §3.1 y §5.1): sin estos tres
+        // campos no se puede emitir ningún evento sobre esta compra. cufe
+        // puede venir null si el XML no traía cbc:UUID (formato no-DIAN) —
+        // el evento 030 queda bloqueado hasta que se complete manualmente.
+        cufe: invoiceData.invoice.cufe || null,
+        dian_issue_date: invoiceData.invoice.date || null,
+        dian_issue_time: invoiceData.invoice.issue_time || null,
+        supplier_xml: invoiceData.xmlContent || null
       }, { transaction: t }));
       break;
     } catch (err) {

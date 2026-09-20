@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember } = require('../../models/inventory');
+const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
 
 // GET /products/:id/equivalents
 // Retorna los grupos de equivalencia donde está este producto, con todos sus miembros y stock en vivo
@@ -38,7 +39,7 @@ const getProductEquivalents = async (req, res) => {
     }
 
     // Para cada grupo, traer TODOS los miembros con datos de producto
-    const groups = [];
+    const groupMembersList = [];
     for (const membership of memberships) {
       const group = membership.group;
       const memberWhereClause = { group_id: group.id };
@@ -49,32 +50,44 @@ const getProductEquivalents = async (req, res) => {
         include: [{
           model: Product,
           as: 'product',
-          attributes: ['id', 'sku', 'name', 'current_stock', 'available_stock', 'sale_price', 'is_active', 'image_url']
+          attributes: ['id', 'sku', 'name', 'current_stock', 'sale_price', 'is_active', 'image_url']
         }],
         order: [['role', 'ASC'], ['created_at', 'ASC']]
       });
 
-      groups.push({
-        group_id: group.id,
-        group_name: group.name,
-        group_notes: group.notes,
-        created_by: group.created_by,
-        created_at: group.created_at,
-        members: members.map(m => ({
+      groupMembersList.push({ group, members });
+    }
+
+    // "Disponible" real (current_stock - en trámite), no el available_stock
+    // almacenado -- una sola consulta agrupada para todos los miembros de
+    // todos los grupos (evita N+1 por producto).
+    const allProductIds = groupMembersList.flatMap(({ members }) => members.map(m => m.product_id));
+    const inProcessMap = tenantId ? await getInProcessMap(tenantId, allProductIds) : {};
+
+    const groups = groupMembersList.map(({ group, members }) => ({
+      group_id: group.id,
+      group_name: group.name,
+      group_notes: group.notes,
+      created_by: group.created_by,
+      created_at: group.created_at,
+      members: members.map(m => {
+        const currentStock = m.product ? parseFloat(m.product.current_stock) : 0;
+        const inProcessQty = inProcessMap[m.product_id]?.total || 0;
+        return {
           member_id: m.id,
           product_id: m.product_id,
           role: m.role,
           notes: m.notes,
           sku: m.product?.sku,
           name: m.product?.name,
-          current_stock: m.product ? parseFloat(m.product.current_stock) : 0,
-          available_stock: m.product ? parseFloat(m.product.available_stock) : 0,
+          current_stock: currentStock,
+          available_stock: currentStock - inProcessQty,
           sale_price: m.product ? parseFloat(m.product.sale_price) : 0,
           is_active: m.product?.is_active,
           image_url: m.product?.image_url
-        }))
-      });
-    }
+        };
+      })
+    }));
 
     res.json({ success: true, data: groups });
   } catch (error) {
@@ -330,10 +343,17 @@ const batchCheckEquivalents = async (req, res) => {
       include: [{
         model: Product,
         as: 'product',
-        attributes: ['id', 'current_stock', 'available_stock', 'is_active'],
+        attributes: ['id', 'current_stock', 'is_active'],
         where: { is_active: true }
       }]
     });
+
+    // Disponible real (current_stock - en trámite), una sola consulta
+    // agrupada para todos los productos involucrados en vez de leer
+    // available_stock (desincronizado, ver H3).
+    const inProcessMap = tenantId
+      ? await getInProcessMap(tenantId, allMembers.map(m => m.product_id))
+      : {};
 
     const result = {};
     product_ids.forEach(id => { result[id] = 0; });
@@ -348,7 +368,9 @@ const batchCheckEquivalents = async (req, res) => {
         if (!groups.has(member.group_id)) continue;
         if (seen.has(member.product_id)) continue;
 
-        const stock = parseFloat(member.product?.available_stock || member.product?.current_stock || 0);
+        const currentStock = parseFloat(member.product?.current_stock || 0);
+        const inProcessQty = inProcessMap[member.product_id]?.total || 0;
+        const stock = currentStock - inProcessQty;
         if (stock > 0) {
           seen.add(member.product_id);
           result[productId] = (result[productId] || 0) + 1;

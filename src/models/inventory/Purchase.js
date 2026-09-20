@@ -258,7 +258,44 @@ const Purchase = sequelize.define('Purchase', {
     allowNull: false,
     defaultValue: false,
     comment: 'Precargado en true cuando supplier.is_obligated_to_invoice=false, editable por el usuario (ver purchases.controller.js).'
-  }
+  },
+  // ── RADIAN — eventos sobre la factura electrónica del proveedor ────
+  // (ver 00 - Documentación/RADIAN-Analisis-y-Plan.md §5.1). Distinto de
+  // requires_support_document/dian_status de arriba, que son del Documento
+  // Soporte (cuando el proveedor NO factura electrónicamente) — acá es al
+  // revés: el proveedor SÍ envió una factura electrónica con CUFE propio, y
+  // Pitbox (el adquirente) debe acusar recibo/aceptarla ante la DIAN.
+  cufe: {
+    type: DataTypes.STRING(255),
+    allowNull: true,
+    comment: 'CUFE de la factura electrónica del proveedor, extraído del XML importado.',
+  },
+  dian_issue_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+    comment: 'cbc:IssueDate de la factura del proveedor (fecha mínima válida para el 030).',
+  },
+  dian_issue_time: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+    comment: 'cbc:IssueTime de la factura del proveedor, tal cual (ej. 14:30:00-05:00).',
+  },
+  supplier_xml: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    comment: 'XML original de la factura del proveedor (UBL), guardado para poder referenciarlo en los eventos.',
+  },
+  radian_status: {
+    type: DataTypes.STRING(20),
+    allowNull: false,
+    defaultValue: 'none',
+    comment: 'none | 030 | 032 | 033 | 031 — último evento aceptado de la secuencia comercial.',
+  },
+  radian_deadline_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    comment: 'Vencimiento del plazo de 3 días hábiles para 031/033, fijado al aceptarse el 032.',
+  },
 }, {
   tableName: 'purchases',
   timestamps: true,

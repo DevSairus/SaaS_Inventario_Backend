@@ -89,6 +89,13 @@ const checkLimits = (resourceType) => {
         return next();
       }
 
+      // Técnicos sin acceso al sistema no cuentan para el límite de usuarios
+      // del plan (D2): si la creación en curso es de uno de ellos, no hay
+      // nada que verificar aquí.
+      if (resourceType === 'users' && req.body?.has_system_access === false) {
+        return next();
+      }
+
       const tenantId = req.tenant_id;
 
       if (!tenantId) {
@@ -143,7 +150,9 @@ const checkLimits = (resourceType) => {
               role: {
                 [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician']
               },
-              is_active: true
+              is_active: true,
+              // Técnicos sin acceso al sistema no cuentan para el límite (D2).
+              has_system_access: true
             }
           });
           maxLimit = plan.max_users;

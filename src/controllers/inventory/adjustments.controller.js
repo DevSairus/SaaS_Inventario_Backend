@@ -205,50 +205,40 @@ const getAdjustmentById = async (req, res) => {
   }
 };
 
+// ── Helper de error HTTP (mismo patrón que voidSale.js#httpError) ───────────
+function httpError(statusCode, payload) {
+  const err = new Error(payload.message);
+  err.statusCode = statusCode;
+  err.payload = payload;
+  return err;
+}
+
 /**
- * Crear nuevo ajuste de inventario
+ * Núcleo reutilizable de "crear ajuste". Extraído del handler HTTP (mismo
+ * patrón que voidSaleCore en voidSale.js) para que physicalCounts.controller.js
+ * pueda crear el ajuste de entrada/salida de una sesión de conteo dentro de su
+ * PROPIA transacción (junto con confirmAdjustmentCore y el resto de la
+ * aplicación), sin pasar por req/res.
+ *
+ * Si se recibe `transaction`, la función NO abre ni cierra su propia
+ * transacción (el llamador es dueño del ciclo de vida); si no se recibe,
+ * abre y confirma/revierte una propia (comportamiento igual al handler HTTP
+ * original de createAdjustment).
+ *
+ * Devuelve { adjustment_id, adjustment_number } o lanza un Error con
+ * .statusCode/.payload.
  */
-const createAdjustment = async (req, res) => {
-  const t = await sequelize.transaction();
+async function createAdjustmentCore({ tenant_id, user_id, adjustment_type, reason, warehouse_id, adjustment_date, notes, items, physical_count_id = null }, transaction = null) {
+  const t = transaction || await sequelize.transaction();
+  const ownsTransaction = !transaction;
 
   try {
-    // ✅ Validar autenticación
-    if (!req.user) {
-      await t.rollback();
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
-    }
-
-    // ✅ Validar tenant_id
-    if (!req.user.tenant_id) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
-    }
-
-    const { adjustment_type, reason, warehouse_id, adjustment_date, notes, items } = req.body;
-    const tenant_id = req.user.tenant_id;
-    const user_id = req.user.id;
-
-    // Validaciones
     if (!adjustment_type || !reason) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Tipo de ajuste y razón son requeridos'
-      });
+      throw httpError(400, { success: false, message: 'Tipo de ajuste y razón son requeridos' });
     }
 
     if (!items || items.length === 0) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Debe agregar al menos un producto'
-      });
+      throw httpError(400, { success: false, message: 'Debe agregar al menos un producto' });
     }
 
     // Generar número de ajuste
@@ -282,11 +272,11 @@ const createAdjustment = async (req, res) => {
       user_id,
       adjustment_date: adjustment_date || new Date(),
       status: 'draft',
-      notes
+      notes,
+      physical_count_id
     }, { transaction: t });
 
     // Crear items del ajuste
-    const adjustmentItems = [];
     for (const item of items) {
       const product = await Product.findOne({
         where: { id: item.product_id, tenant_id },
@@ -294,26 +284,18 @@ const createAdjustment = async (req, res) => {
       });
 
       if (!product) {
-        await t.rollback();
-        return res.status(404).json({
-          success: false,
-          message: `Producto con ID ${item.product_id} no encontrado`
-        });
+        throw httpError(404, { success: false, message: `Producto con ID ${item.product_id} no encontrado` });
       }
 
       const quantity = parseFloat(item.quantity);
       if (!Number.isFinite(quantity) || quantity <= 0) {
-        await t.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Cantidad inválida para el producto ${product.name}. Debe ser un número mayor a cero`
-        });
+        throw httpError(400, { success: false, message: `Cantidad inválida para el producto ${product.name}. Debe ser un número mayor a cero` });
       }
 
       const unit_cost = parseFloat(item.unit_cost || product.average_cost || 0);
       const total_cost = quantity * unit_cost;
 
-      const adjustmentItem = await InventoryAdjustmentItem.create({
+      await InventoryAdjustmentItem.create({
         adjustment_id: adjustment.id,
         product_id: item.product_id,
         quantity,
@@ -322,15 +304,55 @@ const createAdjustment = async (req, res) => {
         reason: item.reason || null,
         notes: item.notes || null
       }, { transaction: t });
-
-      adjustmentItems.push(adjustmentItem);
     }
 
-    await t.commit();
+    if (ownsTransaction) await t.commit();
+
+    return { adjustment_id: adjustment.id, adjustment_number };
+
+  } catch (error) {
+    if (ownsTransaction && t && !t.finished) {
+      await t.rollback();
+    }
+    if (error.statusCode) throw error;
+    logger.error('Error en createAdjustmentCore:', error);
+    throw httpError(500, { success: false, message: 'Error al crear el ajuste' });
+  }
+}
+
+/**
+ * Crear nuevo ajuste de inventario (wrapper HTTP delgado sobre
+ * createAdjustmentCore -- comportamiento idéntico al de antes del refactor).
+ */
+const createAdjustment = async (req, res) => {
+  // ✅ Validar autenticación
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Usuario no autenticado'
+    });
+  }
+
+  // ✅ Validar tenant_id
+  if (!req.user.tenant_id) {
+    return res.status(400).json({
+      success: false,
+      message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+    });
+  }
+
+  const { adjustment_type, reason, warehouse_id, adjustment_date, notes, items } = req.body;
+  const tenant_id = req.user.tenant_id;
+  const user_id = req.user.id;
+
+  try {
+    const { adjustment_id } = await createAdjustmentCore({
+      tenant_id, user_id, adjustment_type, reason, warehouse_id, adjustment_date, notes, items
+    });
 
     // Obtener ajuste completo
     const newAdjustment = await InventoryAdjustment.findOne({
-      where: { id: adjustment.id },
+      where: { id: adjustment_id },
       include: [
         {
           model: InventoryAdjustmentItem,
@@ -353,8 +375,8 @@ const createAdjustment = async (req, res) => {
     });
 
   } catch (error) {
-    if (t && !t.finished) {
-      await t.rollback();
+    if (error.statusCode && error.payload) {
+      return res.status(error.statusCode).json(error.payload);
     }
     logger.error('Error en createAdjustment:', error);
     res.status(500).json({
@@ -511,37 +533,24 @@ const updateAdjustment = async (req, res) => {
 };
 
 /**
- * Confirmar ajuste de inventario (genera movimientos y actualiza stock)
+ * Núcleo reutilizable de "confirmar ajuste" (genera movimientos y actualiza
+ * stock). Mismo patrón de extracción que createAdjustmentCore/voidSaleCore:
+ * si se recibe `transaction` no la abre ni cierra (para que
+ * physicalCounts.controller.js pueda encadenar create+confirm de dos ajustes
+ * dentro de una sola transacción de aplicación).
+ *
+ * Devuelve { adjustment, product_ids } (adjustment con items+product
+ * cargados, ya en estado 'confirmed') o lanza un Error con
+ * .statusCode/.payload.
  */
-const confirmAdjustment = async (req, res) => {
-  const t = await sequelize.transaction();
+async function confirmAdjustmentCore({ tenant_id, user_id, adjustment_id }, transaction = null) {
+  const t = transaction || await sequelize.transaction();
+  const ownsTransaction = !transaction;
 
   try {
-    // ✅ Validar autenticación
-    if (!req.user) {
-      await t.rollback();
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no autenticado'
-      });
-    }
-
-    // ✅ Validar tenant_id
-    if (!req.user.tenant_id) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
-      });
-    }
-
-    const { id } = req.params;
-    const tenant_id = req.user.tenant_id;
-    const user_id = req.user.id;
-
     // Buscar ajuste
     const adjustment = await InventoryAdjustment.findOne({
-      where: { id, tenant_id },
+      where: { id: adjustment_id, tenant_id },
       include: [
         {
           model: InventoryAdjustmentItem,
@@ -558,34 +567,22 @@ const confirmAdjustment = async (req, res) => {
     });
 
     if (!adjustment) {
-      await t.rollback();
-      return res.status(404).json({
-        success: false,
-        message: 'Ajuste no encontrado'
-      });
+      throw httpError(404, { success: false, message: 'Ajuste no encontrado' });
     }
 
     // Validar estado
     if (adjustment.status !== 'draft') {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'El ajuste ya fue confirmado o cancelado'
-      });
+      throw httpError(400, { success: false, message: 'El ajuste ya fue confirmado o cancelado' });
     }
 
     // Validar que tenga items
     if (!adjustment.items || adjustment.items.length === 0) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'El ajuste no tiene productos'
-      });
+      throw httpError(400, { success: false, message: 'El ajuste no tiene productos' });
     }
 
     // Crear movimientos de inventario para cada item
-    const movement_reason = adjustment.adjustment_type === 'entrada' 
-      ? 'adjustment_in' 
+    const movement_reason = adjustment.adjustment_type === 'entrada'
+      ? 'adjustment_in'
       : 'adjustment_out';
 
     for (const item of adjustment.items) {
@@ -593,13 +590,9 @@ const confirmAdjustment = async (req, res) => {
       if (adjustment.adjustment_type === 'salida') {
         const currentStock = parseFloat(item.product.current_stock);
         const adjustQuantity = parseFloat(item.quantity);
-        
+
         if (currentStock < adjustQuantity) {
-          await t.rollback();
-          return res.status(400).json({
-            success: false,
-            message: `Stock insuficiente para ${item.product.name}. Stock actual: ${currentStock}, requerido: ${adjustQuantity}`
-          });
+          throw httpError(400, { success: false, message: `Stock insuficiente para ${item.product.name}. Stock actual: ${currentStock}, requerido: ${adjustQuantity}` });
         }
       }
 
@@ -625,7 +618,48 @@ const confirmAdjustment = async (req, res) => {
       status: 'confirmed'
     }, { transaction: t });
 
-    await t.commit();
+    if (ownsTransaction) await t.commit();
+
+    const product_ids = adjustment.items.map(item => item.product_id);
+    return { adjustment, product_ids };
+
+  } catch (error) {
+    if (ownsTransaction && t && !t.finished) {
+      await t.rollback();
+    }
+    if (error.statusCode) throw error;
+    logger.error('Error en confirmAdjustmentCore:', error);
+    throw httpError(500, { success: false, message: error.message || 'Error al confirmar el ajuste' });
+  }
+}
+
+/**
+ * Confirmar ajuste de inventario (wrapper HTTP delgado sobre
+ * confirmAdjustmentCore -- comportamiento idéntico al de antes del refactor).
+ */
+const confirmAdjustment = async (req, res) => {
+  // ✅ Validar autenticación
+  if (!req.user) {
+    return res.status(401).json({
+      success: false,
+      message: 'Usuario no autenticado'
+    });
+  }
+
+  // ✅ Validar tenant_id
+  if (!req.user.tenant_id) {
+    return res.status(400).json({
+      success: false,
+      message: 'Usuario sin tenant asignado. Por favor contacte a soporte.'
+    });
+  }
+
+  const { id } = req.params;
+  const tenant_id = req.user.tenant_id;
+  const user_id = req.user.id;
+
+  try {
+    const { product_ids } = await confirmAdjustmentCore({ tenant_id, user_id, adjustment_id: id });
 
     // Obtener ajuste confirmado
     const confirmedAdjustment = await InventoryAdjustment.findOne({
@@ -646,7 +680,6 @@ const confirmAdjustment = async (req, res) => {
     });
 
     // 🔔 Verificación automática de alertas
-    const product_ids = adjustment.items.map(item => item.product_id);
     markProductsForAlertCheck(res, product_ids, tenant_id);
 
     // Audit
@@ -662,9 +695,8 @@ const confirmAdjustment = async (req, res) => {
     });
 
   } catch (error) {
-    // Solo hacer rollback si la transacción no se ha finalizado
-    if (t && !t.finished) {
-      await t.rollback();
+    if (error.statusCode && error.payload) {
+      return res.status(error.statusCode).json(error.payload);
     }
     logger.error('Error en confirmAdjustment:', error);
     res.status(500).json({
@@ -868,5 +900,8 @@ module.exports = {
   confirmAdjustment,
   cancelAdjustment,
   deleteAdjustment,
-  getAdjustmentsStats
+  getAdjustmentsStats,
+  // Núcleos reutilizables (ver physicalCounts.controller.js)
+  createAdjustmentCore,
+  confirmAdjustmentCore
 };

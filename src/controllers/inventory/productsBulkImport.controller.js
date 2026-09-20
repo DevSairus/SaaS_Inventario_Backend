@@ -2,6 +2,7 @@ const ExcelJS = require('exceljs');
 const { Op } = require('sequelize');
 const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember } = require('../../models/inventory');
 const { runWithTenantSchema } = require('../../config/tenantContext');
+const { cellToText } = require('../../utils/excelCell');
 
 const REQUIRED_COLUMNS = ['Código*', 'Nombre*'];
 const MAX_REPORTED_ERRORS = 300;
@@ -56,17 +57,6 @@ class UnionFind {
     const rb = this.find(b);
     if (ra !== rb) this.parent.set(ra, rb);
   }
-}
-
-// ExcelJS puede devolver fórmulas/rich text en vez de un string plano.
-function cellToText(value) {
-  if (value === null || value === undefined) return '';
-  if (typeof value === 'object') {
-    if (value.text !== undefined) return String(value.text);
-    if (value.result !== undefined) return String(value.result);
-    if (Array.isArray(value.richText)) return value.richText.map((r) => r.text).join('');
-  }
-  return String(value);
 }
 
 async function readExcelRows(buffer) {

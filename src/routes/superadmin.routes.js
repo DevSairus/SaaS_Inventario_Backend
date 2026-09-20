@@ -101,7 +101,8 @@ router.get(
         rows.map(async (tenant) => {
           const subscription = tenant.subscriptions && tenant.subscriptions[0];
           const userCount = await User.count({
-            where: { tenant_id: tenant.id },
+            // Técnicos sin acceso al sistema no cuentan (D2).
+            where: { tenant_id: tenant.id, has_system_access: true },
           });
 
           return {
@@ -229,11 +230,12 @@ router.get(
       console.log('✅ Tenant encontrado:', tenant.company_name);
 
       // Obtener estadísticas
-      const totalUsers = await User.count({ 
-        where: { 
+      const totalUsers = await User.count({
+        where: {
           tenant_id: id,
-          role: { [Op.ne]: 'super_admin' }  // ← Excluir super_admin del conteo
-        } 
+          role: { [Op.ne]: 'super_admin' },  // ← Excluir super_admin del conteo
+          has_system_access: true, // Técnicos sin acceso no cuentan (D2)
+        }
       });
       const totalInvoices = await Invoice.count({ where: { tenant_id: id } });
       const Branch = require('../models/Branch');
@@ -2833,6 +2835,10 @@ router.post(
 
       if (!user.is_active) {
         return res.status(403).json({ success: false, message: 'No se puede iniciar sesión como un usuario inactivo' });
+      }
+
+      if (!user.has_system_access) {
+        return res.status(403).json({ success: false, message: 'No se puede iniciar sesión como un usuario sin acceso al sistema' });
       }
 
       // La impersonación es para dar soporte administrativo — roles operativos

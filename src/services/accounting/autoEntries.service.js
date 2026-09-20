@@ -219,6 +219,20 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
       const subtotal = total - tax;
       const isCash = purchase.payment_status === 'paid';
 
+      // Retenciones PRACTICADAS al proveedor (Fase 0 de Declaraciones
+      // Periódicas / Formulario 350): antes de esto, todo `total_amount` se
+      // acreditaba a la cuenta por pagar/caja como si se le fuera a pagar
+      // completo al proveedor, aunque parte ya se retuvo y en realidad se le
+      // debe a la DIAN. Cada retención va a su propia cuenta de pasivo
+      // (236505/236710/236805, ya sembradas) y SOLO se resta de lo que se le
+      // debe al proveedor -- el asiento sigue cuadrando porque la suma de
+      // créditos sigue siendo `total`.
+      const retefuente = Number(purchase.retefuente_amount || 0);
+      const reteiva = Number(purchase.reteiva_amount || 0);
+      const reteica = Number(purchase.reteica_amount || 0);
+      const totalRetentions = retefuente + reteiva + reteica;
+      const netPayable = total - totalRetentions;
+
       const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
       const lines = [{ account_id: inventoryAccount, debit: subtotal, credit: 0, description: 'Ingreso de mercancía a inventario' }];
 
@@ -233,10 +247,23 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
       lines.push({
         account_id: creditAccount,
         debit: 0,
-        credit: total,
+        credit: netPayable,
         description: isCash ? 'Pago de contado' : 'Cuenta por pagar a proveedor',
         third_party_id: isCash ? null : (purchase.supplier_id || null),
       });
+
+      if (retefuente > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'purchase_retefuente_payable', t);
+        lines.push({ account_id, debit: 0, credit: retefuente, description: 'Retención en la fuente practicada al proveedor' });
+      }
+      if (reteiva > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'purchase_reteiva_payable', t);
+        lines.push({ account_id, debit: 0, credit: reteiva, description: 'IVA retenido al proveedor' });
+      }
+      if (reteica > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'purchase_reteica_payable', t);
+        lines.push({ account_id, debit: 0, credit: reteica, description: 'ICA retenido al proveedor' });
+      }
 
       const entry = await createDraftEntry(
         tenantId,
@@ -271,6 +298,15 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
       const total = Number(expense.total_amount || 0);
       const isPaid = expense.payment_status === 'paid';
 
+      // Mismo caso que en generatePurchaseEntry: Expense también calcula
+      // retefuente/reteiva/reteica (Fase C de impuestos) y hasta ahora no se
+      // contabilizaban -- ver Fase 0 de Declaraciones Periódicas.
+      const retefuente = Number(expense.retefuente_amount || 0);
+      const reteiva = Number(expense.reteiva_amount || 0);
+      const reteica = Number(expense.reteica_amount || 0);
+      const totalRetentions = retefuente + reteiva + reteica;
+      const netPayable = total - totalRetentions;
+
       const expenseAccount = await getMappedAccountId(tenantId, `expense_category:${expense.category}`, t);
       const pm = (expense.payment_method || '').toLowerCase();
       const isCash = pm.includes('efectivo') || pm.includes('cash');
@@ -282,8 +318,21 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
 
       const lines = [
         { account_id: expenseAccount, debit: total, credit: 0, description: expense.description },
-        { account_id: creditAccount, debit: 0, credit: total, description: isPaid ? 'Pago del gasto' : 'Gasto pendiente de pago' },
+        { account_id: creditAccount, debit: 0, credit: netPayable, description: isPaid ? 'Pago del gasto' : 'Gasto pendiente de pago' },
       ];
+
+      if (retefuente > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'expense_retefuente_payable', t);
+        lines.push({ account_id, debit: 0, credit: retefuente, description: 'Retención en la fuente practicada' });
+      }
+      if (reteiva > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'expense_reteiva_payable', t);
+        lines.push({ account_id, debit: 0, credit: reteiva, description: 'IVA retenido' });
+      }
+      if (reteica > 0) {
+        const account_id = await getMappedAccountId(tenantId, 'expense_reteica_payable', t);
+        lines.push({ account_id, debit: 0, credit: reteica, description: 'ICA retenido' });
+      }
 
       const entry = await createDraftEntry(
         tenantId,
@@ -888,6 +937,136 @@ async function generateAdvanceRefundEntry(refund, advance, tenantId, userId, opt
   }, `devolución de anticipo ${refund.id} (anticipo ${advance.id})`, options);
 }
 
+/**
+ * Última fecha calendario de un período 'YYYY-MM' (fecha del asiento de
+ * depreciación -- se contabiliza al cierre del mes, no al día 1). Cálculo
+ * duplicado a propósito frente a periodEndDate en fixedAssetDepreciation.service.js
+ * para no crear un require circular entre ambos servicios (ese servicio ya
+ * requiere generateDepreciationEntry desde acá).
+ */
+function lastDayOfPeriod(period) {
+  const [year, month] = period.split('-').map(Number);
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
+/**
+ * Genera el asiento en borrador de la depreciación mensual de UN activo fijo
+ * en UN período (`source_type: 'fixed_asset_depreciation'`). Ver
+ * Contabilidad-Plan-Ejecucion-Fases-1-4.md — Fase 1.
+ *
+ * Débito: gasto de depreciación, mapeado por categoría del activo (evento
+ * `fixed_asset_depreciation_expense:<category>`) -- una camioneta y un
+ * computador no deberían caer en la misma cuenta de gasto, mismo criterio
+ * que ya usa `expense_category:*` para gastos operativos.
+ *
+ * Crédito: depreciación acumulada -- NO se resuelve vía AccountMapping
+ * porque cada activo ya trae su propia cuenta
+ * (`accumulated_depreciation_account_id`, elegida al darlo de alta; ver
+ * FixedAsset.js), necesaria para poder tener más de una subcuenta 1592 por
+ * categoría/activo si el plan de cuentas del tenant así lo requiere.
+ *
+ * @param {object} asset - instancia de FixedAsset (status 'activo')
+ * @param {string} period - 'YYYY-MM'
+ * @param {number} amount - monto a depreciar en este período
+ */
+async function generateDepreciationEntry(asset, period, amount, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    if (!(amount > 0)) return null;
+
+    const t = await sequelize.transaction();
+    try {
+      const expenseAccount = await getMappedAccountId(tenantId, `fixed_asset_depreciation_expense:${asset.category}`, t);
+
+      const lines = [
+        { account_id: expenseAccount, debit: amount, credit: 0, description: `Depreciación ${period} — ${asset.name}` },
+        { account_id: asset.accumulated_depreciation_account_id, debit: 0, credit: amount, description: `Depreciación acumulada — ${asset.name}` },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: asset.branch_id,
+          entryDate: lastDayOfPeriod(period),
+          sourceType: 'fixed_asset_depreciation',
+          sourceId: asset.id,
+          description: `Depreciación ${period} — ${asset.name}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `depreciación ${asset.id} (${period})`, options);
+}
+
+/**
+ * Genera el asiento en borrador del pago de UNA cuota de un crédito
+ * (`source_type: 'loan_payment'`). Ver
+ * Contabilidad-Plan-Ejecucion-Fases-1-4.md — Fase 2.
+ *
+ * Débito: pasivo financiero (por `principal_amount`) + gasto financiero
+ * (por `interest_amount`, si aplica) -- ambas cuentas propias del crédito
+ * (`liability_account_id`/`interest_expense_account_id`, elegidas al darlo
+ * de alta; ver Loan.js), NO vía AccountMapping.
+ *
+ * Crédito: caja/bancos -- reutiliza `expense_cash_account`/
+ * `expense_bank_account` (las mismas cuentas que ya usan los pagos de
+ * gastos): pagar una cuota de crédito es una salida de caja/banco como
+ * cualquier otra, no hace falta un mapeo nuevo por esto.
+ *
+ * @param {object} installment - instancia de LoanInstallment
+ * @param {object} loan - instancia de Loan (dueña de la cuota)
+ * @param {string} paymentMethod - texto libre, ej. 'Efectivo'/'Transferencia' (mismo criterio que Expense.payment_method)
+ */
+async function generateLoanPaymentEntry(installment, loan, paymentMethod, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const principal = Number(installment.principal_amount);
+      const interest = Number(installment.interest_amount);
+
+      const pm = (paymentMethod || '').toLowerCase();
+      const isCash = pm.includes('efectivo') || pm.includes('cash');
+      const creditAccount = await getMappedAccountId(tenantId, isCash ? 'expense_cash_account' : 'expense_bank_account', t);
+
+      const lines = [
+        { account_id: loan.liability_account_id, debit: principal, credit: 0, description: `Abono a capital cuota ${installment.installment_number} — ${loan.lender_name}` },
+      ];
+      if (interest > 0) {
+        lines.push({ account_id: loan.interest_expense_account_id, debit: interest, credit: 0, description: `Intereses cuota ${installment.installment_number} — ${loan.lender_name}` });
+      }
+      lines.push({ account_id: creditAccount, debit: 0, credit: principal + interest, description: `Pago cuota ${installment.installment_number} — ${loan.lender_name}` });
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: loan.branch_id,
+          entryDate: installment.paid_date || new Date(),
+          sourceType: 'loan_payment',
+          sourceId: installment.id,
+          description: `Pago cuota ${installment.installment_number}/${loan.term_months} — ${loan.lender_name}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `pago cuota ${installment.id}`, options);
+}
+
 module.exports = {
   generateSaleEntry,
   generatePaymentEntry,
@@ -901,5 +1080,7 @@ module.exports = {
   generateAdvanceEntry,
   generateAdvanceApplicationEntry,
   generateAdvanceRefundEntry,
+  generateDepreciationEntry,
+  generateLoanPaymentEntry,
   reverseSourceEntries,
 };

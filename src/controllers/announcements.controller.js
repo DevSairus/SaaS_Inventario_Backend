@@ -352,9 +352,9 @@ exports.getAnnouncementStats = async (req, res) => {
       });
     }
 
-    // Total de usuarios
+    // Total de usuarios (excluye técnicos sin acceso: nunca ven anuncios)
     const totalUsers = await User.count({
-      where: { is_active: true }
+      where: { is_active: true, has_system_access: true }
     });
 
     // Usuarios que vieron el anuncio

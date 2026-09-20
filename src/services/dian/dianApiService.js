@@ -56,6 +56,23 @@ function bodySendBillSync(fileName, content64) {
 function bodySendTestSetAsync(fileName, content64, testSetId) {
   return `<wcf:SendTestSetAsync xmlns:wcf="${NS.WCF}"><wcf:fileName>${fileName}</wcf:fileName><wcf:contentFile>${content64}</wcf:contentFile><wcf:testSetId>${testSetId}</wcf:testSetId></wcf:SendTestSetAsync>`;
 }
+// SendNominaSync — mismo contrato WcfDianCustomerServices, mismo shape de
+// body que SendBillSync (fileName + contentFile). payrollDianAdapter.js ya
+// llamaba a esta función dando por hecho que existía; nunca se había
+// agregado, así que el primer envío real de nómina electrónica tronaba con
+// un TypeError ("dianApiService.sendNominaSync is not a function").
+function bodySendNominaSync(fileName, content64) {
+  return `<wcf:SendNominaSync xmlns:wcf="${NS.WCF}"><wcf:fileName>${fileName}</wcf:fileName><wcf:contentFile>${content64}</wcf:contentFile></wcf:SendNominaSync>`;
+}
+// SendEventUpdateStatus lleva SOLO contentFile — a diferencia de
+// SendBillSync, NO lleva fileName (confirmado contra el Anexo FE 1.9
+// §7.13.2, ver RADIAN-Analisis-y-Plan.md §5.2).
+function bodySendEventUpdateStatus(content64) {
+  return `<wcf:SendEventUpdateStatus xmlns:wcf="${NS.WCF}"><wcf:contentFile>${content64}</wcf:contentFile></wcf:SendEventUpdateStatus>`;
+}
+function bodyGetXmlByDocumentKey(trackId) {
+  return `<wcf:GetXmlByDocumentKey xmlns:wcf="${NS.WCF}"><wcf:trackId>${trackId}</wcf:trackId></wcf:GetXmlByDocumentKey>`;
+}
 
 // Transporte
 async function soapRequest(endpoint, actionName, soapXml, agent) {
@@ -165,6 +182,13 @@ async function sendBillSync({ xmlContent, nit, invoiceNumber, p12Base64, passwor
   return parseSoapResponse(r.body);
 }
 
+async function sendNominaSync({ xmlContent, nit, documentNumber, p12Base64, password, environment = 'production' }) {
+  const zipBuf = createZip(Buffer.from(xmlContent, 'utf8'), `${nit}${documentNumber}.xml`);
+  const r = await signedCall({ p12Base64, password, environment, actionName: 'SendNominaSync',
+    bodyContent: bodySendNominaSync(`${nit}${documentNumber}.zip`, zipBuf.toString('base64')) });
+  return parseSoapResponse(r.body);
+}
+
 async function sendTestSetAsync({ xmlContent, nit, invoiceNumber, testSetId, p12Base64, password, environment = 'test' }) {
   const zipBuf = createZip(Buffer.from(xmlContent,'utf8'), `${nit}${invoiceNumber}.xml`);
   const r = await signedCall({ p12Base64, password, environment, actionName: 'SendTestSetAsync',
@@ -194,4 +218,30 @@ async function pollGetStatusZip({ zipKey, p12Base64, password, environment, maxR
   return { isValid: false, statusCode: 'TIMEOUT', statusDescription: 'Timeout DIAN', raw: '' };
 }
 
-module.exports = { getStatus, getStatusZip, getNumberingRange, sendBillSync, sendTestSetAsync };
+/**
+ * Envía un evento RADIAN (ApplicationResponse ya firmado XAdES) via
+ * SendEventUpdateStatus. `xmlContent` debe venir YA FIRMADO — a diferencia
+ * de sendBillSync/sendTestSetAsync (que no firman tampoco, ambos reciben el
+ * XML final), se explicita acá porque el flujo de eventos usa
+ * dianSignerService.signXml en vez de @dian-kit.
+ */
+async function sendEventUpdateStatus({ signedXml, nit, documentNumber, p12Base64, password, environment = 'production' }) {
+  const zipBuf = createZip(Buffer.from(signedXml, 'utf8'), `${nit}${documentNumber}.xml`);
+  const r = await signedCall({
+    p12Base64, password, environment, actionName: 'SendEventUpdateStatus',
+    bodyContent: bodySendEventUpdateStatus(zipBuf.toString('base64')),
+  });
+  return parseSoapResponse(r.body);
+}
+
+async function getXmlByDocumentKey({ trackId, p12Base64, password, environment = 'production' }) {
+  const r = await signedCall({ p12Base64, password, environment, actionName: 'GetXmlByDocumentKey', bodyContent: bodyGetXmlByDocumentKey(trackId) });
+  return parseSoapResponse(r.body);
+}
+
+module.exports = {
+  getStatus, getStatusZip, getNumberingRange, sendBillSync, sendTestSetAsync,
+  sendNominaSync,
+  sendEventUpdateStatus, getXmlByDocumentKey,
+  signedCall,
+};

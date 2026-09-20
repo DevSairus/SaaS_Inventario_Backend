@@ -1,6 +1,7 @@
 // backend/src/controllers/sales/customers.controller.js
 const { Customer, Sale, SaleItem } = require('../../models');
 const { Op } = require('sequelize');
+const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 
 // Utilidad: el frontend envía full_name, la DB tiene first_name + last_name
 function splitFullName(fullName) {
@@ -147,10 +148,22 @@ const create = async (req, res) => {
 
     const customer = await Customer.create(customerData);
 
+    // Gamificación (CRM) §4 — mueve new_customers. Cliente no tiene
+    // branch_id propio, así que la meta de sede se resuelve dentro del
+    // motor vía owner_user_id + UserBranch (ver utils/crmGoalMetrics.js).
+    // Best-effort: si el tenant no tiene el módulo CRM ni metas activas,
+    // esto no hace nada (no depende de requireModule('crm') acá porque la
+    // creación de clientes es del módulo Ventas, no del CRM).
+    const gamification = await applyGoalProgressEvent({
+      tenant_id: tenantId, event_type: 'customer_created',
+      user_id: customer.owner_user_id || req.user?.id || null,
+    });
+
     res.status(201).json({
       success: true,
       message: 'Cliente creado exitosamente',
-      data: customer
+      data: customer,
+      gamification,
     });
   } catch (error) {
     console.error('Error al crear cliente:', error);

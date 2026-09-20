@@ -99,6 +99,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '513005', name: 'Seguros', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '513505', name: 'Servicios Públicos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '514505', name: 'Mantenimiento y Reparaciones', type: 'gasto', parent_code: '51', accepts_entries: true },
+  { code: '516005', name: 'Depreciación', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519515', name: 'Transporte, Fletes y Acarreos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519525', name: 'Impuestos Asumidos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519535', name: 'Publicidad y Propaganda (Marketing)', type: 'gasto', parent_code: '51', accepts_entries: true },
@@ -130,10 +131,24 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   purchase_payable: '220505',           // compra a crédito -> proveedores
   purchase_cash_account: '110505',      // compra de contado -> Caja
   purchase_iva_descontable: '135515',   // IVA descontable de la compra
+  // Retenciones PRACTICADAS por el tenant al proveedor (Fase 0 de
+  // Declaraciones Periódicas / Formulario 350): antes de este mapeo,
+  // generatePurchaseEntry acreditaba el total_amount completo a la cuenta
+  // por pagar/caja, ignorando que parte de ese valor no se le paga al
+  // proveedor sino que se le debe a la DIAN -- ver 236505/236710/236805,
+  // ya sembradas en este mismo catálogo pero sin mapeo hasta ahora.
+  purchase_retefuente_payable: '236505', // Retención en la Fuente por Pagar
+  purchase_reteiva_payable: '236710',    // IVA Retenido por Pagar
+  purchase_reteica_payable: '236805',    // Retención de ICA por Pagar
 
   expense_payable: '233505',            // gasto no pagado -> costos y gastos por pagar
   expense_cash_account: '110505',
   expense_bank_account: '111005',
+  // Mismo caso que en compras, aplicado a gastos (Expense también calcula
+  // retefuente/reteiva/reteica y total_retentions desde Fase C).
+  expense_retefuente_payable: '236505',
+  expense_reteiva_payable: '236710',
+  expense_reteica_payable: '236805',
 
   // Diferencias de cierre de caja: sobrante -> ingreso diverso, faltante -> gasto diverso.
   // La cuenta de caja/bancos que se ajusta reutiliza sale_cash_account / sale_bank_account.
@@ -164,6 +179,17 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   // Anticipos de Clientes (pasivo): lo que la empresa "debe" a sus clientes
   // por dinero recibido antes de facturar. Ver Anticipos-Clientes-Analisis-y-Plan.md §7.
   customer_advance_liability: '280505',
+
+  // Activos Fijos — gasto de depreciación mensual (Fase 1 de
+  // Contabilidad-Plan-Ejecucion-Fases-1-4.md). Las 5 categorías comparten
+  // por defecto la misma cuenta base 516005 -- el tenant puede separar por
+  // subcuenta y remapear cada categoría individualmente desde Mapeo de
+  // Cuentas si necesita más detalle en el estado de resultados.
+  'fixed_asset_depreciation_expense:vehiculo': '516005',
+  'fixed_asset_depreciation_expense:maquinaria': '516005',
+  'fixed_asset_depreciation_expense:equipo_computo': '516005',
+  'fixed_asset_depreciation_expense:muebles_enseres': '516005',
+  'fixed_asset_depreciation_expense:otro': '516005',
 };
 
 module.exports = { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS };

@@ -90,13 +90,15 @@ module.exports = {
         automation_rule_id: {
           type: Sequelize.UUID,
           allowNull: false,
-          references: { model: { tableName: 'crm_automation_rules', schema: 'public' }, key: 'id' },
+          // Tabla de TENANT: sin calificar con schema (ver 2026091704-fix-crm-crossschema-fks.js).
+          references: { model: 'crm_automation_rules', key: 'id' },
           onDelete: 'CASCADE',
         },
         opportunity_id: {
           type: Sequelize.UUID,
           allowNull: false,
-          references: { model: { tableName: 'opportunities', schema: 'public' }, key: 'id' },
+          // Tabla de TENANT: sin calificar con schema (ver 2026091704-fix-crm-crossschema-fks.js).
+          references: { model: 'opportunities', key: 'id' },
           onDelete: 'CASCADE',
         },
         triggered_for_stage_changed_at: {

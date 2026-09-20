@@ -32,6 +32,22 @@ const CommissionSettlementItem = sequelize.define('CommissionSettlementItem', {
     allowNull: false,
     defaultValue: 0,
   },
+  // Desde el plan de comisiones por categoría: cada fila es ahora el
+  // desglose de UNA categoría dentro de una OT/venta (puede haber varias
+  // filas para la misma OT, una por categoría). NULL = liquidación legada
+  // sin categorías, donde el % vivía solo en CommissionSettlement.
+  commission_category_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
+  commission_percentage: {
+    type: DataTypes.DECIMAL(5, 2),
+    allowNull: true,
+  },
+  commission_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: true,
+  },
 }, {
   tableName: 'commission_settlement_items',
   timestamps: true,

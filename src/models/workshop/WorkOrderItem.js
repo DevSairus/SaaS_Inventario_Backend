@@ -102,6 +102,17 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
     allowNull: true,
     references: { model: 'work_order_quote_requests', key: 'id' },
     onDelete: 'SET NULL',
+  },
+  // Categoría de comisión resuelta al agregar el ítem (desde product.category_id
+  // o desde diagram_template.system si vino de una marca de diagnóstico). El %
+  // NO se congela acá -- se congela recién al liquidar (ver
+  // CommissionSettlementItem) para no romper la liquidación de OT ya abiertas
+  // si el admin cambia el % de la categoría a mitad de mes.
+  commission_category_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'commission_categories', key: 'id' },
+    onDelete: 'SET NULL',
   }
 }, {
   tableName: 'work_order_items',
