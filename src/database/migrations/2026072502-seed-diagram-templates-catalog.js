@@ -37,7 +37,11 @@ module.exports = {
             configuration: tpl.configuration,
             name: tpl.name,
             description: tpl.description,
-            svg_content: tpl.svg_content || null,
+            // svg_content todavía es NOT NULL en este punto de la historia de
+            // migraciones (se relaja recién en 2026072602-add-image-path...).
+            // '' en vez de null evita romper el aprovisionamiento de un
+            // tenant nuevo desde cero (bug real: bloqueaba TODO onboarding).
+            svg_content: tpl.svg_content || '',
             view_box: tpl.view_box,
             points: JSON.stringify(tpl.points),
           },
