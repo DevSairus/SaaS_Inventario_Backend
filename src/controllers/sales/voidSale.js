@@ -20,6 +20,7 @@ const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const logger = require('../../config/logger');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { resolveUnitCost } = require('../../utils/costResolver');
 
 // ── Número DEV único con advisory lock ───────────────────────────────────────
 async function generateReturnNumber(tenant_id, transaction) {
@@ -154,7 +155,7 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
         product_id:   saleItem.product_id,
         quantity:     qtyReq,
         unit_price:   parseFloat(saleItem.unit_price),
-        unit_cost:    parseFloat(saleItem.unit_cost || saleItem.product?.average_cost || saleItem.unit_price || 0),
+        unit_cost:    resolveUnitCost(saleItem, saleItem.product),
         condition:    reqItem.condition || 'used',
         // 'retained': el repuesto sigue consumido por la OT que generó esta
         // venta -- no vuelve a inventario (ver retained_product_ids arriba).

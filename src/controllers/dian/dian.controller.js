@@ -1421,6 +1421,7 @@ const createAndSendCreditNote = async (req, res) => {
         noteSubtotal += itemSubtot;
         noteTax += itemTax;
         noteItems.push({
+          item_type: saleItem.item_type || 'product',
           product_name: saleItem.product_name,
           product_sku: saleItem.product_sku,
           product_id: saleItem.product_id,
@@ -1447,6 +1448,7 @@ const createAndSendCreditNote = async (req, res) => {
         noteSubtotal += itemSubtot;
         noteTax += itemTax;
         noteItems.push({
+          item_type: si.item_type || 'product',
           product_name: si.product_name,
           product_sku: si.product_sku,
           product_id: si.product_id,
@@ -1469,6 +1471,7 @@ const createAndSendCreditNote = async (req, res) => {
         noteSubtotal += itemSubtot;
         noteTax += itemTax;
         noteItems.push({
+          item_type: si.item_type || 'product',
           product_name: si.product_name,
           product_sku: si.product_sku,
           product_id: si.product_id,
@@ -1527,7 +1530,7 @@ const createAndSendCreditNote = async (req, res) => {
       await SaleItem.create({
         sale_id: noteSale.id,
         tenant_id: tenantId,
-        item_type: 'product',
+        item_type: item.item_type || 'product',
         product_id: item.product_id,
         product_name: item.product_name,
         product_sku: item.product_sku,
@@ -1544,6 +1547,16 @@ const createAndSendCreditNote = async (req, res) => {
     }
 
     await transaction.commit();
+
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    setImmediate(async () => {
+      try {
+        const { generateCreditNoteEntry } = require('../../services/accounting/autoEntries.service');
+        await generateCreditNoteEntry(noteSale, noteItems, tenantId, req.user.id);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de la nota crédito ${noteSale.id}: ${err.message}`);
+      }
+    });
 
     // Enviar a DIAN (async)
     const tenant = await Tenant.findByPk(tenantId);
@@ -1714,6 +1727,16 @@ const createAndSendDebitNote = async (req, res) => {
     }
 
     await transaction.commit();
+
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    setImmediate(async () => {
+      try {
+        const { generateDebitNoteEntry } = require('../../services/accounting/autoEntries.service');
+        await generateDebitNoteEntry(noteSale, noteItems, tenantId, req.user.id);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de la nota débito ${noteSale.id}: ${err.message}`);
+      }
+    });
 
     const tenant = await Tenant.findByPk(tenantId);
     setImmediate(async () => {

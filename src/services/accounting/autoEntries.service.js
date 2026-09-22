@@ -73,13 +73,52 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
-      const productItems = (items || []).filter((i) => i.item_type === 'product');
-      const serviceItems = (items || []).filter((i) => i.item_type === 'service' || i.item_type === 'free_line');
+      // Ítems rechazados al aprobar una cotización parcial (approval_status
+      // 'rechazado') nunca se cobran ni descuentan inventario (ver confirm()
+      // en sales.controller.js) -- si entraran aquí, el asiento reconocería
+      // ingreso/CMV de algo que la venta real nunca incluyó.
+      const validItems = (items || []).filter((i) => i.approval_status !== 'rechazado');
+      const productItems = validItems.filter((i) => i.item_type === 'product');
+      const serviceItems = validItems.filter((i) => i.item_type === 'service' || i.item_type === 'free_line');
 
-      const productRevenue = productItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
-      const serviceRevenue = serviceItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
-      const productCogs = productItems.reduce((s, i) => s + Number(i.quantity || 0) * Number(i.unit_cost || 0), 0);
+      let productRevenue = productItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      let serviceRevenue = serviceItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
+
+      // CMV solo de productos con control de inventario (track_inventory):
+      // uno sin control nunca tuvo una salida real de kardex que respalde el
+      // crédito a 143501, aunque tenga un average_cost > 0 heredado. La
+      // devolución (generateCustomerReturnEntry) ya aplicaba este mismo
+      // filtro; acá faltaba.
+      const { Op } = require('sequelize');
+      const { Product } = require('../../models');
+      const productIds = [...new Set(productItems.map((i) => i.product_id).filter(Boolean))];
+      const trackedProducts = productIds.length
+        ? await Product.findAll({ where: { id: { [Op.in]: productIds }, tenant_id: tenantId }, attributes: ['id', 'track_inventory'], transaction: t })
+        : [];
+      const trackInventoryMap = new Map(trackedProducts.map((p) => [p.id, p.track_inventory]));
+      const productCogs = productItems
+        .filter((i) => trackInventoryMap.get(i.product_id))
+        .reduce((s, i) => s + Number(i.quantity || 0) * Number(i.unit_cost || 0), 0);
       const totalTax = Number(sale.tax_amount || 0);
+
+      // Descuento GLOBAL de la venta/cotización (resolveGlobalDiscount en
+      // sales.controller.js): se resta de sale.total_amount DESPUÉS de
+      // impuestos, así que el IVA por línea no cambia -- reduce el ingreso
+      // reconocido. Se prorratea entre producto y servicio según su peso para
+      // no desbalancear el asiento frente a sale.total_amount, que ya lo trae
+      // descontado (antes, generateSaleEntry ni lo leía y el asiento quedaba
+      // descuadrado, así que createDraftEntry lo rechazaba y la venta se
+      // quedaba sin CMV/ingreso contabilizados).
+      const globalDiscount = Number(sale.global_discount_amount || 0);
+      if (globalDiscount > 0) {
+        const revenueBase = productRevenue + serviceRevenue;
+        if (revenueBase > 0) {
+          const productDiscount = Math.round(globalDiscount * (productRevenue / revenueBase));
+          productRevenue -= productDiscount;
+          serviceRevenue -= (globalDiscount - productDiscount);
+        }
+      }
+
       const total = Number(sale.total_amount || 0);
       const paid = Math.min(Number(sale.paid_amount || 0), total);
       const pending = total - paid;
@@ -1067,6 +1106,273 @@ async function generateLoanPaymentEntry(installment, loan, paymentMethod, tenant
   }, `pago cuota ${installment.id}`, options);
 }
 
+/**
+ * Genera el asiento en borrador de un ajuste de inventario CONFIRMADO
+ * (entrada o salida manual, incluida la toma física — ver physicalCounts.controller.js,
+ * que crea sus ajustes de entrada/salida vía createAdjustmentCore/confirmAdjustmentCore).
+ * Antes, confirmAdjustmentCore movía stock y average_cost vía createMovement
+ * pero nunca tocaba el libro diario -- una merma o un sobrante de conteo
+ * cambiaba el valor del inventario sin que ese cambio llegara jamás a
+ * resultados (ni gasto por faltante, ni ingreso por sobrante).
+ *
+ * MVP: se usan las cuentas genéricas de "diferencia no explicada" que ya
+ * existen para el cierre de caja (Ingresos/Gastos Diversos) -- mismo criterio
+ * que cash_session_surplus/shortage. Si se necesita separar mermas de
+ * sobrantes por motivo (robo, vencimiento, daño) en cuentas distintas, es un
+ * ajuste puntual a futuro sobre este mismo servicio.
+ *
+ * @param {object} adjustment - InventoryAdjustment (adjustment_type, adjustment_date, adjustment_number)
+ * @param {Array} items - InventoryAdjustmentItem[] (quantity, unit_cost)
+ */
+async function generateAdjustmentEntry(adjustment, items, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const totalValue = (items || []).reduce((s, i) => s + Number(i.quantity || 0) * Number(i.unit_cost || 0), 0);
+      if (totalValue <= 0) return null; // ajuste sin costo (ej. producto con average_cost=0) -- nada que contabilizar
+
+      const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
+      const lines = adjustment.adjustment_type === 'entrada'
+        ? [
+            { account_id: inventoryAccount, debit: totalValue, credit: 0, description: 'Sobrante de inventario' },
+            { account_id: await getMappedAccountId(tenantId, 'inventory_adjustment_surplus', t), debit: 0, credit: totalValue, description: 'Sobrante de inventario' },
+          ]
+        : [
+            { account_id: await getMappedAccountId(tenantId, 'inventory_adjustment_shortage', t), debit: totalValue, credit: 0, description: 'Faltante/merma de inventario' },
+            { account_id: inventoryAccount, debit: 0, credit: totalValue, description: 'Faltante/merma de inventario' },
+          ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: adjustment.branch_id,
+          entryDate: adjustment.adjustment_date || adjustment.createdAt || new Date(),
+          sourceType: 'inventory_adjustment',
+          sourceId: adjustment.id,
+          description: `Ajuste de inventario ${adjustment.adjustment_number || adjustment.id} (${adjustment.reason || adjustment.adjustment_type})`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `ajuste de inventario ${adjustment.id}`, options);
+}
+
+/**
+ * Genera el asiento en borrador de un consumo interno APROBADO (repuestos o
+ * insumos que la propia empresa consume, no un cliente -- ej. aceite para el
+ * vehículo de la empresa). Antes, approveInternalConsumption sacaba stock vía
+ * createMovement pero el gasto correspondiente nunca se reconocía: el
+ * inventario bajaba de valor sin ningún gasto que lo explique en el Estado de
+ * Resultados.
+ *
+ * @param {object} consumption - InternalConsumption (total_cost, consumption_date, consumption_number)
+ */
+async function generateInternalConsumptionEntry(consumption, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const totalCost = Number(consumption.total_cost || 0);
+      if (totalCost <= 0) return null;
+
+      const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
+      const expenseAccount = await getMappedAccountId(tenantId, 'internal_consumption_expense', t);
+
+      const lines = [
+        { account_id: expenseAccount, debit: totalCost, credit: 0, description: `Consumo interno — ${consumption.department || 'sin depto.'}` },
+        { account_id: inventoryAccount, debit: 0, credit: totalCost, description: 'Salida de inventario por consumo interno' },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: consumption.branch_id,
+          entryDate: consumption.consumption_date || consumption.createdAt || new Date(),
+          sourceType: 'internal_consumption',
+          sourceId: consumption.id,
+          description: `Consumo interno ${consumption.consumption_number || consumption.id}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `consumo interno ${consumption.id}`, options);
+}
+
+/**
+ * Genera el asiento en borrador de un periodo de nómina ya emitido (todos
+ * los Documentos Soporte de Pago de Nómina Electrónica aceptados por la
+ * DIAN -- ver submitPayrollPeriod en payrollPeriodEmissionService.js, que
+ * llama a esta función y hasta ahora fallaba porque no existía: se importaba
+ * de este archivo pero nunca estuvo implementada ni exportada).
+ *
+ * Un asiento por periodo, consolidando todos los empleados liquidados:
+ *   Debe:  gasto de personal (expense_category:nomina) por el total devengado
+ *   Haber: aportes de seguridad social por pagar (retenido al empleado, se le
+ *          debe remitir a EPS/AFP, no es gasto) por el total deducido
+ *   Haber: salarios por pagar (neto que se le debe a cada empleado hasta que
+ *          se pague) por el total neto
+ *
+ * @param {object} period - PayrollPeriod (id, branch_id, start_date, end_date, payment_date)
+ * @param {Array} liquidations - [{ employee, liquidation }] -- liquidation con devengadosTotal/deduccionesTotal (ver payrollService.js#liquidarEmpleado)
+ */
+async function generatePayrollEntry(period, liquidations, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const totalDevengado = (liquidations || []).reduce((s, l) => s + Number(l.liquidation?.devengadosTotal || 0), 0);
+      const totalDeducciones = (liquidations || []).reduce((s, l) => s + Number(l.liquidation?.deduccionesTotal || 0), 0);
+      const totalNeto = totalDevengado - totalDeducciones;
+
+      if (totalDevengado <= 0) return null;
+
+      const expenseAccount = await getMappedAccountId(tenantId, 'expense_category:nomina', t);
+      const lines = [
+        { account_id: expenseAccount, debit: totalDevengado, credit: 0, description: 'Gasto de personal — nómina' },
+      ];
+
+      if (totalDeducciones > 0) {
+        const ssAccount = await getMappedAccountId(tenantId, 'payroll_social_security_payable', t);
+        lines.push({ account_id: ssAccount, debit: 0, credit: totalDeducciones, description: 'Aportes de seguridad social retenidos al empleado' });
+      }
+      if (totalNeto > 0) {
+        const netPayableAccount = await getMappedAccountId(tenantId, 'payroll_net_payable', t);
+        lines.push({ account_id: netPayableAccount, debit: 0, credit: totalNeto, description: 'Salarios netos por pagar' });
+      }
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: period.branch_id,
+          entryDate: period.payment_date || period.end_date || new Date(),
+          sourceType: 'payroll',
+          sourceId: period.id,
+          description: `Nómina periodo ${period.start_date || ''} — ${period.end_date || ''} (${(liquidations || []).length} empleado(s))`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `nómina periodo ${period.id}`, options);
+}
+
+/**
+ * Genera el asiento en borrador del stock inicial de un producto NUEVO (ver
+ * createProduct en products.controller.js). Antes, un producto creado con
+ * current_stock/average_cost > 0 escribía esos valores directo en la fila,
+ * sin ningún movimiento ni asiento -- al venderlo, se acreditaba 143501 por
+ * algo que nunca se había debitado, y el saldo terminaba negativo.
+ *
+ * Mismo criterio contable que createInventoryOpeningBalance (saldo inicial
+ * de un tenant que migra a Pitbox): débito a inventario, crédito a la cuenta
+ * puente de saldos iniciales -- un producto nuevo con stock de arranque es,
+ * en el fondo, el mismo caso (inventario que entra sin una compra real
+ * registrada en el sistema). A diferencia de esa función (que postea de una
+ * vez, en un flujo explícito de apertura contable), este queda en borrador y
+ * no bloquea la creación del producto si el mapeo no está configurado.
+ */
+async function generateInitialStockEntry(product, quantity, unitCost, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const totalValue = Number(quantity || 0) * Number(unitCost || 0);
+      if (totalValue <= 0) return null;
+
+      const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
+      const suspenseAccount = await getMappedAccountId(tenantId, 'opening_balance_suspense', t);
+
+      const lines = [
+        { account_id: inventoryAccount, debit: totalValue, credit: 0, description: 'Stock inicial al crear el producto' },
+        { account_id: suspenseAccount, debit: 0, credit: totalValue, description: 'Contrapartida stock inicial' },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          entryDate: new Date(),
+          sourceType: 'product_initial_stock',
+          sourceId: product.id,
+          description: `Stock inicial — ${product.name} (${product.sku})`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `stock inicial producto ${product.id}`, options);
+}
+
+/**
+ * Igual que generateInitialStockEntry pero consolidado en UN asiento para
+ * toda una importación masiva de productos (ver productsBulkImport.controller.js)
+ * -- llamar al generador por producto ahí adentro (miles de filas) abriría
+ * miles de transacciones/asientos, lo mismo que bulkCreate evita para la
+ * escritura de los productos.
+ *
+ * @param {object} params - { description, totalValue }
+ */
+async function generateBulkInventoryEntry({ description, totalValue }, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      if (!(Number(totalValue) > 0)) return null;
+
+      const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
+      const suspenseAccount = await getMappedAccountId(tenantId, 'opening_balance_suspense', t);
+
+      const lines = [
+        { account_id: inventoryAccount, debit: totalValue, credit: 0, description },
+        { account_id: suspenseAccount, debit: 0, credit: totalValue, description: 'Contrapartida stock inicial' },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          entryDate: new Date(),
+          sourceType: 'product_bulk_import',
+          description,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `importación masiva de inventario (tenant ${tenantId})`, options);
+}
+
 module.exports = {
   generateSaleEntry,
   generatePaymentEntry,
@@ -1082,5 +1388,10 @@ module.exports = {
   generateAdvanceRefundEntry,
   generateDepreciationEntry,
   generateLoanPaymentEntry,
+  generateAdjustmentEntry,
+  generateInternalConsumptionEntry,
+  generateInitialStockEntry,
+  generateBulkInventoryEntry,
+  generatePayrollEntry,
   reverseSourceEntries,
 };

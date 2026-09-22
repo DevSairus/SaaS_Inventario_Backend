@@ -296,9 +296,20 @@ exports.getProfitReport = async (req, res) => {
     const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
     const branchReplacements = branch_id ? { branchId: branch_id, branchWarehouseId } : {};
 
-    // ── Productos físicos (repuestos) — sin cambios de fondo, solo se
-    // excluye explícitamente product_type='service' para no mezclarlo con la
-    // rama de mano de obra de abajo ────────────────────────────────────────
+    // ── Productos físicos (repuestos) — excluye explícitamente
+    // product_type='service' para no mezclarlo con la rama de mano de obra de
+    // abajo. El ingreso usa si.subtotal (ya neto de descuentos por línea),
+    // no quantity*unit_price -- ese cálculo ignoraba discount_percentage/
+    // discount_amount y sobreestimaba el ingreso (y por tanto el margen) en
+    // cualquier línea con descuento.
+    //
+    // `ret` neta cantidad/ingreso/costo de las devoluciones ya APROBADAS de
+    // cada línea (solo 'approved': una pendiente o rechazada no movió
+    // inventario ni reversó nada) -- sin esto, un producto vendido y devuelto
+    // seguía contando su venta original completa, inflando ingreso/utilidad.
+    // Sigue sin descontar el descuento GLOBAL de la venta
+    // (Sale.global_discount_amount) -- limitación conocida.
+    // ─────────────────────────────────────────────────────────────────────
     const query = `
       SELECT
         p.id,
@@ -307,15 +318,15 @@ exports.getProfitReport = async (req, res) => {
         p.product_type,
         c.name as category,
         COUNT(DISTINCT s.id)::integer as total_sales,
-        COALESCE(SUM(si.quantity), 0)::numeric as total_quantity,
-        COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
-        COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
-        COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as profit,
+        COALESCE(SUM(si.quantity - COALESCE(ret.returned_qty, 0)), 0)::numeric as total_quantity,
+        COALESCE(SUM(si.subtotal - COALESCE(ret.returned_subtotal, 0)), 0)::numeric as total_revenue,
+        COALESCE(SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
+        COALESCE(SUM((si.subtotal - COALESCE(ret.returned_subtotal, 0)) - (si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as profit,
         ROUND(
           CASE
-            WHEN SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) > 0 THEN
-              SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END))
-              / SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) * 100
+            WHEN SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) > 0 THEN
+              SUM((si.subtotal - COALESCE(ret.returned_subtotal, 0)) - (si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)
+              / SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) * 100
             ELSE 0
           END,
           2
@@ -324,6 +335,15 @@ exports.getProfitReport = async (req, res) => {
       INNER JOIN "${schema}"."sale_items" si ON p.id = si.product_id
       INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
       LEFT JOIN "${schema}"."categories" c ON p.category_id = c.id
+      LEFT JOIN (
+        SELECT cri.sale_item_id,
+          SUM(cri.quantity)::numeric as returned_qty,
+          SUM(cri.subtotal)::numeric as returned_subtotal
+        FROM "${schema}"."customer_return_items" cri
+        INNER JOIN "${schema}"."customer_returns" cr ON cri.return_id = cr.id
+        WHERE cr.tenant_id = :tenantId AND cr.status = 'approved'
+        GROUP BY cri.sale_item_id
+      ) ret ON ret.sale_item_id = si.id
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
         AND p.product_type != 'service'
@@ -342,12 +362,21 @@ exports.getProfitReport = async (req, res) => {
 
     const totalsQuery = `
       SELECT
-        COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as total_revenue,
-        COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
-        COALESCE(SUM(si.quantity * (si.unit_price - CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)), 0)::numeric as total_profit
+        COALESCE(SUM(si.subtotal - COALESCE(ret.returned_subtotal, 0)), 0)::numeric as total_revenue,
+        COALESCE(SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_cost,
+        COALESCE(SUM((si.subtotal - COALESCE(ret.returned_subtotal, 0)) - (si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as total_profit
       FROM "${schema}"."products" p
       INNER JOIN "${schema}"."sale_items" si ON p.id = si.product_id
       INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
+      LEFT JOIN (
+        SELECT cri.sale_item_id,
+          SUM(cri.quantity)::numeric as returned_qty,
+          SUM(cri.subtotal)::numeric as returned_subtotal
+        FROM "${schema}"."customer_return_items" cri
+        INNER JOIN "${schema}"."customer_returns" cr ON cri.return_id = cr.id
+        WHERE cr.tenant_id = :tenantId AND cr.status = 'approved'
+        GROUP BY cri.sale_item_id
+      ) ret ON ret.sale_item_id = si.id
       WHERE p.tenant_id = :tenantId
         AND s.tenant_id = :tenantId
         AND p.product_type != 'service'
@@ -535,7 +564,7 @@ exports.getRotationReport = async (req, res) => {
         COALESCE(p.current_stock, 0)::numeric as current_stock,
         COALESCE(p.min_stock, 0)::numeric as min_stock,
         COALESCE(SUM(si.quantity), 0)::numeric as qty_sold,
-        COALESCE(SUM(si.quantity * si.unit_price), 0)::numeric as revenue,
+        COALESCE(SUM(si.subtotal), 0)::numeric as revenue,
         COALESCE(COUNT(DISTINCT si.sale_id), 0)::integer as sales_count,
         ROUND(
           COALESCE(SUM(si.quantity), 0) / NULLIF(p.current_stock, 0),
@@ -671,7 +700,7 @@ exports.getProfitabilityReport = async (req, res) => {
     const dateReplacements = from_date && to_date ? { fromDate: from_date, toDate: to_date } : {};
 
     // Ingresos totales (la OT ya generó su Sale al entregarse, así que sumar
-    // solo Sale evita contar dos veces el mismo ingreso)
+    // solo Sale evita contar dos veces el mismo ingreso).
     const [revenueRow] = await sequelize.query(
       `
         SELECT COALESCE(SUM(s.total_amount), 0)::numeric as total_revenue
@@ -684,13 +713,41 @@ exports.getProfitabilityReport = async (req, res) => {
       { replacements: { tenantId, ...dateReplacements, branchId: branch_id }, type: QueryTypes.SELECT }
     );
 
-    // Costo de repuestos (COGS) — misma fórmula que getProfitReport
+    // Se resta el total de las devoluciones de cliente ya APROBADAS de esas
+    // mismas ventas -- sin esto, una venta devuelta seguía sumando su
+    // ingreso original completo. Consulta separada (mismo alias `s` que
+    // arriba) en vez de una subconsulta correlacionada, para no duplicar
+    // saleDateFilter/branchFilter con otro alias.
+    const [returnsRow] = await sequelize.query(
+      `
+        SELECT COALESCE(SUM(cr.total_amount), 0)::numeric as total_returns
+        FROM "${schema}"."customer_returns" cr
+        INNER JOIN "${schema}"."sales" s ON cr.sale_id = s.id
+        WHERE cr.tenant_id = :tenantId
+          AND cr.status = 'approved'
+          AND s.tenant_id = :tenantId
+          AND s.status IN ('completed', 'pending')
+          AND ${saleDateFilter}
+          ${branchFilter}
+      `,
+      { replacements: { tenantId, ...dateReplacements, branchId: branch_id }, type: QueryTypes.SELECT }
+    );
+
+    // Costo de repuestos (COGS) — misma fórmula que getProfitReport, neta
+    // devoluciones aprobadas por línea.
     const [partsCostRow] = await sequelize.query(
       `
-        SELECT COALESCE(SUM(si.quantity * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as parts_cost
+        SELECT COALESCE(SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as parts_cost
         FROM "${schema}"."products" p
         INNER JOIN "${schema}"."sale_items" si ON p.id = si.product_id
         INNER JOIN "${schema}"."sales" s ON si.sale_id = s.id
+        LEFT JOIN (
+          SELECT cri.sale_item_id, SUM(cri.quantity)::numeric as returned_qty
+          FROM "${schema}"."customer_return_items" cri
+          INNER JOIN "${schema}"."customer_returns" cr ON cri.return_id = cr.id
+          WHERE cr.tenant_id = :tenantId AND cr.status = 'approved'
+          GROUP BY cri.sale_item_id
+        ) ret ON ret.sale_item_id = si.id
         WHERE p.tenant_id = :tenantId
           AND s.tenant_id = :tenantId
           AND p.product_type != 'service'
@@ -729,7 +786,8 @@ exports.getProfitabilityReport = async (req, res) => {
       { replacements: { tenantId, ...dateReplacements, branchId: branch_id }, type: QueryTypes.SELECT }
     );
 
-    const total_revenue = parseFloat(revenueRow?.total_revenue) || 0;
+    const total_returns = parseFloat(returnsRow?.total_returns) || 0;
+    const total_revenue = (parseFloat(revenueRow?.total_revenue) || 0) - total_returns;
     const parts_cost = parseFloat(partsCostRow?.parts_cost) || 0;
     const labor_cost = laborForRange.labor_cost;
     const operating_expenses = parseFloat(expensesRow?.operating_expenses) || 0;

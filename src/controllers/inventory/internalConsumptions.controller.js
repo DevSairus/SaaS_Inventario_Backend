@@ -373,8 +373,18 @@ const approveInternalConsumption = async (req, res) => {
 
     await transaction.commit();
 
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    setImmediate(async () => {
+      try {
+        const { generateInternalConsumptionEntry } = require('../../services/accounting/autoEntries.service');
+        await generateInternalConsumptionEntry(consumption, tenant_id, req.user.id);
+      } catch (err) {
+        console.error(`[accounting] Error generando asiento del consumo interno ${id}: ${err.message}`);
+      }
+    });
+
     const product_ids = consumption.items.map(item => item.product_id);
-    markProductsForAlertCheck(res, product_ids, tenantId);
+    markProductsForAlertCheck(res, product_ids, tenant_id);
 
     res.json({ success: true, message: 'Consumo interno aprobado exitosamente', data: consumption });
   } catch (error) {

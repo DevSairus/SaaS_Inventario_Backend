@@ -650,6 +650,11 @@ const uploadPhysicalCountInner = async (req, res) => {
       let entry_adjustment_id = null;
       let exit_adjustment_id = null;
       const affectedProductIds = new Set();
+      // Se guardan para contabilizar DESPUÉS del commit (ver setImmediate más
+      // abajo) -- confirmAdjustmentCore ya trae items+unit_cost cargados, así
+      // no hace falta re-consultarlos.
+      let entryAdjustment = null;
+      let exitAdjustment = null;
 
       if (entryItems.length > 0) {
         const created = await createAdjustmentCore({
@@ -659,6 +664,7 @@ const uploadPhysicalCountInner = async (req, res) => {
         }, t);
         const confirmed = await confirmAdjustmentCore({ tenant_id, user_id, adjustment_id: created.adjustment_id }, t);
         entry_adjustment_id = created.adjustment_id;
+        entryAdjustment = confirmed.adjustment;
         confirmed.product_ids.forEach((pid) => affectedProductIds.add(pid));
       }
 
@@ -670,6 +676,7 @@ const uploadPhysicalCountInner = async (req, res) => {
         }, t);
         const confirmed = await confirmAdjustmentCore({ tenant_id, user_id, adjustment_id: created.adjustment_id }, t);
         exit_adjustment_id = created.adjustment_id;
+        exitAdjustment = confirmed.adjustment;
         confirmed.product_ids.forEach((pid) => affectedProductIds.add(pid));
       }
 
@@ -699,6 +706,19 @@ const uploadPhysicalCountInner = async (req, res) => {
       }, { transaction: t });
 
       await t.commit();
+
+      // Asientos contables en borrador (no bloqueante: si falla, solo se
+      // loguea) -- uno por cada ajuste de entrada/salida que haya generado
+      // esta aplicación.
+      setImmediate(async () => {
+        try {
+          const { generateAdjustmentEntry } = require('../../services/accounting/autoEntries.service');
+          if (entryAdjustment) await generateAdjustmentEntry(entryAdjustment, entryAdjustment.items, tenant_id, user_id);
+          if (exitAdjustment) await generateAdjustmentEntry(exitAdjustment, exitAdjustment.items, tenant_id, user_id);
+        } catch (err) {
+          logger.warn(`[accounting] Error generando asiento del conteo físico ${count.id}: ${err.message}`);
+        }
+      });
 
       const productIdsArr = [...affectedProductIds];
       markProductsForAlertCheck(res, productIdsArr, tenant_id);

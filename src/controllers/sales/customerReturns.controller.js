@@ -10,6 +10,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { resolveUnitCost } = require('../../utils/costResolver');
 
 /**
  * Generar número de devolución único.
@@ -273,7 +274,7 @@ const createCustomerReturn = async (req, res) => {
         product_id: saleItem.product_id,
         quantity: item.quantity,
         unit_price: saleItem.unit_price,
-        unit_cost: saleItem.unit_cost || saleItem.product.average_cost || 0,
+        unit_cost: resolveUnitCost(saleItem, saleItem.product),
         condition: item.condition || 'used',
         destination: item.condition === 'defective' ? 'quarantine' : 'inventory',
         subtotal: itemSubtotal,

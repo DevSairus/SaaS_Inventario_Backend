@@ -13,6 +13,7 @@ const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantCo
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 const { resolveCategoryForProduct, resolveCategoryForDiagramSystem } = require('../../services/workshop/commissionCategory.service');
+const { resolveUnitCost } = require('../../utils/costResolver');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -137,10 +138,7 @@ async function applyItemStockMovement(item, order, product, tenant_id, user_id, 
   const qty = parseFloat(item.quantity);
   const previous_stock = parseFloat(product.current_stock) || 0;
   const new_stock      = previous_stock - qty;
-  const unit_cost_val  =
-    parseFloat(product.average_cost) ||
-    parseFloat(product.purchase_price) ||
-    parseFloat(item.unit_price);
+  const unit_cost_val  = resolveUnitCost(item, product);
 
   const movement_number = await generateMovementNumber(tenant_id, transaction);
 
@@ -880,7 +878,7 @@ const revertStatus = async (req, res) => {
               product_id: item.product_id,
               warehouse_id: sale.warehouse_id || null,
               quantity: item.quantity,
-              unit_cost: item.unit_cost || product.average_cost || item.unit_price,
+              unit_cost: resolveUnitCost(item, product),
               user_id: req.user.id,
               notes: `Reversión de OT ${order.order_number} por administrador — ${reason}`,
             }, transaction);
@@ -2260,9 +2258,22 @@ const generateSale = async (req, res) => {
         if (originalMovement) unit_cost = parseFloat(originalMovement.unit_cost) || unit_cost;
       }
 
+      // WorkOrderItem.item_type usa su propio vocabulario ('repuesto',
+      // 'servicio', 'mano_obra', 'free_line'); SaleItem.item_type es
+      // 'product'/'service'/'free_line' y por defecto cae en 'product' si no
+      // se especifica. Sin este mapeo, toda la mano de obra quedaba como
+      // 'product' -- generateSaleEntry la acreditaba como ingreso de
+      // mercancía (413501) en vez de ingreso por servicios (415595), e
+      // inflaba productRevenue mientras sale_revenue_service/sale_cogs_service
+      // nunca se usaban para nada generado desde Taller.
+      const saleItemType = item.item_type === 'repuesto' ? 'product'
+        : item.item_type === 'free_line' ? 'free_line'
+        : 'service'; // 'servicio' / 'mano_obra'
+
       await SaleItem.create({
         tenant_id,
         sale_id:          sale.id,
+        item_type:        saleItemType,
         product_id:       item.product_id,
         product_name:     item.product_name,
         product_sku:      item.product_sku,

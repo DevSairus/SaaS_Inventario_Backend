@@ -1,6 +1,7 @@
 const ExcelJS = require('exceljs');
 const { Op } = require('sequelize');
-const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember } = require('../../models/inventory');
+const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember, InventoryMovement, Warehouse } = require('../../models/inventory');
+const { sequelize } = require('../../config/database');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { cellToText } = require('../../utils/excelCell');
 
@@ -302,20 +303,44 @@ const bulkImportProductsInner = async (req, res) => {
     const creationErrors = [];
     let creados = 0;
 
+    // Si el archivo trae stock inicial, ese stock necesita una bodega (igual
+    // que createProduct) -- se resuelve UNA sola vez para todo el archivo, no
+    // por fila, para no repetir la misma consulta miles de veces. Si el
+    // tenant no tiene ninguna bodega todavía, se cae al comportamiento previo
+    // (escribir current_stock/average_cost directo, sin kardex ni asiento)
+    // en vez de bloquear la importación completa.
+    const hasInitialStockRows = toCreate.some((row) => row.current_stock > 0);
+    let bulkWarehouseId = null;
+    if (hasInitialStockRows) {
+      const fallbackWarehouse = await Warehouse.findOne({
+        where: { tenant_id: tenantId },
+        order: [['is_default', 'DESC'], ['is_main', 'DESC'], ['created_at', 'ASC']],
+      });
+      bulkWarehouseId = fallbackWarehouse ? fallbackWarehouse.id : null;
+    }
+
+    // Filas con stock inicial cuyo producto sí se creó -- alimentan el
+    // InventoryMovement en bloque y el asiento contable consolidado de abajo.
+    const stockedRows = []; // { sku, quantity, unit_cost }
+
     for (let i = 0; i < toCreate.length; i += BULK_CHUNK_SIZE) {
       const chunk = toCreate.slice(i, i + BULK_CHUNK_SIZE);
+      // Si hay bodega resuelta, el producto arranca en cero -- su stock real
+      // entra por el InventoryMovement en bloque de más abajo (mismo criterio
+      // que createProduct: nada de stock/costo escrito directo en la fila).
       const payload = chunk.map((row) => ({
         tenant_id: tenantId,
         sku: row.sku,
         name: row.name,
         unit_of_measure: row.unit_of_measure,
-        average_cost: row.average_cost,
+        average_cost: bulkWarehouseId ? 0 : row.average_cost,
         base_price: row.base_price,
         profit_margin_percentage: row.profit_margin_percentage,
         product_type: 'simple',
-        current_stock: row.current_stock,
+        warehouse_id: bulkWarehouseId || null,
+        current_stock: bulkWarehouseId ? 0 : row.current_stock,
         reserved_stock: 0,
-        available_stock: row.current_stock,
+        available_stock: bulkWarehouseId ? 0 : row.current_stock,
         min_stock: 0,
         track_inventory: true,
         is_active: true,
@@ -325,10 +350,17 @@ const bulkImportProductsInner = async (req, res) => {
         tax_config: { iva: { enabled: true, rate: 19 }, inc: { enabled: false, rate: 0 }, ica: { enabled: false, rate: 0 } },
       }));
 
+      const collectStocked = (row) => {
+        if (bulkWarehouseId && row.current_stock > 0) {
+          stockedRows.push({ sku: row.sku, quantity: row.current_stock, unit_cost: row.average_cost });
+        }
+      };
+
       try {
         const created = await Product.bulkCreate(payload, { returning: true, validate: true });
         created.forEach((product, idx) => {
           skuToId.set(chunk[idx].sku, product.id);
+          collectStocked(chunk[idx]);
         });
         creados += created.length;
       } catch (err) {
@@ -340,10 +372,91 @@ const bulkImportProductsInner = async (req, res) => {
           try {
             const product = await Product.create(payload[idx]);
             skuToId.set(row.sku, product.id);
+            collectStocked(row);
             creados++;
           } catch (rowErr) {
             creationErrors.push({ row: row.rowNumber, sku: row.sku, name: row.name, errors: [rowErr.message || 'Error al crear el producto'] });
           }
+        }
+      }
+    }
+
+    // ------- Kardex + asiento contable del stock inicial cargado -------
+    // Todas las filas son productos RECIÉN creados con stock previo = 0, así
+    // que el promedio ponderado resultante es simplemente el costo de la
+    // fila -- no hace falta recalcular contra un stock previo como createMovement.
+    let stockEntry = null;
+    if (stockedRows.length > 0) {
+      const year = new Date().getFullYear();
+      const lastMovement = await InventoryMovement.findOne({
+        where: { tenant_id: tenantId, movement_number: { [Op.like]: `MOV-${year}-%` } },
+        order: [['movement_number', 'DESC']],
+      });
+      let nextMovementNumber = 1;
+      if (lastMovement) {
+        const lastNumber = parseInt(lastMovement.movement_number.split('-')[2], 10);
+        if (!isNaN(lastNumber)) nextMovementNumber = lastNumber + 1;
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+      const movementPayload = stockedRows.map((row, idx) => {
+        const productId = skuToId.get(row.sku);
+        const totalCost = row.quantity * row.unit_cost;
+        return {
+          tenant_id: tenantId,
+          movement_number: `MOV-${year}-${String(nextMovementNumber + idx).padStart(5, '0')}`,
+          movement_type: 'entrada',
+          direction: 'in',
+          movement_reason: 'initial_stock',
+          reference_type: 'product',
+          reference_id: productId,
+          product_id: productId,
+          warehouse_id: bulkWarehouseId,
+          quantity: row.quantity,
+          unit_cost: row.unit_cost,
+          total_cost: totalCost,
+          previous_stock: 0,
+          new_stock: row.quantity,
+          user_id: req.user.id,
+          movement_date: today,
+          notes: 'Stock inicial — importación masiva',
+        };
+      });
+
+      for (let i = 0; i < movementPayload.length; i += BULK_CHUNK_SIZE) {
+        await InventoryMovement.bulkCreate(movementPayload.slice(i, i + BULK_CHUNK_SIZE), { validate: true });
+      }
+
+      // Reflejar el stock/costo resultante en el producto -- para un producto
+      // recién creado con stock previo 0, el promedio ponderado final es
+      // directamente el costo de la fila (no hay stock previo que promediar).
+      // UPDATE ... FROM (VALUES ...) en vez de un Product.update() por fila:
+      // con miles de productos, un round-trip por fila reintroduce el mismo
+      // problema de timeout que bulkCreate ya evita arriba.
+      const { getCurrentSchema } = require('../../config/tenantContext');
+      const schema = getCurrentSchema() || 'public';
+      for (let i = 0; i < movementPayload.length; i += BULK_CHUNK_SIZE) {
+        const chunk = movementPayload.slice(i, i + BULK_CHUNK_SIZE);
+        const values = chunk.map((m) => `('${m.product_id}', ${Number(m.new_stock) || 0}, ${Number(m.unit_cost) || 0})`).join(',');
+        await sequelize.query(`
+          UPDATE "${schema}"."products" AS p
+          SET current_stock = v.qty, available_stock = v.qty, average_cost = v.cost
+          FROM (VALUES ${values}) AS v(id, qty, cost)
+          WHERE p.id = v.id::uuid AND p.tenant_id = :tenantId
+        `, { replacements: { tenantId } });
+      }
+
+      const totalValue = stockedRows.reduce((s, r) => s + r.quantity * r.unit_cost, 0);
+      if (totalValue > 0) {
+        try {
+          const { generateBulkInventoryEntry } = require('../../services/accounting/autoEntries.service');
+          stockEntry = await generateBulkInventoryEntry(
+            { description: `Stock inicial — importación masiva (${stockedRows.length} producto(s))`, totalValue },
+            tenantId,
+            req.user.id
+          );
+        } catch (err) {
+          console.error(`[accounting] Error generando asiento de stock inicial (import masivo) tenant ${tenantId}: ${err.message}`);
         }
       }
     }
@@ -501,6 +614,8 @@ const bulkImportProductsInner = async (req, res) => {
         errores_equivalencia: equivalenceErrors.slice(0, MAX_REPORTED_ERRORS),
         errores: allErrors.slice(0, MAX_REPORTED_ERRORS),
         errores_truncados: allErrors.length > MAX_REPORTED_ERRORS,
+        stock_inicial_productos: stockedRows.length,
+        asiento_stock_inicial_id: stockEntry?.id || null,
       },
     });
   } catch (error) {

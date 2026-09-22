@@ -8,6 +8,7 @@ const { createMovement } = require('./movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { resolveLandedPurchaseUnitCost } = require('../../utils/costResolver');
 
 /**
  * Generar número de compra único
@@ -811,6 +812,11 @@ const receivePurchase = async (req, res) => {
         continue;
       }
 
+      // El kardex debe capitalizar lo mismo que el asiento contable acredita
+      // a 143501 (subtotal - descuento global + flete, ver
+      // generatePurchaseEntry), no el precio de lista de la línea.
+      const landedUnitCost = resolveLandedPurchaseUnitCost(purchaseItem, purchase);
+
       // Crear movimiento de entrada (actualiza current_stock y average_cost automáticamente)
       await createMovement({
         tenant_id: tenant_id,
@@ -821,7 +827,7 @@ const receivePurchase = async (req, res) => {
         product_id: purchaseItem.product_id,
         warehouse_id: resolvedWarehouseId,
         quantity: received_quantity,
-        unit_cost: purchaseItem.unit_cost,
+        unit_cost: landedUnitCost,
         user_id: req.user.id,
         movement_date: purchase.purchase_date ? new Date(purchase.purchase_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
         notes: `Recepcion compra ${purchase.purchase_number} - ${purchaseItem.product_name}`

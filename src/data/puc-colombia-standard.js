@@ -48,6 +48,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '236505', name: 'Retención en la Fuente por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236710', name: 'IVA Retenido por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236805', name: 'Retención de ICA', type: 'pasivo', parent_code: '23', accepts_entries: true },
+  { code: '237005', name: 'Aportes de Seguridad Social por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
 
   { code: '24', name: 'Impuestos, Gravámenes y Tasas', type: 'pasivo', parent_code: '2', accepts_entries: false },
   { code: '240805', name: 'IVA por Pagar (Generado)', type: 'pasivo', parent_code: '24', accepts_entries: true },
@@ -155,6 +156,14 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   cash_session_surplus: '429505',
   cash_session_shortage: '519599',
 
+  // Ajustes de inventario confirmados (manuales o de toma física) y consumo
+  // interno: mismo criterio de "diferencia no explicada" que cash_session_*
+  // -- reutilizan las cuentas genéricas de Ingresos/Gastos Diversos en vez de
+  // abrir una subcuenta nueva por motivo (merma, robo, daño...).
+  inventory_adjustment_surplus: '429505',
+  inventory_adjustment_shortage: '519599',
+  internal_consumption_expense: '519599',
+
   // Mapeo por categoría de Expense.category (los 11 valores del enum)
   'expense_category:arriendo': '512005',
   'expense_category:servicios_publicos': '513505',
@@ -166,8 +175,22 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   'expense_category:insumos_oficina': '519540',
   'expense_category:seguros': '513005',
   'expense_category:honorarios': '511005',
-  'expense_category:comisiones_tecnicos': '510510',
+  // Comisión de técnicos: es costo de la mano de obra vendida, no gasto
+  // administrativo -- reclasificada de 510510 (gasto operativo) a 615595
+  // (Costo de Servicios Taller, la misma cuenta de sale_cogs_service) para
+  // que la Utilidad Bruta del Estado de Resultados no quede inflada. La
+  // cuenta 510510 sigue en el plan de cuentas (ya sembrada en tenants
+  // existentes) por si algún tenant la reasigna manualmente.
+  'expense_category:comisiones_tecnicos': '615595',
   'expense_category:otro': '519599',
+
+  // Nómina electrónica (submitPayrollPeriod / generatePayrollEntry): el
+  // gasto de personal ya tenía cuenta (expense_category:nomina, 510506) pero
+  // faltaban las dos contrapartidas del pasivo -- lo retenido al empleado
+  // para EPS/AFP (que la empresa debe remitir, no gastar) y el neto que
+  // efectivamente se le debe pagar.
+  payroll_social_security_payable: '237005',
+  payroll_net_payable: '250505',
 
   // Cierre de ejercicio (3.3 del análisis contable): traslada el resultado
   // del año (ingresos - costos - gastos) a patrimonio.

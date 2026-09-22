@@ -5,6 +5,7 @@ const { Product, Category } = require('../../models/inventory');
 const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
+const { createMovement } = require('./movements.controller');
 
 // Debe reflejar exactamente el CHECK constraint de la tabla products
 // (ver 20260101000000-baseline-core-inventory-tables.js) -- si diverge,
@@ -409,6 +410,14 @@ const createProduct = async (req, res) => {
         }, { transaction });
       }
 
+      const effectiveTrackInventory = safeProductType === 'service' ? false : track_inventory;
+
+      // El producto se crea SIEMPRE en cero -- si trae stock inicial, ese
+      // stock entra por un InventoryMovement real (igual que una compra),
+      // no escrito directo en la fila. Sin esto, el 143501 nunca se debitaba
+      // por ese stock y, al venderlo, se acreditaba por algo que jamás se
+      // había registrado como entrada (ver openingBalance.service.js, que ya
+      // sigue este mismo patrón para la carga inicial de un tenant nuevo).
       const product = await Product.create({
         tenant_id: tenantId,
         sku: sku.trim(),
@@ -420,23 +429,73 @@ const createProduct = async (req, res) => {
         brand: brand?.trim() || null,
         vehicle_id: vehicleRecord?.id || null,
         unit_of_measure: unit_of_measure?.trim() || null,
-        average_cost: average_cost || 0,
+        average_cost: 0,
         sale_price: sale_price || 0,
         base_price: base_price || 0,
         profit_margin_percentage: profit_margin_percentage || 0,
         product_type: safeProductType,
-        current_stock: safeProductType === 'service' ? 0 : effectiveCurrentStock,
+        current_stock: 0,
         reserved_stock: safeProductType === 'service' ? 0 : reserved_stock,
-        available_stock: safeProductType === 'service' ? 0 : available_stock,
+        available_stock: safeProductType === 'service' ? 0 : (0 - parseFloat(reserved_stock || 0)),
         min_stock: (safeProductType === 'service' || safeProductType === 'vehicle') ? 0 : min_stock,
         max_stock: (safeProductType === 'service' || safeProductType === 'vehicle') ? null : max_stock,
-        track_inventory: safeProductType === 'service' ? false : track_inventory,
+        track_inventory: effectiveTrackInventory,
         is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
         tax_config: finalTaxConfig,
         is_labor: safeProductType === 'service' ? !!is_labor : false,
       }, { transaction });
 
+      const initialQuantity = effectiveTrackInventory ? parseFloat(effectiveCurrentStock) || 0 : 0;
+      const initialCost = parseFloat(average_cost) || 0;
+      if (initialQuantity > 0) {
+        // Igual que en un vehículo la bodega no siempre es obligatoria en el
+        // formulario (ver ProductFormModal), se cae a una bodega por defecto
+        // del tenant antes de bloquear la creación del producto -- mismo
+        // criterio que ya usa physicalCounts.controller.js para su propio
+        // fallback de bodega.
+        let initialWarehouseId = warehouse_id || null;
+        if (!initialWarehouseId) {
+          const { Warehouse } = require('../../models/inventory');
+          const fallbackWarehouse = await Warehouse.findOne({
+            where: { tenant_id: tenantId },
+            order: [['is_default', 'DESC'], ['is_main', 'DESC'], ['created_at', 'ASC']],
+            transaction,
+          });
+          initialWarehouseId = fallbackWarehouse ? fallbackWarehouse.id : null;
+        }
+        if (!initialWarehouseId) {
+          throw Object.assign(new Error('Este producto tiene stock inicial: indica una bodega para registrarlo'), { statusCode: 400 });
+        }
+        await createMovement({
+          tenant_id: tenantId,
+          movement_type: 'entrada',
+          movement_reason: 'initial_stock',
+          reference_type: 'product',
+          reference_id: product.id,
+          product_id: product.id,
+          warehouse_id: initialWarehouseId,
+          quantity: initialQuantity,
+          unit_cost: initialCost,
+          user_id: req.user.id,
+          movement_date: new Date().toISOString().split('T')[0],
+          notes: 'Stock inicial al crear el producto',
+        }, transaction);
+      }
+
       await transaction.commit();
+
+      // Asiento contable en borrador del stock inicial (no bloqueante: si
+      // falla, solo se loguea -- igual que el resto de generadores).
+      if (initialQuantity > 0 && initialCost > 0) {
+        setImmediate(async () => {
+          try {
+            const { generateInitialStockEntry } = require('../../services/accounting/autoEntries.service');
+            await generateInitialStockEntry(product, initialQuantity, initialCost, tenantId, req.user.id);
+          } catch (err) {
+            console.error(`[accounting] Error generando asiento de stock inicial del producto ${product.id}: ${err.message}`);
+          }
+        });
+      }
 
       const newProduct = await Product.findOne({
         where: { id: product.id },
@@ -452,6 +511,9 @@ const createProduct = async (req, res) => {
       throw error;
     }
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
     console.error('Error en createProduct:', error);
     res.status(500).json({ success: false, message: 'Error al crear producto' });
   }
@@ -489,11 +551,20 @@ const updateProduct = async (req, res) => {
       });
     }
 
-    if (updateData.current_stock !== undefined || updateData.reserved_stock !== undefined) {
-      const current = updateData.current_stock !== undefined ? parseFloat(updateData.current_stock) : parseFloat(product.current_stock);
-      const reserved = updateData.reserved_stock !== undefined ? parseFloat(updateData.reserved_stock) : parseFloat(product.reserved_stock);
-      updateData.available_stock = current - reserved;
-    }
+    // El stock y el costo promedio solo deben cambiar a través de un
+    // movimiento real (venta, compra, ajuste, saldo inicial) -- cada uno dejó
+    // su propio rastro en el kardex y, cada vez más, su propio asiento
+    // contable (ver generateAdjustmentEntry, generatePurchaseEntry, etc.).
+    // Editar el producto directamente aquí movía el valor del inventario sin
+    // ningún movimiento ni asiento que lo explique, y alteraba el costo
+    // promedio que usará el próximo CMV sin dejar rastro de por qué cambió.
+    // Se descartan en silencio (no se rechaza el request completo) porque el
+    // formulario de edición reenvía el objeto completo del producto,
+    // incluyendo estos campos sin cambios.
+    delete updateData.current_stock;
+    delete updateData.reserved_stock;
+    delete updateData.available_stock;
+    delete updateData.average_cost;
 
     const nullableFields = ['category_id', 'warehouse_id', 'barcode', 'description', 'brand', 'max_stock'];
     nullableFields.forEach(field => {

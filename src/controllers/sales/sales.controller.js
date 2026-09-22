@@ -14,6 +14,7 @@ const taxService = require('../../services/taxService');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
+const { resolveUnitCost } = require('../../utils/costResolver');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
 // que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
@@ -1004,11 +1005,21 @@ const confirm = async (req, res) => {
         if (item.product_id) {
           const product = productCache[item.product_id] || await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
           if (product && product.track_inventory) {
+            // El costo se recalcula AQUÍ, al confirmar -- no se reusa el
+            // snapshot congelado en item.unit_cost desde que se creó el
+            // borrador/cotización (resolveUnitCost() sin pasarle item.unit_cost),
+            // porque el promedio ponderado pudo cambiar entre tanto (compras,
+            // otras ventas). Se persiste en el SaleItem para que el kardex, el
+            // asiento contable y una eventual devolución vean el mismo valor.
+            const effectiveCost = resolveUnitCost({ unit_price: item.unit_price }, product);
+            if (parseFloat(item.unit_cost || 0) !== effectiveCost) {
+              await item.update({ unit_cost: effectiveCost }, { transaction });
+            }
             await createMovement({
               tenant_id: tenantId, movement_type: 'salida', movement_reason: 'sale',
               reference_type: 'sale', reference_id: sale.id, product_id: item.product_id,
               warehouse_id: sale.warehouse_id || null, quantity: item.quantity,
-              unit_cost: item.unit_cost || product.average_cost || item.unit_price, user_id: userId,
+              unit_cost: effectiveCost, user_id: userId,
               movement_date: sale.sale_date ? new Date(sale.sale_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
               notes: `Venta ${sale.sale_number} - ${item.product_name}`
             }, transaction);
@@ -1214,6 +1225,10 @@ const cancel = async (req, res) => {
     try {
       if (sale.status === 'completed' || sale.status === 'delivered') {
         for (const item of sale.items) {
+          // Ítem rechazado en cotización parcial: confirm() nunca sacó su
+          // stock (ver mismo filtro ahí), así que reingresarlo aquí infla
+          // el inventario con algo que nunca salió.
+          if (item.approval_status === 'rechazado') continue;
           if (item.product_id) {
             const product = await Product.findOne({ where: { id: item.product_id, tenant_id: tenantId }, transaction });
             if (product && product.track_inventory) {
@@ -1221,7 +1236,9 @@ const cancel = async (req, res) => {
                 tenant_id: tenantId, movement_type: 'entrada', movement_reason: 'sale_reversal',
                 reference_type: 'sale', reference_id: sale.id, product_id: item.product_id,
                 warehouse_id: sale.warehouse_id || null, quantity: item.quantity,
-                unit_cost: item.unit_cost || product.average_cost || item.unit_price, user_id: userId,
+                // Reversa el mismo costo que se reconoció al confirmar (item.unit_cost
+                // ya quedó actualizado ahí, ver confirm()), no uno recalculado.
+                unit_cost: resolveUnitCost(item, product), user_id: userId,
                 notes: `Reversión venta ${sale.sale_number} cancelada - ${item.product_name}`
               }, transaction);
             }

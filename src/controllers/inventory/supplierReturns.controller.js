@@ -9,6 +9,7 @@ const {
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const { resolveLandedPurchaseUnitCost } = require('../../utils/costResolver');
 
 const generateReturnNumber = async (tenant_id, transaction = null) => {
   const year = new Date().getFullYear();
@@ -238,9 +239,14 @@ const createSupplierReturn = async (req, res) => {
 
     const returnItems = items.map(item => {
       const purchaseItem = purchase.items.find(pi => pi.id === item.purchase_item_id);
-      const itemSubtotal = parseFloat(item.quantity) * parseFloat(purchaseItem.unit_cost);
+      // Mismo costo "aterrizado" que capitalizó el kardex al recibir la compra
+      // (ver resolveLandedPurchaseUnitCost) -- usar el precio de lista bruto
+      // acá dejaba el 143501 reversado por menos de lo que realmente salió
+      // de inventario.
+      const landedUnitCost = resolveLandedPurchaseUnitCost(purchaseItem, purchase);
+      const itemSubtotal = parseFloat(item.quantity) * landedUnitCost;
       const itemTax = itemSubtotal * (parseFloat(purchaseItem.tax_rate || 0) / 100);
-      
+
       subtotal += itemSubtotal;
       tax += itemTax;
 
@@ -248,7 +254,7 @@ const createSupplierReturn = async (req, res) => {
         purchase_item_id: item.purchase_item_id,
         product_id: purchaseItem.product_id,
         quantity: item.quantity,
-        unit_cost: purchaseItem.unit_cost,
+        unit_cost: landedUnitCost,
         subtotal: itemSubtotal,
         tax: itemTax,
         total: itemSubtotal + itemTax

@@ -5,6 +5,7 @@ const { createMovement } = require('./movements.controller');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
+const { resolveUnitCost } = require('../../utils/costResolver');
 
 /**
  * Obtener todos los ajustes con filtros y paginación
@@ -292,7 +293,7 @@ async function createAdjustmentCore({ tenant_id, user_id, adjustment_type, reaso
         throw httpError(400, { success: false, message: `Cantidad inválida para el producto ${product.name}. Debe ser un número mayor a cero` });
       }
 
-      const unit_cost = parseFloat(item.unit_cost || product.average_cost || 0);
+      const unit_cost = resolveUnitCost(item, product);
       const total_cost = quantity * unit_cost;
 
       await InventoryAdjustmentItem.create({
@@ -479,7 +480,7 @@ const updateAdjustment = async (req, res) => {
           });
         }
 
-        const unit_cost = parseFloat(item.unit_cost || product.average_cost || 0);
+        const unit_cost = resolveUnitCost(item, product);
         const total_cost = quantity * unit_cost;
 
         await InventoryAdjustmentItem.create({
@@ -681,6 +682,16 @@ const confirmAdjustment = async (req, res) => {
 
     // 🔔 Verificación automática de alertas
     markProductsForAlertCheck(res, product_ids, tenant_id);
+
+    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
+    setImmediate(async () => {
+      try {
+        const { generateAdjustmentEntry } = require('../../services/accounting/autoEntries.service');
+        await generateAdjustmentEntry(confirmedAdjustment, confirmedAdjustment.items, tenant_id, user_id);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento del ajuste ${id}: ${err.message}`);
+      }
+    });
 
     // Audit
     setImmediate(() => audit({ tenant_id, user_id: req.user?.id, action: 'INVENTORY_ADJUSTMENT',
