@@ -12,6 +12,7 @@ const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const { setNodeDependencies } = require('xadesjs');
 const { DianKit } = require('@dian-kit/sdk-node');
 const logger = require('../../config/logger');
+const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
 
 // Inicializar dependencias de Node para xadesjs/xmldsigjs/xml-core
 // IMPORTANTE: debe ejecutarse ANTES de cualquier uso de DianKit
@@ -1123,10 +1124,10 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe, testSetId: t
   const testSetId = testSetIdOverride || cfg.test_set_id;
   const isTest = cfg.environment !== 'production';
 
-  // Si hay servicio DIAN remoto, usarlo
-  const dianServiceUrl = process.env.DIAN_SERVICE_URL;
-  if (dianServiceUrl) {
-    return callRemoteDianService(dianServiceUrl, '/api/dian/send', {
+  // Si hay servicio(s) DIAN remoto(s), usarlos (con failover en orden)
+  const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
+  if (dianServiceUrls.length) {
+    return callRemoteDianService(dianServiceUrls, '/api/dian/send', {
       config: cfg,
       signedXml,
       invoiceNumber,
@@ -1253,10 +1254,10 @@ async function getStatusByCufe(tenant, cufe) {
   // necesariamente sobre credenciales) al pegarle desde una IP no
   // autorizada -- por eso enviar/crear documentos funcionaba pero consultar
   // estado no. dian-service.js ya expone /api/dian/get-status para esto.
-  const dianServiceUrl = process.env.DIAN_SERVICE_URL;
+  const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
   let response;
-  if (dianServiceUrl) {
-    response = await callRemoteDianService(dianServiceUrl, '/api/dian/get-status', { config: cfg, cufe });
+  if (dianServiceUrls.length) {
+    response = await callRemoteDianService(dianServiceUrls, '/api/dian/get-status', { config: cfg, cufe });
   } else {
     const kit = getKit(tenant);
     response = await kit.getStatus(cufe);
@@ -1324,10 +1325,10 @@ async function getNumberingRange(tenant) {
   // desactualizado (siempre vacío) y no trae `raw` -- se ignora su
   // `ranges`/forma de respuesta y se re-parsea `rawResponse` acá abajo con
   // la MISMA lógica que la ruta directa, en vez de confiar en ese campo.
-  const dianServiceUrl = process.env.DIAN_SERVICE_URL;
+  const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
   let response;
-  if (dianServiceUrl) {
-    const remote = await callRemoteDianService(dianServiceUrl, '/api/dian/get-numbering-range', {
+  if (dianServiceUrls.length) {
+    const remote = await callRemoteDianService(dianServiceUrls, '/api/dian/get-numbering-range', {
       config: cfg,
     });
     response = { rawResponse: remote.rawResponse };
@@ -1374,29 +1375,32 @@ async function getNumberingRange(tenant) {
 }
 
 /**
- * Llama al servicio DIAN remoto (Hostinger)
+ * Llama al servicio DIAN remoto (Raspberry Pi / PC de respaldo), con
+ * failover en orden sobre `baseUrls`.
  */
-async function callRemoteDianService(baseUrl, path, body) {
+async function callRemoteDianService(baseUrls, path, body) {
   const apiKey = process.env.DIAN_API_KEY || 'pitbox-dian-2026';
-  const url = `${baseUrl}${path}`;
 
-  logger.info(`[DIAN Proxy] → ${url}`);
+  return callWithFailover(baseUrls, async (baseUrl) => {
+    const url = `${baseUrl}${path}`;
+    logger.info(`[DIAN Proxy] → ${url}`);
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-    },
-    body: JSON.stringify(body),
-  });
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+      },
+      body: JSON.stringify(body),
+    });
 
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`DIAN Service error ${response.status}: ${err}`);
-  }
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`DIAN Service error ${response.status}: ${err}`);
+    }
 
-  return response.json();
+    return response.json();
+  }, logger);
 }
 
 module.exports = {

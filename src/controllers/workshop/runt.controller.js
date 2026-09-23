@@ -6,9 +6,13 @@
 
 const axios  = require('axios');
 const logger = require('../../config/logger');
+const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
 
 const RUNT_BASE = 'https://runtproapi.runt.gov.co/CYRConsultaVehiculoMS';
-const RUNT_SERVICE_URL = process.env.RUNT_SERVICE_URL;  // ej: http://tu-ip:4445
+// RUNT_SERVICE_URL admite 2+ URLs separadas por coma (ej. Raspberry Pi
+// primero, PC de respaldo después): se intenta cada una en orden hasta que
+// una responda.
+const RUNT_SERVICE_URLS = parseServiceUrls(process.env.RUNT_SERVICE_URL);
 const RUNT_API_KEY     = process.env.RUNT_API_KEY || 'pitbox-runt-2026';
 
 const runtHeaders = {
@@ -18,24 +22,27 @@ const runtHeaders = {
   'User-Agent':   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
 };
 
-// Llama al servicio RUNT remoto (misma lógica que DIAN)
+// Llama al servicio RUNT remoto (misma lógica que DIAN), con failover sobre
+// RUNT_SERVICE_URLS en orden.
 async function callRemoteRunt(path, body = null) {
-  const url = `${RUNT_SERVICE_URL}${path}`;
-  logger.info(`[RUNT Proxy] → ${url}`);
+  return callWithFailover(RUNT_SERVICE_URLS, async (baseUrl) => {
+    const url = `${baseUrl}${path}`;
+    logger.info(`[RUNT Proxy] → ${url}`);
 
-  const opts = {
-    method: body ? 'POST' : 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': RUNT_API_KEY },
-    timeout: 30000,
-  };
-  if (body) opts.body = JSON.stringify(body);
+    const opts = {
+      method: body ? 'POST' : 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': RUNT_API_KEY },
+      timeout: 30000,
+    };
+    if (body) opts.body = JSON.stringify(body);
 
-  const response = await fetch(url, opts);
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`RUNT Service ${response.status}: ${err}`);
-  }
-  return response.json();
+    const response = await fetch(url, opts);
+    if (!response.ok) {
+      const err = await response.text();
+      throw new Error(`RUNT Service ${response.status}: ${err}`);
+    }
+    return response.json();
+  }, logger);
 }
 
 /* ─── GET /workshop/vehicles/runt/captcha ───────────────────────────────── */
@@ -43,7 +50,7 @@ const getCaptcha = async (req, res) => {
   try {
     let data;
 
-    if (RUNT_SERVICE_URL) {
+    if (RUNT_SERVICE_URLS.length) {
       // Via servicio remoto (Raspberry Pi / VPS)
       data = await callRemoteRunt('/api/runt/captcha');
     } else {
@@ -97,7 +104,7 @@ const consultarVehiculo = async (req, res) => {
     let data;
     let sessionCookie = null;
 
-    if (RUNT_SERVICE_URL) {
+    if (RUNT_SERVICE_URLS.length) {
       // Via servicio remoto
       data = await callRemoteRunt('/api/runt/auth', payload);
     } else {
@@ -147,7 +154,7 @@ const consultarVehiculo = async (req, res) => {
       // SOAT
       try {
         let soatRes;
-        if (RUNT_SERVICE_URL) {
+        if (RUNT_SERVICE_URLS.length) {
           soatRes = { data: await callRemoteRunt('/api/runt/soat', { extraHeaders: secondaryHeaders }) };
         } else {
           soatRes = await axios.get(`${RUNT_BASE}/soat`, { headers: secondaryHeaders, timeout: 10000 });
@@ -161,7 +168,7 @@ const consultarVehiculo = async (req, res) => {
       // RTM
       try {
         let rtmRes;
-        if (RUNT_SERVICE_URL) {
+        if (RUNT_SERVICE_URLS.length) {
           rtmRes = { data: await callRemoteRunt('/api/runt/rtms', { extraHeaders: secondaryHeaders, params: { tipo: 'N' } }) };
         } else {
           rtmRes = await axios.get(`${RUNT_BASE}/rtms`, {
