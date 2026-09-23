@@ -8,6 +8,33 @@ const { Op } = require('sequelize');
  */
 
 /**
+ * Determina qué alerta (si alguna) corresponde al stock actual del producto.
+ * "Sin stock" no depende de tener min_stock configurado: 0 unidades es
+ * crítico siempre. "Stock bajo" y "sobrestock" sí necesitan un umbral
+ * (min_stock/max_stock) configurado para tener sentido -- si no hay
+ * umbral, se compara contra 0 y siempre daría falso.
+ */
+function classifyStock(product) {
+  const currentStock = parseFloat(product.current_stock) || 0;
+  const minStock = parseFloat(product.min_stock) || 0;
+  const maxStock = product.max_stock ? parseFloat(product.max_stock) : null;
+
+  let alertType = null;
+  let severity = null;
+  if (currentStock <= 0) {
+    alertType = 'out_of_stock';
+    severity = 'critical';
+  } else if (minStock > 0 && currentStock <= minStock) {
+    alertType = 'low_stock';
+    severity = 'warning';
+  } else if (maxStock && currentStock >= maxStock) {
+    alertType = 'overstock';
+    severity = 'info';
+  }
+  return { currentStock, minStock, maxStock, alertType, severity };
+}
+
+/**
  * Verificar alertas para un producto específico
  */
 async function checkAlertsForProduct(product_id, tenant_id) {
@@ -22,28 +49,7 @@ async function checkAlertsForProduct(product_id, tenant_id) {
       return; // Producto no rastreado por inventario, no aplica
     }
 
-    const currentStock = parseFloat(product.current_stock) || 0;
-    const minStock = parseFloat(product.min_stock) || 0;
-    const maxStock = product.max_stock ? parseFloat(product.max_stock) : null;
-
-    let alertType = null;
-    let severity = null;
-
-    // Determinar tipo de alerta
-    // "Sin stock" no depende de tener min_stock configurado: 0 unidades es
-    // crítico siempre. "Stock bajo" y "sobrestock" sí necesitan un umbral
-    // (min_stock/max_stock) configurado para tener sentido -- si no hay
-    // umbral, se compara contra 0 y siempre daría falso.
-    if (currentStock <= 0) {
-      alertType = 'out_of_stock';
-      severity = 'critical';
-    } else if (minStock > 0 && currentStock <= minStock) {
-      alertType = 'low_stock';
-      severity = 'warning';
-    } else if (maxStock && currentStock >= maxStock) {
-      alertType = 'overstock';
-      severity = 'info';
-    }
+    const { currentStock, minStock, maxStock, alertType, severity } = classifyStock(product);
 
     if (alertType) {
       // Verificar si ya existe una alerta activa del mismo tipo
@@ -139,18 +145,7 @@ async function checkAllStockAlerts() {
   // `public`, se pueden revisar todos juntos filtrando por sus tenant_id.
   const legacyTenantIds = tenants.filter((t) => !t.schema_name).map((t) => t.id);
   if (legacyTenantIds.length > 0) {
-    const legacyProducts = await Product.findAll({
-      where: {
-        tenant_id: legacyTenantIds,
-        track_inventory: true,
-        [Op.or]: [{ min_stock: { [Op.gt]: 0 } }, { current_stock: { [Op.lte]: 0 } }]
-      },
-      attributes: ['id', 'tenant_id']
-    });
-    for (const product of legacyProducts) {
-      await checkAlertsForProduct(product.id, product.tenant_id);
-    }
-    totalChecked += legacyProducts.length;
+    totalChecked += await syncStockAlertsForTenants(legacyTenantIds);
   }
 
   // Tenants ya cortados a su propio schema: cada uno necesita correr dentro
@@ -160,18 +155,7 @@ async function checkAllStockAlerts() {
   for (const tenant of schemaTenants) {
     try {
       await runWithTenantSchema(tenant.schema_name, async () => {
-        const products = await Product.findAll({
-          where: {
-            tenant_id: tenant.id,
-            track_inventory: true,
-            [Op.or]: [{ min_stock: { [Op.gt]: 0 } }, { current_stock: { [Op.lte]: 0 } }]
-          },
-          attributes: ['id', 'tenant_id']
-        });
-        for (const product of products) {
-          await checkAlertsForProduct(product.id, product.tenant_id);
-        }
-        totalChecked += products.length;
+        totalChecked += await syncStockAlertsForTenants([tenant.id]);
       });
     } catch (error) {
       console.error(`Error revisando alertas de stock para tenant "${tenant.schema_name}":`, error.message);
@@ -179,6 +163,99 @@ async function checkAllStockAlerts() {
   }
 
   return { products_checked: totalChecked, tenants_checked: tenants.length };
+}
+
+/**
+ * Misma lógica que checkAlertsForProduct, pero por lotes: antes el cron
+ * llamaba a checkAlertsForProduct() producto por producto (3-4 queries
+ * secuenciales cada uno, releyendo el producto que ya se tenía), y con
+ * miles de productos la corrida tardaba ~40 min. Todo ese tiempo la
+ * transacción del advisory lock del scheduler (ver utils/advisoryLock.js)
+ * quedaba abierta sin uso, Neon terminaba cortando esa conexión y el job
+ * reventaba en el COMMIT con "Client has encountered a connection error and
+ * is not queryable" -- cada hora, sin llegar a terminar nunca.
+ *
+ * Acá: 1 query de productos + 1 de alertas activas, se clasifica en memoria
+ * y solo se escribe lo que cambió.
+ *
+ * @returns {Promise<number>} cantidad de productos revisados
+ */
+async function syncStockAlertsForTenants(tenantIds) {
+  const products = await Product.findAll({
+    where: {
+      tenant_id: tenantIds,
+      track_inventory: true,
+      [Op.or]: [{ min_stock: { [Op.gt]: 0 } }, { current_stock: { [Op.lte]: 0 } }]
+    },
+    attributes: ['id', 'tenant_id', 'name', 'current_stock', 'min_stock', 'max_stock']
+  });
+  if (products.length === 0) return 0;
+
+  const activeAlerts = await StockAlert.findAll({
+    where: { tenant_id: tenantIds, status: 'active' },
+    attributes: ['id', 'tenant_id', 'product_id', 'alert_type', 'severity', 'current_stock']
+  });
+  const alertsByKey = new Map(activeAlerts.map((a) => [`${a.product_id}:${a.alert_type}`, a]));
+
+  const toCreate = [];
+  const toResolve = [];
+  const toUpdate = [];
+
+  for (const product of products) {
+    const { currentStock, minStock, maxStock, alertType, severity } = classifyStock(product);
+
+    if (!alertType) {
+      toResolve.push(product.id);
+      continue;
+    }
+
+    const existingAlert = alertsByKey.get(`${product.id}:${alertType}`);
+    if (!existingAlert) {
+      toCreate.push({
+        tenant_id: product.tenant_id,
+        product_id: product.id,
+        alert_type: alertType,
+        severity,
+        current_stock: currentStock,
+        min_stock: minStock,
+        max_stock: maxStock,
+        status: 'active'
+      });
+    } else if ((parseFloat(existingAlert.current_stock) || 0) !== currentStock || existingAlert.severity !== severity) {
+      toUpdate.push({ alert: existingAlert, current_stock: currentStock, severity });
+    }
+  }
+
+  if (toCreate.length > 0) {
+    await StockAlert.bulkCreate(toCreate);
+    console.log(`✅ ${toCreate.length} alertas automáticas de stock creadas`);
+  }
+
+  for (const { alert, current_stock, severity } of toUpdate) {
+    await alert.update({ current_stock, severity });
+  }
+
+  // Solo tiene sentido resolver productos que de verdad tienen una alerta activa
+  const productsWithActiveAlert = new Set(activeAlerts.map((a) => a.product_id));
+  const resolvableIds = toResolve.filter((id) => productsWithActiveAlert.has(id));
+  if (resolvableIds.length > 0) {
+    await StockAlert.update(
+      {
+        status: 'resolved',
+        resolved_date: new Date(),
+        resolution_notes: 'Stock normalizado automáticamente'
+      },
+      {
+        where: {
+          tenant_id: tenantIds,
+          product_id: resolvableIds,
+          status: 'active'
+        }
+      }
+    );
+  }
+
+  return products.length;
 }
 
 /**

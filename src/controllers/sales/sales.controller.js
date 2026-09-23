@@ -596,7 +596,7 @@ const create = async (req, res) => {
     });
 
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error('Error creando venta:', error);
     res.status(500).json({ success: false, message: 'Error creando venta' });
   }
@@ -815,7 +815,7 @@ const update = async (req, res) => {
     });
 
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error('Error actualizando venta:', error);
     res.status(500).json({ success: false, message: 'Error actualizando venta' });
   }
@@ -1186,7 +1186,7 @@ const confirm = async (req, res) => {
         changes: { sale_number: updateData.sale_number || sale.sale_number, document_type: finalDocType, total_amount: sale.total_amount, payment_method }, req
       });
     } catch (err) {
-      await transaction.rollback();
+      if (!transaction.finished) await transaction.rollback();
       throw err;
     }
 
@@ -1249,7 +1249,7 @@ const cancel = async (req, res) => {
       await sale.update({ status: 'cancelled', internal_notes: reason || 'Venta cancelada' }, { transaction });
       await transaction.commit();
     } catch (err) {
-      await transaction.rollback();
+      if (!transaction.finished) await transaction.rollback();
       throw err;
     }
 
@@ -2038,7 +2038,7 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
     await transaction.commit();
     res.json({ success: true, message: 'Respuesta registrada correctamente' });
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error('[Cotización pública] Error en respondPublicQuoteBody:', error);
     res.status(500).json({ success: false, message: 'Error al procesar la respuesta' });
   }

@@ -35,7 +35,7 @@ const SaleItem = sequelize.define('SaleItem', {
     onDelete: 'RESTRICT',
   },
   product_name: {
-    type: DataTypes.STRING(255),
+    type: DataTypes.TEXT, // ver migración 2026092301-widen-item-product-name
     allowNull: false,
   },
   product_sku: {

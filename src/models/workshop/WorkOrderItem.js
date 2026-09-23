@@ -31,7 +31,7 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
   },
   // Snapshot del producto al momento de agregar
   product_name: {
-    type: DataTypes.STRING(255),
+    type: DataTypes.TEXT, // ver migración 2026092301-widen-item-product-name
     allowNull: false
   },
   product_sku: {

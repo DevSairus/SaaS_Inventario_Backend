@@ -67,7 +67,11 @@ if (DATABASE_URL) {
     ssl: {
       require: true,
       rejectUnauthorized: false
-    }
+    },
+    // TCP keepalive: sin esto, una conexión que el NAT/proxy entre Railway y
+    // Neon corta en silencio solo se detecta al intentar usarla (p.ej. en el
+    // COMMIT: "Client has encountered a connection error and is not queryable").
+    keepAlive: true
   };
 
   // Si estamos en Vercel, configuración adicional

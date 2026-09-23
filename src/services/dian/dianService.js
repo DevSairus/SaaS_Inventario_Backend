@@ -132,6 +132,18 @@ async function sendInvoiceToDian(sale, tenant) {
       { where: { id: sale.id }, transaction }
     );
 
+    // Se libera la transacción ANTES de hablar con la DIAN. Antes quedaba
+    // abierta durante createInvoice + sendToDian (hasta 60s en SendBillSync y
+    // varios minutos con el polling de SendTestSetAsync): la conexión quedaba
+    // "idle in transaction" con el FOR UPDATE de la resolución tomado. Neon /
+    // la red terminaban matando esa conexión y el COMMIT fallaba con "Client
+    // has encountered a connection error and is not queryable"; mientras
+    // tanto, toda otra factura de la misma sede quedaba bloqueada esperando
+    // el lock y agotando el pool (=> 500 en otros endpoints). El consecutivo
+    // queda asignado al documento y un reintento lo reutiliza (ver
+    // getNextConsecutive / reusableNumber), así que no se pierde numeración.
+    await transaction.commit();
+
     const items = sale.items || [];
 
     // Usar dian-kit para generar y firmar el XML
@@ -160,7 +172,7 @@ async function sendInvoiceToDian(sale, tenant) {
       dian_sent_at: new Date(),
       dian_accepted_at: accepted ? new Date() : null,
       dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
-    }, { where: { id: sale.id }, transaction });
+    }, { where: { id: sale.id } });
 
     await DianEvent.create({
       tenant_id: tenant.id,
@@ -174,9 +186,7 @@ async function sendInvoiceToDian(sale, tenant) {
       status: dianStatus,
       error_message: accepted ? null : dianResponse.statusMessage,
       is_test: isTest,
-    }, { transaction });
-
-    await transaction.commit();
+    });
 
     logger.info(`[DIAN] Factura ${invoiceNumber} — Status: ${dianStatus} | CUFE: ${cufe.substring(0, 16)}...`);
 
@@ -201,7 +211,7 @@ async function sendInvoiceToDian(sale, tenant) {
     return { sent: true, accepted, invoiceNumber, cufe, dianStatus, dianResponse };
 
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error(`[DIAN] Error enviando factura ${sale.sale_number}:`, error);
 
     try {
@@ -317,6 +327,10 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
         { where: { id: saleId }, transaction }
       );
     }
+
+    // Misma razón que en sendInvoiceToDian: no mantener la transacción (ni el
+    // lock de la resolución) abierta mientras se habla con la DIAN.
+    await transaction.commit();
 
     // Para NC/ND usamos dian-kit para generar XML firmado
     // OJO: usar parseDateCol (mediodía UTC), NO `new Date(resolution.valid_from)`
@@ -442,7 +456,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
         dian_sent_at: new Date(),
         dian_accepted_at: accepted ? new Date() : null,
         dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
-      }, { where: { id: saleId }, transaction });
+      }, { where: { id: saleId } });
     }
 
     await DianEvent.create({
@@ -457,9 +471,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       status: dianStatus,
       error_message: accepted ? null : dianResponse.statusMessage,
       is_test: isTest,
-    }, { transaction });
-
-    await transaction.commit();
+    });
 
     logger.info(`[DIAN ${docLabel}] ${noteNumber} → ${dianStatus} | CUDE: ${result.uuid?.substring(0, 16)}...`);
 
@@ -481,7 +493,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     return { sent: true, accepted, noteNumber, cude: result.uuid, dianStatus, dianResponse };
 
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error(`[DIAN ${docLabel}] Error:`, error.message);
     // Bug corregido: antes se priorizaba reference_sale_id (la factura
     // ORIGINAL referenciada) sobre note.id (la nota crédito/débito en sí),
@@ -613,6 +625,10 @@ async function sendSupportDocumentToDian({ tenant, sourceType, sourceId, branchI
       }, { transaction });
     }
 
+    // Misma razón que en sendInvoiceToDian: no mantener la transacción (ni el
+    // lock de la resolución) abierta mientras se habla con la DIAN.
+    await transaction.commit();
+
     const { signedXml, cufe } = await dianKit.createSupportDocument(tenant, {
       documentNumber,
       items,
@@ -638,7 +654,7 @@ async function sendSupportDocumentToDian({ tenant, sourceType, sourceId, branchI
       dian_sent_at: new Date(),
       dian_accepted_at: accepted ? new Date() : null,
       dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
-    }, { transaction });
+    });
 
     await DianEvent.create({
       tenant_id: tenant.id,
@@ -653,16 +669,14 @@ async function sendSupportDocumentToDian({ tenant, sourceType, sourceId, branchI
       status: dianStatus,
       error_message: accepted ? null : dianResponse.statusMessage,
       is_test: isTest,
-    }, { transaction });
-
-    await transaction.commit();
+    });
 
     logger.info(`[DIAN] Documento Soporte ${documentNumber} (${sourceType} ${sourceId}) — Status: ${dianStatus} | CUDS: ${cufe?.substring(0, 16)}...`);
 
     return { sent: true, accepted, documentNumber, cuds: cufe, dianStatus, dianResponse, supportDocumentId: supportDocument.id };
 
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error(`[DIAN] Error enviando Documento Soporte (${sourceType} ${sourceId}):`, error);
 
     try {
@@ -873,6 +887,10 @@ async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, 
 
     await adjustment.update({ adjustment_number: documentNumber, dian_status: 'sending' }, { transaction });
 
+    // Misma razón que en sendInvoiceToDian: no mantener la transacción (ni el
+    // lock de la resolución) abierta mientras se habla con la DIAN.
+    await transaction.commit();
+
     const items = adjustment.items?.length ? adjustment.items : [{
       id: '1',
       quantity: 1,
@@ -916,7 +934,7 @@ async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, 
       dian_sent_at: new Date(),
       dian_accepted_at: accepted ? new Date() : null,
       dian_error_message: accepted ? null : buildRejectionMessage(dianResponse),
-    }, { transaction });
+    });
 
     await DianEvent.create({
       tenant_id: tenant.id,
@@ -931,16 +949,14 @@ async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, 
       status: dianStatus,
       error_message: accepted ? null : dianResponse.statusMessage,
       is_test: isTest,
-    }, { transaction });
-
-    await transaction.commit();
+    });
 
     logger.info(`[DIAN] Nota de Ajuste ${documentNumber} (Documento Soporte ${supportDocument.id}) — Status: ${dianStatus} | CUDS: ${cufe?.substring(0, 16)}...`);
 
     return { sent: true, accepted, documentNumber, cuds: cufe, dianStatus, dianResponse, adjustmentId: adjustment.id };
 
   } catch (error) {
-    await transaction.rollback();
+    if (!transaction.finished) await transaction.rollback();
     logger.error(`[DIAN] Error enviando Nota de Ajuste (SupportDocumentAdjustment ${adjustment.id}):`, error);
     try {
       await SupportDocumentAdjustment.update(
