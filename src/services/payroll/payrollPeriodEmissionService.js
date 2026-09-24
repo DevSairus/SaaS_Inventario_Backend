@@ -164,7 +164,18 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
     // numbering.consecutivo directamente, que no existen en la respuesta real
     // de getNextConsecutive — numeroDocumento salía literalmente
     // "undefinedundefined" y así se firmaba y enviaba a la DIAN.
-    const rawNumbering = await getNextConsecutive(tenant.id, period.branch_id, isTest, t, null, 'payroll');
+    //
+    // Reintento de un documento que ya tuvo número asignado (rechazado o con
+    // error en un envío anterior): se reutiliza el mismo consecutivo en vez
+    // de consumir uno nuevo -- mismo criterio que sendInvoiceToDian con Sale.
+    // Antes se pasaba siempre `null`, así que cada reintento gastaba un
+    // número (ya no era problema visible porque la transacción hacía
+    // rollback del incremento, pero ahora el número se confirma ANTES de
+    // enviar a la DIAN, ver commit más abajo).
+    const reusableNumber = (payrollDocument?.payroll_document_number && payrollDocument.dian_status !== 'accepted')
+      ? payrollDocument.payroll_document_number
+      : null;
+    const rawNumbering = await getNextConsecutive(tenant.id, period.branch_id, isTest, t, reusableNumber, 'payroll');
     const numbering = { prefix: rawNumbering.resolution.prefix, consecutivo: rawNumbering.consecutive };
     const numeroDocumento = rawNumbering.invoiceNumber;
     const cfg = extractDianConfig(tenant);
@@ -197,6 +208,16 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
       }, { transaction: t });
     }
 
+    // Se libera la transacción ANTES de hablar con la DIAN. Antes quedaba
+    // abierta durante todo submitPayrollDocument (firma + envío SOAP) con el
+    // FOR UPDATE de la resolución de nómina tomado: la conexión quedaba
+    // "idle in transaction", Neon/la red la cortaban y el COMMIT fallaba con
+    // "Client has encountered a connection error and is not queryable" --
+    // y mientras tanto el resto de envíos de la misma resolución quedaban
+    // bloqueados esperando el lock. El número queda guardado en el
+    // PayrollDocument y un reintento lo reutiliza (ver reusableNumber).
+    await t.commit();
+
     const result = await submitPayrollDocument({ tenant, employee, period, liquidation, numbering });
 
     const accepted = result.dianResponse?.isValid || result.dianResponse?.statusCode === '00';
@@ -210,7 +231,7 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
       dian_sent_at: new Date(),
       dian_accepted_at: accepted ? new Date() : null,
       dian_error_message: accepted ? null : (result.dianResponse?.statusMessage || 'Rechazado por la DIAN'),
-    }, { transaction: t });
+    });
 
     await DianEvent.create({
       tenant_id: tenant.id,
@@ -224,9 +245,7 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
       status: dianStatus,
       error_message: accepted ? null : result.dianResponse?.statusMessage,
       is_test: isTest,
-    }, { transaction: t });
-
-    await t.commit();
+    });
 
     logger.info(`[Nómina-DIAN] ${numeroDocumento} (empleado ${employee.id}) — Status: ${dianStatus} | CUNE: ${result.cune?.substring(0, 16)}...`);
 
@@ -246,7 +265,7 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
 
     return { employee, liquidation, accepted, error: accepted ? null : (result.dianResponse?.statusMessage || 'Rechazado por la DIAN'), payrollDocumentId: payrollDocument.id };
   } catch (error) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     logger.error(`[Nómina-DIAN] Error emitiendo documento de nómina (empleado ${employee.id}, periodo ${period.id}):`, error);
 
     try {

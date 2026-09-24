@@ -127,9 +127,15 @@ async function sendPayrollAdjustmentToDian(adjustment, payrollDocument, tenant) 
       rawNumbering = await getNextConsecutive(
         tenant.id, payrollDocument.branch_id, isTest, t, adjustment.adjustment_number, 'payroll_adjustment',
       );
+      // Guardar el número reservado en la misma transacción que lo consume:
+      // antes solo se guardaba al final, tras la respuesta de la DIAN, así
+      // que si el envío fallaba el consecutivo quedaba consumido en la
+      // resolución pero sin dueño, y el reintento (adjustment_number null)
+      // tomaba uno nuevo -- huecos en la numeración.
+      await adjustment.update({ adjustment_number: rawNumbering.invoiceNumber }, { transaction: t });
       await t.commit();
     } catch (e) {
-      await t.rollback();
+      if (!t.finished) await t.rollback();
       throw e;
     }
     const numbering = { prefix: rawNumbering.resolution.prefix, consecutivo: rawNumbering.consecutive };
