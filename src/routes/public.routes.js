@@ -10,7 +10,8 @@ const {
   getPublicBranches, getPublicConfig, getPublicAvailability,
   createPublicAppointment, getPublicAppointmentStatus,
 } = require('../controllers/workshop/workshopAppointments.controller');
-const { quoteResponseLimiter, appointmentBookingLimiter } = require('../middleware/rateLimiter');
+const { getPublicVehiclePortal } = require('../controllers/workshop/vehicles.controller');
+const { quoteResponseLimiter, appointmentBookingLimiter, vehiclePortalLimiter } = require('../middleware/rateLimiter');
 const { getPublicPosts, getPublicPostBySlug } = require('../controllers/public/blog.controller');
 
 // GET /api/public/work-orders/:token
@@ -35,6 +36,11 @@ router.get('/sales/:token', getPublicSale);
 // El cliente aprueba/rechaza la cotización. Sin auth, por eso lleva rate
 // limiting — ver quoteResponseLimiter.
 router.post('/sales/:token/respond', quoteResponseLimiter, respondPublicQuote);
+
+// GET /api/public/vehicles/:token
+// Portal del vehículo (hoja de vida + próximo mantenimiento). El token va
+// impreso en el sticker QR -- ver getPublicVehiclePortal.
+router.get('/vehicles/:token', vehiclePortalLimiter, getPublicVehiclePortal);
 
 // ── Citas de Taller ──────────────────────────────────────────────────────
 // Sin token previo posible (primera vez que aparece el cliente) -- el

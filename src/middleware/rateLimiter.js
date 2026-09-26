@@ -423,6 +423,27 @@ const appointmentBookingLimiter = rateLimit({
   },
 });
 
+/**
+ * Rate limiter para el portal público del vehículo
+ * (GET /public/vehicles/:token). Sin autenticación y el link va impreso en
+ * un sticker QR -- un cliente real lo abre unas pocas veces; el límite corta
+ * el barrido automatizado de tokens.
+ */
+const vehiclePortalLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 200,
+  store: makeStore('vehicle-portal'),
+  keyGenerator: ipKey,
+  handler: (req, res) => {
+    logger.warn('Vehicle portal rate limit exceeded', { ip: req.ip, path: req.path });
+    res.status(429).json({
+      success: false,
+      message: 'Demasiadas consultas. Intenta de nuevo en un rato, o contacta al taller directamente',
+      retryAfter: 60,
+    });
+  },
+});
+
 module.exports = {
   generalLimiter,
   authLimiter,
@@ -436,5 +457,6 @@ module.exports = {
   aiChatLimiter,
   quoteResponseLimiter,
   appointmentBookingLimiter,
+  vehiclePortalLimiter,
   waSendLimiter,
 };

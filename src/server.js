@@ -158,6 +158,7 @@ const workOrdersRoutes              = require('./routes/workshop/workOrders.rout
 const appointmentsRoutes            = require('./routes/workshop/appointments.routes');
 const commissionSettlementsRoutes   = require('./routes/workshop/commissionSettlements.routes');
 const commissionCategoriesRoutes    = require('./routes/workshop/commissionCategories.routes');
+const maintenanceTypesRoutes        = require('./routes/workshop/maintenanceTypes.routes');
 const runtRoutes                    = require('./routes/workshop/runt.routes');
 const diagramTemplatesRoutes        = require('./routes/workshop/diagramTemplates.routes');
 const userRoutes                    = require('./routes/user.routes');
@@ -271,6 +272,7 @@ app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware,
 app.use('/api/workshop/appointments',          authMiddleware, tenantMiddleware, branchMiddleware, appointmentsRoutes);
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
 app.use('/api/workshop/commission-categories', authMiddleware, tenantMiddleware, commissionCategoriesRoutes);
+app.use('/api/workshop/maintenance-types',     authMiddleware, tenantMiddleware, maintenanceTypesRoutes);
 app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware, diagramTemplatesRoutes);
 
 // ── Inventario ──

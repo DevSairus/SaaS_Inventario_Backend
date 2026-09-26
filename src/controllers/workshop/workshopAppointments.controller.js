@@ -146,11 +146,34 @@ async function generateOrderNumber(tenant_id, transaction) {
 async function createAppointmentBody({ tenant_id, branch_id, body, source, res }) {
   const {
     scheduled_at, customer_name, customer_phone, customer_email,
-    vehicle_plate, vehicle_brand, vehicle_model, service_description,
+    service_description, portal_token,
   } = body;
+  let { vehicle_plate, vehicle_brand, vehicle_model } = body;
 
   if (!scheduled_at || !customer_name || !customer_phone) {
     return res.status(400).json({ success: false, message: 'Fecha, nombre y teléfono son requeridos' });
+  }
+
+  // Cita pedida desde el portal del vehículo (/portal/vehiculo/:token): la
+  // cita queda vinculada desde el día uno al vehículo y a su propietario. Se
+  // recibe el portal_token (no un vehicle_id suelto) y se resuelve acá,
+  // dentro del schema/tenant ya fijado -- nunca se confía en un id que
+  // mande el cliente. Los datos del vehículo salen de la BD, no del body.
+  let vehicle_id = null;
+  let customer_id = null;
+  if (portal_token) {
+    const vehicle = await Vehicle.findOne({
+      where: { portal_token: String(portal_token), tenant_id, is_active: true },
+      attributes: ['id', 'customer_id', 'plate', 'brand', 'model'],
+    }).catch(() => null); // token con formato inválido -> cast de UUID falla
+    if (!vehicle) {
+      return res.status(400).json({ success: false, message: 'El vehículo del portal no pertenece a este taller' });
+    }
+    vehicle_id = vehicle.id;
+    customer_id = vehicle.customer_id || null;
+    vehicle_plate = vehicle.plate;
+    vehicle_brand = vehicle.brand;
+    vehicle_model = vehicle.model;
   }
 
   const config = await WorkshopAppointmentConfig.findOne({ where: { tenant_id, branch_id } });
@@ -198,6 +221,7 @@ async function createAppointmentBody({ tenant_id, branch_id, body, source, res }
       duration_minutes: config.slot_duration_minutes,
       customer_name, customer_phone,
       customer_email: customer_email || null,
+      customer_id, vehicle_id,
       vehicle_plate: vehicle_plate || null,
       vehicle_brand: vehicle_brand || null,
       vehicle_model: vehicle_model || null,
