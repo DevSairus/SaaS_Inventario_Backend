@@ -253,9 +253,14 @@ const getPublicBranches = async (req, res) => {
 async function getPublicBranchesBody(tenant_id, res) {
   const configs = await WorkshopAppointmentConfig.findAll({
     where: { tenant_id, is_public_booking_enabled: true },
-    include: [{ model: Branch, as: 'branch', attributes: ['id', 'name', 'address'], where: { is_active: true }, required: true }],
+    include: [{ model: Branch, as: 'branch', attributes: ['id', 'name', 'address', 'is_main'], where: { is_active: true }, required: true }],
   });
-  res.json({ success: true, data: configs.map(c => c.branch) });
+  // Principal primero (is_main). Orden estable para el resto.
+  const branches = configs
+    .map((c) => c.branch)
+    .filter(Boolean)
+    .sort((a, b) => Number(!!b.is_main) - Number(!!a.is_main) || String(a.name || '').localeCompare(String(b.name || ''), 'es'));
+  res.json({ success: true, data: branches });
 }
 
 const getPublicConfig = async (req, res) => {
