@@ -78,6 +78,11 @@ const WorkshopAppointment = sequelize.define('WorkshopAppointment', {
   confirmed_at:     { type: DataTypes.DATE, allowNull: true },
   cancelled_reason: { type: DataTypes.STRING, allowNull: true },
   reminder_sent_at: { type: DataTypes.DATE, allowNull: true },
+  // Reagendamiento (ver rescheduleAppointment): se mueve la misma cita, no
+  // se crea otra -- esto deja rastro del último cambio de fecha.
+  previous_scheduled_at: { type: DataTypes.DATE, allowNull: true },
+  rescheduled_count:     { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+  last_rescheduled_at:   { type: DataTypes.DATE, allowNull: true },
   seen_at: {
     type: DataTypes.DATE,
     allowNull: true,
