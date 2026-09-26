@@ -14,11 +14,26 @@ const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/bran
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 const { resolveCategoryForProduct, resolveCategoryForDiagramSystem } = require('../../services/workshop/commissionCategory.service');
 const { resolveUnitCost } = require('../../utils/costResolver');
+const maintenanceService = require('../../services/workshop/maintenance.service');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
 // commission_category_id al crearse (sección 5, punto 3 del plan).
 const COMMISSION_ITEM_TYPES = ['servicio', 'mano_obra'];
+
+// Registros de mantenimiento del vehículo (cambio de aceite, etc.) al
+// entregar una OT -- se llama desde LOS DOS caminos que dejan una OT en
+// 'entregado' (changeStatus y generateSale), siempre después del commit: un
+// fallo acá no debe impedir la entrega, solo se loguea. Es idempotente, así
+// que si ambos caminos corren sobre la misma OT no duplica nada. Ver
+// plan-portal-mantenimiento-vehiculo.md sección 2.2.
+async function generateMaintenanceRecordsSafe(orderId, tenant_id) {
+  try {
+    await maintenanceService.generateRecordsForDeliveredOrder(orderId, tenant_id);
+  } catch (err) {
+    logger.warn(`[maintenance] Error generando registros de mantenimiento de la OT ${orderId}: ${err.message}`);
+  }
+}
 
 // Los endpoints PÚBLICOS (sin autenticación: getPublicOrder, respondQuoteRequest)
 // no tienen tenantMiddleware -- nadie les setea el schema del tenant antes de
@@ -736,6 +751,8 @@ const changeStatus = async (req, res) => {
     await order.update(updates, { transaction });
     await transaction.commit();
 
+    if (status === 'entregado') await generateMaintenanceRecordsSafe(order.id, req.user.tenant_id);
+
     // Retornar la OT completa con includes
     const full = await WorkOrder.findOne({
       where: { id: req.params.id, tenant_id: req.user.tenant_id },
@@ -915,6 +932,16 @@ const revertStatus = async (req, res) => {
       delivered_at: null,
       internal_notes: [order.internal_notes, auditLine].filter(Boolean).join('\n'),
     });
+
+    // Si estaba entregada, sus mantenimientos registrados dejan de ser
+    // ciertos -- se regeneran al volver a entregarla.
+    if (previousStatus === 'entregado') {
+      try {
+        await maintenanceService.removeRecordsForOrder(order.id, tenant_id);
+      } catch (err) {
+        logger.warn(`[maintenance] Error borrando registros de mantenimiento de la OT ${order.id}: ${err.message}`);
+      }
+    }
 
     const full = await WorkOrder.findOne({
       where: { id: req.params.id, tenant_id },
@@ -2331,6 +2358,8 @@ const generateSale = async (req, res) => {
     await order.update({ sale_id: sale.id, status: 'entregado', delivered_at: new Date() }, { transaction });
 
     await transaction.commit();
+
+    await generateMaintenanceRecordsSafe(order.id, tenant_id);
 
     // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
     // Mismo patrón que sales.controller.js#update — antes de este fix, las

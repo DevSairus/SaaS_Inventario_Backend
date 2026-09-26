@@ -105,6 +105,12 @@ const Vehicle = sequelize.define('Vehicle', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  // Token permanente del portal público (/portal/vehiculo/:token), impreso
+  // en el sticker QR -- nunca se regenera (ver migración 2026092503).
+  portal_token: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

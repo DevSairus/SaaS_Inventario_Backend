@@ -96,6 +96,10 @@ const SaleDiagnosisMark = require('./sales/SaleDiagnosisMark');
 const CommissionCategory = require('./workshop/CommissionCategory');
 const TechnicianCommissionRate = require('./workshop/TechnicianCommissionRate');
 const DiagramSystemCommissionMap = require('./workshop/DiagramSystemCommissionMap');
+// ✅ NUEVO - Portal del vehículo / mantenimientos (ver
+// plan-portal-mantenimiento-vehiculo.md)
+const MaintenanceType = require('./workshop/MaintenanceType');
+const VehicleMaintenanceRecord = require('./workshop/VehicleMaintenanceRecord');
 
 // ✅ NUEVO - CRM (Fase 1)
 const CustomerInteraction = require('./crm/CustomerInteraction');
@@ -783,6 +787,15 @@ WorkOrderItem.belongsTo(CommissionCategory, { foreignKey: 'commission_category_i
 CommissionCategory.hasMany(CommissionSettlementItem, { foreignKey: 'commission_category_id', as: 'settlement_items' });
 CommissionSettlementItem.belongsTo(CommissionCategory, { foreignKey: 'commission_category_id', as: 'commission_category' });
 
+// ── Mantenimientos del vehículo (portal del cliente) ─────────────────────
+MaintenanceType.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
+MaintenanceType.hasMany(VehicleMaintenanceRecord, { foreignKey: 'maintenance_type_id', as: 'records' });
+VehicleMaintenanceRecord.belongsTo(MaintenanceType, { foreignKey: 'maintenance_type_id', as: 'maintenance_type' });
+Vehicle.hasMany(VehicleMaintenanceRecord, { foreignKey: 'vehicle_id', as: 'maintenance_records' });
+VehicleMaintenanceRecord.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+WorkOrder.hasMany(VehicleMaintenanceRecord, { foreignKey: 'work_order_id', as: 'maintenance_records' });
+VehicleMaintenanceRecord.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+
 // ── Cruce con nómina (categoría DIAN "Comisiones") ───────────────────────
 CommissionSettlement.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 CommissionSettlement.belongsTo(PayrollNovedad, { foreignKey: 'payroll_novedad_id', as: 'payroll_novedad' });
@@ -993,6 +1006,8 @@ module.exports = {
   CommissionCategory,
   TechnicianCommissionRate,
   DiagramSystemCommissionMap,
+  MaintenanceType,
+  VehicleMaintenanceRecord,
   CommissionSettlement,
   CommissionSettlementItem,
   ProductCommissionSettlement,
