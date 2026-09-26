@@ -62,6 +62,14 @@ const allowedOriginPatterns = [
   /^https:\/\/saa-s-inventario-frontend-[\w-]+-devsairus-projects\.vercel\.app$/,
 ];
 
+// En desarrollo, permite Vite en LAN (p. ej. http://192.168.x.x:5172) para
+// probar el link público desde el celular en la misma red.
+if (process.env.NODE_ENV !== 'production') {
+  allowedOriginPatterns.push(
+    /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/,
+    /^http:\/\/(192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}):\d+$/
+  );
+}
 const corsOptions = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
