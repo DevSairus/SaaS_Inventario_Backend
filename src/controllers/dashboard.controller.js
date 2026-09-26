@@ -14,6 +14,14 @@ const ALERT_CATEGORY_ROLES = {
   payables: ['admin', 'manager', 'accountant'],
   advances: ['admin', 'manager', 'accountant', 'seller'],
 };
+// Ventas que cuentan en los KPIs: 'pending' = confirmada, 'completed' =
+// entregada -- mismo criterio que accounts-receivable.controller.js,
+// reports.controller.js y commissionSettlements.controller.js. Antes acá solo
+// se contaba 'completed', y como las remisiones/facturas generadas desde una
+// OT (workOrders.controller.js#generateSale) nacen 'pending' y no pasan a
+// 'completed', toda la facturación del taller quedaba fuera de las tarjetas.
+const COUNTED_SALE_STATUSES = ['pending', 'completed'];
+
 function roleCanSeeAlertCategory(role, category) {
   if (role === 'super_admin') return true;
   const allowed = ALERT_CATEGORY_ROLES[category];
@@ -75,7 +83,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: dateFrom },
-          status: { [Op.in]: ['completed'] },
+          status: { [Op.in]: COUNTED_SALE_STATUSES },
           ...saleBranchWhere
         },
         attributes: [
@@ -94,7 +102,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: dateFrom },
-          '$sale.status$': { [Op.in]: ['completed'] },
+          '$sale.status$': { [Op.in]: COUNTED_SALE_STATUSES },
           '$product.product_type$': { [Op.ne]: 'service' },
           ...saleItemBranchWhere
         },
@@ -114,7 +122,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: today },
-          status: { [Op.in]: ['completed'] },
+          status: { [Op.in]: COUNTED_SALE_STATUSES },
           ...saleBranchWhere
         },
         attributes: [
@@ -151,7 +159,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: dateFrom },
-          '$sale.status$': { [Op.in]: ['completed'] },
+          '$sale.status$': { [Op.in]: COUNTED_SALE_STATUSES },
           ...saleItemBranchWhere
         },
         attributes: [
@@ -182,7 +190,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: dateFrom },
-          status: { [Op.in]: ['completed'] },
+          status: { [Op.in]: COUNTED_SALE_STATUSES },
           ...saleBranchWhere
         },
         attributes: [
@@ -199,7 +207,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: dateFrom },
-          '$sale.status$': { [Op.in]: ['completed'] },
+          '$sale.status$': { [Op.in]: COUNTED_SALE_STATUSES },
           ...saleItemBranchWhere
         },
         attributes: [
@@ -222,7 +230,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           tenant_id: tenantId,
           sale_date: { [Op.gte]: prevDateFrom, [Op.lt]: prevDateTo },
-          status: { [Op.in]: ['completed'] },
+          status: { [Op.in]: COUNTED_SALE_STATUSES },
           ...saleBranchWhere
         },
         attributes: [
@@ -236,7 +244,7 @@ exports.getKPIs = async (req, res) => {
         where: {
           '$sale.tenant_id$': tenantId,
           '$sale.sale_date$': { [Op.gte]: prevDateFrom, [Op.lt]: prevDateTo },
-          '$sale.status$': { [Op.in]: ['completed'] },
+          '$sale.status$': { [Op.in]: COUNTED_SALE_STATUSES },
           '$product.product_type$': { [Op.ne]: 'service' },
           ...saleItemBranchWhere
         },
