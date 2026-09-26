@@ -47,40 +47,33 @@ function formatDateEs(date) {
   return new Date(date).toLocaleString('es-CO', { dateStyle: 'long', timeStyle: 'short' });
 }
 
-async function computeAvailability({ tenant_id, branch_id, date }) {
-  const config = await WorkshopAppointmentConfig.findOne({ where: { tenant_id, branch_id } });
-  if (!config || !config.is_public_booking_enabled) return { open: false, slots: [] };
-
+// Franjas de un día con su ocupación -- función pura (sin BD), compartida por
+// la reserva pública y por el staff:
+//  - mode 'public': solo dentro de la ventana de reserva del taller
+//    (min_notice_hours .. advance_booking_days).
+//  - mode 'staff': el taller puede agendar/reagendar fuera de esa ventana
+//    (ej. hoy mismo, o más allá de los días que ve el cliente); solo se
+//    descarta lo que ya pasó. Horario, fechas bloqueadas y capacidad
+//    aplican igual en ambos modos.
+// `counts`: { [scheduled_at ISO]: citas activas en esa franja }.
+function buildDaySlots({ config, date, counts, now = new Date(), mode = 'public' }) {
   const isBlocked = (config.blocked_dates || []).some(b => b.date === date);
   if (isBlocked) return { open: false, slots: [], reason: 'blocked' };
 
   const slotTimes = generateSlotsForDay(config, date);
   if (slotTimes.length === 0) return { open: false, slots: [] };
 
-  const dayStart = new Date(`${date}T00:00:00`);
-  const dayEnd = new Date(`${date}T23:59:59`);
-  const existing = await WorkshopAppointment.findAll({
-    where: {
-      tenant_id, branch_id,
-      status: { [Op.in]: ['pendiente', 'confirmada'] },
-      scheduled_at: { [Op.between]: [dayStart, dayEnd] },
-    },
-    attributes: ['scheduled_at'],
-  });
-  const counts = {};
-  for (const a of existing) {
-    const key = a.scheduled_at.toISOString();
-    counts[key] = (counts[key] || 0) + 1;
-  }
-
-  const now = new Date();
-  const minAllowed = new Date(now.getTime() + config.min_notice_hours * 3600000);
-  const maxAllowed = new Date(now.getTime() + config.advance_booking_days * 86400000);
+  const minAllowed = mode === 'staff'
+    ? now
+    : new Date(now.getTime() + config.min_notice_hours * 3600000);
+  const maxAllowed = mode === 'staff'
+    ? null
+    : new Date(now.getTime() + config.advance_booking_days * 86400000);
 
   const slots = slotTimes.map(time => {
     const dt = new Date(`${date}T${time}:00`);
     const booked = counts[dt.toISOString()] || 0;
-    const withinWindow = dt >= minAllowed && dt <= maxAllowed;
+    const withinWindow = dt >= minAllowed && (!maxAllowed || dt <= maxAllowed);
     return {
       time,
       scheduled_at: dt.toISOString(),
@@ -91,6 +84,35 @@ async function computeAvailability({ tenant_id, branch_id, date }) {
   });
 
   return { open: true, slot_duration_minutes: config.slot_duration_minutes, slots };
+}
+
+async function computeAvailability({ tenant_id, branch_id, date, mode = 'public', excludeAppointmentId = null }) {
+  const config = await WorkshopAppointmentConfig.findOne({ where: { tenant_id, branch_id } });
+  if (!config) return { open: false, slots: [], reason: 'no_config' };
+  // La reserva pública apagada solo cierra el link del cliente -- el taller
+  // igual puede agendar/reagendar con su horario configurado.
+  if (mode === 'public' && !config.is_public_booking_enabled) return { open: false, slots: [] };
+
+  const dayStart = new Date(`${date}T00:00:00`);
+  const dayEnd = new Date(`${date}T23:59:59`);
+  const existing = await WorkshopAppointment.findAll({
+    where: {
+      tenant_id, branch_id,
+      status: { [Op.in]: ['pendiente', 'confirmada'] },
+      scheduled_at: { [Op.between]: [dayStart, dayEnd] },
+      // Al reagendar, la propia cita no ocupa cupo (si se deja a la misma
+      // hora, o se mueve dentro del mismo día).
+      ...(excludeAppointmentId ? { id: { [Op.ne]: excludeAppointmentId } } : {}),
+    },
+    attributes: ['scheduled_at'],
+  });
+  const counts = {};
+  for (const a of existing) {
+    const key = a.scheduled_at.toISOString();
+    counts[key] = (counts[key] || 0) + 1;
+  }
+
+  return buildDaySlots({ config, date, counts, mode });
 }
 
 // ── Resolución de tenant SIN token previo (primera vez que aparece el
@@ -141,8 +163,12 @@ async function generateOrderNumber(tenant_id, transaction) {
 }
 
 // Crea la solicitud -- reusada por el flujo público y por el staff (walk-in
-// / teléfono). Revalida horario, fecha bloqueada, ventana de reserva y
-// capacidad server-side (nunca confiar solo en lo que ya filtró el cliente).
+// / teléfono / "Nueva cita" en la agenda). Revalida horario, fecha
+// bloqueada, ventana de reserva y capacidad server-side (nunca confiar solo
+// en lo que ya filtró el cliente). El staff usa las mismas reglas que al
+// reagendar (buildDaySlots modo 'staff'): no depende de que la reserva
+// pública esté encendida ni de la ventana del cliente, solo de no agendar
+// en el pasado.
 async function createAppointmentBody({ tenant_id, branch_id, body, source, res }) {
   const {
     scheduled_at, customer_name, customer_phone, customer_email,
@@ -161,6 +187,29 @@ async function createAppointmentBody({ tenant_id, branch_id, body, source, res }
   // mande el cliente. Los datos del vehículo salen de la BD, no del body.
   let vehicle_id = null;
   let customer_id = null;
+  const isStaff = source === 'staff';
+
+  // Staff: puede elegir un vehículo o cliente ya registrado en el panel.
+  // Se validan contra el tenant (nunca se confía en un id suelto) y los
+  // datos del vehículo salen de la BD.
+  if (isStaff && body.vehicle_id) {
+    const vehicle = await Vehicle.findOne({
+      where: { id: body.vehicle_id, tenant_id },
+      attributes: ['id', 'customer_id', 'plate', 'brand', 'model'],
+    }).catch(() => null);
+    if (!vehicle) return res.status(400).json({ success: false, message: 'El vehículo no pertenece a este taller' });
+    vehicle_id = vehicle.id;
+    customer_id = vehicle.customer_id || null;
+    vehicle_plate = vehicle.plate;
+    vehicle_brand = vehicle.brand;
+    vehicle_model = vehicle.model;
+  }
+  if (isStaff && body.customer_id) {
+    const customer = await Customer.findOne({ where: { id: body.customer_id, tenant_id }, attributes: ['id'] }).catch(() => null);
+    if (!customer) return res.status(400).json({ success: false, message: 'El cliente no pertenece a este taller' });
+    customer_id = customer.id;
+  }
+
   if (portal_token) {
     const vehicle = await Vehicle.findOne({
       where: { portal_token: String(portal_token), tenant_id, is_active: true },
@@ -177,7 +226,10 @@ async function createAppointmentBody({ tenant_id, branch_id, body, source, res }
   }
 
   const config = await WorkshopAppointmentConfig.findOne({ where: { tenant_id, branch_id } });
-  if (!config || !config.is_public_booking_enabled) {
+  if (isStaff && !config) {
+    return res.status(409).json({ success: false, message: 'Esta sede no tiene horario de citas configurado. Configúralo en Taller › Configurar horarios.' });
+  }
+  if (!isStaff && (!config || !config.is_public_booking_enabled)) {
     return res.status(404).json({ success: false, message: 'Esta sede no tiene reserva de citas habilitada' });
   }
 
@@ -198,10 +250,16 @@ async function createAppointmentBody({ tenant_id, branch_id, body, source, res }
   }
 
   const now = new Date();
-  const minAllowed = new Date(now.getTime() + config.min_notice_hours * 3600000);
-  const maxAllowed = new Date(now.getTime() + config.advance_booking_days * 86400000);
-  if (dt < minAllowed || dt > maxAllowed) {
-    return res.status(400).json({ success: false, message: 'Esa fecha/hora está fuera de la ventana de reserva permitida' });
+  if (isStaff) {
+    if (dt < now) {
+      return res.status(400).json({ success: false, message: 'Esa franja ya pasó, elige otra.' });
+    }
+  } else {
+    const minAllowed = new Date(now.getTime() + config.min_notice_hours * 3600000);
+    const maxAllowed = new Date(now.getTime() + config.advance_booking_days * 86400000);
+    if (dt < minAllowed || dt > maxAllowed) {
+      return res.status(400).json({ success: false, message: 'Esa fecha/hora está fuera de la ventana de reserva permitida' });
+    }
   }
 
   const transaction = await sequelize.transaction();
@@ -535,6 +593,8 @@ const MESSAGE_BUILDERS = {
     `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* quedó *confirmada* para el ${formatDateEs(a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
   recordatorio: (a, tenant) =>
     `Hola ${a.customer_name}! Te recordamos tu cita en *${tenant.company_name}* el ${formatDateEs(a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
+  reagendamiento: (a, tenant) =>
+    `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* fue *reagendada* para el ${formatDateEs(a.scheduled_at)}.${a.previous_scheduled_at ? `\n(Antes: ${formatDateEs(a.previous_scheduled_at)})` : ''}\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
   cancelacion: (a, tenant) =>
     `Hola ${a.customer_name}, tu cita en *${tenant.company_name}* del ${formatDateEs(a.scheduled_at)} fue *cancelada*.${a.cancelled_reason ? `\nMotivo: ${a.cancelled_reason}` : ''}\n\nSi deseas, puedes agendar una nueva cita cuando quieras.`,
 };
@@ -584,6 +644,135 @@ const sendAppointmentWhatsApp = async (req, res) => {
   } catch (error) {
     logger.error('Error generando WhatsApp de cita:', error);
     res.status(500).json({ success: false, message: 'Error al generar el enlace de WhatsApp' });
+  }
+};
+
+// ── Reagendar ─────────────────────────────────────────────────────────────
+
+// Estados que se pueden mover de fecha: las que todavía van a ocurrir.
+const RESCHEDULABLE_STATUSES = ['pendiente', 'confirmada'];
+
+// GET /workshop/appointments/availability?date=YYYY-MM-DD[&appointment_id=]
+// Disponibilidad para el staff (modo 'staff' de buildDaySlots). Con
+// appointment_id se calcula para la sede de esa cita y sin contarla a ella.
+const getStaffAvailability = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { date, appointment_id } = req.query;
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ success: false, message: 'Fecha requerida (YYYY-MM-DD)' });
+    }
+    let branch_id = req.branch_id;
+    if (appointment_id) {
+      const appointment = await WorkshopAppointment.findOne({ where: { id: appointment_id, tenant_id }, attributes: ['id', 'branch_id'] });
+      if (!appointment) return res.status(404).json({ success: false, message: 'Cita no encontrada' });
+      branch_id = appointment.branch_id;
+    }
+    if (!branch_id) return res.status(409).json({ success: false, message: 'No hay sede activa' });
+
+    const availability = await computeAvailability({
+      tenant_id, branch_id, date, mode: 'staff', excludeAppointmentId: appointment_id || null,
+    });
+    res.json({ success: true, data: availability });
+  } catch (error) {
+    logger.error('Error obteniendo disponibilidad (staff):', error);
+    res.status(500).json({ success: false, message: 'Error obteniendo disponibilidad' });
+  }
+};
+
+// PATCH /workshop/appointments/:id/reschedule  { scheduled_at }
+// Mueve la MISMA cita (no crea otra): conserva share_token, vínculo con
+// vehículo/cliente y confirmación. Una cita confirmada sigue confirmada --
+// el cambio lo hace el taller, normalmente ya acordado con el cliente. El
+// aviso al cliente va aparte (send-whatsapp type 'reagendamiento'), igual
+// que confirmar/cancelar.
+const rescheduleAppointment = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { scheduled_at } = req.body;
+
+    const appointment = await WorkshopAppointment.findOne({
+      where: { id: req.params.id, tenant_id },
+      lock: transaction.LOCK.UPDATE,
+      transaction,
+    });
+    if (!appointment) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Cita no encontrada' });
+    }
+    if (!RESCHEDULABLE_STATUSES.includes(appointment.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Solo se pueden reagendar citas pendientes o confirmadas' });
+    }
+
+    const dt = new Date(scheduled_at);
+    if (!scheduled_at || Number.isNaN(dt.getTime())) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Fecha inválida' });
+    }
+    if (dt.getTime() === new Date(appointment.scheduled_at).getTime()) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'La cita ya está en esa fecha y hora' });
+    }
+
+    // Se revalida server-side con la misma regla que ve el staff en el modal
+    // (horario, bloqueo, capacidad sin contar esta cita, no en el pasado).
+    const config = await WorkshopAppointmentConfig.findOne({
+      where: { tenant_id, branch_id: appointment.branch_id }, transaction,
+    });
+    if (!config) {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: 'La sede no tiene horario de citas configurado' });
+    }
+    const dateStr = dateStrOf(dt);
+    const dayStart = new Date(`${dateStr}T00:00:00`);
+    const dayEnd = new Date(`${dateStr}T23:59:59`);
+    const existing = await WorkshopAppointment.findAll({
+      where: {
+        tenant_id, branch_id: appointment.branch_id,
+        status: { [Op.in]: ['pendiente', 'confirmada'] },
+        scheduled_at: { [Op.between]: [dayStart, dayEnd] },
+        id: { [Op.ne]: appointment.id },
+      },
+      attributes: ['scheduled_at'],
+      transaction,
+    });
+    const counts = {};
+    for (const a of existing) {
+      const key = a.scheduled_at.toISOString();
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    const day = buildDaySlots({ config, date: dateStr, counts, mode: 'staff' });
+    const slot = day.slots.find(s => s.scheduled_at === dt.toISOString());
+    if (!day.open || !slot) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: day.reason === 'blocked' ? 'Esa fecha está bloqueada' : 'Esa franja no está dentro del horario de la sede' });
+    }
+    if (!slot.available) {
+      await transaction.rollback();
+      return res.status(409).json({
+        success: false,
+        message: slot.booked >= slot.capacity ? 'Esa franja ya no tiene cupo, elige otra.' : 'Esa franja ya pasó, elige otra.',
+      });
+    }
+
+    await appointment.update({
+      previous_scheduled_at: appointment.scheduled_at,
+      scheduled_at: dt,
+      duration_minutes: config.slot_duration_minutes,
+      rescheduled_count: (appointment.rescheduled_count || 0) + 1,
+      last_rescheduled_at: new Date(),
+      // El recordatorio enviado era para la fecha anterior.
+      reminder_sent_at: null,
+    }, { transaction });
+
+    await transaction.commit();
+    res.json({ success: true, message: 'Cita reagendada', data: appointment });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error reagendando cita:', error);
+    res.status(500).json({ success: false, message: 'Error al reagendar la cita' });
   }
 };
 
@@ -698,4 +887,7 @@ module.exports = {
   // staff
   getConfig, updateConfig, list, getPending, markPendingSeen, createStaffAppointment,
   confirmAppointment, cancelAppointment, sendAppointmentWhatsApp, convertToWorkOrder,
+  getStaffAvailability, rescheduleAppointment,
+  // exportado para tests
+  buildDaySlots,
 };

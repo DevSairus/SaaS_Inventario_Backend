@@ -12,11 +12,13 @@ router.put('/config', checkRole('admin', 'manager'), ctrl.updateConfig);
 
 router.get('/pending', ctrl.getPending);
 router.post('/pending/seen', ctrl.markPendingSeen);
+router.get('/availability', ctrl.getStaffAvailability);
 router.get('/', ctrl.list);
 router.post('/', ctrl.createStaffAppointment);
 
 router.patch('/:id/confirm', ctrl.confirmAppointment);
 router.patch('/:id/cancel', ctrl.cancelAppointment);
+router.patch('/:id/reschedule', ctrl.rescheduleAppointment);
 router.post('/:id/send-whatsapp', ctrl.sendAppointmentWhatsApp);
 router.post('/:id/convert-to-work-order', ctrl.convertToWorkOrder);
 
