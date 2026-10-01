@@ -60,8 +60,15 @@ async function cutoverTenant(slug) {
     }
 
     console.log(`\n=== 3/3 Activando corte (schema_name) ===`);
+    // Se registra el resultado acá mismo (no solo en el alta automática de
+    // superadmin.routes.js): si no, un reintento manual exitoso con este
+    // script dejaba el tenant migrado pero con el error del intento viejo
+    // pintado en rojo en el panel de migración para siempre.
     await sequelize.query(
-      `UPDATE public.tenants SET schema_name = :schemaName WHERE id = :tenantId`,
+      `UPDATE public.tenants
+       SET schema_name = :schemaName,
+           cutover_last_status = 'success', cutover_last_error = NULL, cutover_last_attempt_at = NOW()
+       WHERE id = :tenantId`,
       { replacements: { schemaName, tenantId: tenant.id } }
     );
 
