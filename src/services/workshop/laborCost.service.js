@@ -80,7 +80,9 @@ function resolveLaborCost(workOrderId, laborRevenue, settledMap, pct) {
  * (WorkOrder no tiene branch_id propio — 1 sede = 1 bodega, mismo criterio
  * que reports.controller.js#getMovementsByMonth).
  */
-async function getLaborCostForPeriod({ tenantId, branchWarehouseId = null, dateFrom, dateTo, defaultPct = null }) {
+// workOrderFilter: condición SQL extra sobre `wo` (ej. excluir OT cerradas
+// con remisión, ver utils/remisionVisibility.js#workOrderRemisionSqlCondition).
+async function getLaborCostForPeriod({ tenantId, branchWarehouseId = null, dateFrom, dateTo, defaultPct = null, workOrderFilter = 'TRUE' }) {
   const pct = defaultPct !== null ? defaultPct : await getDefaultLaborCostPercentage(tenantId);
   const schema = getCurrentSchema() || 'public';
 
@@ -101,6 +103,7 @@ async function getLaborCostForPeriod({ tenantId, branchWarehouseId = null, dateF
           AND wo.status = 'entregado'
           AND ${dateFilter}
           ${branchFilter}
+          AND ${workOrderFilter}
         GROUP BY wo.id
       ),
       settled AS (

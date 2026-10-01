@@ -4,7 +4,7 @@ const { Product, Sale, SaleItem, Purchase, Customer, InventoryMovement, Warehous
 const { Op, fn, col, literal } = require('sequelize');
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../utils/branchFilter');
 const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
-const { shouldHideRemisiones, remisionExclusionWhere } = require('../utils/remisionVisibility');
+const { shouldHideRemisiones, remisionExclusionWhere, workOrderRemisionSqlCondition, applyWorkOrderRemisionFilter } = require('../utils/remisionVisibility');
 
 // Qué roles necesitan ver cada categoría de alerta en el dashboard general.
 // Mismo criterio que ya se usa en el frontend (SALES_FINANCE_ROLES /
@@ -130,7 +130,7 @@ exports.getKPIs = async (req, res) => {
         raw: true
       }),
 
-      getLaborCostForPeriod({ tenantId, branchWarehouseId, dateFrom, dateTo: new Date() }),
+      getLaborCostForPeriod({ tenantId, branchWarehouseId, dateFrom, dateTo: new Date(), workOrderFilter: workOrderRemisionSqlCondition(req) }),
 
       Sale.findOne({
         where: {
@@ -272,7 +272,7 @@ exports.getKPIs = async (req, res) => {
         raw: true
       }),
 
-      getLaborCostForPeriod({ tenantId, branchWarehouseId, dateFrom: prevDateFrom, dateTo: prevDateTo }),
+      getLaborCostForPeriod({ tenantId, branchWarehouseId, dateFrom: prevDateFrom, dateTo: prevDateTo, workOrderFilter: workOrderRemisionSqlCondition(req) }),
     ]);
 
     // Combinar salesByDay con profitByDay
@@ -582,12 +582,13 @@ exports.getWorkshopKPIs = async (req, res) => {
       include: [{
         model: WorkOrder,
         as: 'work_order',
-        where: {
+        // OT cerradas con remisión fuera, si están ocultas (utils/remisionVisibility.js)
+        where: applyWorkOrderRemisionFilter(req, {
           tenant_id: tenantId,
           status: { [Op.in]: ['listo', 'entregado'] },
           completed_at: { [Op.gte]: startOfMonth },
           ...woBranchWhere
-        },
+        }, 'work_order'),
         attributes: []
       }],
       where: { item_type: { [Op.in]: ['servicio', 'mano_obra'] } },
@@ -600,12 +601,13 @@ exports.getWorkshopKPIs = async (req, res) => {
       include: [{
         model: WorkOrder,
         as: 'work_order',
-        where: {
+        // OT cerradas con remisión fuera, si están ocultas (utils/remisionVisibility.js)
+        where: applyWorkOrderRemisionFilter(req, {
           tenant_id: tenantId,
           status: { [Op.in]: ['listo', 'entregado'] },
           completed_at: { [Op.gte]: startOfMonth },
           ...woBranchWhere
-        },
+        }, 'work_order'),
         attributes: []
       }],
       where: { item_type: 'repuesto' },
@@ -655,6 +657,7 @@ exports.getWorkshopKPIs = async (req, res) => {
       branchWarehouseId: branchWarehouseIds ? (branchWarehouseIds[0] || '00000000-0000-0000-0000-000000000000') : null,
       dateFrom: startOfMonth,
       dateTo: now,
+      workOrderFilter: workOrderRemisionSqlCondition(req),
     });
 
     // Últimas OTs actualizadas (bug fix: el frontend ya esperaba este campo

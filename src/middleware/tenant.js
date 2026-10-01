@@ -1,6 +1,7 @@
 // src/middleware/tenant.js (versión con schema-per-tenant)
 const Tenant = require('../models/auth/Tenant');
 const { runWithTenantSchema } = require('../config/tenantContext');
+const { isSessionRevoked, sessionRevokedResponse } = require('../utils/sessionRevocation');
 
 const tenantMiddleware = async (req, res, next) => {
   try {
@@ -53,6 +54,11 @@ const tenantMiddleware = async (req, res, next) => {
         message: 'Tu período de prueba terminó. Contacta a soporte para activar tu suscripción y seguir usando el sistema.',
         code: 'TRIAL_EXPIRED',
       });
+    }
+
+    // Cierre forzado de sesiones del tenant (utils/sessionRevocation.js).
+    if (isSessionRevoked(tenant, req.user)) {
+      return sessionRevokedResponse(res);
     }
 
     req.tenant_id = tenant.id;

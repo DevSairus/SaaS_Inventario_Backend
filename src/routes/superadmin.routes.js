@@ -33,6 +33,8 @@ const SubscriptionInvoice = require('../models/subscriptions/SubscriptionInvoice
 const SuperAdminMercadoPagoConfig = require('../models/payments/SuperAdminMercadoPagoConfig');
 const { MODULES_CATALOG } = require('../config/modules.catalog');
 const { invalidateModulesCache, invalidateAllModulesCache, getEffectiveModulesForTenantId } = require('../services/moduleAccess');
+const { FEATURE_KEY: REMISION_FEATURE_KEY, isRemisionHidingEnabled } = require('../utils/remisionVisibility');
+const { withSessionsRevoked } = require('../utils/sessionRevocation');
 
 // ============================================
 // GESTIÓN DE TENANTS
@@ -287,6 +289,7 @@ router.get(
           modules_enabled: tenant.modules_enabled || [],
           modules_disabled: tenant.modules_disabled || [],
           effective_modules: await getEffectiveModulesForTenantId(tenant.id),
+          hide_remisiones_for_non_admin: isRemisionHidingEnabled(tenant),
         },
         stats: {
           totalUsers,
@@ -665,6 +668,50 @@ router.post(
       res.json({ tenant });
     } catch (error) {
       res.status(500).json({ error: 'Error al cambiar estado' });
+    }
+  }
+);
+
+// POST /tenants/:id/remision-visibility
+// Único lugar donde se puede DESACTIVAR features.hide_remisiones_for_non_admin
+// una vez que el admin del tenant lo activó (la sección deja de verse en su
+// configuración, ver tenant.controller.js#updateConfig). Cualquier cambio
+// cierra todas las sesiones del tenant (utils/sessionRevocation.js) y queda
+// en audit log.
+router.post(
+  '/tenants/:id/remision-visibility',
+  authMiddleware,
+  checkPermission('superadmin.manage_all'),
+  async (req, res) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: 'enabled debe ser true o false' });
+      }
+      const tenant = await Tenant.findByPk(req.params.id);
+      if (!tenant) {
+        return res.status(404).json({ error: 'Tenant no encontrado' });
+      }
+      const previous = isRemisionHidingEnabled(tenant);
+      if (previous === enabled) {
+        return res.json({ hide_remisiones_for_non_admin: enabled });
+      }
+      await tenant.update({
+        features: withSessionsRevoked({ ...(tenant.features || {}), [REMISION_FEATURE_KEY]: enabled }),
+      });
+      setImmediate(() => audit({
+        tenant_id: tenant.id,
+        user_id: req.user?.id,
+        action: 'REMISION_VISIBILITY_CHANGED',
+        entity: 'tenant',
+        entity_id: tenant.id,
+        changes: { [REMISION_FEATURE_KEY]: { from: previous, to: enabled }, sessions_revoked: true },
+        req,
+      }));
+      res.json({ hide_remisiones_for_non_admin: enabled });
+    } catch (error) {
+      console.error('Error cambiando visibilidad de remisiones:', error);
+      res.status(500).json({ error: 'Error al cambiar la visibilidad de remisiones' });
     }
   }
 );

@@ -11,6 +11,7 @@ const { createMovement } = require('../inventory/movements.controller');
 const Tenant = require('../../models/auth/Tenant');
 const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/branchFilter');
+const { applyWorkOrderRemisionFilter } = require('../../utils/remisionVisibility');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 const { resolveCategoryForProduct, resolveCategoryForDiagramSystem } = require('../../services/workshop/commissionCategory.service');
 const { resolveUnitCost } = require('../../utils/costResolver');
@@ -2767,6 +2768,8 @@ const productivity = async (req, res) => {
       if (date_from) where.received_at[Op.gte] = new Date(date_from);
       if (date_to)   where.received_at[Op.lte] = new Date(date_to + 'T23:59:59');
     }
+    // OT cerradas con remisión fuera, si están ocultas (utils/remisionVisibility.js)
+    applyWorkOrderRemisionFilter(req, where);
 
     // Fetch all relevant orders with items and technician
     const orders = await WorkOrder.findAll({
@@ -3104,6 +3107,9 @@ const getReport = async (req, res) => {
       if (date_from) where.created_at[Op.gte] = new Date(date_from);
       if (date_to)   where.created_at[Op.lte] = new Date(date_to + 'T23:59:59');
     }
+    // OT cerradas con remisión fuera, si están ocultas -- mismo criterio que
+    // ventas/dashboard, para que los ingresos cuadren (utils/remisionVisibility.js)
+    applyWorkOrderRemisionFilter(req, where);
 
     const orders = await WorkOrder.findAll({
       where,

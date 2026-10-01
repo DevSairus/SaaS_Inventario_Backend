@@ -2,6 +2,7 @@ const logger = require('../../config/logger');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const audit = require('../../utils/audit');
+const { isSessionRevoked, sessionRevokedResponse } = require('../../utils/sessionRevocation');
 
 const { Op, fn, col, where: sqlWhere } = require('sequelize');
 
@@ -263,6 +264,13 @@ const refreshToken = async (req, res) => {
 
     if (!user || !user.is_active) {
       return res.status(401).json({ success: false, message: 'Usuario no válido' });
+    }
+
+    // Un token anterior a un cierre forzado de sesiones no se puede renovar
+    // (utils/sessionRevocation.js) -- si no, el refresh lo esquivaría.
+    if (user.tenant_id) {
+      const tenant = await Tenant.findByPk(user.tenant_id, { attributes: ['id', 'features'] });
+      if (isSessionRevoked(tenant, req.user)) return sessionRevokedResponse(res);
     }
 
     const payload = { id: user.id, email: user.email, role: user.role, tenant_id: user.tenant_id };

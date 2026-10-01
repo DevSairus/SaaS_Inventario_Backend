@@ -7,6 +7,8 @@ const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 // Cloudinary — siempre requerido (Vercel es stateless, sin disco persistente)
 const { v2: cloudinary } = require('cloudinary');
 const { FEATURE_KEY: REMISION_FEATURE_KEY } = require('../utils/remisionVisibility');
+const { KEY: SESSIONS_REVOKED_KEY, withSessionsRevoked } = require('../utils/sessionRevocation');
+const audit = require('../utils/audit');
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
@@ -130,19 +132,44 @@ const updateTenantConfig = async (req, res) => {
     if (pdf_config !== undefined) updates.pdf_config = pdf_config;
     if (business_config !== undefined) updates.business_config = { ...(tenant.business_config || {}), ...business_config };
     if (features !== undefined) {
-      // Ocultar remisiones a no-admin: solo el admin puede cambiarlo -- si
-      // no, el mismo usuario al que se le ocultan podría desactivarlo (PUT
-      // /tenant/config no tiene checkRole). Ver utils/remisionVisibility.js.
+      // Ocultar remisiones (ver utils/remisionVisibility.js):
+      // - Activarlo: el admin, desde Configuración. Desde ahí la sección deja
+      //   de mostrarse.
+      // - Desactivarlo: SOLO el superadmin, desde su panel (POST
+      //   /superadmin/tenants/:id/remision-visibility) -- apagarlo dejaría ver
+      //   de golpe ingresos que nadie veía y descuadraría informes ya cerrados.
+      // Al activarlo se cierran todas las sesiones del tenant
+      // (utils/sessionRevocation.js) para que nadie quede con pantallas viejas.
       const currentHide = tenant.features?.[REMISION_FEATURE_KEY] === true;
-      if (features?.[REMISION_FEATURE_KEY] !== undefined
-        && (features[REMISION_FEATURE_KEY] === true) !== currentHide
-        && !['admin', 'super_admin'].includes(req.user?.role)) {
-        return res.status(403).json({
-          success: false,
-          message: 'Solo un administrador puede cambiar la visibilidad de las remisiones',
-        });
+      const requestedHide = features?.[REMISION_FEATURE_KEY];
+      const changingHide = requestedHide !== undefined && (requestedHide === true) !== currentHide;
+      if (changingHide) {
+        const role = req.user?.role;
+        const allowed = currentHide ? role === 'super_admin' : ['admin', 'super_admin'].includes(role);
+        if (!allowed) {
+          return res.status(403).json({
+            success: false,
+            message: currentHide
+              ? 'Solo el superadministrador puede desactivar el ocultamiento de remisiones'
+              : 'Solo un administrador puede ocultar las remisiones',
+          });
+        }
       }
-      updates.features = { ...(tenant.features || {}), ...features };
+      // La marca de cierre de sesiones la maneja solo el servidor.
+      const { [SESSIONS_REVOKED_KEY]: _ignored, ...clientFeatures } = features || {};
+      updates.features = { ...(tenant.features || {}), ...clientFeatures };
+      if (changingHide) {
+        updates.features = withSessionsRevoked(updates.features);
+        setImmediate(() => audit({
+          tenant_id: tenant.id,
+          user_id: req.user?.id,
+          action: 'REMISION_VISIBILITY_CHANGED',
+          entity: 'tenant',
+          entity_id: tenant.id,
+          changes: { [REMISION_FEATURE_KEY]: { from: currentHide, to: requestedHide === true }, sessions_revoked: true },
+          req,
+        }));
+      }
     }
     if (tax_config !== undefined) updates.tax_config = { ...(tenant.tax_config || {}), ...tax_config };
 

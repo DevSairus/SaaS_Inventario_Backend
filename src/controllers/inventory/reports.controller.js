@@ -1,7 +1,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
-const { remisionSqlCondition } = require('../../utils/remisionVisibility');
+const { remisionSqlCondition, workOrderRemisionSqlCondition } = require('../../utils/remisionVisibility');
 const { getCurrentSchema } = require('../../config/tenantContext');
 // Sin calificar schema, las 7 queries de este archivo siempre leían "public"
 // -- para un tenant ya cortado a su propio schema, todos estos reportes de
@@ -414,6 +414,7 @@ exports.getProfitReport = async (req, res) => {
         AND wo.status = 'entregado'
         AND ${woDateFilter}
         ${woBranchFilter}
+        AND ${workOrderRemisionSqlCondition(req, 'wo')}
     `;
     const laborItems = await sequelize.query(laborItemsQuery, {
       replacements: { tenantId, ...dateReplacements, ...branchReplacements },
@@ -777,6 +778,7 @@ exports.getProfitabilityReport = async (req, res) => {
     }
     const laborForRange = await getLaborCostForPeriod({
       tenantId, branchWarehouseId, dateFrom: laborRangeFrom, dateTo: laborRangeTo,
+      workOrderFilter: workOrderRemisionSqlCondition(req, 'wo'),
     });
 
     // Gastos operativos, EXCLUYENDO comisiones_tecnicos (ya contadas en labor_cost)
