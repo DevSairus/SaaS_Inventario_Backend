@@ -146,6 +146,7 @@ const purchasesRoutes               = require('./routes/inventory/purchases.rout
 const movementsRoutes               = require('./routes/inventory/movements.routes');
 const adjustmentsRoutes             = require('./routes/inventory/adjustments.routes');
 const physicalCountsRoutes          = require('./routes/inventory/physicalCounts.routes');
+const combosRoutes                  = require('./routes/inventory/combos.routes');
 const warehousesRoutes              = require('./routes/inventory/warehouses.routes');
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
@@ -291,6 +292,7 @@ app.use('/api/inventory/purchases',            authMiddleware, tenantMiddleware,
 app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, branchMiddleware, movementsRoutes);
 app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, adjustmentsRoutes);
 app.use('/api/inventory/physical-counts',      authMiddleware, tenantMiddleware, physicalCountsRoutes);
+app.use('/api/inventory/combos',               authMiddleware, tenantMiddleware, combosRoutes);
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);

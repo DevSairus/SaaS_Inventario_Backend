@@ -1375,6 +1375,42 @@ async function getNumberingRange(tenant) {
 }
 
 /**
+ * Consulta un adquiriente (cliente) en la DIAN por tipo y número de
+ * identificación (operación GetAcquirer). Devuelve nombre y correo de
+ * recepción de facturas registrados en la DIAN.
+ *
+ * Usa SIEMPRE el certificado del propio tenant -- no hay credencial global
+ * de plataforma a propósito: la consulta sale a nombre de quien la hace.
+ * Mismo esquema de proxy que getStatusByCufe()/getNumberingRange() (la IP
+ * de Railway no está en la whitelist de la DIAN).
+ */
+async function lookupAcquirer(tenant, { identificationType, identificationNumber }) {
+  const cfg = tenant.dian_config || {};
+
+  const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
+  let response;
+  if (dianServiceUrls.length) {
+    response = await callRemoteDianService(dianServiceUrls, '/api/dian/get-acquirer', {
+      config: cfg, identificationType, identificationNumber,
+    });
+  } else {
+    const kit = getKit(tenant);
+    response = await kit.lookupBuyer({ identificationType, identificationNumber });
+  }
+
+  return {
+    // Se decide por el nombre y no por statusCode: el código exacto que
+    // devuelve la DIAN al encontrar el adquiriente no está documentado en
+    // @dian-kit, pero sin ReceiverName no hay nada útil que autocompletar.
+    found: !!response.receiverName,
+    receiverName: response.receiverName || '',
+    receiverEmail: response.receiverEmail || '',
+    statusCode: response.statusCode,
+    message: response.message,
+  };
+}
+
+/**
  * Llama al servicio DIAN remoto (Raspberry Pi / PC de respaldo), con
  * failover en orden sobre `baseUrls`.
  */
@@ -1412,6 +1448,8 @@ module.exports = {
   sendToDian,
   getStatusByCufe,
   getNumberingRange,
+  lookupAcquirer,
+  computeNitCheckDigit,
   mapLines,
   buildDocumentTaxTotals,
   buildWithholdingTaxTotals,

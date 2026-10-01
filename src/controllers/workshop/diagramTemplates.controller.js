@@ -1,31 +1,56 @@
 // backend/src/controllers/workshop/diagramTemplates.controller.js
 const logger = require('../../config/logger');
-const { DiagramTemplate } = require('../../models');
+const { sequelize } = require('../../config/database');
+const { DiagramTemplate, DiagramTemplateSetting } = require('../../models');
 const { Op } = require('sequelize');
+
+const VEHICLE_TYPES = ['automovil', 'camioneta', 'motocicleta', 'camion', 'otro'];
 
 // Lista el catálogo disponible para el tenant: los diagramas de la
 // biblioteca compartida (tenant_id = NULL) más los propios del taller,
 // filtrable por vehicle_type y system para armar el flujo paso a paso
 // (tipo de vehículo → sistema → configuración) descrito en la propuesta.
+//
+// Aplica los ajustes del taller (diagram_template_settings):
+// - vehicle_type incluye también los diagramas que el taller marcó como
+//   aplicables a esa categoría (extra_vehicle_types).
+// - Los desactivados se omiten, salvo con ?all=1 (pantalla "Biblioteca de
+//   diagramas" y calibración, que necesitan verlos todos).
 const list = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { vehicle_type, system } = req.query;
+    const { vehicle_type, system, all } = req.query;
+    const includeDisabled = all === '1' || all === 'true';
 
     const where = {
       is_active: true,
       [Op.or]: [{ tenant_id: null }, { tenant_id }],
     };
-    if (vehicle_type) where.vehicle_type = vehicle_type;
     if (system) where.system = system;
 
-    const templates = await DiagramTemplate.findAll({
-      where,
-      attributes: ['id', 'tenant_id', 'vehicle_type', 'system', 'configuration', 'name', 'description'],
-      order: [['vehicle_type', 'ASC'], ['system', 'ASC'], ['configuration', 'ASC']],
-    });
+    const [templates, settings] = await Promise.all([
+      DiagramTemplate.findAll({
+        where,
+        attributes: ['id', 'tenant_id', 'vehicle_type', 'system', 'configuration', 'name', 'description'],
+        order: [['vehicle_type', 'ASC'], ['system', 'ASC'], ['configuration', 'ASC']],
+      }),
+      DiagramTemplateSetting.findAll({ where: { tenant_id } }),
+    ]);
+    const settingsById = new Map(settings.map(s => [s.diagram_template_id, s]));
 
-    res.json({ success: true, data: templates });
+    const data = templates
+      .map(t => {
+        const setting = settingsById.get(t.id);
+        return {
+          ...t.toJSON(),
+          is_enabled: setting ? setting.is_enabled : true,
+          extra_vehicle_types: setting?.extra_vehicle_types || [],
+        };
+      })
+      .filter(t => includeDisabled || t.is_enabled)
+      .filter(t => !vehicle_type || t.vehicle_type === vehicle_type || t.extra_vehicle_types.includes(vehicle_type));
+
+    res.json({ success: true, data });
   } catch (error) {
     logger.error('Error listando plantillas de diagrama:', error);
     res.status(500).json({ success: false, message: 'Error al obtener el catálogo de diagramas' });
@@ -133,4 +158,66 @@ const updateImage = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, updatePoints, updateImage };
+// Guarda los ajustes del taller sobre uno o varios diagramas (activar /
+// desactivar y categorías adicionales). Recibe un lote para que la pantalla
+// pueda activar/desactivar toda una categoría en un solo request.
+// Body: { settings: [{ diagram_template_id, is_enabled, extra_vehicle_types }] }
+const updateSettings = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { settings } = req.body;
+
+  if (!Array.isArray(settings) || !settings.length || settings.some(s => (
+    typeof s.diagram_template_id !== 'string' ||
+    (s.is_enabled !== undefined && typeof s.is_enabled !== 'boolean') ||
+    (s.extra_vehicle_types !== undefined && !Array.isArray(s.extra_vehicle_types))
+  ))) {
+    return res.status(400).json({
+      success: false,
+      message: 'settings debe ser un array de {diagram_template_id, is_enabled?, extra_vehicle_types?}',
+    });
+  }
+
+  const transaction = await sequelize.transaction();
+  try {
+    const templates = await DiagramTemplate.findAll({
+      where: {
+        id: settings.map(s => s.diagram_template_id),
+        [Op.or]: [{ tenant_id: null }, { tenant_id }],
+      },
+      attributes: ['id', 'vehicle_type'],
+      transaction,
+    });
+    const templatesById = new Map(templates.map(t => [t.id, t]));
+    if (templatesById.size !== new Set(settings.map(s => s.diagram_template_id)).size) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Uno o más diagramas no existen' });
+    }
+
+    for (const s of settings) {
+      const template = templatesById.get(s.diagram_template_id);
+      const [row] = await DiagramTemplateSetting.findOrCreate({
+        where: { tenant_id, diagram_template_id: s.diagram_template_id },
+        defaults: { tenant_id, diagram_template_id: s.diagram_template_id },
+        transaction,
+      });
+
+      const updates = {};
+      if (s.is_enabled !== undefined) updates.is_enabled = s.is_enabled;
+      if (s.extra_vehicle_types !== undefined) {
+        // Solo categorías válidas, sin repetir y sin la propia del diagrama
+        updates.extra_vehicle_types = [...new Set(s.extra_vehicle_types)]
+          .filter(vt => VEHICLE_TYPES.includes(vt) && vt !== template.vehicle_type);
+      }
+      if (Object.keys(updates).length) await row.update(updates, { transaction });
+    }
+
+    await transaction.commit();
+    res.json({ success: true, message: 'Ajustes de diagramas guardados' });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error guardando ajustes de diagramas:', error);
+    res.status(500).json({ success: false, message: 'Error al guardar los ajustes de diagramas' });
+  }
+};
+
+module.exports = { list, getById, updatePoints, updateImage, updateSettings };

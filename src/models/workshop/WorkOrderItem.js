@@ -113,7 +113,21 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
     allowNull: true,
     references: { model: 'commission_categories', key: 'id' },
     onDelete: 'SET NULL',
-  }
+  },
+  // ── Combo (ver migración 2026092901-create-combos) ────────
+  // Las líneas que vienen de un combo comparten combo_group_id. Los campos
+  // combo_* son snapshot: el documento no depende de que el combo exista.
+  combo_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'combos', key: 'id' },
+    onDelete: 'SET NULL',
+  },
+  combo_group_id: { type: DataTypes.UUID, allowNull: true },
+  combo_name: { type: DataTypes.STRING(200), allowNull: true },
+  combo_quantity: { type: DataTypes.DECIMAL(10, 3), allowNull: true },
+  // false = en pantalla/PDF/DIAN el grupo se muestra solo como nombre + total
+  combo_show_breakdown: { type: DataTypes.BOOLEAN, allowNull: true },
 }, {
   tableName: 'work_order_items',
   timestamps: true,

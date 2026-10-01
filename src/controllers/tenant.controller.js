@@ -6,6 +6,7 @@ const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 
 // Cloudinary — siempre requerido (Vercel es stateless, sin disco persistente)
 const { v2: cloudinary } = require('cloudinary');
+const { FEATURE_KEY: REMISION_FEATURE_KEY } = require('../utils/remisionVisibility');
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key:    process.env.CLOUDINARY_API_KEY,
@@ -128,7 +129,21 @@ const updateTenantConfig = async (req, res) => {
     if (secondary_color !== undefined) updates.secondary_color = secondary_color;
     if (pdf_config !== undefined) updates.pdf_config = pdf_config;
     if (business_config !== undefined) updates.business_config = { ...(tenant.business_config || {}), ...business_config };
-    if (features !== undefined) updates.features = { ...(tenant.features || {}), ...features };
+    if (features !== undefined) {
+      // Ocultar remisiones a no-admin: solo el admin puede cambiarlo -- si
+      // no, el mismo usuario al que se le ocultan podría desactivarlo (PUT
+      // /tenant/config no tiene checkRole). Ver utils/remisionVisibility.js.
+      const currentHide = tenant.features?.[REMISION_FEATURE_KEY] === true;
+      if (features?.[REMISION_FEATURE_KEY] !== undefined
+        && (features[REMISION_FEATURE_KEY] === true) !== currentHide
+        && !['admin', 'super_admin'].includes(req.user?.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Solo un administrador puede cambiar la visibilidad de las remisiones',
+        });
+      }
+      updates.features = { ...(tenant.features || {}), ...features };
+    }
     if (tax_config !== undefined) updates.tax_config = { ...(tenant.tax_config || {}), ...tax_config };
 
     await tenant.update(updates);

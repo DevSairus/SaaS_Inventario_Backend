@@ -16,6 +16,7 @@ const {
 } = require('../../models');
 const { Op } = require('sequelize');
 const taxService = require('../../services/taxService');
+const { pickComboFields } = require('../../utils/comboLines');
 
 const DIAGNOSIS_MARK_INCLUDE = [
   { model: Product, as: 'suggested_product', attributes: ['id', 'name', 'sku', 'base_price'], required: false },
@@ -320,6 +321,7 @@ const convertToWorkOrder = async (req, res) => {
         tax_percentage: item.tax_percentage, tax_amount: item.tax_amount,
         subtotal: item.subtotal, total: item.total,
         approval_status: 'aprobado',
+        ...pickComboFields(item),
       }, { transaction });
     }
     await order.update({

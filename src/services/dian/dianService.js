@@ -8,6 +8,7 @@ const dianKit = require('./dianKitAdapter');
 const { sequelize } = require('../../config/database');
 const logger = require('../../config/logger');
 const { assertReadiness: assertCustomerDianReadiness } = require('./customerDianReadiness');
+const { collapseComboLinesForDian } = require('../../utils/comboLines');
 
 /* ──────────────────────────────────────────────────────────
  * Extrae configuración DIAN del tenant y valida campos
@@ -47,6 +48,46 @@ function buildRejectionMessage(dianResponse) {
 /* ──────────────────────────────────────────────────────────
  * Obtiene o incrementa el consecutivo de la resolución
  * ────────────────────────────────────────────────────────── */
+/**
+ * Sede con la que se numera un documento de venta (factura / nota) ante la
+ * DIAN -- getNextConsecutive exige una. Si el documento no la tiene (ventas
+ * anteriores a las sedes, o creadas por super_admin, cuyo req.branch_id es
+ * null) se resuelve en este orden y se guarda en la venta:
+ *   1. sede de su bodega
+ *   2. sede de la factura de referencia (notas crédito/débito)
+ *   3. sede principal activa del tenant
+ * Si nada aplica devuelve null y getNextConsecutive falla con su mensaje.
+ */
+async function resolveDocumentBranchId(sale, tenantId, transaction) {
+  if (sale.branch_id) return sale.branch_id;
+  const { Sale, Warehouse, Branch } = require('../../models');
+
+  let branchId = null;
+  if (sale.warehouse_id) {
+    const warehouse = await Warehouse.findByPk(sale.warehouse_id, { attributes: ['branch_id'], transaction });
+    branchId = warehouse?.branch_id || null;
+  }
+  if (!branchId && sale.reference_sale_id) {
+    const reference = await Sale.findByPk(sale.reference_sale_id, { attributes: ['branch_id'], transaction });
+    branchId = reference?.branch_id || null;
+  }
+  if (!branchId) {
+    const main = await Branch.findOne({
+      where: { tenant_id: tenantId, is_active: true },
+      order: [['is_main', 'DESC'], ['created_at', 'ASC']],
+      attributes: ['id'],
+      transaction,
+    });
+    branchId = main?.id || null;
+  }
+
+  if (branchId && sale.id) {
+    await Sale.update({ branch_id: branchId }, { where: { id: sale.id }, transaction });
+    logger.info(`[DIAN] Documento ${sale.sale_number} sin sede: se asigna la sede ${branchId}`);
+  }
+  return branchId;
+}
+
 async function getNextConsecutive(tenantId, branchId, isTest = false, transaction, existingInvoiceNumber = null, documentType = 'invoice') {
   const { DianResolution } = require('../../models');
 
@@ -123,8 +164,9 @@ async function sendInvoiceToDian(sale, tenant) {
       ? sale.dian_invoice_number
       : null;
 
+    const branchId = await resolveDocumentBranchId(sale, tenant.id, transaction);
     const { consecutive, invoiceNumber, resolution } = await getNextConsecutive(
-      tenant.id, sale.branch_id, isTest, transaction, reusableNumber
+      tenant.id, branchId, isTest, transaction, reusableNumber
     );
 
     await Sale.update(
@@ -144,7 +186,15 @@ async function sendInvoiceToDian(sale, tenant) {
     // getNextConsecutive / reusableNumber), así que no se pierde numeración.
     await transaction.commit();
 
-    const items = sale.items || [];
+    // Las líneas que el cliente rechazó en una cotización aprobada a medias
+    // no se facturan: confirm() no les descuenta stock, generateSaleEntry no
+    // las contabiliza y respondPublicQuoteBody ya las sacó de total_amount.
+    // Antes llegaban igual al XML (y a sus totales) -- ahora se excluyen.
+    // Combos configurados como "solo nombre y total" van como una línea por
+    // tarifa de impuesto (ver utils/comboLines.js) -- el PDF muestra lo mismo.
+    const items = collapseComboLinesForDian(
+      (sale.items || []).filter(i => i.approval_status !== 'rechazado')
+    );
 
     // Usar dian-kit para generar y firmar el XML
     const { signedXml, cufe } = await dianKit.createInvoice(tenant, {
@@ -317,8 +367,9 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       ? note.dian_invoice_number
       : null;
 
+    const noteBranchId = await resolveDocumentBranchId(note, tenant.id, transaction);
     const { invoiceNumber: noteNumber, resolution } = await getNextConsecutive(
-      tenant.id, note.branch_id, isTest, transaction, reusableNoteNumber, documentType
+      tenant.id, noteBranchId, isTest, transaction, reusableNoteNumber, documentType
     );
 
     if (saleId) {
@@ -357,7 +408,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       technicalKey: dianCfg.technical_key,
     };
 
-    const items = note.items?.length ? note.items : [{
+    const items = note.items?.length ? collapseComboLinesForDian(note.items) : [{
       description: isDebit ? 'Cargo adicional' : 'Devolucion parcial',
       quantity: 1,
       unit_price: Number(note.total_amount || note.subtotal || 0),
@@ -971,6 +1022,7 @@ async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, 
 }
 
 module.exports = {
+  resolveDocumentBranchId,
   sendInvoiceToDian,
   checkInvoiceStatus,
   getNextConsecutive,

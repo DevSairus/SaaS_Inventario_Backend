@@ -8,6 +8,7 @@ const {
 } = require('../../models');
 const { getEffectiveModulesForTenantId } = require('../../services/moduleAccess');
 const { applyOwnershipScope } = require('../../utils/crmScope');
+const { applyRemisionFilter } = require('../../utils/remisionVisibility');
 
 // ── Interacciones ────────────────────────────────────────────────────────────
 
@@ -92,7 +93,9 @@ const getTimeline = async (req, res) => {
 
     const [sales, interactions, workOrders] = await Promise.all([
       Sale.findAll({
-        where: { tenant_id, customer_id },
+        // Remisiones ocultas a no-admin si el tenant lo configuró -- también
+        // salen del LTV, que se calcula sobre esta misma lista.
+        where: applyRemisionFilter(req, { tenant_id, customer_id }),
         attributes: ['id', 'sale_number', 'document_type', 'status', 'total_amount', 'sale_date', 'converted_to_work_order_id'],
         order: [['sale_date', 'DESC']],
         limit: 50,

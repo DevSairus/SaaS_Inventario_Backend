@@ -4,7 +4,7 @@ const { sequelize } = require('../../config/database');
 const {
   WorkOrder, WorkOrderItem, WorkOrderQuoteRequest, Vehicle, Customer, User,
   Warehouse, Product, InventoryMovement, Sale, SaleItem,
-  DiagramTemplate, WorkOrderDiagnosisMark, CommissionCategory,
+  DiagramTemplate, WorkOrderDiagnosisMark, CommissionCategory, Combo, ComboItem,
 } = require('../../models');
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
@@ -14,6 +14,8 @@ const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/bran
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 const { resolveCategoryForProduct, resolveCategoryForDiagramSystem } = require('../../services/workshop/commissionCategory.service');
 const { resolveUnitCost } = require('../../utils/costResolver');
+const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
+const dianService = require('../../services/dian/dianService');
 const maintenanceService = require('../../services/workshop/maintenance.service');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
@@ -538,6 +540,7 @@ const convertQuoteToWorkOrder = async (req, res) => {
         total: saleItem.total,
         notes: saleItem.notes,
         approval_status: 'aprobado',
+        ...pickComboFields(saleItem),
       }, { transaction });
 
       if (item_type === 'repuesto' && saleItem.product_id) {
@@ -973,6 +976,135 @@ const revertStatus = async (req, res) => {
   }
 };
 
+// Error de validación al crear un ítem de catálogo en una OT -- lo lanza
+// createCatalogItem y lo traducen a HTTP addItem / addCombo.
+class WorkOrderItemError extends Error {
+  constructor(status, message, alternatives) {
+    super(message);
+    this.status = status;
+    this.alternatives = alternatives;
+  }
+}
+
+const toBool = (v, def = false) => {
+  // Normalizar booleanos: Sequelize/PG puede devolver true/false/null/string/'true'/'false'
+  if (v === true  || v === 'true'  || v === 1) return true;
+  if (v === false || v === 'false' || v === 0) return false;
+  return def;
+};
+
+// Crea un ítem de catálogo (repuesto / servicio / mano_obra) en la OT: valida
+// tipo y stock, calcula importes, resuelve la categoría de comisión y
+// descuenta inventario si corresponde. Compartido por addItem (un ítem) y
+// addCombo (todos los componentes de un combo en la misma transacción).
+async function createCatalogItem({
+  order, tenant_id, user_id, product_id, item_type, qty, unit_price, tax_percentage,
+  technician_id, requiresApproval, comboFields = {}, transaction,
+}) {
+  let stockWarnings = [];
+
+  const product = await Product.findOne({ where: { id: product_id, tenant_id }, transaction });
+  if (!product) throw new WorkOrderItemError(404, 'Producto no encontrado');
+
+  // Validar combinación tipo/producto
+  if (item_type === 'repuesto' && product.product_type === 'service') {
+    throw new WorkOrderItemError(400, 'Un producto de tipo servicio no puede ser "repuesto"');
+  }
+
+  // Validar stock si es repuesto físico
+  if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
+    const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
+    const alternatives = await getEquivalentsWithStock(product_id, tenant_id);
+    throw new WorkOrderItemError(400, `Stock insuficiente de "${product.name}". Disponible: ${product.current_stock}`, alternatives);
+  }
+
+  // Calcular importes — respetar price_includes_tax y has_tax
+  const price           = parseFloat(unit_price) || parseFloat(product.base_price) || 0;
+  const taxPct          = parseFloat(tax_percentage ?? product.tax_percentage ?? 19);
+  const hasTax          = toBool(product.has_tax, true) && taxPct > 0;
+  const priceIncludesTax = toBool(product.price_includes_tax, false);
+
+  let subtotal, tax_amount;
+  if (!hasTax) {
+    // Producto exento de IVA
+    subtotal   = qty * price;
+    tax_amount = 0;
+  } else if (priceIncludesTax) {
+    // El precio ya incluye IVA — extraer el impuesto embebido
+    const totalBruto = qty * price;
+    subtotal   = Math.round(totalBruto / (1 + taxPct / 100));
+    tax_amount = totalBruto - subtotal;
+  } else {
+    // Precio no incluye IVA — sumarlo encima
+    subtotal   = qty * price;
+    tax_amount = Math.round(subtotal * (taxPct / 100));
+  }
+  const total = subtotal + tax_amount;
+
+  // Categoría de comisión (Frenos, Suspensión...), resuelta desde
+  // product.category_id -- solo aplica a mano de obra/servicio, no a
+  // repuestos (esos siguen liquidándose aparte, sin categoría).
+  let commission_category_id = null;
+  if (COMMISSION_ITEM_TYPES.includes(item_type)) {
+    commission_category_id = await resolveCategoryForProduct(tenant_id, product, transaction);
+  }
+
+  const item = await WorkOrderItem.create({
+    tenant_id,
+    work_order_id: order.id,
+    item_type,
+    product_id,
+    product_name: product.name,
+    product_sku:  product.sku,
+    quantity:     qty,
+    unit_price:   price,
+    tax_percentage: taxPct,
+    tax_amount,
+    subtotal,
+    total,
+    technician_id: technician_id || null,
+    approval_status: requiresApproval ? 'pendiente' : 'aprobado',
+    commission_category_id,
+    ...comboFields,
+  }, { transaction });
+
+  // Advertencia (NO bloqueante) de "cantidad en trámite": el chequeo de
+  // stock insuficiente de arriba compara contra current_stock crudo, así
+  // que puede pasar aunque otros documentos (ventas en borrador / ítems
+  // de OT aprobados sin aplicar) ya estén comprometiendo esas mismas
+  // unidades. Se calcula con el current_stock ANTES de que este ítem
+  // descuente el suyo (ver services/inventory/stockInProcess.service.js)
+  // y excluyendo esta misma OT para que un ítem 'pendiente' de aprobación
+  // no se cuente a sí mismo.
+  if (item_type === 'repuesto' && product.track_inventory) {
+    try {
+      stockWarnings = await buildStockWarnings(tenant_id, [{
+        product_id: product.id,
+        product_name: product.name,
+        quantity: qty,
+        current_stock: parseFloat(product.current_stock || 0),
+        track_inventory: true,
+      }], { excludeWorkOrderId: order.id, transaction });
+    } catch (warnError) {
+      logger.warn('No se pudo calcular advertencia de cantidad en trámite:', warnError.message);
+    }
+  }
+
+  // Descontar inventario si es repuesto físico con track_inventory —
+  // salvo que requiera aprobación del cliente: en ese caso queda
+  // 'pendiente' sin tocar inventario hasta que se apruebe (ver
+  // applyApprovedItems), sea cual sea el momento de la OT en que se agregó.
+  if (!requiresApproval && item_type === 'repuesto' && product.track_inventory) {
+    try {
+      await applyItemStockMovement(item, order, product, tenant_id, user_id, transaction);
+    } catch (stockError) {
+      throw new WorkOrderItemError(400, stockError.message);
+    }
+  }
+
+  return { item, stockWarnings };
+}
+
 // ── ADD ITEM ──────────────────────────────────────────────────────────────────
 
 const addItem = async (req, res) => {
@@ -1040,120 +1172,21 @@ const addItem = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Producto, tipo y cantidad son requeridos' });
       }
 
-      const product = await Product.findOne({ where: { id: product_id, tenant_id }, transaction });
-      if (!product) {
+      try {
+        ({ item, stockWarnings } = await createCatalogItem({
+          order, tenant_id, user_id: req.user.id, product_id, item_type, qty,
+          unit_price, tax_percentage, technician_id: itemTechnicianId, requiresApproval, transaction,
+        }));
+      } catch (itemError) {
         await transaction.rollback();
-        return res.status(404).json({ success: false, message: 'Producto no encontrado' });
-      }
-
-      // Validar combinación tipo/producto
-      if (item_type === 'repuesto' && product.product_type === 'service') {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'Un producto de tipo servicio no puede ser "repuesto"' });
-      }
-
-      // Validar stock si es repuesto físico
-      if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
-        const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
-        const alternatives = await getEquivalentsWithStock(product_id, tenant_id);
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stock insuficiente. Disponible: ${product.current_stock}`,
-          alternatives
-        });
-      }
-
-      // Calcular importes — respetar price_includes_tax y has_tax
-      // Normalizar booleanos: Sequelize/PG puede devolver true/false/null/string/'true'/'false'
-      const toBool = (v, def = false) => {
-        if (v === true  || v === 'true'  || v === 1) return true;
-        if (v === false || v === 'false' || v === 0) return false;
-        return def;
-      };
-
-      const price           = parseFloat(unit_price) || parseFloat(product.base_price) || 0;
-      const taxPct          = parseFloat(tax_percentage ?? product.tax_percentage ?? 19);
-      const hasTax          = toBool(product.has_tax, true) && taxPct > 0;
-      const priceIncludesTax = toBool(product.price_includes_tax, false);
-
-      let subtotal, tax_amount;
-      if (!hasTax) {
-        // Producto exento de IVA
-        subtotal   = qty * price;
-        tax_amount = 0;
-      } else if (priceIncludesTax) {
-        // El precio ya incluye IVA — extraer el impuesto embebido
-        const totalBruto = qty * price;
-        subtotal   = Math.round(totalBruto / (1 + taxPct / 100));
-        tax_amount = totalBruto - subtotal;
-      } else {
-        // Precio no incluye IVA — sumarlo encima
-        subtotal   = qty * price;
-        tax_amount = Math.round(subtotal * (taxPct / 100));
-      }
-      const total = subtotal + tax_amount;
-
-      // Categoría de comisión (Frenos, Suspensión...), resuelta desde
-      // product.category_id -- solo aplica a mano de obra/servicio, no a
-      // repuestos (esos siguen liquidándose aparte, sin categoría).
-      let commission_category_id = null;
-      if (COMMISSION_ITEM_TYPES.includes(item_type)) {
-        commission_category_id = await resolveCategoryForProduct(tenant_id, product, transaction);
-      }
-
-      // Crear ítem
-      item = await WorkOrderItem.create({
-        tenant_id,
-        work_order_id: order.id,
-        item_type,
-        product_id,
-        product_name: product.name,
-        product_sku:  product.sku,
-        quantity:     qty,
-        unit_price:   price,
-        tax_percentage: taxPct,
-        tax_amount,
-        subtotal,
-        total,
-        technician_id: itemTechnicianId || null,
-        approval_status: requiresApproval ? 'pendiente' : 'aprobado',
-        commission_category_id,
-      }, { transaction });
-
-      // Advertencia (NO bloqueante) de "cantidad en trámite": el chequeo de
-      // stock insuficiente de arriba compara contra current_stock crudo, así
-      // que puede pasar aunque otros documentos (ventas en borrador / ítems
-      // de OT aprobados sin aplicar) ya estén comprometiendo esas mismas
-      // unidades. Se calcula con el current_stock ANTES de que este ítem
-      // descuente el suyo (ver services/inventory/stockInProcess.service.js)
-      // y excluyendo esta misma OT para que un ítem 'pendiente' de aprobación
-      // no se cuente a sí mismo.
-      if (item_type === 'repuesto' && product.track_inventory) {
-        try {
-          stockWarnings = await buildStockWarnings(tenant_id, [{
-            product_id: product.id,
-            product_name: product.name,
-            quantity: qty,
-            current_stock: parseFloat(product.current_stock || 0),
-            track_inventory: true,
-          }], { excludeWorkOrderId: order.id, transaction });
-        } catch (warnError) {
-          logger.warn('No se pudo calcular advertencia de cantidad en trámite:', warnError.message);
+        if (itemError instanceof WorkOrderItemError) {
+          return res.status(itemError.status).json({
+            success: false,
+            message: itemError.message,
+            ...(itemError.alternatives ? { alternatives: itemError.alternatives } : {}),
+          });
         }
-      }
-
-      // Descontar inventario si es repuesto físico con track_inventory —
-      // salvo que requiera aprobación del cliente: en ese caso queda
-      // 'pendiente' sin tocar inventario hasta que se apruebe (ver
-      // applyApprovedItems), sea cual sea el momento de la OT en que se agregó.
-      if (!requiresApproval && item_type === 'repuesto' && product.track_inventory) {
-        try {
-          await applyItemStockMovement(item, order, product, tenant_id, req.user.id, transaction);
-        } catch (stockError) {
-          await transaction.rollback();
-          return res.status(400).json({ success: false, message: stockError.message });
-        }
+        throw itemError;
       }
     }
 
@@ -1180,6 +1213,24 @@ const addItem = async (req, res) => {
 
 // ── REMOVE ITEM ───────────────────────────────────────────────────────────────
 
+// Borra un ítem de la OT revirtiendo su movimiento de inventario si lo tenía.
+// Compartido por removeItem y removeCombo.
+async function destroyItemRestoringStock(item, transaction) {
+  if (item.item_type === 'repuesto' && item.inventory_movement_id) {
+    const product = await Product.findByPk(item.product_id, { transaction });
+    if (product && product.track_inventory) {
+      const restored = parseFloat(product.current_stock) + parseFloat(item.quantity);
+      await product.update({
+        current_stock: restored,
+        available_stock: restored - parseFloat(product.reserved_stock || 0)
+      }, { transaction });
+      await InventoryMovement.destroy({ where: { id: item.inventory_movement_id }, transaction });
+    }
+  }
+  await item.destroy({ transaction });
+}
+
+
 const removeItem = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
@@ -1195,20 +1246,7 @@ const removeItem = async (req, res) => {
     const item = await WorkOrderItem.findOne({ where: { id: req.params.itemId, work_order_id: order.id }, transaction });
     if (!item) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Ítem no encontrado' }); }
 
-    // Revertir inventario si aplica
-    if (item.item_type === 'repuesto' && item.inventory_movement_id) {
-      const product = await Product.findByPk(item.product_id, { transaction });
-      if (product && product.track_inventory) {
-        const restored = parseFloat(product.current_stock) + parseFloat(item.quantity);
-        await product.update({
-          current_stock: restored,
-          available_stock: restored - parseFloat(product.reserved_stock || 0)
-        }, { transaction });
-        await InventoryMovement.destroy({ where: { id: item.inventory_movement_id }, transaction });
-      }
-    }
-
-    await item.destroy({ transaction });
+    await destroyItemRestoringStock(item, transaction);
 
     // Recalcular totales
     const remaining = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
@@ -1222,6 +1260,185 @@ const removeItem = async (req, res) => {
     await transaction.rollback();
     logger.error('Error eliminando ítem OT:', error);
     res.status(500).json({ success: false, message: 'Error al eliminar ítem' });
+  }
+};
+
+// ── COMBOS ────────────────────────────────────────────────────────────────────
+// Un combo entra a la OT como sus componentes (líneas normales con el mismo
+// combo_group_id), todos en UNA transacción: si un repuesto no tiene stock no
+// se agrega nada. Ver controllers/inventory/combos.controller.js.
+
+function workOrderItemTypeForProduct(product) {
+  if (product.product_type === 'service') return product.is_labor ? 'mano_obra' : 'servicio';
+  return 'repuesto';
+}
+
+async function recalcOrderTotals(order, transaction) {
+  const allItems = await WorkOrderItem.findAll({ where: { work_order_id: order.id }, transaction });
+  const { subtotal, tax_amount } = calcTotals(allItems);
+  const disc = resolveDiscountAmount(order, subtotal + tax_amount);
+  await order.update({ subtotal, tax_amount, discount_amount: disc, total_amount: subtotal + tax_amount - disc }, { transaction });
+}
+
+// POST /:id/combos
+// body: { combo_id, quantity?, show_breakdown?, requires_approval?, technician_id?,
+//         items?: [{ product_id, quantity, unit_price }] }
+// `items` son los componentes ya editados en el selector (cantidad total y
+// precio por línea); si no vienen se usan los del combo × quantity.
+const addCombo = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
+    if (!order) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    }
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se pueden agregar ítems a una OT bloqueada' });
+    }
+
+    const { combo_id, quantity, show_breakdown, requires_approval, technician_id, items } = req.body;
+    const combo = combo_id && await Combo.findOne({
+      where: { id: combo_id, tenant_id },
+      include: [{ model: ComboItem, as: 'items' }],
+      order: [[{ model: ComboItem, as: 'items' }, 'sort_order', 'ASC']],
+      transaction,
+    });
+    if (!combo) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Combo no encontrado' });
+    }
+
+    const comboQty = parseFloat(quantity) > 0 ? parseFloat(quantity) : 1;
+    const lines = Array.isArray(items) && items.length > 0
+      ? items
+      : combo.items.map(ci => ({
+        product_id: ci.product_id,
+        quantity: parseFloat(ci.quantity) * comboQty,
+        unit_price: ci.unit_price,
+      }));
+    if (lines.length === 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El combo no tiene componentes' });
+    }
+
+    const requiresApproval = requires_approval === true || requires_approval === 'true' || requires_approval === 1;
+    const comboFields = pickComboFields({
+      combo_id: combo.id,
+      combo_group_id: require('crypto').randomUUID(),
+      combo_name: combo.name,
+      combo_quantity: comboQty,
+      combo_show_breakdown: show_breakdown === undefined ? combo.show_breakdown : !!show_breakdown,
+    });
+
+    const products = await Product.findAll({
+      where: { id: { [Op.in]: lines.map(l => l.product_id).filter(Boolean) }, tenant_id },
+      attributes: ['id', 'product_type', 'is_labor'],
+      transaction,
+    });
+    const productById = Object.fromEntries(products.map(p => [p.id, p]));
+
+    const created = [];
+    let warnings = [];
+    for (const line of lines) {
+      const product = productById[line.product_id];
+      const qty = parseFloat(line.quantity);
+      if (!product || !(qty > 0)) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'Componente del combo inválido' });
+      }
+      try {
+        const { item, stockWarnings } = await createCatalogItem({
+          order, tenant_id, user_id: req.user.id, product_id: product.id,
+          item_type: workOrderItemTypeForProduct(product), qty,
+          unit_price: line.unit_price, tax_percentage: undefined,
+          technician_id, requiresApproval, comboFields, transaction,
+        });
+        created.push(item);
+        warnings = warnings.concat(stockWarnings);
+      } catch (itemError) {
+        await transaction.rollback();
+        if (itemError instanceof WorkOrderItemError) {
+          return res.status(itemError.status).json({
+            success: false,
+            message: itemError.message,
+            ...(itemError.alternatives ? { alternatives: itemError.alternatives } : {}),
+          });
+        }
+        throw itemError;
+      }
+    }
+
+    await recalcOrderTotals(order, transaction);
+    await transaction.commit();
+
+    res.status(201).json({
+      success: true,
+      message: `Combo "${combo.name}" agregado`,
+      data: created,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error agregando combo a OT:', error);
+    res.status(500).json({ success: false, message: 'Error al agregar el combo' });
+  }
+};
+
+// PATCH /:id/combos/:groupId  body: { show_breakdown }
+// Solo cambia cómo se presenta el combo en esta OT.
+const updateCombo = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id } });
+    if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
+    if (req.body.show_breakdown === undefined)
+      return res.status(400).json({ success: false, message: 'Nada para actualizar' });
+
+    const [count] = await WorkOrderItem.update(
+      { combo_show_breakdown: !!req.body.show_breakdown },
+      { where: { work_order_id: order.id, combo_group_id: req.params.groupId } }
+    );
+    if (count === 0) return res.status(404).json({ success: false, message: 'Combo no encontrado en la orden' });
+    res.json({ success: true, message: 'Combo actualizado' });
+  } catch (error) {
+    logger.error('Error actualizando combo de OT:', error);
+    res.status(500).json({ success: false, message: 'Error al actualizar el combo' });
+  }
+};
+
+// DELETE /:id/combos/:groupId -- quita todos los componentes del combo
+// (revirtiendo inventario igual que removeItem).
+const removeCombo = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const tenant_id = req.user.tenant_id;
+    const order = await WorkOrder.findOne({ where: { id: req.params.id, tenant_id }, transaction });
+    if (!order) { await transaction.rollback(); return res.status(404).json({ success: false, message: 'Orden no encontrada' }); }
+    if (['listo', 'entregado', 'cancelado'].includes(order.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se pueden eliminar ítems de una OT bloqueada' });
+    }
+
+    const items = await WorkOrderItem.findAll({
+      where: { work_order_id: order.id, combo_group_id: req.params.groupId },
+      transaction,
+    });
+    if (items.length === 0) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Combo no encontrado en la orden' });
+    }
+    for (const item of items) await destroyItemRestoringStock(item, transaction);
+
+    await recalcOrderTotals(order, transaction);
+    await transaction.commit();
+    res.json({ success: true, message: 'Combo eliminado' });
+  } catch (error) {
+    await transaction.rollback();
+    logger.error('Error eliminando combo de OT:', error);
+    res.status(500).json({ success: false, message: 'Error al eliminar el combo' });
   }
 };
 
@@ -1804,7 +2021,8 @@ const sendQuoteRequest = async (req, res) => {
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
-    const itemsSummary = pendingItems.map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
+    const itemsSummary = presentComboLines(pendingItems, i => ({ product_name: i.product_name, quantity: i.quantity, total: i.total }))
+      .map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
     const message = `Hola! Tenemos una cotización pendiente de tu aprobación para la orden ${order.order_number}:\n${itemsSummary}\n\nRevísala y apruébala aquí:\n${shareUrl}`;
     const whatsappText = encodeURIComponent(message);
     const whatsappUrl = cleanPhone
@@ -1897,7 +2115,8 @@ const resendQuoteRequest = async (req, res) => {
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
-    const itemsSummary = items.map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
+    const itemsSummary = presentComboLines(items, i => ({ product_name: i.product_name, quantity: i.quantity, total: i.total }))
+      .map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
     const message = `Hola! Recordatorio: sigue pendiente tu aprobación para la orden ${order.order_number}:\n${itemsSummary}\n\nRevísala y apruébala aquí:\n${shareUrl}`;
     const whatsappText = encodeURIComponent(message);
     const whatsappUrl = cleanPhone
@@ -2049,6 +2268,15 @@ async function respondQuoteRequestBody({ orderId, quoteRequestId, approvals, app
       return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
     }
 
+    // Un combo resumido se aprueba/rechaza como una sola línea (id
+    // `combo:<groupId>`, ver presentComboLines): aplica a todos sus componentes.
+    const roundItems = await WorkOrderItem.findAll({
+      where: { work_order_id: order.id, quote_request_id: quoteRequestId },
+      attributes: ['id', 'combo_group_id'],
+      transaction,
+    });
+    approvals = expandComboApprovals(approvals, roundItems);
+
     for (const a of approvals) {
       await WorkOrderItem.update(
         {
@@ -2179,22 +2407,33 @@ const generateSale = async (req, res) => {
 
     // Número del documento
     const year   = new Date().getFullYear();
+    // Sede del documento: la del request (branchMiddleware); si no hay --
+    // super_admin -- la de la bodega de la OT o la principal del tenant.
+    // Misma regla que usa dianService al numerar, para que la resolución
+    // con la que se valida acá sea la misma con la que se envía.
+    const saleBranchId = req.branch_id
+      || await dianService.resolveDocumentBranchId({ warehouse_id: order.warehouse_id }, tenant_id, transaction);
     let sale_number;
     if (document_type === 'factura') {
       // Usar resolución DIAN activa del tenant
+      // Mismo criterio que generateSaleNumber en sales.controller.js: el
+      // sale_number es PROVISIONAL (consecutivo actual, sin consumirlo); el
+      // número definitivo lo toma dianService.sendInvoiceToDian con lock al
+      // enviar (getNextConsecutive). Antes este flujo hacía current_number + 1,
+      // lo guardaba sin lock y con otro formato (padStart), y luego el envío
+      // a la DIAN volvía a incrementar -> cada factura de OT se saltaba un
+      // número y el sale_number no coincidía con el dian_invoice_number.
       const { DianResolution } = require('../../models');
       const resolution = await DianResolution.findOne({
-        where: { tenant_id, branch_id: req.branch_id || null, is_active: true, document_type: 'invoice' },
-        order: [['created_at', 'DESC']],
+        where: { tenant_id, branch_id: saleBranchId || null, is_active: true, document_type: 'invoice' },
+        order: [['is_test', 'ASC'], ['created_at', 'DESC']], // producción primero
         transaction,
       });
       if (!resolution) {
         await transaction.rollback();
         return res.status(400).json({ success: false, message: 'No hay resolución DIAN activa para generar facturas. Configure la resolución en ajustes DIAN.' });
       }
-      const nextNum = parseInt(resolution.current_number || resolution.from_number) + 1;
-      sale_number = `${resolution.prefix || ''}${String(nextNum).padStart(5, '0')}`;
-      await resolution.update({ current_number: nextNum }, { transaction });
+      sale_number = `${resolution.prefix || ''}${resolution.current_number}`;
     } else {
       const prefix = 'REM';
       const lastSale = await Sale.findOne({
@@ -2220,7 +2459,7 @@ const generateSale = async (req, res) => {
 
     const sale = await Sale.create({
       tenant_id,
-      branch_id: req.branch_id || null,
+      branch_id: saleBranchId || null,
       sale_number,
       document_type,
       customer_id:      order.customer_id,
@@ -2314,6 +2553,7 @@ const generateSale = async (req, res) => {
         subtotal:         item.subtotal,
         total:            item.total,
         technician_id:    item.technician_id || null,
+        ...pickComboFields(item),
       }, { transaction });
 
       // Crear movimiento de salida de inventario -- solo si este ítem todavía
@@ -2376,9 +2616,24 @@ const generateSale = async (req, res) => {
       }
     });
 
+    // Factura electrónica: envío a la DIAN en segundo plano, igual que
+    // sales.controller.js#confirm (antes una factura generada desde la OT
+    // nunca se enviaba sola -- quedaba 'pending' hasta el envío manual).
+    if (document_type === 'factura') {
+      setImmediate(async () => {
+        try {
+          const finalSale = await Sale.findByPk(sale.id, { include: [{ model: SaleItem, as: 'items' }] });
+          const tenant = await Tenant.findByPk(tenant_id);
+          await dianService.sendInvoiceToDian(finalSale, tenant);
+        } catch (err) {
+          logger.error(`[DIAN] Error async al enviar factura ${sale.sale_number} (desde cierre de OT ${order.id}):`, err.message);
+        }
+      });
+    }
+
     res.status(201).json({
       success: true,
-      message: 'Remisión generada exitosamente',
+      message: document_type === 'factura' ? 'Factura generada; se está enviando a la DIAN' : 'Remisión generada exitosamente',
       data: { sale_id: sale.id, sale_number: sale.sale_number, total_amount: sale.total_amount },
     });
   } catch (error) {
@@ -3065,7 +3320,7 @@ async function getPublicOrderBody(orderId, res) {
         {
           model: WorkOrderItem,
           as: 'items',
-          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'subtotal', 'tax_amount', 'total', 'approval_status'],
+          attributes: ['item_type', 'product_name', 'product_sku', 'quantity', 'unit_price', 'subtotal', 'tax_amount', 'total', 'approval_status', 'combo_group_id', 'combo_name', 'combo_quantity', 'combo_show_breakdown'],
         },
       ],
     });
@@ -3083,7 +3338,7 @@ async function getPublicOrderBody(orderId, res) {
       include: [{
         model: WorkOrderItem,
         as: 'items',
-        attributes: ['id', 'product_name', 'product_sku', 'quantity', 'unit_price', 'subtotal', 'tax_amount', 'total', 'item_type', 'approval_status', 'rejection_reason'],
+        attributes: ['id', 'product_name', 'product_sku', 'quantity', 'unit_price', 'subtotal', 'tax_amount', 'total', 'item_type', 'approval_status', 'rejection_reason', 'combo_group_id', 'combo_name', 'combo_quantity', 'combo_show_breakdown'],
       }],
     });
 
@@ -3185,9 +3440,10 @@ async function getPublicOrderBody(orderId, res) {
       diagrams,
       // Solo los ítems ya confirmados (aprobado) — los pendientes de cotizar
       // se muestran aparte en active_quote_request, no acá.
-      items: (order.items || [])
-        .filter(i => (i.approval_status || 'aprobado') === 'aprobado')
-        .map(i => ({
+      // Combos "solo nombre y total" resumidos en una línea (presentComboLines).
+      items: presentComboLines(
+        (order.items || []).filter(i => (i.approval_status || 'aprobado') === 'aprobado'),
+        i => ({
           item_type: i.item_type,
           product_name: i.product_name,
           product_sku: i.product_sku,
@@ -3196,33 +3452,37 @@ async function getPublicOrderBody(orderId, res) {
           subtotal: parseFloat(i.subtotal || 0),
           tax_amount: parseFloat(i.tax_amount || 0),
           total: parseFloat(i.total),
-        })),
+        })
+      ).map(({ id, approval_status, image_url, ...rest }) => rest),
       active_quote_request: activeQuoteRequest ? {
         id: activeQuoteRequest.id,
         sent_at: activeQuoteRequest.sent_at,
         // Solo lo 'pendiente' -- si la ronda se reabrió sumando ítems, lo ya
         // decidido en un envío anterior no vuelve a quedar sujeto a que el
         // cliente lo (des)marque otra vez (ver respondQuoteRequestBody).
-        items: (activeQuoteRequest.items || [])
-          .filter(i => (i.approval_status || 'aprobado') === 'pendiente')
-          .map(i => ({
-          id: i.id,
-          item_type: i.item_type,
-          product_name: i.product_name,
-          product_sku: i.product_sku,
-          quantity: parseFloat(i.quantity),
-          unit_price: parseFloat(i.unit_price),
-          subtotal: parseFloat(i.subtotal || 0),
-          tax_amount: parseFloat(i.tax_amount || 0),
-          total: parseFloat(i.total),
-        })),
+        // Un combo resumido llega como una sola línea con id `combo:<groupId>`
+        // (respondQuoteRequestBody la expande a sus componentes).
+        items: presentComboLines(
+          (activeQuoteRequest.items || []).filter(i => (i.approval_status || 'aprobado') === 'pendiente'),
+          i => ({
+            id: i.id,
+            item_type: i.item_type,
+            product_name: i.product_name,
+            product_sku: i.product_sku,
+            quantity: parseFloat(i.quantity),
+            unit_price: parseFloat(i.unit_price),
+            subtotal: parseFloat(i.subtotal || 0),
+            tax_amount: parseFloat(i.tax_amount || 0),
+            total: parseFloat(i.total),
+          })
+        ).map(({ approval_status, image_url, ...rest }) => rest),
       } : null,
       quote_history: respondedQuoteRequests.map(q => ({
         id: q.id,
         sent_at: q.sent_at,
         responded_at: q.responded_at,
         approved_by_name: q.approved_by_name,
-        items: (q.items || []).map(i => ({
+        items: presentComboLines(q.items || [], i => ({
           product_name: i.product_name,
           quantity: parseFloat(i.quantity),
           subtotal: parseFloat(i.subtotal || 0),
@@ -3230,7 +3490,7 @@ async function getPublicOrderBody(orderId, res) {
           total: parseFloat(i.total),
           approval_status: i.approval_status,
           rejection_reason: i.rejection_reason,
-        })),
+        })).map(({ id, item_type, product_sku, image_url, unit_price, ...rest }) => rest),
       })),
       workshop: tenant ? {
         name: tenant.company_name,
@@ -3322,4 +3582,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, addCombo, updateCombo, removeCombo, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };

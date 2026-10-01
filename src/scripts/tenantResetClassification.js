@@ -87,8 +87,9 @@ const ALWAYS_WIPE = [
 const ASK_GROUPS = [
   {
     key: 'catalogo_productos',
-    label: 'Catálogo de productos (products, product_prices, product_suppliers, product_vehicle_applications)',
-    tables: ['products', 'product_prices', 'product_suppliers', 'product_vehicle_applications'],
+    label: 'Catálogo de productos (products, product_prices, product_suppliers, product_vehicle_applications, combos)',
+    // combos/combo_items van con los productos: combo_items tiene FK a products.
+    tables: ['products', 'product_prices', 'product_suppliers', 'product_vehicle_applications', 'combos', 'combo_items'],
     // Si se conserva, el stock se resetea a 0 igual (el stock físico real
     // hay que volver a cargarlo, no tiene sentido arrastrar el de pruebas).
     resetStockIfKept: true,

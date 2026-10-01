@@ -1,6 +1,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { remisionSqlCondition } = require('../../utils/remisionVisibility');
 const { getCurrentSchema } = require('../../config/tenantContext');
 // Sin calificar schema, las 7 queries de este archivo siempre leían "public"
 // -- para un tenant ya cortado a su propio schema, todos estos reportes de
@@ -279,7 +280,9 @@ exports.getProfitReport = async (req, res) => {
 
     // sales.branch_id ya existe (Fase 1/2), a diferencia de inventory_movements
     // no requiere lookup a warehouses.
-    const branchFilter = branch_id ? `AND s.branch_id = :branchId` : '';
+    // + remisiones ocultas a no-admin (utils/remisionVisibility.js): viaja con
+    // el filtro de sede, que ya está en todas las consultas sobre `sales s`.
+    const branchFilter = `${branch_id ? 'AND s.branch_id = :branchId' : ''} AND ${remisionSqlCondition(req, 's')}`;
 
     // work_orders no tiene branch_id propio (1 sede = 1 bodega) — resolver vía
     // warehouse_id, mismo criterio que getMovementsByMonth.
@@ -553,7 +556,8 @@ exports.getRotationReport = async (req, res) => {
 
     // sales.branch_id ya existe; el subquery de ventas de la sección de
     // rotación filtra sobre esa tabla directamente.
-    const branchFilter = branch_id ? `AND branch_id = :branchId` : '';
+    // + remisiones ocultas a no-admin (utils/remisionVisibility.js)
+    const branchFilter = `${branch_id ? 'AND branch_id = :branchId' : ''} AND ${remisionSqlCondition(req, '')}`;
 
     const query = `
       SELECT 
@@ -685,7 +689,9 @@ exports.getProfitabilityReport = async (req, res) => {
       ? `e.expense_date BETWEEN :fromDate AND :toDate`
       : `e.expense_date >= NOW() - INTERVAL '${monthsToUse} months'`;
 
-    const branchFilter = branch_id ? `AND s.branch_id = :branchId` : '';
+    // + remisiones ocultas a no-admin (utils/remisionVisibility.js): viaja con
+    // el filtro de sede, que ya está en todas las consultas sobre `sales s`.
+    const branchFilter = `${branch_id ? 'AND s.branch_id = :branchId' : ''} AND ${remisionSqlCondition(req, 's')}`;
     const expenseBranchFilter = branch_id ? `AND (e.branch_id = :branchId OR e.branch_id IS NULL)` : '';
 
     let branchWarehouseId = null;

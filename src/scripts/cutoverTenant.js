@@ -46,6 +46,19 @@ async function cutoverTenant(slug) {
     console.log(`\n=== 2/3 Copiando y verificando datos ===`);
     await migrateTenantData(slug, tenant.id);
 
+    // La migración que siembra diagram_templates en el schema nuevo no pone
+    // image_path (ver 2026072502-seed-diagram-templates-catalog.js); eso lo
+    // completa seedDiagramTemplates(), que solo corre al arrancar el server.
+    // Sin este paso, un tenant creado después del último reinicio veía los
+    // diagramas en blanco hasta el siguiente deploy. No es fatal: si falla,
+    // el próximo arranque lo vuelve a intentar.
+    try {
+      const { seedDiagramTemplatesInSchema } = require('../services/seedDiagramTemplates');
+      await seedDiagramTemplatesInSchema(schemaName);
+    } catch (err) {
+      console.warn(`⚠️  No se pudo sincronizar diagram_templates en "${schemaName}": ${err.message}`);
+    }
+
     console.log(`\n=== 3/3 Activando corte (schema_name) ===`);
     await sequelize.query(
       `UPDATE public.tenants SET schema_name = :schemaName WHERE id = :tenantId`,

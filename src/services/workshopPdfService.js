@@ -4,6 +4,7 @@ const https = require('https');
 const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
+const { groupComboLines } = require('../utils/comboLines');
 
 /* ── helpers ─────────────────────────────────────────────── */
 const COP = n =>
@@ -630,7 +631,27 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
     //    aparte, en la caja de "Proceso Calidad y Servicio al Cliente") ────
     if (y + 60 > 680) { doc.addPage(); y = 40; }
 
-    const allItems   = order.items || [];
+    // Combos "solo nombre y total" = una fila con el total del grupo (en la
+    // tabla de repuestos); desglosados = sus componentes con el nombre del
+    // combo como prefijo. Ver utils/comboLines.js.
+    const allItems = [];
+    for (const entry of groupComboLines(order.items || [])) {
+      if (entry.type === 'line') allItems.push(entry.item);
+      else if (!entry.showBreakdown) {
+        allItems.push({
+          item_type: 'combo',
+          quantity: entry.quantity,
+          product_name: entry.name,
+          unit_price: entry.subtotal / (entry.quantity || 1),
+          total: entry.total,
+        });
+      } else {
+        entry.items.forEach(item => allItems.push({
+          ...(item.get ? item.get({ plain: true }) : item),
+          product_name: `${entry.name} · ${item.product_name || item.product?.name || ''}`,
+        }));
+      }
+    }
     // item_type real en WorkOrderItem: 'repuesto' | 'servicio' | 'mano_obra'
     // 'servicio' y 'mano_obra' se totalizan juntos como mano de obra/servicios
     // (mismo criterio que ya usa workOrders.controller.js para sus reportes)

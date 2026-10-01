@@ -27,6 +27,7 @@ const dianKit = require('../../services/dian/dianKitAdapter');
 const logger = require('../../config/logger');
 const { Op } = require('sequelize');
 const { DIVIPOLA_DEPARTMENTS, DIVIPOLA_CITIES } = require('../../data/divipola-colombia');
+const { pickComboFields } = require('../../utils/comboLines');
 
 /* ─── Helpers ─── */
 const ok = (res, data, status = 200) => res.status(status).json({ success: true, ...data });
@@ -1433,7 +1434,19 @@ const createAndSendCreditNote = async (req, res) => {
           tax_amount: itemTax,
           subtotal: itemSubtot,
           total: itemSubtot + itemTax,
+          ...pickComboFields(saleItem),
+          _source_item_id: saleItem.id,
+          _full_quantity: qtyReq === parseFloat(saleItem.quantity),
         });
+      }
+      // Un combo "solo nombre y total" se acredita resumido solo si entra
+      // completo (todas sus líneas, cantidades totales); si no, la nota
+      // muestra los componentes acreditados.
+      for (const noteItem of noteItems) {
+        if (!noteItem.combo_group_id || noteItem.combo_show_breakdown) continue;
+        const groupLines = original.items.filter(i => i.combo_group_id === noteItem.combo_group_id);
+        const complete = groupLines.every(gl => noteItems.some(n => n._source_item_id === gl.id && n._full_quantity));
+        if (!complete) noteItem.combo_show_breakdown = true;
       }
     } else if (amount && parseFloat(amount) > 0) {
       // ── Modo: monto fijo — distribuir proporcionalmente ──
@@ -1460,6 +1473,7 @@ const createAndSendCreditNote = async (req, res) => {
           tax_amount: itemTax,
           subtotal: itemSubtot,
           total: itemSubtot + itemTax,
+          ...pickComboFields(si),
         });
       }
     } else {
@@ -1483,6 +1497,7 @@ const createAndSendCreditNote = async (req, res) => {
           tax_amount: itemTax,
           subtotal: itemSubtot,
           total: itemSubtot + itemTax,
+          ...pickComboFields(si),
         });
       }
     }
@@ -1543,6 +1558,7 @@ const createAndSendCreditNote = async (req, res) => {
         subtotal: item.subtotal,
         total: item.total,
         unit_cost: 0,
+        ...pickComboFields(item),
       }, { transaction });
     }
 

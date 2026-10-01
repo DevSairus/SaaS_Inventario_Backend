@@ -4,6 +4,7 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const QRCode = require('qrcode');
+const { groupComboLines, collapseComboLinesForDian } = require('../utils/comboLines');
 
 const DOCUMENT_TYPES = {
   factura:      { title: 'FACTURA',       numberLabel: 'FACTURA No.'        },
@@ -330,7 +331,13 @@ const generateSalePDF = async (res, sale, tenant) => {
 
     y += 24;
 
-    const items = sale.SaleItems || sale.items || [];
+    // En factura/remisión no se imprimen las líneas que el cliente rechazó
+    // en la cotización (no se cobran ni van al XML DIAN); en la cotización sí
+    // se siguen viendo.
+    const allSaleItems = sale.SaleItems || sale.items || [];
+    const items = ['factura', 'remision'].includes(sale.document_type)
+      ? allSaleItems.filter(i => i.approval_status !== 'rechazado')
+      : allSaleItems;
     const itemsTop = y;
 
     // Miniaturas de producto -- solo en cotizaciones, como referencia visual
@@ -359,8 +366,35 @@ const generateSalePDF = async (res, sale, tenant) => {
     }
     const ROW_H = isQuoteDoc ? 56 : 20;
 
-    items.forEach((item, index) => {
+    // Combos: desglosados = fila de encabezado + componentes con sangría;
+    // "solo nombre y total" = una fila por tarifa de impuesto, igual que el
+    // XML DIAN (ver utils/comboLines.js).
+    const rows = [];
+    for (const entry of groupComboLines(items)) {
+      if (entry.type === 'line') rows.push({ item: entry.item });
+      else if (!entry.showBreakdown) collapseComboLinesForDian(entry.items).forEach(item => rows.push({ item }));
+      else {
+        rows.push({ comboHeader: entry });
+        entry.items.forEach(item => rows.push({ item, component: true }));
+      }
+    }
+
+    rows.forEach(({ item, comboHeader, component }, index) => {
       if (y > 620) { doc.addPage(); y = 40; }
+
+      if (comboHeader) {
+        const HEADER_H = 20;
+        doc.rect(MARGIN, y, INNER_W, HEADER_H).fill(lightBg);
+        const hy = y + (HEADER_H - 9) / 2;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor(black)
+          .text(`COMBO: ${comboHeader.name}`, cols.desc + 6, hy, { width: cols.qty - cols.desc - 12 })
+          .text(String(comboHeader.quantity),  cols.qty,   hy)
+          .text(formatCurrency(comboHeader.total), cols.total, hy);
+        doc.rect(MARGIN, y, INNER_W, HEADER_H).strokeColor(border).lineWidth(0.4).stroke();
+        y += HEADER_H;
+        return;
+      }
+
       if (index % 2 === 0) doc.rect(MARGIN, y, INNER_W, ROW_H).fill(lightBg);
 
       // Precio unitario: en remisión mostrar precio con IVA incluido (unit_price + tax por unidad)
@@ -378,12 +412,12 @@ const generateSalePDF = async (res, sale, tenant) => {
           // (solo lee JPEG/PNG) -- se ignora, la fila queda solo con texto.
         }
       }
-      const descX = thumb ? cols.desc + 6 + THUMB + 8 : cols.desc + 6;
+      const descX = (thumb ? cols.desc + 6 + THUMB + 8 : cols.desc + 6) + (component ? 12 : 0);
       const descW = (cols.qty - 6) - descX;
       const textY = y + (ROW_H - 9) / 2;
 
       doc.font('Helvetica').fontSize(9).fillColor(black)
-        .text(item.Product?.name || item.product_name, descX, textY, { width: descW })
+        .text(`${component ? '- ' : ''}${item.Product?.name || item.product_name}`, descX, textY, { width: descW })
         .text(String(item.quantity),              cols.qty,   textY)
         .text(formatCurrency(unitPriceDisplay),   cols.price, textY)
         .text(formatCurrency(item.total),         cols.total, textY);

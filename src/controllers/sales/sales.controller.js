@@ -15,6 +15,8 @@ const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/ca
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 const { resolveUnitCost } = require('../../utils/costResolver');
+const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
+const { applyRemisionFilter } = require('../../utils/remisionVisibility');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
 // que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
@@ -66,6 +68,10 @@ const getAll = async (req, res) => {
     if (quote_status) where.quote_status = quote_status;
     if (customer_id) where.customer_id = customer_id;
     if (dian_status) where.dian_status = dian_status;
+    // Remisiones ocultas a no-admin si el tenant lo configuró
+    // (utils/remisionVisibility.js) -- va en Op.and para no chocar con el
+    // Op.or de quote_view / search.
+    applyRemisionFilter(req, where);
 
     if (customer_name) {
       where.customer_name = { [Op.iLike]: `%${customer_name}%` };
@@ -320,6 +326,7 @@ const create = async (req, res) => {
           tax_percentage: ftaxpct, tax_amount: ftax,
           subtotal: fs, total: ftotal, unit_cost: 0,
           technician_id: item.technician_id || null,
+          ...pickComboFields(item),
         });
         continue;
       }
@@ -354,6 +361,7 @@ const create = async (req, res) => {
         total: taxes.total_line,
         unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
         technician_id: item.technician_id || null,
+        ...pickComboFields(item),
       });
     }
 
@@ -499,6 +507,7 @@ const create = async (req, res) => {
         unit_cost: item.unit_cost,
         notes: null,
         technician_id: item.technician_id || null,
+        ...pickComboFields(item),
       })),
       { transaction }
     );
@@ -733,6 +742,7 @@ const update = async (req, res) => {
             discount_percentage: item.discount_percentage || 0, discount_amount: fd,
             tax_percentage: ftaxpct, tax_amount: ftax, subtotal: fs, total: ftotal, unit_cost: 0,
             technician_id: item.technician_id || null,
+            ...pickComboFields(item),
           });
           continue;
         }
@@ -758,6 +768,7 @@ const update = async (req, res) => {
           subtotal: taxes.base, total: taxes.total_line,
           unit_cost: product.product_type === 'service' ? 0 : (product.average_cost || 0),
           technician_id: item.technician_id || null,
+          ...pickComboFields(item),
         });
       }
 
@@ -1517,6 +1528,7 @@ const getStats = async (req, res) => {
     if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
     else if (from_date) where.sale_date = { [Op.gte]: from_date };
     else if (to_date) where.sale_date = { [Op.lte]: to_date };
+    applyRemisionFilter(req, where); // mismas ventas que lista getAll
 
     const stats = await Sale.findAll({
       where,
@@ -1898,6 +1910,23 @@ const getPublicSale = async (req, res) => {
   }
 };
 
+// Ítems que ve el cliente en el link público. Un combo "solo nombre y total"
+// se muestra (y se aprueba/rechaza) como una sola línea -- ver
+// presentComboLines / expandComboApprovals en utils/comboLines.js.
+function publicQuoteItems(items) {
+  return presentComboLines(items, i => ({
+    id: i.id,
+    product_name: i.product?.name || i.product_name || i.description,
+    image_url: i.product?.image_url || null,
+    quantity: i.quantity,
+    unit_price: i.unit_price,
+    subtotal: i.subtotal,
+    tax_amount: i.tax_amount,
+    total: i.total,
+    approval_status: i.approval_status,
+  }));
+}
+
 async function getPublicSaleBody(saleId, res) {
   const sale = await Sale.findOne({
     where: { id: saleId },
@@ -1924,17 +1953,7 @@ async function getPublicSaleBody(saleId, res) {
       discount_amount: sale.discount_amount,
       total_amount: sale.total_amount,
       notes: sale.notes,
-      items: (sale.items || []).map(i => ({
-        id: i.id,
-        product_name: i.product?.name || i.description,
-        image_url: i.product?.image_url || null,
-        quantity: i.quantity,
-        unit_price: i.unit_price,
-        subtotal: i.subtotal,
-        tax_amount: i.tax_amount,
-        total: i.total,
-        approval_status: i.approval_status,
-      })),
+      items: publicQuoteItems(sale.items || []),
       quote_approved_by_name: sale.quote_approved_by_name,
       quote_responded_at: sale.quote_responded_at,
       tenant: { company_name: tenant.company_name },
@@ -1995,8 +2014,10 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
       return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
     }
 
+    // Un combo aprobado/rechazado como una sola línea aplica a todos sus componentes.
+    const expandedApprovals = expandComboApprovals(approvals, sale.items);
     const itemIds = new Set(sale.items.map(i => i.id));
-    const validApprovals = approvals.filter(a => itemIds.has(a.item_id));
+    const validApprovals = expandedApprovals.filter(a => itemIds.has(a.item_id));
     if (validApprovals.length === 0) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'No se recibió ninguna decisión válida' });

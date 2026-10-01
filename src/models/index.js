@@ -41,6 +41,8 @@ const InventoryAdjustment = require('./inventory/InventoryAdjustment');
 const InventoryAdjustmentItem = require('./inventory/InventoryAdjustmentItem');
 const PhysicalCount = require('./inventory/PhysicalCount');
 const PhysicalCountItem = require('./inventory/PhysicalCountItem');
+const Combo = require('./inventory/Combo');
+const ComboItem = require('./inventory/ComboItem');
 const StockAlert = require('./StockAlert');
 const PayableAlert = require('./PayableAlert');
 
@@ -89,6 +91,7 @@ const ProductCommissionSettlement = require('./workshop/ProductCommissionSettlem
 const ProductCommissionSettlementItem = require('./workshop/ProductCommissionSettlementItem');
 // ✅ NUEVO - Diagramas interactivos de intervención (fase 3)
 const DiagramTemplate = require('./workshop/DiagramTemplate');
+const DiagramTemplateSetting = require('./workshop/DiagramTemplateSetting');
 const WorkOrderDiagnosisMark = require('./workshop/WorkOrderDiagnosisMark');
 const SaleDiagnosisMark = require('./sales/SaleDiagnosisMark');
 // ✅ NUEVO - Comisiones de técnicos por categoría de trabajo (ver
@@ -628,6 +631,10 @@ Product.hasMany(WorkOrderItem, { foreignKey: 'product_id', as: 'work_order_items
 // DiagramTemplate ↔ Tenant (NULL = biblioteca compartida global)
 DiagramTemplate.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
+// DiagramTemplateSetting ↔ DiagramTemplate (activación y categorías extra por taller)
+DiagramTemplate.hasMany(DiagramTemplateSetting, { foreignKey: 'diagram_template_id', as: 'settings' });
+DiagramTemplateSetting.belongsTo(DiagramTemplate, { foreignKey: 'diagram_template_id', as: 'diagram_template' });
+
 // WorkOrderDiagnosisMark ↔ WorkOrder / DiagramTemplate / Product / User
 WorkOrderDiagnosisMark.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
 WorkOrder.hasMany(WorkOrderDiagnosisMark, { foreignKey: 'work_order_id', as: 'diagnosis_marks' });
@@ -971,6 +978,8 @@ module.exports = {
   InventoryAdjustmentItem,
   PhysicalCount,
   PhysicalCountItem,
+  Combo,
+  ComboItem,
   StockAlert,
   PayableAlert,
   Invoice,
@@ -1013,6 +1022,7 @@ module.exports = {
   ProductCommissionSettlement,
   ProductCommissionSettlementItem,
   DiagramTemplate,
+  DiagramTemplateSetting,
   WorkOrderDiagnosisMark,
   SaleDiagnosisMark,
   DianResolution,

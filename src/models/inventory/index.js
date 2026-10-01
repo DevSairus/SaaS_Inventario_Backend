@@ -14,6 +14,8 @@ const ProductEquivalenceGroupMember = require('./ProductEquivalenceGroupMember')
 const ProductVehicleApplication = require('./ProductVehicleApplication');
 const PhysicalCount = require('./PhysicalCount');
 const PhysicalCountItem = require('./PhysicalCountItem');
+const Combo = require('./Combo');
+const ComboItem = require('./ComboItem');
 
 // ========== RELACIONES ==========
 
@@ -102,6 +104,14 @@ Product.hasMany(ProductVehicleApplication, {
   as: 'vehicleApplications'
 });
 
+// Combo - ComboItem (1:N)
+Combo.hasMany(ComboItem, { foreignKey: 'combo_id', as: 'items' });
+ComboItem.belongsTo(Combo, { foreignKey: 'combo_id', as: 'combo' });
+
+// ComboItem - Product (N:1)
+ComboItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Product.hasMany(ComboItem, { foreignKey: 'product_id', as: 'combo_items' });
+
 // ========== EXPORTAR ==========
 module.exports = {
   Product,
@@ -118,5 +128,7 @@ module.exports = {
   ProductEquivalenceGroupMember,
   ProductVehicleApplication,
   PhysicalCount,
-  PhysicalCountItem
+  PhysicalCountItem,
+  Combo,
+  ComboItem
 };

@@ -2,6 +2,12 @@
 const { Sale, SaleItem, Customer, User } = require('../../models');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
+const { shouldHideRemisiones } = require('../../utils/remisionVisibility');
+
+// Cartera = facturas y remisiones con saldo. Si el tenant oculta las
+// remisiones a no-admin (utils/remisionVisibility.js), esos usuarios solo
+// ven las facturas.
+const receivableDocumentTypes = (req) => (shouldHideRemisiones(req) ? ['factura'] : ['factura', 'remision']);
 
 // Obtener resumen de cartera
 const getAccountsReceivableSummary = async (req, res) => {
@@ -11,7 +17,7 @@ const getAccountsReceivableSummary = async (req, res) => {
 
     const where = {
       tenant_id: tenantId,
-      document_type: { [Op.in]: ['factura', 'remision'] }, // Facturas Y remisiones
+      document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
       status: { [Op.in]: ['pending', 'completed'] }, // pending = confirmada, completed = entregada
       payment_status: { [Op.in]: ['pending', 'partial'] } // Solo pendientes o parciales
     };
@@ -167,7 +173,7 @@ const getCustomerAccountsReceivable = async (req, res) => {
       where: {
         tenant_id: tenantId,
         customer_id: customerId,
-        document_type: { [Op.in]: ['factura', 'remision'] }, // ✅ CAMBIO: Incluir facturas Y remisiones
+        document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
         status: { [Op.in]: ['pending', 'completed'] }, // pending = confirmada, completed = entregada
         payment_status: { [Op.in]: ['pending', 'partial'] }
       },
@@ -312,7 +318,7 @@ const getAgingReport = async (req, res) => {
     const invoices = await Sale.findAll({
       where: {
         tenant_id: tenantId,
-        document_type: { [Op.in]: ['factura', 'remision'] }, // ✅ CAMBIO: Incluir facturas Y remisiones
+        document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
         status: { [Op.in]: ['pending', 'completed'] }, // pending = confirmada, completed = entregada
         payment_status: { [Op.in]: ['pending', 'partial'] }
       },

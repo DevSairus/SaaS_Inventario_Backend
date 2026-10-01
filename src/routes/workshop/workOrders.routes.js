@@ -40,6 +40,9 @@ router.post('/from-quote/:saleId', requireModule('workshop'), checkRole('seller'
 router.post('/:id/items', ctrl.addItem);
 router.patch('/:id/items/:itemId', ctrl.updateItem);
 router.delete('/:id/items/:itemId', ctrl.removeItem);
+router.post('/:id/combos', ctrl.addCombo);
+router.patch('/:id/combos/:groupId', ctrl.updateCombo);
+router.delete('/:id/combos/:groupId', ctrl.removeCombo);
 
 // Cotización con aprobación del cliente
 router.post('/:id/quote-requests', ctrl.sendQuoteRequest);
