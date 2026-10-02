@@ -6,6 +6,7 @@ const NULLABLE_FIELDS = [
   'branch_id', 'termination_date', 'contract_end_date', 'bank_name', 'account_type', 'account_number',
   'state', 'city', 'city_code', 'address', 'notes', 'employee_code',
   'work_state', 'work_city', 'work_city_code', 'work_address',
+  'eps_supplier_id', 'pension_fund_supplier_id', 'severance_fund_supplier_id',
 ];
 
 // Campos `allowNull: false` del modelo — algunos son obligatorios sin
@@ -21,7 +22,7 @@ const NULLABLE_FIELDS = [
 const PROTECTED_NOT_NULL_FIELDS = [
   'tenant_id', 'document_type', 'document_number', 'first_name', 'first_surname', 'hire_date',
   'contract_type', 'worker_type', 'worker_subtype', 'salary_type',
-  'payment_method', 'payment_form', 'work_country', 'payroll_periodicity',
+  'payment_method', 'payment_form', 'work_country', 'payroll_periodicity', 'arl_risk_class',
 ];
 
 /**
@@ -176,6 +177,10 @@ const createEmployee = async (req, res) => {
       work_address,
       is_active = true,
       notes,
+      eps_supplier_id,
+      pension_fund_supplier_id,
+      severance_fund_supplier_id,
+      arl_risk_class = 1,
     } = req.body;
 
     if (!document_number || !first_name || !first_surname || !hire_date) {
@@ -237,6 +242,10 @@ const createEmployee = async (req, res) => {
       work_address: work_address || null,
       is_active,
       notes: notes || null,
+      eps_supplier_id: eps_supplier_id || null,
+      pension_fund_supplier_id: pension_fund_supplier_id || null,
+      severance_fund_supplier_id: severance_fund_supplier_id || null,
+      arl_risk_class: Number(arl_risk_class) || 1,
       created_by: req.user.id || req.user.userId || null,
     });
 
@@ -306,6 +315,7 @@ const updateEmployee = async (req, res) => {
     Object.keys(updateData).forEach((key) => {
       if (updateData[key] === undefined) delete updateData[key];
     });
+    if (updateData.arl_risk_class !== undefined) updateData.arl_risk_class = Number(updateData.arl_risk_class);
 
     await employee.update(updateData);
 

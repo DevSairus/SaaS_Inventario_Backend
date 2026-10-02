@@ -25,7 +25,7 @@ const logger = require('../../config/logger');
 const { formatFechaCol } = require('../dian/payrollXmlBuilder');
 const { submitPayrollAdjustmentDocument } = require('../dian/payrollDianAdapter');
 const { getNextConsecutive, extractDianConfig } = require('../dian/dianService');
-const { getNovedadesParaLiquidacion } = require('./payrollPeriodEmissionService');
+const { getNovedadesParaLiquidacion, getActiveAutoConcepts } = require('./payrollPeriodEmissionService');
 const { liquidarEmpleado } = require('./payrollService');
 
 /**
@@ -93,8 +93,12 @@ async function buildLiquidationForAdjustment({
   }
 
   const { diasNoRemunerados, novedadesDian } = await getNovedadesParaLiquidacion(tenant.id, employee.id, period.id);
+  // BUG CORREGIDO: no se pasaban los conceptos automáticos (auto_apply), así
+  // que un Reemplazar los perdía frente al documento original, que sí los
+  // incluye (ver submitPayrollPeriod).
+  const autoConcepts = await getActiveAutoConcepts(tenant.id);
   return liquidarEmpleado({
-    employee, period, novedades: novedadesDian, diasNoRemunerados, softwareSecurityCode,
+    employee, period, novedades: novedadesDian, autoConcepts, diasNoRemunerados, softwareSecurityCode,
   });
 }
 
@@ -185,6 +189,19 @@ async function sendPayrollAdjustmentToDian(adjustment, payrollDocument, tenant) 
     });
 
     logger.info(`[Nómina-Ajuste-DIAN] ${numeroDocumento} (documento ${payrollDocument.id}, tipo ${adjustment.adjustment_type}) — Status: ${dianStatus} | CUNE: ${result.cune?.substring(0, 16)}...`);
+
+    // Contabilidad: la nota aceptada pasa a ser el soporte vigente del
+    // empleado, así que el comprobante del periodo se reemplaza por uno
+    // recalculado (ver regenerarComprobantesPeriodo). No bloquea: un
+    // problema contable no debe hacer parecer que la nota no se emitió.
+    if (accepted) {
+      const { safeAutoGenerate } = require('../accounting/journalEntry.service');
+      await safeAutoGenerate(async () => {
+        const { regenerarComprobantesPeriodo } = require('./payrollAccountingService');
+        const tipo = adjustment.adjustment_type === 'delete' ? 'Eliminar' : 'Reemplazar';
+        return regenerarComprobantesPeriodo(tenant.id, period.id, adjustment.created_by, `Nota de ajuste ${numeroDocumento} (${tipo})`);
+      }, `comprobante de nómina por nota de ajuste ${adjustment.id}`);
+    }
 
     return { accepted, adjustment };
   } catch (error) {

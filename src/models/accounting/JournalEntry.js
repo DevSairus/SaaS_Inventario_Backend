@@ -16,7 +16,17 @@ const JournalEntry = sequelize.define(
       type: DataTypes.STRING(40),
       allowNull: false,
       defaultValue: 'manual',
-      validate: { isIn: [['sale', 'purchase', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'credit_note', 'debit_note', 'manual', 'adjustment', 'customer_advance', 'customer_advance_application', 'customer_advance_refund', 'fixed_asset_depreciation', 'loan_payment']] },
+      // BUG CORREGIDO: faltaban aquí varios tipos que los generadores sí usan
+      // (payroll, opening_balance, year_end_close, internal_consumption,
+      // inventory_adjustment, product_initial_stock, product_bulk_import) --
+      // la validación rechazaba el create y safeAutoGenerate se tragaba el
+      // error, así que esos asientos nunca se creaban (ej. el de nómina).
+      validate: { isIn: [[
+        'sale', 'purchase', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'credit_note', 'debit_note', 'manual', 'adjustment',
+        'customer_advance', 'customer_advance_application', 'customer_advance_refund', 'fixed_asset_depreciation', 'loan_payment',
+        'opening_balance', 'year_end_close', 'internal_consumption', 'inventory_adjustment', 'product_initial_stock', 'product_bulk_import',
+        'payroll', 'payroll_provisions', 'payroll_payment', 'payroll_cesantias_year_end', 'payroll_provision_adjustment',
+      ]] },
     },
     source_id: { type: DataTypes.UUID, allowNull: true },
     description: { type: DataTypes.STRING(500), allowNull: true },

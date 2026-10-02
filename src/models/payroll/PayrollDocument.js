@@ -75,6 +75,12 @@ const PayrollDocument = sequelize.define('PayrollDocument', {
     allowNull: true,
     comment: 'Ruta de la representación gráfica generada (Fase 3) — NULL hasta que se genere',
   },
+  // Desembolso que pagó el neto de este documento (PayrollPayment
+  // payment_type='net_pay') -- null mientras no se haya registrado el pago.
+  payment_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
   dian_status: {
     type: DataTypes.STRING(30),
     allowNull: false,

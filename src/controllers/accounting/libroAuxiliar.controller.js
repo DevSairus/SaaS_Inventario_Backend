@@ -1,7 +1,7 @@
 // backend/src/controllers/accounting/libroAuxiliar.controller.js
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
-const { Customer, Supplier } = require('../../models');
+const { Customer, Supplier, Employee } = require('../../models');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   generateLibroAuxiliarExcel,
@@ -37,8 +37,10 @@ async function fetchLibroAuxiliar(req) {
     err.statusCode = 400;
     throw err;
   }
-  if (!third_party_id || !['customer', 'supplier'].includes(third_party_type)) {
-    const err = new Error('third_party_id y third_party_type (customer|supplier) son obligatorios');
+  // 'employee': los comprobantes de nómina llevan la cédula del empleado
+  // como tercero (ver payrollAccountingService.js).
+  if (!third_party_id || !['customer', 'supplier', 'employee'].includes(third_party_type)) {
+    const err = new Error('third_party_id y third_party_type (customer|supplier|employee) son obligatorios');
     err.statusCode = 400;
     throw err;
   }
@@ -55,16 +57,21 @@ async function fetchLibroAuxiliar(req) {
     throw err;
   }
 
-  const Model = third_party_type === 'customer' ? Customer : Supplier;
+  const Model = { customer: Customer, supplier: Supplier, employee: Employee }[third_party_type];
   const thirdParty = await Model.findOne({ where: { id: third_party_id, tenant_id: req.tenant_id } });
   if (!thirdParty) {
-    const err = new Error(third_party_type === 'customer' ? 'Cliente no encontrado' : 'Proveedor no encontrado');
+    const err = new Error({ customer: 'Cliente no encontrado', supplier: 'Proveedor no encontrado', employee: 'Empleado no encontrado' }[third_party_type]);
     err.statusCode = 404;
     throw err;
   }
-  const thirdPartyName = third_party_type === 'customer'
-    ? (thirdParty.business_name || thirdParty.full_name || [thirdParty.first_name, thirdParty.last_name].filter(Boolean).join(' '))
-    : (thirdParty.business_name || thirdParty.name);
+  let thirdPartyName;
+  if (third_party_type === 'customer') {
+    thirdPartyName = thirdParty.business_name || thirdParty.full_name || [thirdParty.first_name, thirdParty.last_name].filter(Boolean).join(' ');
+  } else if (third_party_type === 'employee') {
+    thirdPartyName = thirdParty.full_name;
+  } else {
+    thirdPartyName = thirdParty.business_name || thirdParty.name;
+  }
 
   // Sin calificar schema, estas dos queries siempre leían "public" -- para
   // un tenant ya cortado a su propio schema (schema-per-tenant) el Libro
@@ -140,7 +147,7 @@ async function fetchLibroAuxiliar(req) {
       id: thirdParty.id,
       type: third_party_type,
       name: thirdPartyName,
-      tax_id: thirdParty.tax_id,
+      tax_id: third_party_type === 'employee' ? thirdParty.document_number : thirdParty.tax_id,
     },
     opening_balance: openingBalance,
     closing_balance: running,

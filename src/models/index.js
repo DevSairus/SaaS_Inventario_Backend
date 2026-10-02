@@ -190,6 +190,7 @@ const PayrollDocument = require('./payroll/PayrollDocument');
 const PayrollDocumentAdjustment = require('./payroll/PayrollDocumentAdjustment');
 const PayrollNovedad = require('./payroll/PayrollNovedad');
 const PayrollSetting = require('./payroll/PayrollSetting');
+const PayrollPayment = require('./payroll/PayrollPayment');
 
 // ✅ NUEVO - Módulo de Soporte
 const SupportFaqCategory = require('./support/SupportFaqCategory');
@@ -952,6 +953,13 @@ Employee.hasMany(PayrollNovedad, { foreignKey: 'employee_id', as: 'novedades' })
 PayrollSetting.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 PayrollSetting.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
 
+// Nómina — PayrollPayment (desembolsos) ↔ PayrollPeriod / BankAccount / PayrollDocument
+PayrollPayment.belongsTo(PayrollPeriod, { foreignKey: 'payroll_period_id', as: 'period' });
+PayrollPeriod.hasMany(PayrollPayment, { foreignKey: 'payroll_period_id', as: 'payments' });
+PayrollPayment.belongsTo(BankAccount, { foreignKey: 'bank_account_id', as: 'bankAccount' });
+PayrollPayment.hasMany(PayrollDocument, { foreignKey: 'payment_id', as: 'documents' });
+PayrollDocument.belongsTo(PayrollPayment, { foreignKey: 'payment_id', as: 'payment' });
+
 // Debe correr DESPUÉS de que todos los modelos/asociaciones ya se registraron
 // en sequelize.models -- de lo contrario los hooks no se agregan a ninguno.
 // Sin esto, tenantMiddleware marca el schema del tenant en el contexto pero
@@ -1106,4 +1114,5 @@ module.exports = {
   PayrollDocumentAdjustment,
   PayrollNovedad,
   PayrollSetting,
+  PayrollPayment,
 };

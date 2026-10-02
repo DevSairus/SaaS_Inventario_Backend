@@ -496,7 +496,7 @@ const generateLibroMayorPDF = async (res, data, tenant, filters = {}, generatedB
    ══════════════════════════════════════════════════════════════════ */
 const generateLibroAuxiliarPDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
   try {
-    const tpLabel = data.third_party?.type === 'customer' ? 'Cliente' : 'Proveedor';
+    const tpLabel = { customer: 'Cliente', supplier: 'Proveedor', employee: 'Empleado' }[data.third_party?.type] || 'Tercero';
     const ctx = await startReportDoc(res, {
       title: 'LIBRO AUXILIAR POR TERCERO',
       subtitle: `${tpLabel}: ${data.third_party?.name || ''}${data.third_party?.tax_id ? ' - ' + data.third_party.tax_id : ''}  ·  Periodo: ${fmtDate(filters.from)} — ${fmtDate(filters.to)}`,

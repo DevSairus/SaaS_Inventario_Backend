@@ -167,6 +167,32 @@ const Employee = sequelize.define('Employee', {
     type: DataTypes.STRING(50),
     allowNull: true,
   },
+  // ── Seguridad social (fondos registrados como proveedores) ──
+  // Terceros de los aportes en los comprobantes de nómina -- ver
+  // payrollAccountingService.js. ARL y Caja de Compensación son a nivel de
+  // empresa (PayrollSetting), no por empleado.
+  eps_supplier_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'EPS del empleado (Supplier)',
+  },
+  pension_fund_supplier_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Fondo de pensiones (AFP) del empleado (Supplier)',
+  },
+  severance_fund_supplier_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Fondo de cesantías del empleado (Supplier)',
+  },
+  arl_risk_class: {
+    type: DataTypes.SMALLINT,
+    allowNull: false,
+    defaultValue: 1,
+    validate: { isIn: [[1, 2, 3, 4, 5]] },
+    comment: 'Clase de riesgo ARL (I a V, Decreto 1295/1994)',
+  },
   // ── Ubicación DIAN (mismo patrón que Supplier/Customer) ──
   country: {
     type: DataTypes.STRING(100),

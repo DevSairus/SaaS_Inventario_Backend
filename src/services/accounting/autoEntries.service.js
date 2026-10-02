@@ -1214,66 +1214,28 @@ async function generateInternalConsumptionEntry(consumption, tenantId, userId, o
 }
 
 /**
- * Genera el asiento en borrador de un periodo de nómina ya emitido (todos
- * los Documentos Soporte de Pago de Nómina Electrónica aceptados por la
- * DIAN -- ver submitPayrollPeriod en payrollPeriodEmissionService.js, que
- * llama a esta función y hasta ahora fallaba porque no existía: se importaba
- * de este archivo pero nunca estuvo implementada ni exportada).
+ * Genera los comprobantes contables en borrador de un periodo de nómina ya
+ * emitido (todos los Documentos Soporte de Pago de Nómina Electrónica
+ * aceptados por la DIAN -- ver submitPayrollPeriod en
+ * payrollPeriodEmissionService.js y la liquidación definitiva en
+ * payrollTerminationService.js).
  *
- * Un asiento por periodo, consolidando todos los empleados liquidados:
- *   Debe:  gasto de personal (expense_category:nomina) por el total devengado
- *   Haber: aportes de seguridad social por pagar (retenido al empleado, se le
- *          debe remitir a EPS/AFP, no es gasto) por el total deducido
- *   Haber: salarios por pagar (neto que se le debe a cada empleado hasta que
- *          se pague) por el total neto
+ * La lógica vive en services/payroll/payrollAccountingService.js:
+ * comprobante de nómina por empleado y concepto (cédula como tercero),
+ * aportes del empleador y provisiones por fondo de destino, en el mismo
+ * asiento o en uno aparte según la configuración de nómina del tenant.
  *
- * @param {object} period - PayrollPeriod (id, branch_id, start_date, end_date, payment_date)
- * @param {Array} liquidations - [{ employee, liquidation }] -- liquidation con devengadosTotal/deduccionesTotal (ver payrollService.js#liquidarEmpleado)
+ * Mantiene el contrato anterior (devuelve un asiento o null, nunca lanza
+ * salvo `options.rethrow`) para los dos llamadores existentes.
+ *
+ * @param {object} period - PayrollPeriod
+ * @param {Array} liquidations - [{ employee, liquidation }] (ver payrollService.js#liquidarEmpleado)
  */
 async function generatePayrollEntry(period, liquidations, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
-    const t = await sequelize.transaction();
-    try {
-      const totalDevengado = (liquidations || []).reduce((s, l) => s + Number(l.liquidation?.devengadosTotal || 0), 0);
-      const totalDeducciones = (liquidations || []).reduce((s, l) => s + Number(l.liquidation?.deduccionesTotal || 0), 0);
-      const totalNeto = totalDevengado - totalDeducciones;
-
-      if (totalDevengado <= 0) return null;
-
-      const expenseAccount = await getMappedAccountId(tenantId, 'expense_category:nomina', t);
-      const lines = [
-        { account_id: expenseAccount, debit: totalDevengado, credit: 0, description: 'Gasto de personal — nómina' },
-      ];
-
-      if (totalDeducciones > 0) {
-        const ssAccount = await getMappedAccountId(tenantId, 'payroll_social_security_payable', t);
-        lines.push({ account_id: ssAccount, debit: 0, credit: totalDeducciones, description: 'Aportes de seguridad social retenidos al empleado' });
-      }
-      if (totalNeto > 0) {
-        const netPayableAccount = await getMappedAccountId(tenantId, 'payroll_net_payable', t);
-        lines.push({ account_id: netPayableAccount, debit: 0, credit: totalNeto, description: 'Salarios netos por pagar' });
-      }
-
-      const entry = await createDraftEntry(
-        tenantId,
-        {
-          branchId: period.branch_id,
-          entryDate: period.payment_date || period.end_date || new Date(),
-          sourceType: 'payroll',
-          sourceId: period.id,
-          description: `Nómina periodo ${period.start_date || ''} — ${period.end_date || ''} (${(liquidations || []).length} empleado(s))`,
-          lines,
-          createdBy: userId,
-        },
-        t
-      );
-
-      await t.commit();
-      return entry;
-    } catch (error) {
-      await t.rollback();
-      throw error;
-    }
+    const { generarComprobantesNomina } = require('../payroll/payrollAccountingService');
+    const { entries } = await generarComprobantesNomina(period, liquidations, tenantId, userId);
+    return entries[0] || null;
   }, `nómina periodo ${period.id}`, options);
 }
 

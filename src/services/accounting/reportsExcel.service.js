@@ -486,7 +486,7 @@ const generateLibroAuxiliarExcel = async (data, tenant, filters = {}, generatedB
     { key: 'balance', width: 18 },
   ];
 
-  const tpLabel = data.third_party?.type === 'customer' ? 'Cliente' : 'Proveedor';
+  const tpLabel = { customer: 'Cliente', supplier: 'Proveedor', employee: 'Empleado' }[data.third_party?.type] || 'Tercero';
   addHeader(sheet, {
     title: 'LIBRO AUXILIAR POR TERCERO',
     tenant,
