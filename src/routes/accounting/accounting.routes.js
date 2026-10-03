@@ -14,6 +14,8 @@ const fiscalPeriodsCtrl = require('../../controllers/accounting/fiscalPeriods.co
 const accountingHealthCtrl = require('../../controllers/accounting/accountingHealth.controller');
 const agingReportCtrl = require('../../controllers/accounting/agingReport.controller');
 const withholdingReportCtrl = require('../../controllers/accounting/withholdingReport.controller');
+const withholdingPracticedCtrl = require('../../controllers/accounting/withholdingPracticed.controller');
+const taxClassificationCtrl = require('../../controllers/accounting/taxClassification.controller');
 const cashFlowIndirectCtrl = require('../../controllers/accounting/cashFlowIndirect.controller');
 const openingBalancesCtrl = require('../../controllers/accounting/openingBalances.controller');
 const fixedAssetsCtrl = require('../../controllers/accounting/fixedAssets.controller');
@@ -102,6 +104,16 @@ router.get('/reports/trial-balance-comparativo/export', reportsCtrl.trialBalance
 // Certificado / reporte de retenciones (ReteFuente, ReteICA) practicadas por clientes.
 router.get('/reports/retenciones', withholdingReportCtrl.withholding);
 router.get('/reports/retenciones/export', withholdingReportCtrl.withholdingExport);
+// Retenciones practicadas por el tenant a proveedores, por concepto (soporte F350 / certificados).
+// Clasificación tributaria de compras (concepto de retención por categoría /
+// excepciones por producto) — pantalla del contador.
+router.get('/tax-classification', taxClassificationCtrl.overview);
+router.get('/tax-classification/lines', taxClassificationCtrl.lines);
+router.put('/tax-classification/categories', taxClassificationCtrl.saveCategories);
+router.get('/tax-classification/products', taxClassificationCtrl.products);
+router.put('/tax-classification/products', taxClassificationCtrl.saveProducts);
+router.get('/reports/retenciones-practicadas', withholdingPracticedCtrl.withholdingPracticed);
+router.get('/reports/retenciones-practicadas/export', withholdingPracticedCtrl.withholdingPracticedExport);
 
 // Estado de Flujo de Efectivo — método indirecto, derivado de los asientos.
 router.get('/reports/cashflow-indirecto', cashFlowIndirectCtrl.cashFlowIndirect);

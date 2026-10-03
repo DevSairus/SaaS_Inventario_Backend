@@ -16,6 +16,18 @@
 const SUGGESTED_CONCEPTS = {
   1001: {
     purchase: '5007', // Compra de activos movibles (inventario para reventa) -- ítem 9
+    // Compras separadas por concepto de retención del ítem (catálogo por
+    // defecto, data/retention-concepts-default.js). Conceptos propios del
+    // tenant no tienen sugerencia: los asigna el contador.
+    'purchase:compras': '5007', // Compra de activos movibles -- ítem 9
+    'purchase:combustibles': '5007', // Compra de activos movibles -- ítem 9
+    'purchase:servicios': '5004', // Servicios -- ítem 5
+    'purchase:transporte_carga': '5004', // Servicios -- ítem 5
+    'purchase:aseo_vigilancia': '5004', // Servicios -- ítem 5
+    'purchase:hoteles_restaurantes': '5004', // Servicios -- ítem 5
+    'purchase:honorarios': '5002', // Honorarios -- ítem 3
+    'purchase:arrendamiento_inmuebles': '5005', // Arrendamientos -- ítem 6
+    'purchase:arrendamiento_muebles': '5005', // Arrendamientos -- ítem 6
     'expense:arriendo': '5005', // Arrendamientos -- ítem 6
     'expense:honorarios': '5002', // Honorarios -- ítem 3
     'expense:comisiones_tecnicos': '5003', // Comisiones -- ítem 4

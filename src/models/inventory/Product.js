@@ -114,6 +114,12 @@ const Product = sequelize.define('Product', {
     allowNull: false,
     defaultValue: false
   },
+  // Concepto de retención en la fuente (catálogo del tenant). NULL = heredar
+  // de la categoría / proveedor / tipo (ver retentionEngine.service.js).
+  retention_concept: {
+    type: DataTypes.STRING(60),
+    allowNull: true
+  },
   tax_config: {
     type: DataTypes.JSONB,
     allowNull: true,

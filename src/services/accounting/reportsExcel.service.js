@@ -62,6 +62,124 @@ function zebraStripe(row, idx) {
   }
 }
 
+/* ── DETALLE DE ASIENTOS (hoja anexa) ─────────────────────────────
+ * Los reportes que solo listan el N° de asiento (Libro Mayor, Auxiliar,
+ * IVA, Retenciones) quedan incompletos para quien recibe el archivo sin
+ * acceso a Pitbox. Esta hoja anexa trae cada asiento referenciado con
+ * todas sus líneas (cuenta, tercero, débito, crédito), y el N° de asiento
+ * de la hoja principal queda como hipervínculo a su bloque aquí.
+ *
+ * `details` = { entries, truncated, total } (entryDetails.service.js).
+ * Devuelve Map(entry_id → fila de inicio) para armar los hipervínculos.
+ */
+const DETAIL_SHEET_NAME = 'Detalle de Asientos';
+const SOURCE_LABELS = {
+  sale: 'Venta', payment: 'Abono de cliente', purchase: 'Compra', expense: 'Gasto', cash_session: 'Cierre de caja',
+  customer_return: 'Devolución de cliente', credit_note: 'Nota crédito', debit_note: 'Nota débito',
+  supplier_return: 'Devolución a proveedor', customer_advance: 'Anticipo de cliente', manual: 'Manual',
+  payroll: 'Nómina', opening_balance: 'Saldo inicial', depreciation: 'Depreciación',
+};
+
+function addEntryDetailSheet(workbook, details, { tenant, subtitle, generatedByName } = {}) {
+  const positions = new Map();
+  if (!details) return positions;
+
+  const sheet = workbook.addWorksheet(DETAIL_SHEET_NAME, { views: [{ state: 'frozen', ySplit: 6 }] });
+  sheet.columns = [
+    { key: 'date', width: 12 },
+    { key: 'number', width: 14 },
+    { key: 'code', width: 12 },
+    { key: 'account', width: 34 },
+    { key: 'third', width: 30 },
+    { key: 'detail', width: 34 },
+    { key: 'debit', width: 16 },
+    { key: 'credit', width: 16 },
+  ];
+
+  addHeader(sheet, {
+    title: 'DETALLE DE ASIENTOS',
+    tenant,
+    subtitle: subtitle || 'Asientos referenciados en el reporte',
+    generatedByName,
+    mergeCols: 'H',
+  });
+
+  const headerRow = sheet.getRow(6);
+  headerRow.values = ['Fecha', 'N° Asiento', 'Código', 'Cuenta', 'Tercero', 'Detalle', 'Débito', 'Crédito'];
+  styleHeaderRow(headerRow);
+
+  let r = 7;
+  if (details.truncated) {
+    sheet.mergeCells(`A${r}:H${r}`);
+    sheet.getCell(`A${r}`).value = `El reporte referencia ${details.total} asientos; el detalle se omite por tamaño. Genera el reporte por un rango de fechas menor para incluirlo.`;
+    sheet.getCell(`A${r}`).font = { italic: true, color: { argb: 'FF6B7280' } };
+    return positions;
+  }
+  if (!details.entries || details.entries.length === 0) {
+    sheet.mergeCells(`A${r}:H${r}`);
+    sheet.getCell(`A${r}`).value = 'Sin asientos referenciados.';
+    return positions;
+  }
+
+  for (const entry of details.entries) {
+    positions.set(entry.id, r);
+
+    // Encabezado del asiento
+    const head = sheet.getRow(r);
+    head.values = [toExcelDate(entry.entry_date), entry.entry_number, '', entry.description || '', '', SOURCE_LABELS[entry.source_type] || entry.source_type || '', '', ''];
+    head.getCell(1).numFmt = 'dd/mm/yyyy';
+    head.eachCell({ includeEmpty: true }, (cell) => {
+      cell.font = { bold: true, color: { argb: DARK } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE5E7EB' } };
+    });
+    r += 1;
+
+    entry.lines.forEach((line, idx) => {
+      const row = sheet.getRow(r);
+      row.values = [
+        '',
+        '',
+        line.account_code,
+        line.account_name,
+        line.third_party_name ? `${line.third_party_name}${line.third_party_tax_id ? ' - ' + line.third_party_tax_id : ''}` : '',
+        line.description,
+        Number(line.debit) || null,
+        Number(line.credit) || null,
+      ];
+      row.getCell(7).numFmt = '$#,##0';
+      row.getCell(8).numFmt = '$#,##0';
+      zebraStripe(row, idx);
+      r += 1;
+    });
+
+    const total = sheet.getRow(r);
+    total.values = ['', '', '', '', '', 'Total asiento', Number(entry.total_debit), Number(entry.total_credit)];
+    total.getCell(6).font = { bold: true };
+    total.getCell(7).font = { bold: true };
+    total.getCell(8).font = { bold: true };
+    total.getCell(7).numFmt = '$#,##0';
+    total.getCell(8).numFmt = '$#,##0';
+    total.eachCell((cell) => { cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } }; });
+    r += 2;
+  }
+
+  return positions;
+}
+
+// Valor de celda para el N° de asiento: hipervínculo interno al bloque del
+// asiento en la hoja de detalle, o el número plano si no hay detalle.
+function entryNumberCell(entryNumber, entryId, positions) {
+  const row = positions?.get(entryId);
+  if (!row) return entryNumber;
+  return { text: String(entryNumber ?? ''), hyperlink: `#'${DETAIL_SHEET_NAME}'!A${row}` };
+}
+
+function styleLinkCell(cell) {
+  if (cell.value && typeof cell.value === 'object' && cell.value.hyperlink) {
+    cell.font = { color: { argb: 'FF2563EB' }, underline: true };
+  }
+}
+
 /**
  * Balance de Comprobación (trial balance) en Excel.
  * data = { accounts: [{code,name,account_type,total_debit,total_credit}], totals: {debit,credit}, branch_id }
@@ -388,6 +506,11 @@ const generateLibroMayorExcel = async (data, tenant, filters = {}, generatedByNa
   const sheet = workbook.addWorksheet('Libro Mayor', {
     views: [{ state: 'frozen', ySplit: 7 }],
   });
+  const entryRows = addEntryDetailSheet(workbook, data.entry_details, {
+    tenant,
+    subtitle: `Libro Mayor · Cuenta ${data.account?.code || ''} - ${data.account?.name || ''} · ${fmtDate(filters.from)} a ${fmtDate(filters.to)}`,
+    generatedByName,
+  });
 
   sheet.columns = [
     { key: 'date', width: 12 },
@@ -424,12 +547,13 @@ const generateLibroMayorExcel = async (data, tenant, filters = {}, generatedByNa
     const row = sheet.getRow(firstDataRow + idx);
     row.values = [
       toExcelDate(m.entry_date),
-      m.entry_number,
+      entryNumberCell(m.entry_number, m.entry_id, entryRows),
       m.description,
       Number(m.debit),
       Number(m.credit),
       Number(m.running_balance),
     ];
+    styleLinkCell(row.getCell(2));
     row.getCell(1).numFmt = 'dd/mm/yyyy';
     row.getCell(4).numFmt = '$#,##0';
     row.getCell(5).numFmt = '$#,##0';
@@ -475,6 +599,11 @@ const generateLibroAuxiliarExcel = async (data, tenant, filters = {}, generatedB
   const sheet = workbook.addWorksheet('Libro Auxiliar', {
     views: [{ state: 'frozen', ySplit: 7 }],
   });
+  const entryRows = addEntryDetailSheet(workbook, data.entry_details, {
+    tenant,
+    subtitle: `Libro Auxiliar · ${data.third_party?.name || ''} · ${fmtDate(filters.from)} a ${fmtDate(filters.to)}`,
+    generatedByName,
+  });
 
   sheet.columns = [
     { key: 'date', width: 12 },
@@ -513,13 +642,14 @@ const generateLibroAuxiliarExcel = async (data, tenant, filters = {}, generatedB
     const row = sheet.getRow(firstDataRow + idx);
     row.values = [
       toExcelDate(m.entry_date),
-      m.entry_number,
+      entryNumberCell(m.entry_number, m.entry_id, entryRows),
       `${m.account_code} - ${m.account_name}`,
       m.description,
       Number(m.debit),
       Number(m.credit),
       Number(m.running_balance),
     ];
+    styleLinkCell(row.getCell(2));
     row.getCell(1).numFmt = 'dd/mm/yyyy';
     row.getCell(5).numFmt = '$#,##0';
     row.getCell(6).numFmt = '$#,##0';
@@ -549,6 +679,24 @@ const generateLibroAuxiliarExcel = async (data, tenant, filters = {}, generatedB
     cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } };
   });
 
+  // Saldo al corte por cuenta (el saldo final mezcla cuentas: ej. cuenta
+  // por pagar al proveedor + retenciones que se le practicaron).
+  if (Array.isArray(data.by_account) && data.by_account.length > 0) {
+    let br = totalRowNum + 3;
+    sheet.mergeCells(`A${br}:G${br}`);
+    sheet.getCell(`A${br}`).value = `SALDO POR CUENTA AL ${fmtDate(filters.to)}`;
+    sheet.getCell(`A${br}`).font = { bold: true, color: { argb: WHITE } };
+    sheet.getCell(`A${br}`).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: DARK } };
+    br += 1;
+    data.by_account.forEach((a, idx) => {
+      const row = sheet.getRow(br);
+      row.values = ['', '', `${a.account_code} - ${a.account_name}`, '', '', '', Number(a.balance)];
+      row.getCell(7).numFmt = '$#,##0';
+      zebraStripe(row, idx);
+      br += 1;
+    });
+  }
+
   return workbook.xlsx.writeBuffer();
 };
 
@@ -563,6 +711,11 @@ const generateLibroIvaExcel = async (data, tenant, filters = {}, generatedByName
   workbook.created = new Date();
 
   const sheet = workbook.addWorksheet('Libro de IVA');
+  const entryRows = addEntryDetailSheet(workbook, data.entry_details, {
+    tenant,
+    subtitle: `Libro de IVA · ${fmtDate(data.from)} a ${fmtDate(data.to)}`,
+    generatedByName,
+  });
 
   sheet.columns = [
     { key: 'date', width: 12 },
@@ -603,7 +756,8 @@ const generateLibroIvaExcel = async (data, tenant, filters = {}, generatedByName
     } else {
       rows.forEach((row, idx) => {
         const sheetRow = sheet.getRow(r);
-        sheetRow.values = [toExcelDate(row.entry_date), row.entry_number, row.source_type, row.description, Number(row.amount)];
+        sheetRow.values = [toExcelDate(row.entry_date), entryNumberCell(row.entry_number, row.entry_id, entryRows), row.source_type, row.description, Number(row.amount)];
+        styleLinkCell(sheetRow.getCell(2));
         sheetRow.getCell(1).numFmt = 'dd/mm/yyyy';
         sheetRow.getCell(5).numFmt = '$#,##0';
         zebraStripe(sheetRow, idx);
@@ -768,25 +922,35 @@ const generateWithholdingExcel = async (data, tenant, filters = {}, generatedByN
     { key: 'base', width: 16 },
     { key: 'retefuente', width: 16 },
     { key: 'reteica', width: 16 },
+    { key: 'entry', width: 14 },
   ];
+  const entryRows = addEntryDetailSheet(workbook, data.entry_details, {
+    tenant,
+    subtitle: `Retenciones · ${fmtDate(data.from)} a ${fmtDate(data.to)}`,
+    generatedByName,
+  });
 
   addHeader(sheet, {
     title: 'CERTIFICADO DE RETENCIONES',
     tenant,
     subtitle: `Periodo: ${fmtDate(data.from)} a ${fmtDate(data.to)}`,
     generatedByName,
-    mergeCols: 'F',
+    mergeCols: 'G',
   });
 
   let r = 6;
   const headerRow = sheet.getRow(r);
-  headerRow.values = ['Fecha', 'N° Venta', 'Cliente', 'Base', 'ReteFuente', 'ReteICA'];
+  headerRow.values = ['Fecha', 'N° Venta', 'Cliente', 'Base', 'ReteFuente', 'ReteICA', 'N° Asiento'];
   styleHeaderRow(headerRow);
   r += 1;
 
   data.sales.forEach((s, idx) => {
     const row = sheet.getRow(r);
-    row.values = [toExcelDate(s.sale_date), s.sale_number, s.customer_name, s.subtotal, s.retefuente_amount, s.reteica_amount];
+    row.values = [
+      toExcelDate(s.sale_date), s.sale_number, s.customer_name, s.subtotal, s.retefuente_amount, s.reteica_amount,
+      s.entry_id ? entryNumberCell(s.entry_number, s.entry_id, entryRows) : '',
+    ];
+    styleLinkCell(row.getCell(7));
     row.getCell(1).numFmt = 'dd/mm/yyyy';
     row.getCell(4).numFmt = '$#,##0';
     row.getCell(5).numFmt = '$#,##0';
@@ -873,7 +1037,131 @@ const generateCashFlowIndirectExcel = async (data, tenant, filters = {}, generat
   return workbook.xlsx.writeBuffer();
 };
 
+/* ══════════════════════════════════════════════════════════════════
+   12) RETENCIONES PRACTICADAS A PROVEEDORES — POR CONCEPTO
+   data = withholdingPracticed.controller.fetchWithholdingPracticed (+ entry_details)
+   ══════════════════════════════════════════════════════════════════ */
+const generateWithholdingPracticedExcel = async (data, tenant, filters = {}, generatedByName = '') => {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = tenant?.company_name || 'Pitbox';
+  workbook.created = new Date();
+
+  const single = data.supplier_id && data.by_supplier.length === 1;
+  const period = `Periodo: ${fmtDate(data.from)} a ${fmtDate(data.to)}`;
+  const rateLabel = (x) => `${x.rate}${x.rate_unit}`;
+  const money = (row, cols) => cols.forEach((c) => { row.getCell(c).numFmt = '$#,##0'; });
+  const boldTotal = (row) => row.eachCell((cell) => { cell.font = { bold: true }; cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } }; });
+
+  // ── Hoja 1: resumen por concepto ──
+  const summary = workbook.addWorksheet('Por concepto', { views: [{ state: 'frozen', ySplit: 6 }] });
+  summary.columns = [
+    { width: 14 }, { width: 40 }, { width: 10 }, { width: 18 }, { width: 18 }, { width: 12 }, { width: 12 },
+  ];
+  addHeader(summary, {
+    title: single ? `RETENCIONES PRACTICADAS — ${data.by_supplier[0].supplier_name}` : 'RETENCIONES PRACTICADAS A PROVEEDORES',
+    tenant,
+    subtitle: `${period}${single && data.by_supplier[0].supplier_tax_id ? '  ·  NIT proveedor: ' + data.by_supplier[0].supplier_tax_id : ''}`,
+    generatedByName,
+    mergeCols: 'G',
+  });
+  let r = 6;
+  const sh = summary.getRow(r);
+  sh.values = ['Tipo', 'Concepto', 'Tarifa', 'Base', 'Valor retenido', 'Documentos', 'Proveedores'];
+  styleHeaderRow(sh);
+  r += 1;
+
+  if (data.by_concept.length === 0) {
+    summary.mergeCells(`A${r}:G${r}`);
+    summary.getCell(`A${r}`).value = 'Sin retenciones practicadas en el periodo seleccionado.';
+    r += 1;
+  }
+  // Agrupado por tipo con subtotal (es como se diligencia el Formulario 350).
+  for (const code of ['07', '05', '06']) {
+    const group = data.by_concept.filter((c) => c.code === code);
+    if (group.length === 0) continue;
+    group.forEach((c, idx) => {
+      const row = summary.getRow(r);
+      row.values = [c.type_name, c.concept, rateLabel(c), c.base, c.amount, c.documents, c.suppliers];
+      money(row, [4, 5]);
+      zebraStripe(row, idx);
+      r += 1;
+    });
+    const sub = summary.getRow(r);
+    sub.values = ['', `Subtotal ${group[0].type_name}`, '', group.reduce((s, c) => s + c.base, 0), group.reduce((s, c) => s + c.amount, 0)];
+    money(sub, [4, 5]);
+    boldTotal(sub);
+    r += 2;
+  }
+  const tot = summary.getRow(r);
+  tot.values = ['', 'TOTAL RETENCIONES PRACTICADAS', '', '', data.totals.total];
+  money(tot, [5]);
+  tot.getCell(2).font = { bold: true, color: { argb: RED } };
+  tot.getCell(5).font = { bold: true, color: { argb: RED } };
+
+  // ── Hoja 2: por proveedor → concepto (base del certificado) ──
+  const bySup = workbook.addWorksheet('Por proveedor', { views: [{ state: 'frozen', ySplit: 6 }] });
+  bySup.columns = [{ width: 34 }, { width: 16 }, { width: 14 }, { width: 38 }, { width: 10 }, { width: 18 }, { width: 18 }];
+  addHeader(bySup, { title: 'RETENCIONES PRACTICADAS POR PROVEEDOR', tenant, subtitle: period, generatedByName, mergeCols: 'G' });
+  r = 6;
+  const bh = bySup.getRow(r);
+  bh.values = ['Proveedor', 'NIT', 'Tipo', 'Concepto', 'Tarifa', 'Base', 'Valor retenido'];
+  styleHeaderRow(bh);
+  r += 1;
+  for (const s of data.by_supplier) {
+    s.concepts.forEach((c, idx) => {
+      const row = bySup.getRow(r);
+      row.values = [idx === 0 ? s.supplier_name : '', idx === 0 ? s.supplier_tax_id : '', c.type_name, c.concept, rateLabel(c), c.base, c.amount];
+      money(row, [6, 7]);
+      r += 1;
+    });
+    const sub = bySup.getRow(r);
+    sub.values = ['', '', '', `Total ${s.supplier_name}`, '', '', s.totals.total];
+    money(sub, [7]);
+    boldTotal(sub);
+    r += 2;
+  }
+
+  // ── Hoja 3: detalle por documento ──
+  const det = workbook.addWorksheet('Detalle', { views: [{ state: 'frozen', ySplit: 6 }] });
+  det.columns = [
+    { width: 12 }, { width: 10 }, { width: 14 }, { width: 22 }, { width: 30 }, { width: 16 },
+    { width: 12 }, { width: 36 }, { width: 10 }, { width: 16 }, { width: 16 }, { width: 14 },
+  ];
+  addHeader(det, { title: 'DETALLE DE RETENCIONES PRACTICADAS', tenant, subtitle: period, generatedByName, mergeCols: 'L' });
+  const entryRows = addEntryDetailSheet(workbook, data.entry_details, {
+    tenant, subtitle: `Retenciones practicadas · ${fmtDate(data.from)} a ${fmtDate(data.to)}`, generatedByName,
+  });
+  r = 6;
+  const dh = det.getRow(r);
+  dh.values = ['Fecha', 'Origen', 'N° Documento', 'Factura / Detalle', 'Proveedor', 'NIT', 'Tipo', 'Concepto', 'Tarifa', 'Base', 'Valor retenido', 'N° Asiento'];
+  styleHeaderRow(dh);
+  r += 1;
+  data.lines.forEach((l, idx) => {
+    const row = det.getRow(r);
+    row.values = [
+      toExcelDate(l.doc_date), l.source === 'purchase' ? 'Compra' : 'Gasto', l.doc_number, l.doc_reference,
+      l.supplier_name, l.supplier_tax_id, l.type_name, l.concept, rateLabel(l), l.base, l.amount,
+      l.entry_id ? entryNumberCell(l.entry_number, l.entry_id, entryRows) : '',
+    ];
+    row.getCell(1).numFmt = 'dd/mm/yyyy';
+    money(row, [10, 11]);
+    styleLinkCell(row.getCell(12));
+    zebraStripe(row, idx);
+    r += 1;
+  });
+  if (data.lines.length > 0) {
+    det.autoFilter = { from: 'A6', to: `L${r - 1}` };
+    const dt = det.getRow(r);
+    dt.values = ['', '', '', '', '', '', '', 'TOTAL', '', '', data.totals.total];
+    money(dt, [11]);
+    boldTotal(dt);
+  }
+
+  return workbook.xlsx.writeBuffer();
+};
+
 module.exports = {
+  generateWithholdingPracticedExcel,
   generateTrialBalanceExcel,
   generateBalanceGeneralExcel,
   generateIncomeStatementExcel,

@@ -21,6 +21,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { fetchEntryDetails, fetchEntryIdsBySource } = require('../../services/accounting/entryDetails.service');
 const { generateWithholdingExcel } = require('../../services/accounting/reportsExcel.service');
 const { generateWithholdingPDF } = require('../../services/accounting/reportsPdf.service');
 
@@ -138,6 +139,17 @@ exports.withholdingExport = async (req, res) => {
     const suffix = data.customer_id ? (data.customers[0]?.customer_name || 'certificado') : 'consolidado';
 
     if (format === 'excel') {
+      // Este reporte lee de `sales`, no de la contabilidad: se busca el
+      // asiento de cada venta (source_type='sale') para anexar su detalle.
+      const entryRows = await fetchEntryIdsBySource(req.tenant_id, 'sale', data.sales.map((s) => s.id));
+      const entryBySale = new Map();
+      for (const e of entryRows) if (!entryBySale.has(e.source_id)) entryBySale.set(e.source_id, e);
+      for (const s of data.sales) {
+        const e = entryBySale.get(s.id);
+        s.entry_id = e?.id || null;
+        s.entry_number = e?.entry_number || null;
+      }
+      data.entry_details = await fetchEntryDetails(req.tenant_id, entryRows.map((e) => e.id));
       const buffer = await generateWithholdingExcel(data, req.tenant, {}, name);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="Retenciones-${suffix}-${data.from}_${data.to}.xlsx"`);

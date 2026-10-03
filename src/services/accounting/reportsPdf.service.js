@@ -103,6 +103,9 @@ function finishReportDoc({ doc, PAGE_W, MARGIN, INNER_W, red: _red, bufferMode, 
   const pageRange = doc.bufferedPageRange();
   for (let i = 0; i < pageRange.count; i++) {
     doc.switchToPage(i);
+    // Sin margen inferior: el pie va dentro del margen y pdfkit, si no,
+    // agregaba una página en blanco por cada página del reporte.
+    doc.page.margins.bottom = 0;
     doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(red);
     doc.font('Helvetica').fontSize(7).fillColor(gray)
       .text(`Página ${i + 1} de ${pageRange.count}`, MARGIN, doc.page.height - 24, { width: INNER_W, align: 'center' });
@@ -828,6 +831,134 @@ const generateWithholdingPDF = async (res, data, tenant, filters = {}, generated
 };
 
 /* ══════════════════════════════════════════════════════════════════
+   10b) RETENCIONES PRACTICADAS A PROVEEDORES — POR CONCEPTO
+   Con un solo proveedor sale como "Certificado de retención" (art. 381
+   E.T.): datos del retenedor y del retenido + conceptos, bases y valores.
+   ══════════════════════════════════════════════════════════════════ */
+const generateWithholdingPracticedPDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
+  try {
+    const single = data.supplier_id && data.by_supplier.length === 1;
+    const sup = single ? data.by_supplier[0] : null;
+    const ctx = await startReportDoc(res, {
+      title: single ? 'CERTIFICADO DE RETENCIÓN' : 'RETENCIONES PRACTICADAS',
+      subtitle: `${single ? sup.supplier_name + ' · ' : ''}Periodo: ${fmtDate(data.from)} — ${fmtDate(data.to)}`,
+      filenamePrefix: `Retenciones-Practicadas-${data.from || ''}_${data.to || ''}`,
+      tenant,
+      generatedByName,
+    });
+    const { doc, MARGIN, INNER_W } = ctx;
+    const COLS = { type: MARGIN, concept: MARGIN + 62, rate: MARGIN + INNER_W - 210, base: MARGIN + INNER_W - 160, amount: MARGIN + INNER_W - 80 };
+    const rateLabel = (x) => `${x.rate}${x.rate_unit}`;
+
+    const drawTableHeader = () => {
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(gray)
+        .text('TIPO', COLS.type, ctx.y)
+        .text('CONCEPTO', COLS.concept, ctx.y)
+        .text('TARIFA', COLS.rate, ctx.y, { width: 45, align: 'right' })
+        .text('BASE', COLS.base, ctx.y, { width: 75, align: 'right' })
+        .text('VALOR RETENIDO', COLS.amount, ctx.y, { width: MARGIN + INNER_W - COLS.amount, align: 'right' });
+      ctx.y += 12;
+    };
+    const drawConceptRow = (c) => {
+      ensureSpace(ctx, 13, drawTableHeader);
+      doc.font('Helvetica').fontSize(7.5).fillColor(black)
+        .text(c.type_name, COLS.type, ctx.y, { width: COLS.concept - COLS.type - 4 })
+        .text(c.concept, COLS.concept, ctx.y, { width: COLS.rate - COLS.concept - 4, ellipsis: true, lineBreak: false })
+        .text(rateLabel(c), COLS.rate, ctx.y, { width: 45, align: 'right' })
+        .text(formatCurrency(c.base), COLS.base, ctx.y, { width: 75, align: 'right' })
+        .text(formatCurrency(c.amount), COLS.amount, ctx.y, { width: MARGIN + INNER_W - COLS.amount, align: 'right' });
+      ctx.y += 12;
+    };
+    const totalLine = (label, value, color = darkGray) => {
+      ensureSpace(ctx, 18);
+      doc.moveTo(MARGIN, ctx.y).lineTo(MARGIN + INNER_W, ctx.y).strokeColor(borderMd).lineWidth(0.5).stroke();
+      ctx.y += 5;
+      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(color)
+        .text(label, MARGIN, ctx.y, { width: INNER_W - 100, align: 'right' })
+        .text(formatCurrency(value), MARGIN + INNER_W - 100, ctx.y, { width: 100, align: 'right' });
+      ctx.y += 16;
+    };
+
+    if (single) {
+      // Bloque retenedor / retenido
+      const boxH = 58;
+      doc.roundedRect(MARGIN, ctx.y, INNER_W, boxH, 3).fillAndStroke(softGray, border);
+      const half = INNER_W / 2;
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(gray)
+        .text('RETENEDOR', MARGIN + 10, ctx.y + 8)
+        .text('RETENIDO (PROVEEDOR)', MARGIN + half + 10, ctx.y + 8);
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(black)
+        .text(tenant?.company_name || '', MARGIN + 10, ctx.y + 19, { width: half - 20 })
+        .text(sup.supplier_name, MARGIN + half + 10, ctx.y + 19, { width: half - 20 });
+      doc.font('Helvetica').fontSize(8).fillColor(darkGray)
+        .text(tenant?.tax_id ? `NIT: ${tenant.tax_id}` : '', MARGIN + 10, ctx.y + 32, { width: half - 20 })
+        .text(sup.supplier_tax_id ? `NIT/CC: ${sup.supplier_tax_id}` : '', MARGIN + half + 10, ctx.y + 32, { width: half - 20 })
+        .text([sup.supplier_address, sup.supplier_city].filter(Boolean).join(' · '), MARGIN + half + 10, ctx.y + 43, { width: half - 20, ellipsis: true, lineBreak: false });
+      ctx.y += boxH + 14;
+
+      drawTableHeader();
+      sup.concepts.forEach(drawConceptRow);
+      totalLine('TOTAL RETENIDO', sup.totals.total, red);
+
+      ensureSpace(ctx, 50);
+      ctx.y += 6;
+      doc.font('Helvetica').fontSize(7).fillColor(gray).text(
+        'Certificado de retención expedido conforme al artículo 381 del Estatuto Tributario. Los valores retenidos fueron ' +
+        'consignados (o se consignarán) a la DIAN en la declaración de retención en la fuente del periodo correspondiente. ' +
+        'Documento generado por computador; no requiere firma autógrafa (artículo 10 del Decreto 836 de 1991).',
+        MARGIN, ctx.y, { width: INNER_W, align: 'justify' }
+      );
+      ctx.y += 40;
+      return finishReportDoc(ctx);
+    }
+
+    // ── Consolidado: resumen por concepto + bloque por proveedor ──
+    const sectionHeader = (label) => {
+      ensureSpace(ctx, 22);
+      doc.roundedRect(MARGIN, ctx.y, INNER_W, 16, 2).fill(darkGray);
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(white).text(label, MARGIN + 6, ctx.y + 4);
+      ctx.y += 22;
+    };
+
+    sectionHeader('RESUMEN POR CONCEPTO');
+    if (data.by_concept.length === 0) {
+      doc.font('Helvetica').fontSize(8).fillColor(gray).text('Sin retenciones practicadas en el periodo seleccionado.', MARGIN, ctx.y);
+      ctx.y += 14;
+    } else {
+      drawTableHeader();
+      for (const code of ['07', '05', '06']) {
+        const group = data.by_concept.filter((c) => c.code === code);
+        if (group.length === 0) continue;
+        group.forEach(drawConceptRow);
+        totalLine(`Subtotal ${group[0].type_name}`, group.reduce((s, c) => s + c.amount, 0));
+      }
+      totalLine('TOTAL RETENCIONES PRACTICADAS', data.totals.total, red);
+    }
+
+    if (data.by_supplier.length > 0) {
+      ctx.y += 6;
+      sectionHeader('POR PROVEEDOR');
+      for (const s of data.by_supplier) {
+        ensureSpace(ctx, 40);
+        doc.font('Helvetica-Bold').fontSize(8.5).fillColor(black)
+          .text(`${s.supplier_name}${s.supplier_tax_id ? '  ·  ' + s.supplier_tax_id : ''}`, MARGIN, ctx.y, { width: INNER_W });
+        ctx.y += 13;
+        drawTableHeader();
+        s.concepts.forEach(drawConceptRow);
+        totalLine(`Total ${s.supplier_name}`, s.totals.total);
+        ctx.y += 4;
+      }
+    }
+
+    return finishReportDoc(ctx);
+  } catch (error) {
+    console.error(error);
+    if (res && !res.headersSent) res.status(500).json({ message: 'Error generando reporte de retenciones practicadas' });
+    if (!res) throw error;
+  }
+};
+
+/* ══════════════════════════════════════════════════════════════════
    11) ESTADO DE FLUJO DE EFECTIVO — MÉTODO INDIRECTO
    ══════════════════════════════════════════════════════════════════ */
 const generateCashFlowIndirectPDF = async (res, data, tenant, filters = {}, generatedByName = '') => {
@@ -905,5 +1036,6 @@ module.exports = {
   generateAgingPDF,
   generateTrialBalanceComparativePDF,
   generateWithholdingPDF,
+  generateWithholdingPracticedPDF,
   generateCashFlowIndirectPDF,
 };

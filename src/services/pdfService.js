@@ -1099,6 +1099,7 @@ const generateCashFlowPDF = async (res, cashFlow, tenant, filters = {}, generate
     const pageRange = doc.bufferedPageRange();
     for (let i = 0; i < pageRange.count; i++) {
       doc.switchToPage(i);
+      doc.page.margins.bottom = 0; // pie dentro del margen: sin esto pdfkit agrega páginas en blanco
       doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(red);
       doc.font('Helvetica').fontSize(7).fillColor(gray)
         .text(`Página ${i + 1} de ${pageRange.count}`, MARGIN, doc.page.height - 24, { width: INNER_W, align: 'center' });
@@ -1114,4 +1115,4 @@ const generateCashFlowPDF = async (res, cashFlow, tenant, filters = {}, generate
   }
 };
 
-module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer, generateCashFlowPDF };
+module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer, generateCashFlowPDF, downloadImageWithTimeout, toJpgUrl };

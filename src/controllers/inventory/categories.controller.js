@@ -43,7 +43,7 @@ const getAllCategories = async (req, res) => {
         attributes: ['id', 'name']
       }],
       order: [['name', 'ASC']],
-      attributes: ['id', 'name', 'description', 'parent_id', 'is_active', 'created_at', 'commission_category_id']
+      attributes: ['id', 'name', 'description', 'parent_id', 'is_active', 'created_at', 'commission_category_id', 'retention_concept']
     });
 
     res.json({
@@ -127,7 +127,7 @@ const getCategoryById = async (req, res) => {
  */
 const createCategory = async (req, res) => {
   try {
-    const { name, description, parent_id, is_active = true, commission_category_id } = req.body;
+    const { name, description, parent_id, is_active = true, commission_category_id, retention_concept } = req.body;
 
     // ✅ Validar autenticación
     if (!req.user) {
@@ -178,7 +178,8 @@ const createCategory = async (req, res) => {
       description: description?.trim() || null,
       parent_id: parent_id || null,
       is_active,
-      commission_category_id: commission_category_id || null
+      commission_category_id: commission_category_id || null,
+      retention_concept: retention_concept || null
     });
 
     const newCategory = await Category.findOne({
@@ -211,7 +212,7 @@ const createCategory = async (req, res) => {
 const updateCategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, parent_id, is_active, commission_category_id } = req.body;
+    const { name, description, parent_id, is_active, commission_category_id, retention_concept } = req.body;
 
     // ✅ Validar autenticación
     if (!req.user) {
@@ -281,7 +282,8 @@ const updateCategory = async (req, res) => {
       description: description !== undefined ? (description?.trim() || null) : category.description,
       parent_id: parent_id !== undefined ? parent_id : category.parent_id,
       is_active: is_active !== undefined ? is_active : category.is_active,
-      commission_category_id: commission_category_id !== undefined ? (commission_category_id || null) : category.commission_category_id
+      commission_category_id: commission_category_id !== undefined ? (commission_category_id || null) : category.commission_category_id,
+      retention_concept: retention_concept !== undefined ? (retention_concept || null) : category.retention_concept
     });
 
     const updatedCategory = await Category.findOne({

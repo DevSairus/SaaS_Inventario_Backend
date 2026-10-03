@@ -337,7 +337,7 @@ const createProduct = async (req, res) => {
       min_stock = 0, max_stock, product_type = 'simple',
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
-      tax_config, is_labor = false, vehicle
+      tax_config, is_labor = false, vehicle, retention_concept
     } = req.body;
 
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
@@ -443,6 +443,7 @@ const createProduct = async (req, res) => {
         is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
         tax_config: finalTaxConfig,
         is_labor: safeProductType === 'service' ? !!is_labor : false,
+        retention_concept: retention_concept || null,
       }, { transaction });
 
       const initialQuantity = effectiveTrackInventory ? parseFloat(effectiveCurrentStock) || 0 : 0;
@@ -676,6 +677,134 @@ const checkBarcodeExists = async (req, res) => {
   }
 };
 
+/**
+ * Comparativo de proveedores de un producto para decidir a quién comprar:
+ * por proveedor, último precio (con el descuento de línea aplicado), fecha y
+ * compra, precio anterior (tendencia), mínimo, promedio y cantidad de
+ * compras. Fuente: compras confirmadas o recibidas (no borradores ni
+ * anuladas) + proveedores asociados en product_suppliers aunque aún no
+ * tengan compras (se muestran sin precio).
+ */
+async function buildSupplierPriceComparison(product, tenant_id) {
+  const Supplier = require('../../models/inventory/Supplier');
+  const { Purchase, PurchaseItem } = require('../../models/inventory');
+
+  const items = await PurchaseItem.findAll({
+    where: { product_id: product.id },
+    attributes: ['unit_cost', 'quantity', 'discount_percentage', 'tax_rate'],
+    include: [{
+      model: Purchase,
+      as: 'purchase',
+      where: { tenant_id, status: { [Op.in]: ['confirmed', 'partially_received', 'received'] } },
+      attributes: ['id', 'purchase_number', 'purchase_date', 'invoice_number', 'status', 'supplier_id'],
+      include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name', 'contact_name', 'phone', 'email', 'is_active'] }],
+    }],
+    order: [[{ model: Purchase, as: 'purchase' }, 'purchase_date', 'DESC'], [{ model: Purchase, as: 'purchase' }, 'created_at', 'DESC']],
+  });
+
+  const pivotBySupplier = new Map((product.suppliers || []).map((s) => [s.id, s]));
+  const bySupplier = new Map();
+  for (const item of items) {
+    const sup = item.purchase?.supplier;
+    if (!sup) continue;
+    const unit = parseFloat(item.unit_cost) || 0;
+    const disc = parseFloat(item.discount_percentage) || 0;
+    const net = Math.round(unit * (1 - disc / 100) * 100) / 100;
+    if (!bySupplier.has(sup.id)) {
+      bySupplier.set(sup.id, { supplier: sup, purchases: [] });
+    }
+    bySupplier.get(sup.id).purchases.push({
+      purchase_id: item.purchase.id,
+      purchase_number: item.purchase.purchase_number,
+      invoice_number: item.purchase.invoice_number,
+      purchase_date: item.purchase.purchase_date,
+      status: item.purchase.status,
+      quantity: parseFloat(item.quantity) || 0,
+      unit_cost: unit,
+      discount_percentage: disc,
+      net_cost: net,
+      tax_rate: parseFloat(item.tax_rate) || 0,
+    });
+  }
+
+  const rows = [];
+  for (const { supplier, purchases } of bySupplier.values()) {
+    const prices = purchases.map((p) => p.net_cost).filter((n) => n > 0);
+    const last = purchases[0];
+    const previous = purchases.find((p, i) => i > 0 && p.net_cost > 0) || null;
+    const totalQty = purchases.reduce((s, p) => s + p.quantity, 0);
+    const weightedAvg = totalQty > 0
+      ? purchases.reduce((s, p) => s + p.net_cost * p.quantity, 0) / totalQty
+      : (prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : null);
+    const pivot = pivotBySupplier.get(supplier.id);
+    rows.push({
+      id: supplier.id,
+      name: supplier.name,
+      business_name: supplier.business_name,
+      contact_name: supplier.contact_name,
+      phone: supplier.phone,
+      email: supplier.email,
+      is_active: supplier.is_active,
+      supplier_code: pivot?.ProductSupplier?.supplier_code || null,
+      lead_time_days: pivot?.ProductSupplier?.lead_time_days || null,
+      last_price: last.net_cost || null,
+      last_unit_cost: last.unit_cost,
+      last_discount_percentage: last.discount_percentage,
+      last_purchase_date: last.purchase_date,
+      last_purchase_id: last.purchase_id,
+      last_purchase_number: last.purchase_number,
+      last_invoice_number: last.invoice_number,
+      last_quantity: last.quantity,
+      previous_price: previous?.net_cost ?? null,
+      price_change_pct: previous?.net_cost ? Math.round(((last.net_cost - previous.net_cost) / previous.net_cost) * 1000) / 10 : null,
+      min_price: prices.length ? Math.min(...prices) : null,
+      avg_price: weightedAvg !== null ? Math.round(weightedAvg * 100) / 100 : null,
+      purchases_count: purchases.length,
+      total_quantity: totalQty,
+      history: purchases.slice(0, 10),
+    });
+  }
+
+  // Proveedores asociados al producto que aún no tienen compras registradas.
+  for (const [sid, s] of pivotBySupplier) {
+    if (bySupplier.has(sid)) continue;
+    rows.push({
+      id: s.id, name: s.name, business_name: s.business_name, contact_name: s.contact_name,
+      phone: s.phone, email: s.email, is_active: s.is_active,
+      supplier_code: s.ProductSupplier?.supplier_code || null,
+      lead_time_days: s.ProductSupplier?.lead_time_days || null,
+      last_price: s.ProductSupplier?.last_price ? parseFloat(s.ProductSupplier.last_price) : null,
+      last_purchase_date: s.ProductSupplier?.last_purchase_date || null,
+      purchases_count: 0, history: [],
+    });
+  }
+
+  // Mejor precio = menor último precio entre proveedores activos con precio.
+  const priced = rows.filter((r) => r.last_price > 0 && r.is_active !== false);
+  const best = priced.length ? Math.min(...priced.map((r) => r.last_price)) : null;
+  for (const r of rows) {
+    r.is_best_price = best !== null && r.last_price === best && r.is_active !== false;
+    r.diff_vs_best_pct = best && r.last_price > 0 ? Math.round(((r.last_price - best) / best) * 1000) / 10 : null;
+  }
+  rows.sort((a, b) => {
+    if (!!a.last_price !== !!b.last_price) return a.last_price ? -1 : 1;
+    if (a.last_price && b.last_price && a.last_price !== b.last_price) return a.last_price - b.last_price;
+    return String(b.last_purchase_date || '').localeCompare(String(a.last_purchase_date || ''));
+  });
+
+  const latest = rows.filter((r) => r.last_purchase_date).sort((a, b) => String(b.last_purchase_date).localeCompare(String(a.last_purchase_date)))[0];
+  return {
+    suppliers: rows,
+    summary: {
+      suppliers_count: rows.length,
+      best_price: best,
+      best_supplier_id: rows.find((r) => r.is_best_price)?.id || null,
+      last_purchase: latest ? { supplier_id: latest.id, price: latest.last_price, date: latest.last_purchase_date } : null,
+      current_cost: parseFloat(product.average_cost ?? 0) || null,
+    },
+  };
+}
+
 const getProductSuppliers = async (req, res) => {
   try {
     const { id } = req.params;
@@ -694,9 +823,17 @@ const getProductSuppliers = async (req, res) => {
 
     const product = await Product.findOne({
       where: whereClause,
-      include: [{ model: Supplier, as: 'suppliers', through: { model: ProductSupplier, attributes: ['last_price', 'last_purchase_date', 'lead_time_days'] }, attributes: ['id', 'name', 'business_name', 'contact_name', 'phone', 'email', 'is_active'] }]
+      include: [{ model: Supplier, as: 'suppliers', through: { model: ProductSupplier, attributes: ['last_price', 'last_purchase_date', 'lead_time_days', 'supplier_code'] }, attributes: ['id', 'name', 'business_name', 'contact_name', 'phone', 'email', 'is_active'] }]
     });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    // ?detail=1 (ficha del producto): comparativo por proveedor armado desde
+    // el historial real de compras, no solo el precio guardado en el pivote.
+    // La alerta de stock sigue usando la respuesta simple de abajo.
+    if (req.query.detail === '1' || req.query.detail === 'true') {
+      const data = await buildSupplierPriceComparison(product, tenant_id || product.tenant_id);
+      return res.json({ success: true, data });
+    }
 
     const suppliersFromPivot = product.suppliers.map(s => ({
       id: s.id, name: s.name, business_name: s.business_name, contact_name: s.contact_name,
@@ -713,7 +850,7 @@ const getProductSuppliers = async (req, res) => {
       try {
         const purchaseItems = await PurchaseItem.findAll({
           where: { product_id: id },
-          include: [{ model: Purchase, as: 'purchase', where: { tenant_id, status: 'received' }, include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name', 'contact_name', 'phone', 'email', 'is_active'] }], attributes: ['id', 'purchase_date', 'supplier_id'] }],
+          include: [{ model: Purchase, as: 'purchase', where: { tenant_id, status: { [Op.in]: ['partially_received', 'received'] } }, include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name', 'contact_name', 'phone', 'email', 'is_active'] }], attributes: ['id', 'purchase_date', 'supplier_id'] }],
           attributes: ['unit_cost'],
           order: [[{ model: Purchase, as: 'purchase' }, 'purchase_date', 'DESC']]
         });

@@ -146,6 +146,155 @@ function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale'
 }
 
 /* ──────────────────────────────────────────────────────────
+ * Retenciones detalladas por concepto (compras)
+ *
+ * Un mismo proveedor puede tener varias tarifas del mismo tipo de retención
+ * según lo que se le compre (ej. ReteFuente 2.5% compras, 4% servicios,
+ * 11% honorarios), y cada concepto suele ir a su propia subcuenta del PUC
+ * (236540 / 236525 / 236515). Por eso supplier.retention_config.retentions
+ * es una lista de conceptos:
+ *
+ *   [{ id, code: '07'|'05'|'06', concept, rate, min_base?, account_id?, is_default? }]
+ *
+ * y la compra guarda en `applied_retentions` las líneas que realmente se
+ * practicaron, cada una con su base (editable: una compra mixta de bienes
+ * y servicios reparte el subtotal entre dos conceptos de ReteFuente).
+ * Las columnas agregadas retefuente_amount/reteiva_amount/reteica_amount se
+ * siguen llenando con la suma por tipo — de ahí leen Exógena (1001), el
+ * asiento contable legado y los reportes existentes.
+ * ────────────────────────────────────────────────────────── */
+const RETENTION_TYPES = {
+  '07': { key: 'retefuente', name: 'ReteFuente', divisor: 100 },
+  '05': { key: 'reteiva', name: 'ReteIVA', divisor: 100 },
+  '06': { key: 'reteica', name: 'ReteICA', divisor: 1000 },
+};
+
+/**
+ * Normaliza/valida la lista de conceptos de retención de un proveedor
+ * (lo que llega del formulario). Descarta filas sin código válido o con
+ * tarifa no positiva, y garantiza un id estable por fila.
+ */
+function sanitizeRetentionConcepts(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((r) => r && RETENTION_TYPES[r.code] && Number(r.rate) > 0)
+    .map((r, idx) => ({
+      id: r.id || `${r.code}-${Date.now().toString(36)}-${idx}`,
+      code: r.code,
+      concept: String(r.concept || '').trim().slice(0, 120) || RETENTION_TYPES[r.code].name,
+      rate: Number(r.rate),
+      min_base: r.min_base !== undefined && r.min_base !== null && r.min_base !== '' ? Math.max(Number(r.min_base) || 0, 0) : 0,
+      account_id: r.account_id || null,
+      is_default: !!r.is_default,
+    }));
+}
+
+/**
+ * @param {Array}  items          - Ítems con subtotal/tax_amount.
+ * @param {object} tenantConfig   - tenant.tax_config (fallback legado).
+ * @param {object} supplierConfig - supplier.retention_config.
+ * @param {Array|undefined} requested - Líneas elegidas en el formulario de compra
+ *        ([{ code, concept, rate, base?, account_id?, retention_id? }]). Si es
+ *        `undefined` (API, importación de facturas, cambio de proveedor) se usan
+ *        los conceptos `is_default` del proveedor; si el proveedor no tiene
+ *        conceptos configurados, se cae al cálculo legado (calculateRetentions).
+ * @returns {object} - { retefuente, reteiva, reteica, total, lines }
+ */
+function calculatePurchaseRetentions(items, tenantConfig, supplierConfig, requested) {
+  const config = supplierConfig || {};
+  const empty = () => ({
+    retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0, lines: [],
+  });
+
+  if (config.is_exento || config.is_autoretenedor) return empty();
+
+  const concepts = sanitizeRetentionConcepts(config.retentions);
+  const baseSubtotal = items.reduce((s, i) => s + Number(i.subtotal || i.base || 0), 0);
+  const baseIva = items.reduce((s, i) => s + Number(i.tax_amount || i.iva?.amount || 0), 0);
+  const defaultBaseFor = (code) => (code === '05' ? baseIva : baseSubtotal);
+
+  let candidateLines;
+  if (Array.isArray(requested)) {
+    candidateLines = requested
+      .filter((r) => r && RETENTION_TYPES[r.code] && Number(r.rate) > 0)
+      .map((r) => {
+        const hasBase = r.base !== undefined && r.base !== null && r.base !== '';
+        return {
+          retention_id: r.retention_id || r.id || null,
+          code: r.code,
+          concept: String(r.concept || '').trim() || RETENTION_TYPES[r.code].name,
+          rate: Number(r.rate),
+          base: hasBase ? Math.max(Number(r.base) || 0, 0) : defaultBaseFor(r.code),
+          account_id: r.account_id || concepts.find((c) => c.id === (r.retention_id || r.id))?.account_id || null,
+        };
+      });
+  } else if (concepts.length > 0) {
+    candidateLines = concepts
+      .filter((c) => c.is_default && defaultBaseFor(c.code) >= c.min_base)
+      .map((c) => ({
+        retention_id: c.id, code: c.code, concept: c.concept, rate: c.rate,
+        base: defaultBaseFor(c.code), account_id: c.account_id,
+      }));
+  } else {
+    // Proveedor sin conceptos configurados: comportamiento anterior
+    // (tarifas del tenant / retefuente_rate sueltos en retention_config).
+    const legacy = calculateRetentions(items, tenantConfig, config, 'purchase');
+    const lines = [];
+    for (const code of ['07', '05', '06']) {
+      const t = RETENTION_TYPES[code];
+      if (legacy[t.key].amount > 0) {
+        lines.push({
+          retention_id: null, code, concept: t.name, rate: legacy[t.key].rate,
+          base: round(defaultBaseFor(code)), amount: legacy[t.key].amount, account_id: null,
+        });
+      }
+    }
+    return { ...legacy, lines };
+  }
+
+  const result = empty();
+  const baseByKey = { retefuente: 0, reteiva: 0, reteica: 0 };
+  for (const line of candidateLines) {
+    const t = RETENTION_TYPES[line.code];
+    const amount = round(line.base * line.rate / t.divisor);
+    if (amount <= 0) continue;
+    result.lines.push({ ...line, base: round(line.base), amount });
+    result[t.key].amount = round(result[t.key].amount + amount);
+    baseByKey[t.key] += line.base;
+  }
+
+  // Tarifa agregada por tipo: si hay una sola línea es su tarifa; si hay
+  // varias, la tarifa efectiva ponderada (las columnas *_rate son solo
+  // informativas, el detalle real vive en `lines`).
+  for (const code of ['07', '05', '06']) {
+    const t = RETENTION_TYPES[code];
+    const linesOfType = result.lines.filter((l) => l.code === code);
+    if (linesOfType.length === 1) result[t.key].rate = round(linesOfType[0].rate);
+    else if (linesOfType.length > 1 && baseByKey[t.key] > 0) {
+      result[t.key].rate = round(result[t.key].amount * t.divisor / baseByKey[t.key]);
+    }
+  }
+  result.total = round(result.retefuente.amount + result.reteiva.amount + result.reteica.amount);
+  return result;
+}
+
+/**
+ * Campos de Purchase a partir del resultado de calculatePurchaseRetentions.
+ */
+function purchaseRetentionFields(retentions) {
+  return {
+    retefuente_rate:    retentions.retefuente.rate,
+    retefuente_amount:  retentions.retefuente.amount,
+    reteiva_rate:       retentions.reteiva.rate,
+    reteiva_amount:     retentions.reteiva.amount,
+    reteica_rate:       retentions.reteica.rate,
+    reteica_amount:     retentions.reteica.amount,
+    total_retentions:   retentions.total,
+    applied_retentions: retentions.lines || [],
+  };
+}
+
+/* ──────────────────────────────────────────────────────────
  * Construye el desglose de impuestos para tax_breakdown
  * ────────────────────────────────────────────────────────── */
 function buildTaxBreakdown(items, retentions) {
@@ -186,7 +335,16 @@ function buildTaxBreakdown(items, retentions) {
     breakdown.push({ type: 'tax', ...g, amount: round(g.amount) });
   }
 
-  // Retenciones
+  // Retenciones — con detalle por concepto cuando existe (compras)
+  if (Array.isArray(retentions?.lines) && retentions.lines.length > 0) {
+    for (const l of retentions.lines) {
+      breakdown.push({
+        type: 'retention', code: l.code, name: RETENTION_TYPES[l.code]?.name || l.code,
+        concept: l.concept, rate: l.rate, taxable: l.base, amount: -l.amount,
+      });
+    }
+    return breakdown;
+  }
   if (retentions?.retefuente?.amount > 0) {
     breakdown.push({ type: 'retention', code: '07', name: 'ReteFuente', rate: retentions.retefuente.rate, amount: -retentions.retefuente.amount });
   }
@@ -203,6 +361,10 @@ function buildTaxBreakdown(items, retentions) {
 module.exports = {
   calculateItemTaxes,
   calculateRetentions,
+  calculatePurchaseRetentions,
+  purchaseRetentionFields,
+  sanitizeRetentionConcepts,
+  RETENTION_TYPES,
   buildTaxBreakdown,
   round,
 };

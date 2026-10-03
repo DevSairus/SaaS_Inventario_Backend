@@ -31,6 +31,12 @@ const Category = sequelize.define('Category', {
       key: 'id'
     }
   },
+  // Concepto de retención en la fuente (catálogo del tenant). NULL = heredar
+  // de la categoría / proveedor / tipo (ver retentionEngine.service.js).
+  retention_concept: {
+    type: DataTypes.STRING(60),
+    allowNull: true
+  },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

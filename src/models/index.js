@@ -167,6 +167,7 @@ const SupportDocumentAdjustment = require('./dian/SupportDocumentAdjustment');
 // RADIAN — eventos 030/031/032/033/034 sobre facturas electrónicas
 const RadianEvent = require('./dian/RadianEvent');
 const RadianAlert = require('./dian/RadianAlert');
+const DianReceivedDocument = require('./dian/DianReceivedDocument');
 
 // ✅ NUEVO - Tesorería
 const Expense = require('./finance/Expense');
@@ -814,6 +815,11 @@ CommissionSettlement.belongsTo(PayrollNovedad, { foreignKey: 'payroll_novedad_id
 DianResolution.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.hasMany(DianResolution, { foreignKey: 'tenant_id', as: 'dian_resolutions' });
 
+// DianReceivedDocument (Excel de documentos recibidos del portal DIAN)
+DianReceivedDocument.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+DianReceivedDocument.belongsTo(Expense, { foreignKey: 'expense_id', as: 'expense' });
+DianReceivedDocument.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+
 // DianEvent ↔ Tenant
 DianEvent.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.hasMany(DianEvent, { foreignKey: 'tenant_id', as: 'dian_events' });
@@ -1037,6 +1043,7 @@ module.exports = {
   DianEvent,
   RadianEvent,
   RadianAlert,
+  DianReceivedDocument,
   SupportDocument,
   SupportDocumentAdjustment,
   Expense,

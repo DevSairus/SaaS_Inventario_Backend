@@ -31,10 +31,15 @@ async function buildRecords(tenantId, year) {
 
   const purchaseRows = await sequelize.query(
     `SELECT p.supplier_id, s.tax_id, s.document_type, s.person_type, s.name, s.business_name, s.city_code, s.address,
-            SUM(p.total_amount - p.paid_amount) AS sal
+            -- Saldo con el proveedor: neto de retenciones (lo retenido es un
+            -- pasivo con la DIAN, no con el proveedor).
+            SUM(p.total_amount - COALESCE(p.total_retentions, 0) - p.paid_amount) AS sal
      FROM "${schema}"."purchases" p
      JOIN "${schema}"."suppliers" s ON s.id = p.supplier_id
-     WHERE p.tenant_id = :tenantId AND p.status NOT IN ('draft', 'cancelled')
+     WHERE p.tenant_id = :tenantId
+       -- Obligación real: recibida (total/parcial) o confirmada con factura.
+       AND (p.status IN ('partially_received', 'received')
+            OR (p.status = 'confirmed' AND COALESCE(p.invoice_number, '') <> ''))
        AND p.payment_status IN ('pending', 'partial')
        AND p.purchase_date <= :cutoff
      GROUP BY p.supplier_id, s.tax_id, s.document_type, s.person_type, s.name, s.business_name, s.city_code, s.address`,
@@ -43,7 +48,7 @@ async function buildRecords(tenantId, year) {
 
   const expenseRows = await sequelize.query(
     `SELECT e.supplier_id, s.tax_id, s.document_type, s.person_type, s.name, s.business_name, s.city_code, s.address,
-            SUM(e.total_amount - e.paid_amount) AS sal
+            SUM(e.total_amount - COALESCE(e.total_retentions, 0) - e.paid_amount) AS sal
      FROM "${schema}"."expenses" e
      JOIN "${schema}"."suppliers" s ON s.id = e.supplier_id
      WHERE e.tenant_id = :tenantId AND e.supplier_id IS NOT NULL

@@ -169,6 +169,23 @@ function parseDIANFormat(xml) {
   const cufe = extractText(getField(invoice, 'uuid'));
   const issueTime = extractText(getField(invoice, 'issuetime'));
 
+  // Forma de pago y vencimiento (Anexo técnico FE, UBL 2.1):
+  //   cac:PaymentMeans/cbc:ID              1 = contado, 2 = crédito
+  //   cac:PaymentMeans/cbc:PaymentMeansCode medio (10 efectivo, 42 consignación, 47 transferencia, ZZZ...)
+  //   cac:PaymentMeans/cbc:PaymentDueDate  vencimiento — obligatorio si es crédito
+  // cbc:DueDate (raíz) es opcional y muchos emisores no lo envían, por eso
+  // antes las facturas a crédito llegaban sin fecha de vencimiento.
+  const paymentMeansRaw = getField(invoice, 'paymentmeans');
+  const paymentMeans = Array.isArray(paymentMeansRaw) ? paymentMeansRaw[0] : paymentMeansRaw;
+  const paymentFormCode = paymentMeans ? extractText(getField(paymentMeans, 'id')) : null;
+  const paymentMeansCode = paymentMeans ? extractText(getField(paymentMeans, 'paymentmeanscode')) : null;
+  const paymentDueDate = paymentMeans ? extractText(getField(paymentMeans, 'paymentduedate')) : null;
+  const paymentForm = paymentFormCode === '1' ? 'cash' : (paymentFormCode === '2' ? 'credit' : null);
+  const paymentTermsRaw = getField(invoice, 'paymentterms');
+  const paymentTermsNote = paymentTermsRaw
+    ? extractText(getField(Array.isArray(paymentTermsRaw) ? paymentTermsRaw[0] : paymentTermsRaw, 'note'))
+    : null;
+
   console.log('📄 Invoice info:', { number: invoiceNumber, date: invoiceDate, cufe, issueTime });
 
   // Items de la factura
@@ -189,9 +206,13 @@ function parseDIANFormat(xml) {
     invoice: {
       number: invoiceNumber,
       date: invoiceDate,
-      due_date: dueDate,
+      // Vencimiento efectivo: el de PaymentMeans manda sobre cbc:DueDate.
+      due_date: paymentDueDate || dueDate,
       cufe: cufe,
-      issue_time: issueTime
+      issue_time: issueTime,
+      payment_form: paymentForm,
+      payment_means_code: paymentMeansCode,
+      payment_terms_note: paymentTermsNote,
     },
     items: items,
     totals: totals,

@@ -35,4 +35,23 @@ router.post('/preview', upload.single('file'), previewInvoice);
  */
 router.post('/import', upload.single('file'), importInvoice);
 
+// ── Documentos recibidos DIAN (Excel del portal) ─────────────────────
+const dianDocs = require('../controllers/dian/dianReceivedDocuments.controller');
+const uploadExcel = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (file.originalname.toLowerCase().endsWith('.xlsx')) cb(null, true);
+    else cb(new Error('Solo se permite el Excel (.xlsx) descargado del portal DIAN'));
+  },
+});
+
+router.post('/dian-documents/upload', uploadExcel.single('file'), dianDocs.upload);
+router.get('/dian-documents', dianDocs.list);
+router.post('/dian-documents/load-batch', dianDocs.loadBatch);
+router.patch('/dian-documents/batch', dianDocs.updateStatus);
+router.get('/dian-documents/:id', dianDocs.getById);
+router.patch('/dian-documents/:id', dianDocs.updateStatus);
+router.post('/dian-documents/:id/fetch-xml', dianDocs.fetchXml);
+
 module.exports = router;

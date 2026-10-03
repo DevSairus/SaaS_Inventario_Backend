@@ -5,6 +5,7 @@ const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
+const { purchaseNetPayable, purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2 } = require('../../utils/purchaseAmounts');
 
 // Obtener resumen de cuentas por pagar
 const getAccountsPayableSummary = async (req, res) => {
@@ -14,7 +15,9 @@ const getAccountsPayableSummary = async (req, res) => {
 
     const where = {
       tenant_id: tenantId,
-      status: { [Op.in]: ['confirmed', 'received'] }, // solo compras ya formalizadas
+      // Solo obligaciones reales: mercancía recibida, o factura del proveedor
+      // registrada. Una orden confirmada sin nada de eso es solo un pedido.
+      ...payablePurchaseWhere(),
       payment_status: { [Op.in]: ['pending', 'partial'] }
     };
 
@@ -45,7 +48,7 @@ const getAccountsPayableSummary = async (req, res) => {
       order: [['purchase_date', 'ASC']],
       attributes: [
         'id', 'purchase_number', 'purchase_date', 'due_date', 'supplier_id',
-        'total_amount', 'paid_amount', 'payment_status', 'payment_method',
+        'total_amount', 'total_retentions', 'paid_amount', 'payment_status', 'payment_method',
         'payment_history', 'invoice_number', 'status'
       ]
     });
@@ -55,7 +58,7 @@ const getAccountsPayableSummary = async (req, res) => {
     const today = new Date();
 
     const purchasesWithDetails = pendingPurchases.map(purchase => {
-      const balance = parseFloat(purchase.total_amount) - parseFloat(purchase.paid_amount || 0);
+      const balance = purchaseBalance(purchase); // neto de retenciones
       // Si hay due_date se usa esa fecha para vencimiento; si no, se cae al
       // mismo criterio de 30 días desde la compra que usa Cartera.
       const referenceDate = purchase.due_date ? new Date(purchase.due_date) : new Date(purchase.purchase_date);
@@ -77,6 +80,8 @@ const getAccountsPayableSummary = async (req, res) => {
         supplier: purchase.supplier,
         supplier_name: purchase.supplier?.name || 'Sin proveedor',
         total_amount: parseFloat(purchase.total_amount),
+        total_retentions: parseFloat(purchase.total_retentions || 0),
+        net_payable: purchaseNetPayable(purchase),
         paid_amount: parseFloat(purchase.paid_amount || 0),
         balance,
         payment_status: purchase.payment_status,
@@ -146,7 +151,7 @@ const getSupplierAccountsPayable = async (req, res) => {
       where: {
         tenant_id: tenantId,
         supplier_id: supplierId,
-        status: { [Op.in]: ['confirmed', 'received'] },
+        ...payablePurchaseWhere(),
         payment_status: { [Op.in]: ['pending', 'partial'] }
       },
       order: [['purchase_date', 'DESC']]
@@ -157,7 +162,7 @@ const getSupplierAccountsPayable = async (req, res) => {
     const today = new Date();
 
     const purchasesWithDetails = purchases.map(purchase => {
-      const balance = parseFloat(purchase.total_amount) - parseFloat(purchase.paid_amount || 0);
+      const balance = purchaseBalance(purchase); // neto de retenciones
       const referenceDate = purchase.due_date ? new Date(purchase.due_date) : new Date(purchase.purchase_date);
       const daysOverdue = purchase.due_date
         ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
@@ -214,7 +219,7 @@ const getPaymentHistory = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Compra no encontrada' });
     }
 
-    const balance = parseFloat(purchase.total_amount) - parseFloat(purchase.paid_amount || 0);
+    const balance = purchaseBalance(purchase); // neto de retenciones
     const paymentHistory = purchase.payment_history || [];
 
     const userIds = [...new Set(paymentHistory.map(p => p.user_id).filter(Boolean))];
@@ -238,6 +243,8 @@ const getPaymentHistory = async (req, res) => {
           purchase_date: purchase.purchase_date,
           supplier: purchase.supplier,
           total_amount: parseFloat(purchase.total_amount),
+          total_retentions: parseFloat(purchase.total_retentions || 0),
+          net_payable: purchaseNetPayable(purchase),
           paid_amount: parseFloat(purchase.paid_amount || 0),
           balance,
           payment_status: purchase.payment_status
@@ -259,7 +266,7 @@ const getAgingReport = async (req, res) => {
     const purchases = await Purchase.findAll({
       where: {
         tenant_id: tenantId,
-        status: { [Op.in]: ['confirmed', 'received'] },
+        ...payablePurchaseWhere(),
         payment_status: { [Op.in]: ['pending', 'partial'] }
       },
       include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'email', 'phone'] }],
@@ -271,7 +278,7 @@ const getAgingReport = async (req, res) => {
     const totals = { current: 0, days_31_60: 0, days_61_90: 0, over_90: 0, total: 0 };
 
     purchases.forEach(purchase => {
-      const balance = parseFloat(purchase.total_amount) - parseFloat(purchase.paid_amount || 0);
+      const balance = purchaseBalance(purchase); // neto de retenciones
       const referenceDate = purchase.due_date ? new Date(purchase.due_date) : new Date(purchase.purchase_date);
       const daysOverdue = Math.max(Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)), 0);
 
@@ -282,6 +289,8 @@ const getAgingReport = async (req, res) => {
         supplier_id: purchase.supplier_id,
         supplier: purchase.supplier,
         total_amount: parseFloat(purchase.total_amount),
+        total_retentions: parseFloat(purchase.total_retentions || 0),
+        net_payable: purchaseNetPayable(purchase),
         paid_amount: parseFloat(purchase.paid_amount || 0),
         balance,
         days_overdue: daysOverdue
@@ -309,7 +318,7 @@ const registerPayment = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.user.tenant_id;
     const userId = req.user.id;
-    const { amount, payment_method, payment_date, notes } = req.body;
+    const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await transaction.rollback();
@@ -331,30 +340,31 @@ const registerPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se puede registrar un pago en una compra en borrador o cancelada' });
     }
 
-    const total = parseFloat(purchase.total_amount);
+    // Lo que se le debe al proveedor es el neto de retenciones (ver
+    // utils/purchaseAmounts.js); antes se usaba total_amount.
     const alreadyPaid = parseFloat(purchase.paid_amount || 0);
-    const remaining = total - alreadyPaid;
+    const remaining = purchaseBalance(purchase);
 
     if (remaining <= 0) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Esta compra ya está pagada en su totalidad' });
     }
 
-    const effectiveAmount = Math.min(parseFloat(amount), remaining);
-    const paid_amount = alreadyPaid + effectiveAmount;
+    const effectiveAmount = round2(Math.min(parseFloat(amount), remaining));
+    const paid_amount = round2(alreadyPaid + effectiveAmount);
+    const payment_status = purchasePaymentStatus(purchase, paid_amount);
 
-    let payment_status = 'pending';
-    if (paid_amount >= total) payment_status = 'paid';
-    else if (paid_amount > 0) payment_status = 'partial';
-
-    const payment_history = [...(purchase.payment_history || [])];
-    payment_history.push({
+    const payment = {
+      id: require('crypto').randomUUID(),
       date: payment_date || new Date(),
       amount: effectiveAmount,
       method: payment_method || purchase.payment_method || 'Efectivo',
+      bank_account_id: bank_account_id || null,
       user_id: userId,
-      notes: notes || null
-    });
+      notes: notes || null,
+      journal_entry_id: null,
+    };
+    const payment_history = [...(purchase.payment_history || []), payment];
 
     await purchase.update(
       { paid_amount, payment_status, payment_method: payment_method || purchase.payment_method, payment_history },
@@ -362,6 +372,16 @@ const registerPayment = async (req, res) => {
     );
 
     await transaction.commit();
+
+    // Asiento del pago (débito proveedores / crédito caja-bancos). No
+    // bloqueante: si falla (ej. falta un mapeo), el pago queda registrado y
+    // el asiento se puede generar después; se loguea.
+    try {
+      const { recordPurchasePaymentEntries } = require('../../services/inventory/purchasePayments.service');
+      await recordPurchasePaymentEntries(purchase.id, tenantId, userId);
+    } catch (e) {
+      require('../../config/logger').warn(`[accounting] Asiento de pago a proveedor (compra ${id}): ${e.message}`);
+    }
 
     // 🔔 Verificación automática de alertas de cuentas por pagar
     markPurchaseForAlertCheck(res, id, tenantId);

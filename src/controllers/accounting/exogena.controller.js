@@ -23,7 +23,7 @@ const { ExogenaFormatConfig, ExogenaConceptMapping, ExogenaManualRecord, Exogena
 const { EXOGENA_FORMATS, EXOGENA_FORMAT_BY_CODE, EXOGENA_DOCUMENT_TYPES } = require('../../data/exogena-catalogs');
 const { SUGGESTED_CONCEPTS } = require('../../data/exogena-concept-suggestions');
 const { checkReadiness } = require('../../services/exogena/exogenaReadiness.service');
-const { generate, ExogenaGenerationError } = require('../../services/exogena/exogenaGenerator.service');
+const { generate, generateExcel, ExogenaGenerationError } = require('../../services/exogena/exogenaGenerator.service');
 const FORMAT_SERVICES = require('../../services/exogena/formatServices');
 const logger = require('../../config/logger');
 
@@ -86,12 +86,21 @@ exports.getConcepts = async (req, res) => {
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
     const sourceKeys = await service.fetchSourceKeys(req.tenant_id, year);
     const mappings = await ExogenaConceptMapping.findAll({ where: { tenant_id: req.tenant_id, format_code: req.params.code } });
+    const sourceLabels = service.describeSourceKeys ? await service.describeSourceKeys(req.tenant_id, sourceKeys) : {};
+    // Valor de cada renglón, para validar de un vistazo.
+    const sourceTotals = service.summarizeSourceKeys ? await service.summarizeSourceKeys(req.tenant_id, year) : {};
+    // Mapeo general 'purchase' guardado antes de separar compras por concepto:
+    // se informa para que el front lo muestre como respaldo.
+    const legacyPurchase = mappings.find((m) => m.source_key === 'purchase')?.concept_code || null;
 
     res.json({
       success: true,
       data: {
         needs_mapping: true,
         source_keys: sourceKeys,
+        source_labels: sourceLabels,
+        source_totals: sourceTotals,
+        legacy_purchase_concept: legacyPurchase,
         mappings,
         // Sugerencias tomadas literalmente de la tabla de conceptos de la
         // Resolución 000227/2025 (ver exogena-concept-suggestions.js) --
@@ -145,14 +154,18 @@ exports.readiness = async (req, res) => {
   }
 };
 
-// GET /exogena/formats/:code/generate?year=
+// GET /exogena/formats/:code/generate?year=&format=xml|excel
+// format=excel devuelve los mismos registros en un .xlsx legible (revisión
+// con el contador / compartir); el XML sigue siendo lo que se presenta.
 exports.generateFile = async (req, res) => {
   try {
     const meta = requireKnownFormat(req.params.code, res);
     if (!meta) return;
 
     const year = parseInt(req.query.year, 10) || new Date().getFullYear();
-    const { filename, buffer, contentType } = await generate(req.tenant_id, req.params.code, year);
+    const { filename, buffer, contentType } = req.query.format === 'excel'
+      ? await generateExcel(req.tenant_id, req.params.code, year, req.tenant)
+      : await generate(req.tenant_id, req.params.code, year);
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

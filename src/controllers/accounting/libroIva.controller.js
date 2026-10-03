@@ -3,6 +3,7 @@ const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { AccountMapping } = require('../../models');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { fetchEntryDetails } = require('../../services/accounting/entryDetails.service');
 const {
   generateLibroIvaExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -137,6 +138,11 @@ exports.libroIvaExport = async (req, res) => {
     const name = generatedByName(req);
 
     if (format === 'excel') {
+      // Hoja anexa con el detalle completo de cada asiento (base, contrapartidas).
+      data.entry_details = await fetchEntryDetails(
+        req.tenant_id,
+        [...data.generado, ...data.descontable].map((r) => r.entry_id)
+      );
       const buffer = await generateLibroIvaExcel(data, req.tenant, { from: data.from, to: data.to }, name);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="Libro-IVA-${data.from}_${data.to}.xlsx"`);

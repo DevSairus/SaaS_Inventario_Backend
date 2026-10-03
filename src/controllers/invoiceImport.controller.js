@@ -5,6 +5,7 @@ const { Purchase, PurchaseItem, Product, Supplier, ProductSupplier } = require('
 const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../config/tenantContext');
+const taxService = require('../services/taxService');
 
 /**
  * Importar factura electrónica desde archivo ZIP
@@ -28,82 +29,115 @@ const importInvoice = async (req, res) => {
   return importInvoiceInner(req, res);
 };
 
-const importInvoiceInner = async (req, res) => {
-  const transaction = await sequelize.transaction();
+class InvoiceImportError extends Error {
+  constructor(message, status, payload = {}) {
+    super(message);
+    this.status = status;
+    this.payload = payload;
+  }
+}
 
+/**
+ * Origen del XML: un ZIP subido (flujo de siempre) o un documento del
+ * registro de documentos recibidos DIAN (dian_document_id) cuyo XML ya se
+ * descargó con GetXmlByDocumentKey.
+ * @returns {Promise<{ xml: string|null, pdf: Buffer|null, dianDocument: object|null }>}
+ */
+async function resolveXmlSource(req) {
+  const dianDocumentId = req.body?.dian_document_id;
+  if (dianDocumentId) {
+    const { DianReceivedDocument } = require('../models');
+    const doc = await DianReceivedDocument.findOne({ where: { id: dianDocumentId, tenant_id: req.user.tenant_id } });
+    if (!doc) throw new InvoiceImportError('Documento DIAN no encontrado', 404);
+    if (!doc.xml_content) {
+      throw new InvoiceImportError('Este documento aún no tiene el XML: usa "Obtener detalle desde DIAN" o carga su ZIP', 400);
+    }
+    return { xml: doc.xml_content, pdf: null, dianDocument: doc };
+  }
+  if (!req.file) throw new InvoiceImportError('No se ha cargado ningún archivo', 400);
+  const zipData = await extractZipContent(req.file.buffer);
+  if (!zipData.xml) throw new InvoiceImportError('No se encontró archivo XML en el ZIP', 400);
+  return { ...zipData, dianDocument: null };
+}
+
+/**
+ * Tras crear la compra, marca como cargado el documento del registro DIAN
+ * correspondiente (por id si vino de ahí, o por CUFE si se subió el ZIP de
+ * una factura que ya estaba registrada desde el Excel). Así una futura carga
+ * del Excel no la vuelve a mostrar como pendiente.
+ */
+async function linkReceivedDocument(tenant_id, purchase, dianDocumentId = null) {
   try {
-    const tenant_id = req.user.tenant_id;
-    const user_id = req.user.id;
-    const profit_margin = parseFloat(req.body.profit_margin) || 30;
-    const margin_multiplier = 1 + (profit_margin / 100);
-    const supplier_name_override = req.body.supplier_name?.trim() || null;
-    const removed_items  = JSON.parse(req.body.removed_items || '[]');
-    const shipping_cost   = parseFloat(req.body.shipping_cost) || 0;
-    const discount_amount = parseFloat(req.body.discount_amount) || 0;
-    // Override de IVA por ítem: { "0": 19, "1": 0, "2": 5 } (índice original → porcentaje)
-    const items_tax_overrides = JSON.parse(req.body.items_tax_overrides || '{}');
-    // Decisiones del usuario en el modal para ítems sin mapeo exacto por código:
-    // { "0": "<product_id>", "2": "CREATE_NEW" } (índice original → decisión).
-    // Es la única vía por la que se guarda un mapeo código-proveedor nuevo (ver
-    // processInvoiceItems) — un match automático por SKU interno o por nombre
-    // aproximado nunca guarda el mapeo por sí solo.
-    const manual_links = JSON.parse(req.body.manual_links || '{}');
-    // Datos que el usuario definió en el modal para el producto a crear en
-    // ítems marcados CREATE_NEW: { "2": { sku, barcode, name, category_id,
-    // brand, unit_of_measure, price_includes_tax } } (índice original → datos).
-    const new_product_data = JSON.parse(req.body.new_product_data || '{}');
+    const { DianReceivedDocument } = require('../models');
+    const where = dianDocumentId
+      ? { id: dianDocumentId, tenant_id }
+      : (purchase.cufe ? { tenant_id, cufe: purchase.cufe } : null);
+    if (!where) return;
+    await DianReceivedDocument.update(
+      { status: 'loaded', purchase_id: purchase.id, supplier_id: purchase.supplier_id },
+      { where }
+    );
+  } catch (e) {
+    // El registro DIAN es informativo: un fallo aquí no debe tumbar la importación.
+    console.warn('⚠️  No se pudo vincular el documento DIAN recibido:', e.message);
+  }
+}
 
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No se ha cargado ningún archivo'
-      });
-    }
+// "Contado" / "Crédito" (texto del Excel DIAN) → 'cash' | 'credit' | null
+function paymentFormFromText(text) {
+  const t = String(text || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+  if (t.includes('contado')) return 'cash';
+  if (t.includes('credito')) return 'credit';
+  return null;
+}
 
-    console.log('📦 Procesando archivo:', req.file.originalname);
+/**
+ * Núcleo de la importación: XML → proveedor, productos y compra en borrador.
+ * Lo usan el flujo del ZIP (con las decisiones del modal en `opts`) y la carga
+ * masiva desde el registro DIAN (sin decisiones: mapeo automático).
+ */
+async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id }, opts = {}) {
+  const profit_margin = parseFloat(opts.profit_margin) || 30;
+  const margin_multiplier = 1 + (profit_margin / 100);
+  const supplier_name_override = opts.supplier_name?.trim() || null;
+  const removed_items = opts.removed_items || [];
+  const shipping_cost = parseFloat(opts.shipping_cost) || 0;
+  const discount_amount = parseFloat(opts.discount_amount) || 0;
+  // Override de IVA por ítem: { "0": 19, "1": 0, "2": 5 } (índice original → porcentaje)
+  const items_tax_overrides = opts.items_tax_overrides || {};
+  // Decisiones del usuario en el modal para ítems sin mapeo exacto por código:
+  // { "0": "<product_id>", "2": "CREATE_NEW" } (índice original → decisión).
+  // Es la única vía por la que se guarda un mapeo código-proveedor nuevo (ver
+  // processInvoiceItems) — un match automático por SKU interno o por nombre
+  // aproximado nunca guarda el mapeo por sí solo.
+  const manual_links = opts.manual_links || {};
+  // Datos que el usuario definió en el modal para el producto a crear en
+  // ítems marcados CREATE_NEW: { "2": { sku, barcode, name, category_id,
+  // brand, unit_of_measure, price_includes_tax } } (índice original → datos).
+  const new_product_data = opts.new_product_data || {};
 
-    const zipData = await extractZipContent(req.file.buffer);
-    
-    if (!zipData.xml) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'No se encontró archivo XML en el ZIP'
-      });
-    }
+  const invoiceData = await parseInvoiceXML(xmlContent);
+  // Respaldo de la forma de pago cuando el XML no trae PaymentMeans/ID:
+  // la columna "Forma de Pago" del Excel DIAN ("Contado" / "Crédito").
+  const hint = paymentFormFromText(opts.payment_form_hint);
+  if (hint) invoiceData.invoice.payment_form_hint = hint;
+  const validation = validateParsedData(invoiceData);
+  if (!validation.isValid) {
+    throw new InvoiceImportError('Datos de factura inválidos', 400, { errors: validation.errors });
+  }
 
-    console.log('📄 XML encontrado, parseando...');
-
-    const invoiceData = await parseInvoiceXML(zipData.xml);
-    const validation = validateParsedData(invoiceData);
-    
-    if (!validation.isValid) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: 'Datos de factura inválidos',
-        errors: validation.errors
-      });
-    }
-
-    console.log('✅ Datos parseados correctamente');
-
+  const transaction = await sequelize.transaction();
+  try {
     // Verificar si la factura ya fue importada
     const invoiceNumber = invoiceData.invoice.number;
     const existingPurchase = await Purchase.findOne({
-      where: {
-        tenant_id,
-        invoice_number: invoiceNumber
-      },
+      where: { tenant_id, invoice_number: invoiceNumber },
       include: [{ model: Supplier, as: 'supplier' }],
       transaction
     });
 
     if (existingPurchase) {
-      await transaction.rollback();
-      return res.status(409).json({
-        success: false,
-        message: `Esta factura ya fue importada anteriormente`,
+      throw new InvoiceImportError('Esta factura ya fue importada anteriormente', 409, {
         error: 'DUPLICATE_INVOICE',
         data: {
           invoice_number: invoiceNumber,
@@ -114,11 +148,10 @@ const importInvoiceInner = async (req, res) => {
             total_amount: existingPurchase.total_amount,
             created_at: existingPurchase.created_at
           }
-        }
+        },
+        existingPurchase,
       });
     }
-
-    console.log('✅ Factura no duplicada, continuando...');
 
     // Si el usuario editó el nombre del proveedor en el modal, usarlo
     const supplierData = supplier_name_override
@@ -130,7 +163,6 @@ const importInvoiceInner = async (req, res) => {
       .map((item, originalIdx) => ({
         ...item,
         original_index: originalIdx, // para resolver manual_links[idx] tras el filtro
-        // Si hay override de IVA para este índice original, aplicarlo
         tax_percentage: items_tax_overrides[originalIdx] !== undefined
           ? parseFloat(items_tax_overrides[originalIdx])
           : item.tax_percentage,
@@ -145,7 +177,7 @@ const importInvoiceInner = async (req, res) => {
 
     const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, margin_multiplier, manual_links, new_product_data);
     const purchase = await createPurchaseFromInvoice(
-      invoiceData,
+      { ...invoiceData, xmlContent: invoiceData.xmlContent || xmlContent },
       supplier,
       processedItems,
       tenant_id,
@@ -153,10 +185,48 @@ const importInvoiceInner = async (req, res) => {
       transaction,
       shipping_cost,
       discount_amount,
-      req.branch_id || null
+      branch_id || null
     );
 
     await transaction.commit();
+    return { purchase, supplier, processedItems, invoiceData };
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    // Carrera entre dos importaciones concurrentes de la misma factura (doble
+    // clic, reintento): ambas pasan el chequeo previo de duplicado (findOne)
+    // antes de que la primera confirme, y la segunda choca acá contra el
+    // índice único tenant_invoice_number_unique.
+    if (error.name === 'SequelizeUniqueConstraintError' &&
+        ['tenant_invoice_number_unique', 'purchases_tenant_cufe_unique'].includes(error.original?.constraint)) {
+      throw new InvoiceImportError('Esta factura ya fue importada anteriormente', 409, { error: 'DUPLICATE_INVOICE' });
+    }
+    throw error;
+  }
+}
+
+const importInvoiceInner = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const source = await resolveXmlSource(req);
+    console.log('📄 XML encontrado, parseando...');
+
+    const { purchase, supplier, processedItems, invoiceData } = await importInvoiceFromXml(
+      source.xml,
+      { tenant_id, user_id: req.user.id, branch_id: req.branch_id },
+      {
+        profit_margin: req.body.profit_margin,
+        supplier_name: req.body.supplier_name,
+        removed_items: JSON.parse(req.body.removed_items || '[]'),
+        shipping_cost: req.body.shipping_cost,
+        discount_amount: req.body.discount_amount,
+        items_tax_overrides: JSON.parse(req.body.items_tax_overrides || '{}'),
+        manual_links: JSON.parse(req.body.manual_links || '{}'),
+        new_product_data: JSON.parse(req.body.new_product_data || '{}'),
+        payment_form_hint: source.dianDocument?.payment_form || null,
+      }
+    );
+
+    await linkReceivedDocument(tenant_id, purchase, source.dianDocument?.id || null);
 
     const completePurchase = await Purchase.findByPk(purchase.id, {
       include: [
@@ -185,24 +255,10 @@ const importInvoiceInner = async (req, res) => {
     });
 
   } catch (error) {
-    if (transaction && !transaction.finished) {
-      await transaction.rollback();
+    if (error instanceof InvoiceImportError) {
+      const { existingPurchase, ...payload } = error.payload || {};
+      return res.status(error.status).json({ success: false, message: error.message, ...payload });
     }
-
-    // Carrera entre dos importaciones concurrentes de la misma factura (doble
-    // clic, reintento): ambas pasan el chequeo previo de duplicado (findOne)
-    // antes de que la primera confirme, y la segunda choca acá contra el
-    // índice único tenant_invoice_number_unique. Mismo resultado 409 que el
-    // chequeo normal, en vez de un 500 genérico.
-    if (error.name === 'SequelizeUniqueConstraintError' &&
-        ['tenant_invoice_number_unique', 'purchases_tenant_cufe_unique'].includes(error.original?.constraint)) {
-      return res.status(409).json({
-        success: false,
-        message: 'Esta factura ya fue importada anteriormente',
-        error: 'DUPLICATE_INVOICE'
-      });
-    }
-
     console.error('❌ Error importando factura:', error);
     res.status(500).json({
       success: false,
@@ -227,23 +283,20 @@ const previewInvoice = async (req, res) => {
 
 const previewInvoiceInner = async (req, res) => {
   try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No se ha cargado ningún archivo'
-      });
-    }
-
-    const zipData = await extractZipContent(req.file.buffer);
-    
-    if (!zipData.xml) {
-      return res.status(400).json({
-        success: false,
-        message: 'No se encontró archivo XML en el ZIP'
-      });
+    let zipData;
+    try {
+      zipData = await resolveXmlSource(req);
+    } catch (e) {
+      if (e instanceof InvoiceImportError) return res.status(e.status).json({ success: false, message: e.message });
+      throw e;
     }
 
     const invoiceData = await parseInvoiceXML(zipData.xml);
+    // Mismo respaldo que en la importación: "Forma de Pago" del Excel DIAN
+    // si el XML no trae PaymentMeans/ID.
+    if (!invoiceData.invoice.payment_form && zipData.dianDocument) {
+      invoiceData.invoice.payment_form = paymentFormFromText(zipData.dianDocument.payment_form);
+    }
     const validation = validateParsedData(invoiceData);
 
     // Verificar si la factura ya existe
@@ -627,14 +680,25 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
   const total_amount = subtotal + tax_amount + shipping_cost - discount_amount;
 
   // Plazo/fecha de pago, en orden de prioridad:
-  //  1. Fecha de vencimiento que ya trae la propia factura XML (PaymentDueDate)
+  //  0. Forma de pago CONTADO (PaymentMeans/ID=1 en el XML o, si el XML no la
+  //     trae, "Forma de Pago" del Excel DIAN): vence el mismo día de emisión.
+  //     Queda PENDIENTE, no pagada — "contado" en la DIAN no prueba que ya se
+  //     pagó; el pago se registra al confirmar la compra.
+  //  1. Fecha de vencimiento que ya trae la propia factura XML
+  //     (PaymentMeans/PaymentDueDate, o cbc:DueDate)
   //  2. Calculada a partir del plazo por defecto configurado en el proveedor
   //  3. Sin plazo conocido → queda pendiente sin fecha (se puede editar a mano)
   const purchase_date = invoiceData.invoice.date || new Date();
+  const paymentForm = invoiceData.invoice.payment_form || invoiceData.invoice.payment_form_hint || null;
   let due_date = null;
   let payment_terms = null;
+  let forceCashPending = false;
 
-  if (invoiceData.invoice.due_date) {
+  if (paymentForm === 'cash') {
+    due_date = String(purchase_date).slice(0, 10);
+    payment_terms = 0;
+    forceCashPending = true;
+  } else if (invoiceData.invoice.due_date) {
     due_date = invoiceData.invoice.due_date;
     payment_terms = Math.round((new Date(due_date) - new Date(purchase_date)) / (1000 * 60 * 60 * 24));
   } else if (supplier.payment_terms !== null && supplier.payment_terms !== undefined) {
@@ -648,7 +712,25 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
 
   // Plazo 0 (o factura ya vencida el mismo día de emisión) = compra de contado:
   // se marca pagada de inmediato y no debe aparecer en cuentas por pagar.
-  const isCash = payment_terms === 0;
+  const isCash = payment_terms === 0 && !forceCashPending;
+
+  // Retenciones por defecto del proveedor (conceptos marcados "aplicar por
+  // defecto" en su ficha). La compra queda en borrador, así que el usuario
+  // puede ajustar conceptos/bases desde el formulario antes de confirmarla.
+  const { Tenant } = require('../models');
+  const tenantForRetentions = await Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction });
+  const { computePurchaseRetentions } = require('../services/retentionEngine.service');
+  const retentions = await computePurchaseRetentions({
+    tenantId: tenant_id,
+    taxConfig: tenantForRetentions?.tax_config || {},
+    supplier,
+    items: items.map(i => ({ product_id: i.product_id, subtotal: i.subtotal, tax_amount: i.tax_amount })),
+    transaction,
+  });
+  const tax_breakdown = taxService.buildTaxBreakdown(
+    items.map(i => ({ subtotal: i.subtotal, tax_amount: i.tax_amount, tax_percentage: i.tax_percentage })),
+    retentions
+  );
 
   // generatePurchaseNumber lee el último número y le suma 1 -- no es atómico,
   // así que dos importaciones concurrentes (mismo problema que ya vimos con el
@@ -671,7 +753,18 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
         due_date: isCash ? null : due_date,
         payment_terms,
         payment_status: isCash ? 'paid' : 'pending',
-        paid_amount: isCash ? total_amount : 0,
+        // Contado: se paga el neto (total - retenciones), con su registro de
+        // pago — el asiento del pago se genera al confirmar la compra.
+        paid_amount: isCash ? Math.round((total_amount - retentions.total) * 100) / 100 : 0,
+        payment_history: isCash
+          ? [{
+            ...require('../services/inventory/purchasePayments.service').newPaymentRecord({
+              date: purchase_date, amount: Math.round((total_amount - retentions.total) * 100) / 100,
+              method: 'Efectivo', user_id, notes: 'Compra de contado',
+            }),
+            source: 'creation_cash',
+          }]
+          : [],
         subtotal,
         tax_amount,
         discount_amount,
@@ -688,7 +781,9 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
         cufe: invoiceData.invoice.cufe || null,
         dian_issue_date: invoiceData.invoice.date || null,
         dian_issue_time: invoiceData.invoice.issue_time || null,
-        supplier_xml: invoiceData.xmlContent || null
+        supplier_xml: invoiceData.xmlContent || null,
+        ...taxService.purchaseRetentionFields(retentions),
+        tax_breakdown,
       }, { transaction: t }));
       break;
     } catch (err) {
@@ -750,5 +845,8 @@ async function generatePurchaseNumber(tenant_id, transaction) {
 // ============== EXPORTS ==============
 module.exports = {
   importInvoice,
-  previewInvoice
+  previewInvoice,
+  importInvoiceFromXml,
+  linkReceivedDocument,
+  InvoiceImportError,
 };

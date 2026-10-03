@@ -216,6 +216,12 @@ const createSupplierReturn = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Compra no encontrada' });
     }
 
+    // Solo se devuelve mercancía que efectivamente entró al inventario.
+    if (!['received', 'partially_received'].includes(purchase.status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Solo se puede devolver mercancía de una compra recibida (total o parcialmente)' });
+    }
+
     // Validar items
     for (const item of items) {
       const purchaseItem = purchase.items.find(pi => pi.id === item.purchase_item_id);
@@ -225,11 +231,16 @@ const createSupplierReturn = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Producto no encontrado en la compra' });
       }
 
-      if (parseFloat(item.quantity) > parseFloat(purchaseItem.quantity)) {
+      // Tope: lo RECIBIDO (con recepción parcial puede ser menos que lo
+      // pedido). Compras viejas sin received_quantity usan lo pedido.
+      const receivedQty = parseFloat(purchaseItem.received_quantity) > 0
+        ? parseFloat(purchaseItem.received_quantity)
+        : parseFloat(purchaseItem.quantity);
+      if (parseFloat(item.quantity) > receivedQty) {
         await transaction.rollback();
         return res.status(400).json({
           success: false,
-          message: `Cantidad a devolver excede la cantidad comprada`
+          message: `Cantidad a devolver de ${purchaseItem.product_name} excede la recibida (${receivedQty})`
         });
       }
     }

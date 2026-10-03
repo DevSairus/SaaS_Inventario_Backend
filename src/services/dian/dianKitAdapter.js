@@ -1411,6 +1411,23 @@ async function lookupAcquirer(tenant, { identificationType, identificationNumber
 }
 
 /**
+ * Descarga el XML de un documento electrónico por su CUFE/CUDE
+ * (GetXmlByDocumentKey). Mismo esquema de proxy que getStatusByCufe(): la
+ * IP de Railway no está en la whitelist de la DIAN.
+ * @returns {Promise<{ found: boolean, xml: string|null, code: string, message: string }>}
+ */
+async function getXmlByDocumentKey(tenant, cufe) {
+  const cfg = tenant.dian_config || {};
+  const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
+  if (dianServiceUrls.length) {
+    return callRemoteDianService(dianServiceUrls, '/api/dian/get-xml-by-document-key', { config: cfg, cufe });
+  }
+  const core = require('@dian-kit/core');
+  const { getXmlByDocumentKey: fetchXml } = require('./dianXmlByDocumentKey');
+  return fetchXml(cfg, cufe, core.loadP12);
+}
+
+/**
  * Llama al servicio DIAN remoto (Raspberry Pi / PC de respaldo), con
  * failover en orden sobre `baseUrls`.
  */
@@ -1447,6 +1464,7 @@ module.exports = {
   createSupportDocumentAdjustment,
   sendToDian,
   getStatusByCufe,
+  getXmlByDocumentKey,
   getNumberingRange,
   lookupAcquirer,
   computeNitCheckDigit,

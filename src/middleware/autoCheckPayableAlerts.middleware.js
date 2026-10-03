@@ -45,14 +45,15 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
     const purchase = await Purchase.findOne({
       where: { id: purchase_id, tenant_id },
       attributes: [
-        'id', 'due_date', 'purchase_date', 'total_amount', 'paid_amount',
-        'payment_status', 'status'
+        'id', 'due_date', 'purchase_date', 'total_amount', 'total_retentions', 'paid_amount',
+        'payment_status', 'status', 'invoice_number'
       ]
     });
 
     if (!purchase) return;
 
-    const balance = parseFloat(purchase.total_amount) - parseFloat(purchase.paid_amount || 0);
+    // Neto de retenciones: lo retenido se le debe a la DIAN, no al proveedor.
+    const balance = require('../utils/purchaseAmounts').purchaseBalance(purchase);
 
     // Igual que en getAgingReport (accountsPayable.controller.js): si la
     // compra no tiene due_date explícito (proveedor sin payment_terms
@@ -63,7 +64,8 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
     const referenceDate = purchase.due_date || purchase.purchase_date;
 
     // Ya pagada, en borrador o cancelada, o sin ninguna fecha de referencia: resolver cualquier alerta activa
-    const isFormalized = ['confirmed', 'received'].includes(purchase.status);
+    // Obligación real: recibida (total/parcial) o confirmada con factura del proveedor.
+    const isFormalized = require('../utils/purchaseAmounts').isPayablePurchase(purchase);
     const isPending = ['pending', 'partial'].includes(purchase.payment_status);
 
     if (!referenceDate || balance <= 0 || !isFormalized || !isPending) {
@@ -151,7 +153,7 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
  */
 async function checkAllPayableAlerts(tenant_id = null) {
   const where = {
-    status: { [Op.in]: ['confirmed', 'received'] },
+    ...require('../utils/purchaseAmounts').payablePurchaseWhere(),
     payment_status: { [Op.in]: ['pending', 'partial'] }
   };
   if (tenant_id) where.tenant_id = tenant_id;

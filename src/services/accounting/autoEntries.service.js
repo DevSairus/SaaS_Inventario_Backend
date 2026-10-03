@@ -243,75 +243,127 @@ async function generatePaymentEntry(payment, sale, tenantId, userId, options = {
 }
 
 /**
- * Genera el asiento en borrador de una compra recibida.
+ * Valores de una compra (o de una recepción parcial de ella) para su asiento.
+ * Sin `portion` → la compra completa (comportamiento de siempre).
+ */
+function purchaseEntryAmounts(purchase, portion) {
+  if (portion) return portion;
+  const total = Number(purchase.total_amount || 0);
+  const tax = Number(purchase.tax_amount || 0);
+  return {
+    // Simplificación MVP: todo lo que no es IVA (subtotal, descuento, flete,
+    // otros costos) se lleva a inventario como costo.
+    inventory: total - tax,
+    tax,
+    retefuente: Number(purchase.retefuente_amount || 0),
+    reteiva: Number(purchase.reteiva_amount || 0),
+    reteica: Number(purchase.reteica_amount || 0),
+    retention_lines: Array.isArray(purchase.applied_retentions) ? purchase.applied_retentions : [],
+  };
+}
+
+/**
+ * Genera el asiento en borrador de una compra recibida, o de una recepción
+ * parcial (options.portion = valores de lo recibido, ver
+ * purchases.controller.buildReceiptPortion).
+ *
+ * La contrapartida es SIEMPRE la cuenta por pagar al proveedor (neto de
+ * retenciones). Los pagos —de contado al confirmar o abonos después—
+ * generan su propio asiento (generatePurchasePaymentEntry: débito
+ * proveedores / crédito caja-bancos). Antes, una compra ya pagada al
+ * recibirse acreditaba Caja directo y los abonos no generaban asiento: la
+ * 2205 nunca bajaba y caja/bancos no reflejaban los pagos a proveedores.
  */
 async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
-      const total = Number(purchase.total_amount || 0);
-      const tax = Number(purchase.tax_amount || 0);
-      // Simplificación MVP: todo lo que no es IVA (subtotal, descuento, flete,
-      // otros costos) se lleva a inventario como costo. Si se necesita mayor
-      // detalle contable (flete y descuentos en cuentas separadas), es un
-      // ajuste puntual a futuro sobre este mismo servicio.
-      const subtotal = total - tax;
-      const isCash = purchase.payment_status === 'paid';
+      const amounts = purchaseEntryAmounts(purchase, options.portion);
+      const inventory = Number(amounts.inventory || 0);
+      const tax = Number(amounts.tax || 0);
 
       // Retenciones PRACTICADAS al proveedor (Fase 0 de Declaraciones
-      // Periódicas / Formulario 350): antes de esto, todo `total_amount` se
-      // acreditaba a la cuenta por pagar/caja como si se le fuera a pagar
-      // completo al proveedor, aunque parte ya se retuvo y en realidad se le
-      // debe a la DIAN. Cada retención va a su propia cuenta de pasivo
-      // (236505/236710/236805, ya sembradas) y SOLO se resta de lo que se le
-      // debe al proveedor -- el asiento sigue cuadrando porque la suma de
-      // créditos sigue siendo `total`.
-      const retefuente = Number(purchase.retefuente_amount || 0);
-      const reteiva = Number(purchase.reteiva_amount || 0);
-      const reteica = Number(purchase.reteica_amount || 0);
+      // Periódicas / Formulario 350): cada una va a su cuenta de pasivo y
+      // SOLO se resta de lo que se le debe al proveedor.
+      const retefuente = Number(amounts.retefuente || 0);
+      const reteiva = Number(amounts.reteiva || 0);
+      const reteica = Number(amounts.reteica || 0);
       const totalRetentions = retefuente + reteiva + reteica;
-      const netPayable = total - totalRetentions;
+      const netPayable = inventory + tax - totalRetentions;
 
       const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
-      const lines = [{ account_id: inventoryAccount, debit: subtotal, credit: 0, description: 'Ingreso de mercancía a inventario' }];
+      const lines = [{ account_id: inventoryAccount, debit: inventory, credit: 0, description: 'Ingreso de mercancía a inventario' }];
 
       if (tax > 0) {
         const ivaAccount = await getMappedAccountId(tenantId, 'purchase_iva_descontable', t);
         lines.push({ account_id: ivaAccount, debit: tax, credit: 0, description: 'IVA descontable de la compra' });
       }
 
-      const creditAccount = await getMappedAccountId(tenantId, isCash ? 'purchase_cash_account' : 'purchase_payable', t);
-      // third_party_id solo cuando queda cuenta por pagar: es lo que alimenta
-      // el Libro Auxiliar por proveedor (conciliar cuentas por pagar uno a uno).
+      const payableAccount = await getMappedAccountId(tenantId, 'purchase_payable', t);
+      // third_party_id: alimenta el Libro Auxiliar por proveedor.
       lines.push({
-        account_id: creditAccount,
+        account_id: payableAccount,
         debit: 0,
         credit: netPayable,
-        description: isCash ? 'Pago de contado' : 'Cuenta por pagar a proveedor',
-        third_party_id: isCash ? null : (purchase.supplier_id || null),
+        description: 'Cuenta por pagar a proveedor',
+        third_party_id: purchase.supplier_id || null,
       });
 
-      if (retefuente > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'purchase_retefuente_payable', t);
-        lines.push({ account_id, debit: 0, credit: retefuente, description: 'Retención en la fuente practicada al proveedor' });
-      }
-      if (reteiva > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'purchase_reteiva_payable', t);
-        lines.push({ account_id, debit: 0, credit: reteiva, description: 'IVA retenido al proveedor' });
-      }
-      if (reteica > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'purchase_reteica_payable', t);
-        lines.push({ account_id, debit: 0, credit: reteica, description: 'ICA retenido al proveedor' });
+      // Con detalle por concepto (applied_retentions), cada línea va a la
+      // subcuenta que el proveedor tenga configurada para ese concepto
+      // (ej. 236525 servicios vs 236540 compras); sin cuenta propia, a la
+      // del mapeo por tipo. Solo se usa el detalle si cuadra con los totales
+      // por tipo — si no (datos viejos/manuales), se cae al comportamiento
+      // por tipo para no descuadrar el asiento.
+      const detail = Array.isArray(amounts.retention_lines) ? amounts.retention_lines : [];
+      const detailTotal = detail.reduce((sum, l) => sum + Number(l.amount || 0), 0);
+      const useDetail = detail.length > 0 && Math.abs(detailTotal - totalRetentions) < 0.01;
+      const RETENTION_EVENT = { '07': 'purchase_retefuente_payable', '05': 'purchase_reteiva_payable', '06': 'purchase_reteica_payable' };
+      // Las cuentas 2365/2367/2368 se llevan por tercero: es el soporte del
+      // certificado de retención y de Exógena (1001) por proveedor.
+      const retentionThirdParty = purchase.supplier_id || null;
+
+      if (useDetail) {
+        const { ChartOfAccount } = require('../../models');
+        for (const l of detail) {
+          const amount = Number(l.amount || 0);
+          if (amount <= 0 || !RETENTION_EVENT[l.code]) continue;
+          let account_id = null;
+          if (l.account_id) {
+            const acc = await ChartOfAccount.findOne({
+              where: { id: l.account_id, tenant_id: tenantId, accepts_entries: true },
+              attributes: ['id'],
+              transaction: t,
+            });
+            account_id = acc?.id || null;
+          }
+          if (!account_id) account_id = await getMappedAccountId(tenantId, RETENTION_EVENT[l.code], t);
+          lines.push({ account_id, debit: 0, credit: amount, description: `${l.concept || 'Retención'} (${l.rate}${l.code === '06' ? '‰' : '%'}) practicada al proveedor`, third_party_id: retentionThirdParty });
+        }
+      } else {
+        if (retefuente > 0) {
+          const account_id = await getMappedAccountId(tenantId, 'purchase_retefuente_payable', t);
+          lines.push({ account_id, debit: 0, credit: retefuente, description: 'Retención en la fuente practicada al proveedor', third_party_id: retentionThirdParty });
+        }
+        if (reteiva > 0) {
+          const account_id = await getMappedAccountId(tenantId, 'purchase_reteiva_payable', t);
+          lines.push({ account_id, debit: 0, credit: reteiva, description: 'IVA retenido al proveedor', third_party_id: retentionThirdParty });
+        }
+        if (reteica > 0) {
+          const account_id = await getMappedAccountId(tenantId, 'purchase_reteica_payable', t);
+          lines.push({ account_id, debit: 0, credit: reteica, description: 'ICA retenido al proveedor', third_party_id: retentionThirdParty });
+        }
       }
 
+      const label = options.portion?.label ? ` — ${options.portion.label}` : '';
       const entry = await createDraftEntry(
         tenantId,
         {
           branchId: purchase.branch_id,
-          entryDate: purchase.purchase_date || purchase.createdAt || new Date(),
+          entryDate: options.portion?.entry_date || purchase.purchase_date || purchase.createdAt || new Date(),
           sourceType: 'purchase',
           sourceId: purchase.id,
-          description: `Compra ${purchase.purchase_number || purchase.id}`,
+          description: `Compra ${purchase.purchase_number || purchase.id}${label}`,
           lines,
           createdBy: userId,
         },
@@ -325,6 +377,68 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
       throw error;
     }
   }, `compra ${purchase.id}`, options);
+}
+
+/**
+ * Cuenta de caja o bancos para un pago a proveedor: la subcuenta de la
+ * cuenta bancaria elegida (bank_account_id) si viene; si no, Caja para
+ * efectivo y Bancos para lo demás (transferencia, tarjeta, cheque...).
+ */
+async function resolvePaymentAccount(tenantId, payment, t) {
+  if (payment.bank_account_id) {
+    const { BankAccount } = require('../../models');
+    const bank = await BankAccount.findOne({ where: { id: payment.bank_account_id, tenant_id: tenantId }, attributes: ['chart_of_account_id'], transaction: t });
+    if (bank?.chart_of_account_id) return bank.chart_of_account_id;
+  }
+  const pm = String(payment.method || '').toLowerCase();
+  if (pm.includes('efectivo') || pm.includes('cash')) {
+    return getMappedAccountId(tenantId, 'purchase_cash_account', t);
+  }
+  // No hay mapeo propio de "bancos para compras": se usa el de gastos y,
+  // si tampoco está, el de ventas (todos apuntan a 111005 por defecto).
+  for (const event of ['purchase_bank_account', 'expense_bank_account', 'sale_bank_account']) {
+    try { return await getMappedAccountId(tenantId, event, t); } catch (e) { /* siguiente */ }
+  }
+  throw new Error('No hay cuenta de bancos mapeada (expense_bank_account / sale_bank_account)');
+}
+
+/**
+ * Asiento de un pago (o abono) a proveedor sobre una compra:
+ *   Débito  2205 Proveedores (tercero = proveedor)
+ *   Crédito 1105 Caja / 1110 Bancos
+ * payment = { amount, date, method, bank_account_id?, notes? }
+ */
+async function generatePurchasePaymentEntry(purchase, payment, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Math.round(Number(payment.amount || 0) * 100) / 100;
+      if (amount <= 0) throw new Error('Pago sin monto');
+      const payableAccount = await getMappedAccountId(tenantId, 'purchase_payable', t);
+      const creditAccount = await resolvePaymentAccount(tenantId, payment, t);
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: purchase.branch_id,
+          entryDate: payment.date ? String(payment.date).slice(0, 10) : new Date(),
+          sourceType: 'purchase_payment',
+          sourceId: purchase.id,
+          description: `Pago a proveedor — Compra ${purchase.purchase_number || purchase.id}${payment.method ? ` (${payment.method})` : ''}`,
+          lines: [
+            { account_id: payableAccount, debit: amount, credit: 0, description: 'Pago a proveedor', third_party_id: purchase.supplier_id || null },
+            { account_id: creditAccount, debit: 0, credit: amount, description: payment.notes || 'Salida por pago a proveedor' },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `pago a proveedor (compra ${purchase.id})`, options);
 }
 
 /**
@@ -362,15 +476,15 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
 
       if (retefuente > 0) {
         const account_id = await getMappedAccountId(tenantId, 'expense_retefuente_payable', t);
-        lines.push({ account_id, debit: 0, credit: retefuente, description: 'Retención en la fuente practicada' });
+        lines.push({ account_id, debit: 0, credit: retefuente, description: 'Retención en la fuente practicada', third_party_id: expense.supplier_id || null });
       }
       if (reteiva > 0) {
         const account_id = await getMappedAccountId(tenantId, 'expense_reteiva_payable', t);
-        lines.push({ account_id, debit: 0, credit: reteiva, description: 'IVA retenido' });
+        lines.push({ account_id, debit: 0, credit: reteiva, description: 'IVA retenido', third_party_id: expense.supplier_id || null });
       }
       if (reteica > 0) {
         const account_id = await getMappedAccountId(tenantId, 'expense_reteica_payable', t);
-        lines.push({ account_id, debit: 0, credit: reteica, description: 'ICA retenido' });
+        lines.push({ account_id, debit: 0, credit: reteica, description: 'ICA retenido', third_party_id: expense.supplier_id || null });
       }
 
       const entry = await createDraftEntry(
@@ -1339,6 +1453,7 @@ module.exports = {
   generateSaleEntry,
   generatePaymentEntry,
   generatePurchaseEntry,
+  generatePurchasePaymentEntry,
   generateExpenseEntry,
   generateCashSessionEntry,
   generateCustomerReturnEntry,

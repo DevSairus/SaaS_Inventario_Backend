@@ -3,6 +3,7 @@ const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { ChartOfAccount } = require('../../models');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { fetchEntryDetails } = require('../../services/accounting/entryDetails.service');
 const {
   generateLibroMayorExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -165,6 +166,8 @@ exports.libroMayorExport = async (req, res) => {
     const name = generatedByName(req);
 
     if (format === 'excel') {
+      // Hoja anexa con el detalle completo de cada asiento (contrapartidas).
+      data.entry_details = await fetchEntryDetails(req.tenant_id, data.movements.map((m) => m.entry_id));
       const buffer = await generateLibroMayorExcel(data, req.tenant, { from: data.from, to: data.to }, name);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="Libro-Mayor-${data.account.code}-${data.from}_${data.to}.xlsx"`);

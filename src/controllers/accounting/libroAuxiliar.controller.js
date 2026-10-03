@@ -3,6 +3,7 @@ const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { Customer, Supplier, Employee } = require('../../models');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { fetchEntryDetails } = require('../../services/accounting/entryDetails.service');
 const {
   generateLibroAuxiliarExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -139,6 +140,34 @@ async function fetchLibroAuxiliar(req) {
   const periodDebit = movements.reduce((s, m) => s + m.debit, 0);
   const periodCredit = movements.reduce((s, m) => s + m.credit, 0);
 
+  // Saldo al corte por cuenta: el saldo total mezcla cuentas de distinta
+  // naturaleza (ej. para un proveedor, la cuenta por pagar Y las retenciones
+  // 2365/2367/2368 que se le practicaron, que se le deben a la DIAN, no a él).
+  const byAccountRows = await sequelize.query(
+    `SELECT a.code AS account_code, a.name AS account_name, a.account_type,
+            COALESCE(SUM(l.debit), 0) AS debit, COALESCE(SUM(l.credit), 0) AS credit
+     FROM "${schema}"."journal_entry_lines" l
+     JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
+     JOIN "${schema}"."chart_of_accounts" a ON a.id = l.account_id
+     WHERE l.third_party_id = :thirdPartyId
+       AND e.tenant_id = :tenantId
+       AND e.status = 'posted'
+       AND e.entry_date <= :to
+       AND (:branchId::uuid IS NULL OR e.branch_id = :branchId::uuid)
+     GROUP BY a.code, a.name, a.account_type
+     ORDER BY a.code ASC`,
+    { replacements: { thirdPartyId: third_party_id, tenantId: req.tenant_id, to, branchId: branch_id || null }, type: QueryTypes.SELECT }
+  );
+  const by_account = byAccountRows.map((r) => {
+    const debit = Number(r.debit);
+    const credit = Number(r.credit);
+    return {
+      account_code: r.account_code,
+      account_name: r.account_name,
+      balance: DEBIT_NATURE.has(r.account_type) ? debit - credit : credit - debit,
+    };
+  }).filter((r) => Math.abs(r.balance) >= 0.01);
+
   return {
     from,
     to,
@@ -153,6 +182,7 @@ async function fetchLibroAuxiliar(req) {
     closing_balance: running,
     movements,
     totals: { debit: periodDebit, credit: periodCredit },
+    by_account,
     movement_count: movements.length,
   };
 }
@@ -179,6 +209,8 @@ exports.libroAuxiliarExport = async (req, res) => {
     const name = generatedByName(req);
 
     if (format === 'excel') {
+      // Hoja anexa con el detalle completo de cada asiento (contrapartidas).
+      data.entry_details = await fetchEntryDetails(req.tenant_id, data.movements.map((m) => m.entry_id));
       const buffer = await generateLibroAuxiliarExcel(data, req.tenant, { from: data.from, to: data.to }, name);
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="Libro-Auxiliar-${data.third_party.name}-${data.from}_${data.to}.xlsx"`);

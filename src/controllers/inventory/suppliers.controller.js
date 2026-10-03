@@ -1,5 +1,33 @@
 const { Supplier } = require('../../models/inventory');
 const { Op } = require('sequelize');
+const { sanitizeRetentionConcepts } = require('../../services/taxService');
+
+// retention_config: { is_exento, is_autoretenedor, retentions: [conceptos] }.
+// Los conceptos se normalizan en el servidor (código válido, tarifa > 0,
+// id estable) porque de ellos sale el cálculo de retenciones de las compras.
+// Perfil tributario del proveedor (ver services/retentionEngine.service.js):
+//  - is_exento: no se le practica ninguna retención
+//  - is_autoretenedor: autorretenedor de RENTA → ReteFuente en $0
+//  - is_gran_contribuyente: no se le practica ReteIVA
+//  - is_declarante: (persona natural) define la tarifa de ReteFuente
+//  - default_concept_id: concepto de ReteFuente si el producto/categoría no tiene
+//  - retentions: SOLO ReteICA (tarifa municipal ‰); la ReteFuente sale del
+//    concepto de cada ítem comprado.
+function normalizeRetentionConfig(config) {
+  const c = config && typeof config === 'object' ? config : {};
+  const normalized = {
+    ...c,
+    is_exento: !!c.is_exento,
+    is_autoretenedor: !!c.is_autoretenedor,
+    is_gran_contribuyente: !!c.is_gran_contribuyente,
+    is_declarante: c.is_declarante !== false,
+    default_concept_id: c.default_concept_id || null,
+  };
+  if (c.retentions !== undefined) {
+    normalized.retentions = sanitizeRetentionConcepts(c.retentions).filter((r) => r.code === '06');
+  }
+  return normalized;
+}
 
 /**
  * Obtener todos los proveedores con filtros y paginación
@@ -229,7 +257,7 @@ const createSupplier = async (req, res) => {
       tax_regime: tax_regime || null,
       fiscal_responsibilities: fiscal_responsibilities || [],
       is_obligated_to_invoice,
-      retention_config: retention_config || {},
+      retention_config: normalizeRetentionConfig(retention_config),
     });
 
     res.status(201).json({
@@ -328,6 +356,10 @@ const updateSupplier = async (req, res) => {
     Object.keys(updateData).forEach(key => {
       if (updateData[key] === undefined) delete updateData[key];
     });
+
+    if (updateData.retention_config !== undefined) {
+      updateData.retention_config = normalizeRetentionConfig(updateData.retention_config);
+    }
 
     await supplier.update(updateData);
 

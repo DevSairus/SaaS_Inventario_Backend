@@ -82,7 +82,7 @@ const Purchase = sequelize.define('Purchase', {
     type: DataTypes.STRING(20),
     defaultValue: 'draft',
     validate: {
-      isIn: [['draft', 'confirmed', 'received', 'cancelled']]
+      isIn: [['draft', 'confirmed', 'partially_received', 'received', 'cancelled']]
     }
   },
   subtotal: {
@@ -116,10 +116,19 @@ const Purchase = sequelize.define('Purchase', {
   retefuente_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   reteiva_rate:      { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
   reteiva_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
-  reteica_rate:      { type: DataTypes.DECIMAL(5, 4), defaultValue: 0 },
+  reteica_rate:      { type: DataTypes.DECIMAL(7, 4), defaultValue: 0 },
   reteica_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   total_retentions:  { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   tax_breakdown:     { type: DataTypes.JSONB, defaultValue: [] },
+  // Detalle por concepto de las retenciones practicadas (ver
+  // taxService.calculatePurchaseRetentions). Las columnas *_amount de arriba
+  // son la suma por tipo.
+  applied_retentions: { type: DataTypes.JSONB, defaultValue: [] },
+  // Historial de recepciones (parciales o totales) — ver migración
+  // 2026100203-purchase-partial-receipts.js.
+  receipts: { type: DataTypes.JSONB, defaultValue: [] },
+  // Envíos de la orden de compra al proveedor (ver migración 2026100204).
+  order_emails: { type: DataTypes.JSONB, defaultValue: [] },
   // ───────────────────────────────────────────────────────────────────
   payment_method: {
     type: DataTypes.STRING(50),

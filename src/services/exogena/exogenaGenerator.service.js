@@ -26,7 +26,21 @@ class ExogenaGenerationError extends Error {
 /**
  * @returns {{ filename: string, buffer: Buffer, contentType: string, recordCount: number, skipped: Array }}
  */
-async function generate(tenantId, formatCode, year) {
+/**
+ * Mapeo de conceptos efectivo: las sugerencias oficiales (tabla de conceptos
+ * de la Resolución 000227/2025, ver exogena-concept-suggestions.js) se
+ * aplican por defecto, y lo que el contador haya guardado las reemplaza. Así
+ * el formato sale listo sin que nadie tenga que "confirmar" lo obvio; el
+ * contador solo cambia lo que no comparta.
+ */
+async function effectiveConceptMap(tenantId, formatCode) {
+  const { SUGGESTED_CONCEPTS } = require('../../data/exogena-concept-suggestions');
+  const suggested = Object.fromEntries(Object.entries(SUGGESTED_CONCEPTS[formatCode] || {}).filter(([, v]) => v));
+  const mappings = await ExogenaConceptMapping.findAll({ where: { tenant_id: tenantId, format_code: formatCode } });
+  return { ...suggested, ...Object.fromEntries(mappings.map((m) => [m.source_key, m.concept_code])) };
+}
+
+async function resolveRecords(tenantId, formatCode, year) {
   const meta = EXOGENA_FORMAT_BY_CODE[formatCode];
   const service = FORMAT_SERVICES[formatCode];
   if (!meta || !service) throw new ExogenaGenerationError(`Formato ${formatCode} no reconocido`, 'FORMAT_UNKNOWN');
@@ -36,11 +50,15 @@ async function generate(tenantId, formatCode, year) {
 
   let conceptBySourceKey = {};
   if (meta.needsConceptMapping) {
-    const mappings = await ExogenaConceptMapping.findAll({ where: { tenant_id: tenantId, format_code: formatCode } });
-    conceptBySourceKey = Object.fromEntries(mappings.map((m) => [m.source_key, m.concept_code]));
+    conceptBySourceKey = await effectiveConceptMap(tenantId, formatCode);
   }
 
   const { records, skipped } = await service.buildRecords(tenantId, year, conceptBySourceKey);
+  return { meta, service, records, skipped };
+}
+
+async function generate(tenantId, formatCode, year) {
+  const { service, records, skipped } = await resolveRecords(tenantId, formatCode, year);
 
   const files = buildMuiscaFiles({
     formatCode,
@@ -76,4 +94,25 @@ async function generate(tenantId, formatCode, year) {
   };
 }
 
-module.exports = { generate, ExogenaGenerationError };
+/**
+ * Misma información del XML, en Excel legible (columnas con nombre, totales
+ * y hoja de registros excluidos) — para revisión con el contador o para
+ * compartir sin acceso a Pitbox. No reemplaza el XML que se sube a la DIAN.
+ * @returns {{ filename: string, buffer: Buffer, contentType: string, recordCount: number }}
+ */
+async function generateExcel(tenantId, formatCode, year, tenant) {
+  const { meta, service, records, skipped } = await resolveRecords(tenantId, formatCode, year);
+  const { buildExogenaWorkbook } = require('./exogenaExcel.service');
+  const buffer = await buildExogenaWorkbook({
+    formatCode, formatName: meta.name, version: service.version, year, records, skipped, tenant,
+    totalValueField: service.totalValueField,
+  });
+  return {
+    filename: `Exogena-${formatCode}-${year}.xlsx`,
+    buffer: Buffer.from(buffer),
+    contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    recordCount: records.length,
+  };
+}
+
+module.exports = { generate, generateExcel, effectiveConceptMap, ExogenaGenerationError };

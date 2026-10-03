@@ -30,7 +30,7 @@ const verifyEmailConfig = async () => {
 // ─────────────────────────────────────────
 // Función base de envío
 // ─────────────────────────────────────────
-const sendEmail = async ({ to, subject, html, text, attachments }) => {
+const sendEmail = async ({ to, subject, html, text, attachments, cc, replyTo }) => {
   try {
     if (!isEmailConfigured()) {
       logger.warn(`[EMAIL] Brevo no configurado, omitiendo envío. Para: ${to} | Asunto: ${subject}`);
@@ -53,6 +53,13 @@ const sendEmail = async ({ to, subject, html, text, attachments }) => {
         email: process.env.EMAIL_FROM_ADDRESS,
       },
       to: recipients,
+      // cc / replyTo opcionales: ej. la orden de compra va con copia a quien
+      // la envía, y las respuestas del proveedor deben llegarle a la empresa
+      // (el remitente es la cuenta global del sistema).
+      ...(cc && (Array.isArray(cc) ? cc : [cc]).filter(Boolean).length > 0 && {
+        cc: (Array.isArray(cc) ? cc : [cc]).filter(Boolean).map((email) => ({ email })),
+      }),
+      ...(replyTo?.email && { replyTo: { email: replyTo.email, ...(replyTo.name && { name: replyTo.name }) } }),
       subject,
       htmlContent: html,
       textContent: text || html.replace(/<[^>]*>/g, ''),

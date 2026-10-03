@@ -25,20 +25,24 @@ async function checkReadiness(tenantId, formatCode, year) {
   const missingConcepts = [];
   if (meta.needsConceptMapping && service.fetchSourceKeys) {
     const sourceKeys = await service.fetchSourceKeys(tenantId, year);
-    const mappings = await ExogenaConceptMapping.findAll({ where: { tenant_id: tenantId, format_code: formatCode } });
-    const mappedKeys = new Set(mappings.map((m) => m.source_key));
+    // Sugerencias oficiales aplicadas por defecto + lo guardado por el contador.
+    const { effectiveConceptMap } = require('./exogenaGenerator.service');
+    const map = await effectiveConceptMap(tenantId, formatCode);
+    // Cada formato puede tener respaldos (ej. 1001: 'purchase:<concepto>' cae
+    // al mapeo general 'purchase' si no tiene uno propio).
+    const resolve = service.resolveConcept || ((m, key) => m[key]);
     for (const key of sourceKeys) {
-      if (!mappedKeys.has(key)) missingConcepts.push(key);
+      if (!resolve(map, key)) missingConcepts.push(key);
     }
   }
 
   // buildRecords ya excluye (en `skipped`) terceros sin NIT u otras
   // filas no reportables -- se corre igual aquí para poder mostrarle al
   // usuario cuántas filas quedarían fuera ANTES de descargar el archivo.
-  const conceptBySourceKey = {};
+  let conceptBySourceKey = {};
   if (meta.needsConceptMapping) {
-    const mappings = await ExogenaConceptMapping.findAll({ where: { tenant_id: tenantId, format_code: formatCode } });
-    for (const m of mappings) conceptBySourceKey[m.source_key] = m.concept_code;
+    const { effectiveConceptMap } = require('./exogenaGenerator.service');
+    conceptBySourceKey = await effectiveConceptMap(tenantId, formatCode);
   }
   const { records, skipped } = await service.buildRecords(tenantId, year, conceptBySourceKey);
 

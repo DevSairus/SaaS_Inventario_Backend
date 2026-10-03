@@ -22,6 +22,10 @@ const BankTransaction = sequelize.define(
     amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false },
     reference: { type: DataTypes.STRING(100), allowNull: true },
     raw_row: { type: DataTypes.JSONB, allowNull: true },
+    // Número de repetición de un movimiento idéntico (misma fecha, monto,
+    // referencia y descripción) en la cuenta — ver migración
+    // 2026100202-bank-transactions-occurrence.js.
+    occurrence: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
 
     reconciliation_status: {
       type: DataTypes.STRING(20),

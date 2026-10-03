@@ -616,119 +616,20 @@ const checkAndCreateAlerts = async (req, res) => {
 
     const tenant_id = req.user.tenant_id;
 
-    console.log('🔍 Iniciando verificación de alertas para tenant:', tenant_id);
-
-    // Obtener productos rastreados que o bien tienen un umbral configurado,
-    // o bien están directamente en 0 unidades (esto último no depende de
-    // tener min_stock configurado -- min_stock=0 es el valor por defecto de
-    // TODO producto, así que filtrar solo por min_stock > 0 dejaba fuera a
-    // la inmensa mayoría de productos sin stock).
-    const products = await Product.findAll({
-      where: {
-        tenant_id,
-        track_inventory: true,
-        [Op.or]: [
-          { min_stock: { [Op.gt]: 0 } },
-          { current_stock: { [Op.lte]: 0 } }
-        ]
-      },
-      attributes: ['id', 'name', 'sku', 'current_stock', 'min_stock', 'max_stock']
-    });
-
-    console.log(`📦 Productos encontrados a evaluar: ${products.length}`);
-
-    let alertsCreated = 0;
-    let alertsResolved = 0;
-
-    for (const product of products) {
-      const currentStock = parseFloat(product.current_stock) || 0;
-      const minStock = parseFloat(product.min_stock) || 0;
-      const maxStock = product.max_stock ? parseFloat(product.max_stock) : null;
-
-      let alertType = null;
-      let severity = null;
-
-      // Determinar tipo de alerta. "Sin stock" es crítico siempre,
-      // independientemente de si hay min_stock configurado.
-      if (currentStock <= 0) {
-        alertType = 'out_of_stock';
-        severity = 'critical';
-        console.log(`⚠️ CRÍTICO - Producto sin stock: ${product.name} (${product.sku}) - Stock: ${currentStock}`);
-      } else if (minStock > 0 && currentStock <= minStock) {
-        alertType = 'low_stock';
-        severity = 'warning';
-        console.log(`⚠️ Stock bajo: ${product.name} (${product.sku}) - Stock: ${currentStock} / Min: ${minStock}`);
-      } else if (maxStock && currentStock >= maxStock) {
-        alertType = 'overstock';
-        severity = 'info';
-        console.log(`ℹ️ Sobrestock: ${product.name} (${product.sku}) - Stock: ${currentStock} / Max: ${maxStock}`);
-      }
-
-      if (alertType) {
-        // Verificar si ya existe una alerta activa del mismo tipo
-        const existingAlert = await StockAlert.findOne({
-          where: {
-            tenant_id,
-            product_id: product.id,
-            alert_type: alertType,
-            status: 'active'
-          }
-        });
-
-        if (!existingAlert) {
-          // Crear nueva alerta
-          const newAlert = await StockAlert.create({
-            tenant_id,
-            product_id: product.id,
-            alert_type: alertType,
-            severity,
-            current_stock: currentStock,
-            min_stock: minStock,
-            max_stock: maxStock,
-            status: 'active'
-          });
-          console.log(`✅ Alerta creada para: ${product.name} - Tipo: ${alertType}`);
-          alertsCreated++;
-        } else {
-          // Actualizar stock actual en la alerta existente
-          await existingAlert.update({
-            current_stock: currentStock,
-            severity: severity // Actualizar severidad por si cambió
-          });
-          console.log(`🔄 Alerta actualizada para: ${product.name}`);
-        }
-      } else {
-        // Si el stock está bien, resolver alertas activas
-        const resolvedCount = await StockAlert.update(
-          {
-            status: 'resolved',
-            resolved_date: new Date(),
-            resolution_notes: 'Stock normalizado automáticamente'
-          },
-          {
-            where: {
-              tenant_id,
-              product_id: product.id,
-              status: 'active'
-            }
-          }
-        );
-        if (resolvedCount[0] > 0) {
-          console.log(`✅ Alertas resueltas para: ${product.name}`);
-        }
-        alertsResolved += resolvedCount[0];
-      }
-    }
-
-    console.log(`📊 Resumen: ${alertsCreated} alertas creadas, ${alertsResolved} alertas resueltas`);
+    // Misma lógica que el cron (autoCheckAlerts.syncStockAlertsForTenants):
+    // antes este endpoint tenía su propia copia, que además no filtraba los
+    // productos sin compras ni entradas.
+    const { syncStockAlertsForTenants } = require('../middleware/autoCheckAlerts.middleware');
+    const stats = await syncStockAlertsForTenants([tenant_id]);
 
     res.json({
       success: true,
       message: 'Verificación de alertas completada',
       data: {
-        products_checked: products.length,
-        alerts_created: alertsCreated,
-        alerts_resolved: alertsResolved
+        products_checked: stats.checked,
+        alerts_created: stats.created,
+        alerts_resolved: stats.resolved,
+        alerts_not_applicable: stats.not_applicable,
       }
     });
 
