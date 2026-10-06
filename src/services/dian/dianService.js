@@ -512,7 +512,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
           address: noteAddress,
         },
         address: noteAddress,
-        email: note.customer_email || '',
+        ...(note.customer_email && { email: note.customer_email }),
       },
       billingReference: {
         id: ref.number,
@@ -538,12 +538,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       paymentMeans: { paymentForm: '1', paymentMethod: '10' },
     };
 
-    let result;
-    if (isDebit) {
-      result = await kit.createDebitNote(noteInput);
-    } else {
-      result = await kit.createCreditNote(noteInput);
-    }
+    const result = await dianKit.createDocumentWithItemCodes(kit, isDebit ? 'debit' : 'credit', noteInput, items);
 
     const dianResponse = await dianKit.sendToDian(tenant, {
       signedXml: result.signedXml,

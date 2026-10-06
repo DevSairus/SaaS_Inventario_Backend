@@ -189,7 +189,9 @@ function invalidateKit(tenantId) {
  */
 function mapLines(items) {
   return items.map((item, idx) => ({
-    id: String(item.id || idx + 1),
+    // Consecutivo de línea (1, 2, 3...). Antes iba el UUID del SaleItem y la
+    // representación gráfica de la DIAN lo mostraba en la columna "Nro.".
+    id: String(idx + 1),
     quantity: Number(item.quantity || 1),
     unitCode: item.unit_code || 'EA',
     description: item.description || item.name || item.product_name || 'Item',
@@ -492,6 +494,54 @@ function patchAiuXml(xml, aiu) {
     );
 }
 
+/**
+ * Código del producto en cada línea. addLineNode() de @dian-kit solo emite
+ * <cbc:Description> dentro de <cac:Item>, así que la columna "Código" de la
+ * representación gráfica de la DIAN salía vacía. Se agrega el SKU como
+ * SellersItemIdentification y StandardItemIdentification (esquema 999,
+ * codificación propia del contribuyente). Las líneas del XML salen en el
+ * mismo orden que `items` (ver mapLines). Líneas sin SKU (servicios sin
+ * código, AIU, combos colapsados) quedan como estaban.
+ */
+function injectItemCodes(xml, items) {
+  let idx = 0;
+  return xml.replace(/(<cac:Item>\s*<cbc:Description>[^<]*<\/cbc:Description>)/g, (m) => {
+    const item = items[idx++] || {};
+    const code = String(item.product_sku || item.sku || '').trim();
+    if (!code) return m;
+    const c = escXml(code);
+    return `${m}<cac:SellersItemIdentification><cbc:ID>${c}</cbc:ID></cac:SellersItemIdentification>`
+      + `<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">${c}</cbc:ID></cac:StandardItemIdentification>`;
+  });
+}
+
+/**
+ * Factura / nota crédito / nota débito con los códigos de producto
+ * inyectados. Mismo camino que kit.createInvoice/createCreditNote/
+ * createDebitNote (assembleDocument + processDocument), con el builder
+ * envuelto para parchear el XML antes de la firma. `extraPatch` permite
+ * encadenar otro parche (AIU).
+ */
+async function createDocumentWithItemCodes(kit, kind, input, items, extraPatch) {
+  const core = require('@dian-kit/core');
+  const { DocumentType: DT, OperationType: OT } = core;
+  const opts = {
+    invoice: { documentType: input.documentType || DT.FACTURA_VENTA, operationType: input.operationType || OT.ESTANDAR, build: core.buildInvoiceXml },
+    credit: { documentType: DT.NOTA_CREDITO, operationType: OT.NOTA_CREDITO, build: core.buildCreditNoteXml },
+    debit: { documentType: DT.NOTA_DEBITO, operationType: OT.NOTA_DEBITO, build: core.buildDebitNoteXml },
+  }[kind];
+  const doc = kit.assembleDocument(input, {
+    documentType: opts.documentType,
+    operationType: opts.operationType,
+    ...(kind !== 'invoice' && { billingReference: input.billingReference, discrepancyResponse: input.discrepancyResponse }),
+  });
+  return kit.processDocument(doc, (d, uuid, ssc) => {
+    let xml = injectItemCodes(opts.build(d, uuid, ssc), items);
+    if (extraPatch) xml = extraPatch(xml);
+    return xml;
+  });
+}
+
 async function createInvoice(tenant, { invoiceNumber, items, resolution, customer, sale, documentType, aiu }) {
   const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
@@ -530,19 +580,10 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
     },
   };
 
-  let result;
-  if (aiu) {
-    // Mismo camino que kit.createInvoice (assembleDocument + processDocument),
-    // con el builder envuelto para parchear el XML antes de la firma.
-    const { buildInvoiceXml, DocumentType: DT, OperationType } = require('@dian-kit/core');
-    const doc = kit.assembleDocument(input, {
-      documentType: documentType || DT.FACTURA_VENTA,
-      operationType: OperationType.ESTANDAR,
-    });
-    result = await kit.processDocument(doc, (d, uuid, ssc) => patchAiuXml(buildInvoiceXml(d, uuid, ssc), aiu));
-  } else {
-    result = await kit.createInvoice(input);
-  }
+  const result = await createDocumentWithItemCodes(
+    kit, 'invoice', input, items,
+    aiu ? (xml) => patchAiuXml(xml, aiu) : null
+  );
 
   return {
     xml: result.xml,
@@ -1499,6 +1540,8 @@ module.exports = {
   getKit,
   invalidateKit,
   createInvoice,
+  createDocumentWithItemCodes,
+  injectItemCodes,
   createSupportDocument,
   createSupportDocumentAdjustment,
   sendToDian,
