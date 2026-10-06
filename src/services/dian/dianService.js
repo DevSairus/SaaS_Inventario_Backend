@@ -136,6 +136,39 @@ async function getNextConsecutive(tenantId, branchId, isTest = false, transactio
   };
 }
 
+/**
+ * Copia los datos actuales del Customer al snapshot customer_* de la venta
+ * (en BD y en el objeto `sale` en memoria). Solo para facturas no aceptadas:
+ * una aceptada ya es inmutable. Sin customer_id (consumidor final / datos
+ * escritos a mano) se deja el snapshot como está.
+ */
+async function refreshCustomerSnapshot(sale, transaction) {
+  if (!sale.customer_id || sale.dian_status === 'accepted') return;
+  const { Sale, Customer } = require('../../models');
+  const customer = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: sale.tenant_id }, transaction });
+  if (!customer) return;
+
+  const fullName = [customer.first_name, customer.last_name].filter(Boolean).join(' ');
+  const snapshot = {
+    customer_name: customer.business_name || fullName || sale.customer_name,
+    customer_tax_id: customer.tax_id,
+    customer_email: customer.email || sale.customer_email,
+    customer_phone: customer.phone || customer.mobile || sale.customer_phone,
+    customer_address: customer.address || sale.customer_address,
+    customer_city_code: customer.city_code,
+    customer_city_name: customer.city,
+    customer_department_name: customer.state,
+    customer_document_type: customer.document_type,
+  };
+  const changed = Object.keys(snapshot).filter((k) => (snapshot[k] ?? null) !== (sale[k] ?? null));
+  if (!changed.length) return;
+
+  await Sale.update(snapshot, { where: { id: sale.id }, transaction });
+  if (typeof sale.set === 'function') sale.set(snapshot, { raw: true });
+  else Object.assign(sale, snapshot);
+  logger.info(`[DIAN] Venta ${sale.sale_number}: datos del cliente actualizados antes del envío (${changed.join(', ')})`);
+}
+
 /* ──────────────────────────────────────────────────────────
  * sendInvoiceToDian – Función principal
  * ────────────────────────────────────────────────────────── */
@@ -153,6 +186,12 @@ async function sendInvoiceToDian(sale, tenant) {
       await transaction.commit();
       return { sent: false, reason: 'not_applicable' };
     }
+
+    // El XML se arma con el snapshot customer_* de la venta. Si la DIAN la
+    // rechazó por datos del comprador (NIT, tipo de documento, ciudad...) y se
+    // corrigió la ficha del cliente, el reintento debe salir con los datos
+    // corregidos -- antes reenviaba el snapshot viejo.
+    await refreshCustomerSnapshot(sale, transaction);
 
     // Cortar acá si faltan datos DIAN del comprador (ciudad DIVIPOLA, tipo
     // de identificación) — antes de consumir un consecutivo, no después.
@@ -1041,6 +1080,7 @@ async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, 
 module.exports = {
   resolveDocumentBranchId,
   sendInvoiceToDian,
+  refreshCustomerSnapshot,
   checkInvoiceStatus,
   getNextConsecutive,
   extractDianConfig,
