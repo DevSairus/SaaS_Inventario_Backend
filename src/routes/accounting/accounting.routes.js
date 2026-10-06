@@ -24,6 +24,13 @@ const bankAccountsCtrl = require('../../controllers/accounting/bankAccounts.cont
 const bankImportCtrl = require('../../controllers/accounting/bankImport.controller');
 const bankReconciliationCtrl = require('../../controllers/accounting/bankReconciliation.controller');
 const exogenaCtrl = require('../../controllers/accounting/exogena.controller');
+const accountMigrationsCtrl = require('../../controllers/accounting/accountMigrations.controller');
+const icaCtrl = require('../../controllers/accounting/ica.controller');
+const { checkRole } = require('../../middleware/auth');
+
+// Operaciones reservadas al personal de contabilidad (el router ya admite
+// también a manager, ver server.js).
+const accountingStaff = checkRole('admin', 'super_admin', 'accountant');
 
 // Extracto bancario: mismo límite/patrón de multer que invoiceImport.routes.js.
 const uploadStatement = multer({
@@ -45,6 +52,23 @@ router.put('/journal-entries/:id', journalEntriesCtrl.update);
 router.patch('/journal-entries/:id/post', journalEntriesCtrl.post);
 router.patch('/journal-entries/:id/void', journalEntriesCtrl.void);
 router.patch('/journal-entries/:id/reverse', journalEntriesCtrl.reverse);
+
+// Migración de movimientos de una cuenta a otra (solo contabilidad)
+router.get('/account-migrations', accountingStaff, accountMigrationsCtrl.list);
+router.post('/account-migrations/preview', accountingStaff, accountMigrationsCtrl.preview);
+router.post('/account-migrations', accountingStaff, accountMigrationsCtrl.execute);
+
+// ICA por municipio: configuración, pre-liquidación y causación (escritura solo contabilidad)
+router.get('/ica/config', icaCtrl.getConfig);
+router.post('/ica/municipalities', accountingStaff, icaCtrl.createMunicipality);
+router.put('/ica/municipalities/:id', accountingStaff, icaCtrl.updateMunicipality);
+router.delete('/ica/municipalities/:id', accountingStaff, icaCtrl.deleteMunicipality);
+router.put('/ica/municipalities/:id/activities', accountingStaff, icaCtrl.setActivities);
+router.put('/ica/branches', accountingStaff, icaCtrl.assignBranches);
+router.get('/ica/report', icaCtrl.report);
+router.get('/ica/settlements', icaCtrl.listSettlements);
+router.post('/ica/settlements', accountingStaff, icaCtrl.createSettlement);
+router.patch('/ica/settlements/:id/void', accountingStaff, icaCtrl.voidSettlement);
 
 // Mapeo de eventos -> cuentas
 router.get('/account-mappings', accountMappingsCtrl.list);

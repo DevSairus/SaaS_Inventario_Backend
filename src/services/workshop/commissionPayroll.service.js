@@ -17,6 +17,20 @@
 const { Op } = require('sequelize');
 const { findEmployeeForUser } = require('../../utils/crmRewardMatching');
 
+const COMMISSION_PAYROLL_MODES = ['salarial', 'no_salarial', 'no_reportar'];
+
+// Tratamiento de la comisión para ESTE empleado: su excepción si la tiene,
+// si no el valor del tenant (PayrollSetting), si no 'salarial' (Art. 127
+// CST: la comisión es salario salvo pacto expreso en contrario).
+async function resolveCommissionPayrollMode(tenant_id, employee) {
+  if (employee?.commission_payroll_mode && COMMISSION_PAYROLL_MODES.includes(employee.commission_payroll_mode)) {
+    return employee.commission_payroll_mode;
+  }
+  const { PayrollSetting } = require('../../models');
+  const settings = await PayrollSetting.findOne({ where: { tenant_id }, attributes: ['commission_payroll_mode'] });
+  return settings?.commission_payroll_mode || 'salarial';
+}
+
 async function tenantHasPayroll(tenant_id) {
   const { getEffectiveModulesForTenantId } = require('../moduleAccess');
   const modules = await getEffectiveModulesForTenantId(tenant_id);
@@ -67,6 +81,14 @@ async function chargeCommissionToPayroll(settlement, technician) {
     return settlement.payroll_status;
   }
 
+  const mode = await resolveCommissionPayrollMode(settlement.tenant_id, emp);
+  if (mode === 'no_reportar') {
+    // Ni novedad ni reintento: el llamador registra la comisión como gasto
+    // operativo (comisiones_tecnicos) porque el estado no es 'cargada_nomina'.
+    await settlement.update({ employee_id: emp.id, payroll_status: 'no_reporta_nomina', payroll_error: null });
+    return settlement.payroll_status;
+  }
+
   const dateStr = settlement.date_to || new Date().toISOString().slice(0, 10);
   const period = await findOpenPayrollPeriod(settlement.tenant_id, dateStr);
   if (!period) {
@@ -78,18 +100,21 @@ async function chargeCommissionToPayroll(settlement, technician) {
     return settlement.payroll_status;
   }
 
+  const amount = parseFloat(settlement.commission_amount || 0);
   const novedad = await PayrollNovedad.create({
     tenant_id: settlement.tenant_id,
     employee_id: emp.id,
     payroll_period_id: period.id,
-    // 'Comisiones' es kind 'simpleList' en DIAN_CATEGORY_MAP
+    // Salarial: 'Comisiones' es kind 'simpleList' en DIAN_CATEGORY_MAP
     // (services/payroll/payrollService.js): el payload se empuja tal cual
     // dentro del arreglo <Comisiones><Comision>...</Comision></Comisiones>
-    // del XML -- por eso va como número plano, no como objeto (a diferencia
-    // de 'Bonificaciones', que es kind 'array').
-    dian_category: 'Comisiones',
-    payload: parseFloat(settlement.commission_amount || 0),
-    notes: `Comisión de mano de obra — ${settlement.settlement_number}`,
+    // del XML -- por eso va como número plano. El Anexo no tiene variante
+    // no salarial de <Comision>, así que la comisión no salarial se reporta
+    // como <Bonificacion BonificacionNS> (kind 'array', payload objeto),
+    // igual que las recompensas no salariales del CRM.
+    dian_category: mode === 'no_salarial' ? 'Bonificaciones' : 'Comisiones',
+    payload: mode === 'no_salarial' ? { bonificacionNS: amount } : amount,
+    notes: `Comisión de mano de obra${mode === 'no_salarial' ? ' (no salarial)' : ''} — ${settlement.settlement_number}`,
     created_by: settlement.created_by,
   });
 
@@ -103,4 +128,4 @@ async function chargeCommissionToPayroll(settlement, technician) {
   return settlement.payroll_status;
 }
 
-module.exports = { tenantHasPayroll, findOpenPayrollPeriod, chargeCommissionToPayroll };
+module.exports = { COMMISSION_PAYROLL_MODES, resolveCommissionPayrollMode, tenantHasPayroll, findOpenPayrollPeriod, chargeCommissionToPayroll };

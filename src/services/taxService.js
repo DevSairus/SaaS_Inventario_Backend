@@ -27,7 +27,7 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
 
   const grossBase = qty * unitPrice;
   const discount = discAmt > 0 ? discAmt : grossBase * discPct / 100;
-  const base = grossBase - discount;
+  let base = grossBase - discount;
 
   // ── IVA (01) ──
   let ivaRate = 0;
@@ -37,7 +37,11 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
     ivaRate = Number(item.tax_percentage ?? product?.tax_percentage ?? (context === 'sale' ? 19 : 0));
     const priceIncludesTax = product?.price_includes_tax || false;
     if (priceIncludesTax) {
+      // El precio ya trae el IVA: se extrae y la base queda neta. Antes la
+      // base no se reducía y total_line = base + IVA cobraba el IVA dos veces
+      // (el formulario de venta sí mostraba el total correcto).
       ivaAmount = base * ivaRate / (100 + ivaRate);
+      base -= ivaAmount;
     } else {
       ivaAmount = base * ivaRate / 100;
     }
@@ -48,27 +52,17 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
   const incRate = (incConfig?.enabled && incConfig?.rate > 0) ? Number(incConfig.rate) : 0;
   const incAmount = base * incRate / 100;
 
-  // ── ICA (03) — sobre base SIN IVA, se expresa en ‰ (milesimas) ──
-  // Fase D: el producto puede fijar una tarifa manual (icaConfig.rate, legado)
-  // o referenciar una categoría económica (icaConfig.category) cuya tarifa
-  // vive en tenant.tax_config.ica_categories — la carga y mantiene cada
-  // tenant según su propio municipio, no hay tabla nacional aquí. Si hay
-  // categoría, esta manda: así un cambio de tarifa se refleja para todos
-  // los productos de esa categoría sin editarlos uno por uno.
-  const icaConfig = product?.tax_config?.ica;
-  let icaRate = 0;
-  if (icaConfig?.enabled) {
-    if (icaConfig.category) {
-      const cat = (tenantConfig?.ica_categories || []).find(c => c.key === icaConfig.category);
-      icaRate = Number(cat?.rate || 0);
-    } else {
-      icaRate = Number(icaConfig.rate || 0);
-    }
-  }
-  const icaAmount = base * icaRate / 1000;
+  // ── ICA (03) ──
+  // El ICA es un impuesto a cargo del vendedor sobre sus ingresos: no se le
+  // cobra al cliente ni va en la factura. Se causa por período y municipio
+  // (ver services/tax/ica.service.js). Se conserva la forma { rate, amount }
+  // en 0 para no romper a quien lee estos campos.
+  const icaRate = 0;
+  const icaAmount = 0;
 
   return {
     base: round(base),
+    discount: round(discount),
     iva: { rate: round(ivaRate), amount: round(ivaAmount) },
     inc: { rate: round(incRate), amount: round(incAmount) },
     ica: { rate: round(icaRate), amount: round(icaAmount) },
@@ -100,7 +94,7 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
  * @param {string}  context       - 'sale' | 'purchase' (default 'sale') — determina de qué lado se revisa is_autoretenedor
  * @returns {object}              - { retefuente, reteiva, reteica, total }
  * ────────────────────────────────────────────────────────── */
-function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale') {
+function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale', baseOverrides = {}) {
   const zero = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
 
   // No aplicar si la contraparte (cliente en venta, proveedor en compra) está exenta
@@ -116,8 +110,11 @@ function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale'
     : tenantConfig?.is_autoretenedor;
   if (payeeIsAutoretenedor) return zero;
 
-  // Base = suma de subtotales (sin IVA)
+  // Base = suma de subtotales (sin IVA). Una factura AIU trae sus propias
+  // bases (ver services/sales/aiu.service.js#aiuRetentionBases).
   const base = items.reduce((s, i) => s + Number(i.subtotal || i.base || 0), 0);
+  const retefuenteBase = baseOverrides.retefuente ?? base;
+  const reteicaBase = baseOverrides.reteica ?? base;
 
   // Total IVA facturado
   const totalIVA = items.reduce((s, i) => s + Number(i.tax_amount || i.iva?.amount || 0), 0);
@@ -125,7 +122,7 @@ function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale'
   // ── ReteFuente (07) — sobre base gravable ──
   const tenantReteFuente = tenantConfig?.retentions?.find(r => r.code === '07');
   const retefuenteRate = Number(entityConfig?.retefuente_rate ?? tenantReteFuente?.rate ?? 0);
-  const retefuente = base * retefuenteRate / 100;
+  const retefuente = retefuenteBase * retefuenteRate / 100;
 
   // ── ReteIVA (05) — sobre el IVA facturado ──
   const tenantReteIVA = tenantConfig?.retentions?.find(r => r.code === '05');
@@ -135,7 +132,7 @@ function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale'
   // ── ReteICA (06) — sobre base gravable, en ‰ ──
   const tenantReteICA = tenantConfig?.retentions?.find(r => r.code === '06');
   const reteicaRate = Number(entityConfig?.reteica_rate ?? tenantReteICA?.rate ?? 0);
-  const reteica = base * reteicaRate / 1000;
+  const reteica = reteicaBase * reteicaRate / 1000;
 
   return {
     retefuente: { rate: round(retefuenteRate), amount: round(retefuente) },

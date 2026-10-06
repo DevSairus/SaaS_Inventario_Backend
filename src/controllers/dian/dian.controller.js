@@ -1507,6 +1507,16 @@ const createAndSendCreditNote = async (req, res) => {
       return fail(res, 'No hay ítems válidos para la nota crédito');
     }
 
+    // Factura AIU: A, I, U y el IVA (que va solo sobre la U) se acreditan
+    // en proporción al costo directo acreditado -- ver aiu.service.js#prorateAiu.
+    let aiuNote = null;
+    if (original.aiu_enabled) {
+      const { prorateAiu } = require('../../services/sales/aiu.service');
+      aiuNote = prorateAiu(original, noteSubtotal);
+      noteSubtotal = aiuNote.subtotal;
+      noteTax = aiuNote.tax;
+    }
+
     const noteTotal = noteSubtotal + noteTax;
     const noteNumber = `NC-${Date.now()}`;
 
@@ -1538,6 +1548,7 @@ const createAndSendCreditNote = async (req, res) => {
       status: 'completed',
       notes: `Nota crédito para factura ${original.dian_invoice_number || original.sale_number}. Motivo: ${reason}`,
       dian_status: 'pending',
+      ...(aiuNote ? aiuNote.fields : {}),
     }, { transaction });
 
     // Crear ítems de la nota crédito

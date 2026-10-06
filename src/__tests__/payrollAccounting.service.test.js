@@ -87,6 +87,16 @@ describe('calcularAportesYProvisiones', () => {
     expect(aportes).toEqual({ eps: 170000, pension: 240000, arl: 10440, ccf: 80000, sena: 40000, icbf: 60000 });
   });
 
+  it('la comisión salarial integra el IBC del empleado y del empleador; la no salarial no', () => {
+    const conComision = liquidar(employee, [{ dian_category: 'Comisiones', payload: 500000 }]);
+    expect(conComision.deducciones.salud.deduccion).toBeCloseTo(100000, 2);
+    expect(svc.calcularAportesYProvisiones({ employee, liquidation: conComision, settings: baseSettings }).ibc).toBeCloseTo(2500000, 2);
+
+    const noSalarial = liquidar(employee, [{ dian_category: 'Bonificaciones', payload: { bonificacionNS: 500000 } }]);
+    expect(noSalarial.deducciones.salud.deduccion).toBeCloseTo(80000, 2);
+    expect(svc.calcularAportesYProvisiones({ employee, liquidation: noSalarial, settings: baseSettings }).ibc).toBeCloseTo(2000000, 2);
+  });
+
   it('con exoneración 114-1 no aporta salud, SENA ni ICBF', () => {
     const { aportes } = svc.calcularAportesYProvisiones({ employee, liquidation, settings: { ...baseSettings, employer_exonerated_114_1: true } });
     expect(aportes.eps).toBe(0);

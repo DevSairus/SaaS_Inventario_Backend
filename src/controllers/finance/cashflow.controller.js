@@ -57,14 +57,17 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     CustomerAdvance.findAll({
       where: { tenant_id, status: { [Op.ne]: 'voided' } },
       include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] }],
-      attributes: ['id', 'advance_number', 'amount', 'received_date', 'method', 'branch_id', 'cash_session_id', 'refund_history'],
+      attributes: ['id', 'advance_number', 'amount', 'received_date', 'method', 'branch_id', 'cash_session_id', 'refund_history', 'reassigned_from_id'],
     }),
   ]);
 
   let transactions = [];
 
   sales.forEach(s => {
-    (s.payment_history || []).forEach(p => {
+    // No son dinero que entre a caja ese día: las retenciones registradas en
+    // cartera, ni la aplicación de un anticipo (su entrada ya se contó el día
+    // en que se recibió, más abajo -- sumarla otra vez la duplicaba).
+    (s.payment_history || []).filter(p => p.source !== 'retention' && p.source !== 'advance').forEach(p => {
       transactions.push({
         date: toDateOnly(p.date),
         amount: parseFloat(p.amount) || 0,
@@ -106,7 +109,9 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // anticipo. NO se vuelve a sumar el día que se aplica a una factura —
     // esa plata ya se contó aquí (ver §6 del análisis: sumarla otra vez
     // sería doble conteo).
-    transactions.push({
+    // Un anticipo nacido de una reasignación no es dinero nuevo: ya se contó
+    // en el anticipo de origen.
+    if (!a.reassigned_from_id) transactions.push({
       date: toDateOnly(a.received_date),
       amount: parseFloat(a.amount) || 0,
       direction: 'in',

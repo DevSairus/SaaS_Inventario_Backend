@@ -71,7 +71,9 @@ const CommissionSettlement = sequelize.define('CommissionSettlement', {
     type: DataTypes.STRING(30),
     allowNull: false,
     defaultValue: 'not_applicable',
-    validate: { isIn: [['not_applicable', 'sin_empleado_vinculado', 'pendiente_periodo', 'cargada_nomina']] },
+    // no_reporta_nomina: el empleado (o el tenant) está configurado para que
+    // la comisión no vaya a nómina -- ver commission_payroll_mode.
+    validate: { isIn: [['not_applicable', 'sin_empleado_vinculado', 'pendiente_periodo', 'cargada_nomina', 'no_reporta_nomina']] },
   },
   payroll_error: {
     type: DataTypes.TEXT,

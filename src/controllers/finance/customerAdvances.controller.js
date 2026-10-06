@@ -11,6 +11,7 @@
 //   POST   /api/sales/:id/apply-advance                → applyAdvanceToSale
 //   POST   /api/customer-advances/:id/refund           → refundAdvance
 //   POST   /api/customer-advances/:id/void             → voidAdvance
+//   POST   /api/customer-advances/:id/reassign         → reassignAdvance (solo contabilidad)
 
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
@@ -21,6 +22,7 @@ const { generateAdvanceNumber } = require('../../services/finance/advanceNumber.
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { markAdvanceForAlertCheck } = require('../../middleware/autoCheckAdvanceAlerts.middleware');
 const logger = require('../../config/logger');
+const audit = require('../../utils/audit');
 
 // ── POST /customer-advances — recibir un anticipo ───────────────────────────
 const createAdvance = async (req, res) => {
@@ -169,7 +171,11 @@ const getAdvanceById = async (req, res) => {
     if (!advance) return res.status(404).json({ success: false, message: 'Anticipo no encontrado' });
 
     const journalEntry = await JournalEntry.findOne({
-      where: { tenant_id, source_type: 'customer_advance', source_id: advance.id },
+      where: {
+        tenant_id,
+        source_type: advance.reassigned_from_id ? 'customer_advance_reassignment' : 'customer_advance',
+        source_id: advance.id,
+      },
       attributes: ['id', 'entry_number', 'status'],
     });
 
@@ -297,7 +303,7 @@ const applyAdvanceToSale = async (req, res) => {
       createdApplications.push(application);
 
       const newAppliedAmount = parseFloat(advance.applied_amount) + appAmount;
-      const newBalance = parseFloat(advance.amount) - newAppliedAmount - parseFloat(advance.refunded_amount);
+      const newBalance = parseFloat(advance.amount) - newAppliedAmount - parseFloat(advance.refunded_amount) - parseFloat(advance.reassigned_amount || 0);
       await advance.update({
         applied_amount: newAppliedAmount,
         balance: newBalance,
@@ -411,7 +417,7 @@ const refundAdvance = async (req, res) => {
     }];
 
     const newRefundedAmount = parseFloat(advance.refunded_amount) + refundAmount;
-    const newBalance = parseFloat(advance.amount) - parseFloat(advance.applied_amount) - newRefundedAmount;
+    const newBalance = parseFloat(advance.amount) - parseFloat(advance.applied_amount) - newRefundedAmount - parseFloat(advance.reassigned_amount || 0);
 
     await advance.update({
       refunded_amount: newRefundedAmount,
@@ -481,6 +487,16 @@ const voidAdvance = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'No se puede anular: este anticipo ya tiene devoluciones registradas.' });
     }
+    if (parseFloat(advance.reassigned_amount || 0) > 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No se puede anular: parte de este anticipo se reasignó a otro cliente.' });
+    }
+    // Un anticipo nacido de una reasignación no tiene asiento de recepción
+    // que reversar; se deshace reasignándolo de vuelta al cliente original.
+    if (advance.reassigned_from_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Este anticipo proviene de una reasignación: para deshacerla, reasígnelo de vuelta al cliente original.' });
+    }
 
     await advance.update({
       status: 'voided',
@@ -509,7 +525,133 @@ const voidAdvance = async (req, res) => {
   }
 };
 
+// ── POST /customer-advances/:id/reassign — reasignar saldo a otro cliente ────
+// Solo contabilidad (checkRole en la ruta). Mueve todo o parte del SALDO
+// disponible a un anticipo nuevo del cliente destino; lo ya aplicado o
+// devuelto no se toca. No mueve caja: asiento 280505 origen → 280505 destino.
+const reassignAdvance = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { id } = req.params;
+    const tenant_id = req.tenant_id;
+    const user_id = req.user_id || req.user?.id;
+    const { customer_id, reason } = req.body;
+
+    if (!customer_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El cliente destino es obligatorio' });
+    }
+    if (!reason || !String(reason).trim()) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El motivo es obligatorio' });
+    }
+
+    const advance = await CustomerAdvance.findOne({
+      where: { id, tenant_id },
+      lock: transaction.LOCK.UPDATE,
+      transaction,
+    });
+    if (!advance) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Anticipo no encontrado' });
+    }
+    if (advance.status !== 'active') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: `El anticipo no está disponible (estado: ${advance.status})` });
+    }
+    if (advance.customer_id === customer_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El cliente destino debe ser distinto al actual' });
+    }
+
+    const available = parseFloat(advance.balance);
+    const amount = req.body.amount != null && req.body.amount !== ''
+      ? Math.round(parseFloat(req.body.amount) * 100) / 100
+      : available;
+    if (!(amount > 0)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
+    }
+    if (amount > available + 0.01) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: `Solo hay ${available} disponibles para reasignar` });
+    }
+
+    const target = await Customer.findOne({ where: { id: customer_id, tenant_id }, transaction });
+    if (!target) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Cliente destino no encontrado' });
+    }
+
+    const advance_number = await generateAdvanceNumber(tenant_id, transaction);
+    const newAdvance = await CustomerAdvance.create({
+      tenant_id,
+      branch_id: advance.branch_id,
+      customer_id,
+      advance_number,
+      amount,
+      balance: amount,
+      method: advance.method,
+      // Se conserva la fecha en que entró el dinero (antigüedad del anticipo).
+      received_date: advance.received_date,
+      cash_session_id: null,
+      reference_note: `Reasignado desde ${advance.advance_number} — ${reason}`,
+      triggers_iva: advance.triggers_iva,
+      reassigned_from_id: advance.id,
+      status: 'active',
+      created_by: user_id,
+    }, { transaction });
+
+    const newReassigned = parseFloat(advance.reassigned_amount || 0) + amount;
+    const newBalance = parseFloat(advance.amount) - parseFloat(advance.applied_amount)
+      - parseFloat(advance.refunded_amount) - newReassigned;
+    await advance.update({
+      reassigned_amount: newReassigned,
+      balance: newBalance,
+      status: newBalance <= 0.01 ? 'reassigned' : 'active',
+      reassignment_history: [...(advance.reassignment_history || []), {
+        to_advance_id: newAdvance.id,
+        to_advance_number: advance_number,
+        to_customer_id: customer_id,
+        amount,
+        date: new Date().toISOString(),
+        user_id,
+        reason,
+      }],
+    }, { transaction });
+
+    await transaction.commit();
+
+    setImmediate(async () => {
+      try {
+        const { generateAdvanceReassignmentEntry } = require('../../services/accounting/autoEntries.service');
+        await generateAdvanceReassignmentEntry(newAdvance, advance, tenant_id, user_id);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de reasignación de anticipo (${id}): ${err.message}`);
+      }
+      await audit({
+        tenant_id, user_id, action: 'REASSIGN_CUSTOMER_ADVANCE', entity: 'customer_advance', entity_id: advance.id,
+        changes: { from_customer_id: advance.customer_id, to_customer_id: customer_id, amount, new_advance_id: newAdvance.id, reason },
+        req,
+      });
+    });
+    markAdvanceForAlertCheck(advance.id, tenant_id);
+    markAdvanceForAlertCheck(newAdvance.id, tenant_id);
+
+    res.status(201).json({
+      success: true,
+      message: `Saldo reasignado al anticipo ${advance_number}`,
+      data: { original: advance, new_advance: newAdvance },
+    });
+  } catch (error) {
+    if (transaction && !transaction.finished) await transaction.rollback();
+    logger.error('Error reasignando anticipo:', error);
+    res.status(500).json({ success: false, message: 'Error reasignando anticipo' });
+  }
+};
+
 module.exports = {
+  reassignAdvance,
   createAdvance,
   listAdvances,
   getAdvanceById,

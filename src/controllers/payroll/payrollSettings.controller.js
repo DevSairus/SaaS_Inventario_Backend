@@ -20,6 +20,7 @@ const ENUM_FIELDS = {
   cesantias_accrual_mode: ['monthly', 'year_end'],
   prima_accrual_mode: ['monthly', 'on_payment'],
   vacaciones_accrual_mode: ['monthly', 'on_payment'],
+  commission_payroll_mode: ['salarial', 'no_salarial', 'no_reportar'],
 };
 const SUPPLIER_FIELDS = ['arl_supplier_id', 'ccf_supplier_id', 'sena_supplier_id', 'icbf_supplier_id'];
 
@@ -110,4 +111,25 @@ const updatePayrollSettings = async (req, res) => {
   }
 };
 
-module.exports = { getPayrollSettings, updatePayrollSettings };
+// Carga el catálogo de EPS, pensión, cesantías, ARL, cajas, SENA e ICBF como
+// proveedores marcados para nómina (idempotente: no duplica por NIT). Ver
+// services/payroll/payrollFundsSeed.service.js.
+const loadFundCatalog = async (req, res) => {
+  try {
+    if (!['admin', 'super_admin', 'accountant'].includes(req.user?.role)) {
+      return res.status(403).json({ success: false, message: 'Solo un administrador o contador puede cargar el catálogo de entidades' });
+    }
+    const { ensurePayrollFundSuppliers } = require('../../services/payroll/payrollFundsSeed.service');
+    const result = await ensurePayrollFundSuppliers(req.user.tenant_id);
+    res.json({
+      success: true,
+      message: `Catálogo cargado: ${result.created} entidades nuevas, ${result.tagged} proveedores existentes marcados`,
+      data: result,
+    });
+  } catch (error) {
+    console.error('Error en loadFundCatalog:', error);
+    res.status(500).json({ success: false, message: 'Error cargando el catálogo de entidades' });
+  }
+};
+
+module.exports = { getPayrollSettings, updatePayrollSettings, loadFundCatalog };

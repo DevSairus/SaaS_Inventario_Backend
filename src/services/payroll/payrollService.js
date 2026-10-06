@@ -148,9 +148,9 @@ function calcularAuxilioTransporte(employee, diasTrabajados, diasPeriodoCompleto
 /* ──────────────────────────────────────────────────────────
  * 3. Deducciones legales obligatorias — Salud, Pensión, FSP
  * IBC (Ingreso Base de Cotización) = sueldoTrabajado del Básico prorrateado
- * del periodo. MEJOR ESFUERZO: en la práctica el IBC puede incluir otros
- * devengados salariales del periodo (comisiones, etc.) según el caso — este
- * cálculo cubre el caso base (solo salario). Si el tenant tiene devengados
+ * del periodo + comisiones. MEJOR ESFUERZO: en la práctica el IBC puede
+ * incluir otros devengados salariales del periodo (horas extra, etc.) según
+ * el caso — este cálculo cubre salario y comisiones. Si el tenant tiene devengados
  * salariales adicionales que deban integrar el IBC, ajustar antes de
  * habilitación.
  * ────────────────────────────────────────────────────────── */
@@ -333,6 +333,13 @@ function aplicarNovedades(novedades, devengados, deducciones) {
   return { totalNovedadesDevengados, totalNovedadesDeducciones };
 }
 
+// Total de novedades 'Comisiones' (payload numérico, kind 'simpleList').
+function sumarComisiones(novedades) {
+  return (novedades || [])
+    .filter((n) => n.dian_category === 'Comisiones')
+    .reduce((s, n) => s + sumarValorNovedad(n.payload), 0);
+}
+
 /**
  * Suma las horas ("cantidad") reportadas en novedades de horas EXTRA
  * (ver CATEGORIAS_HORAS_EXTRA — excluye recargos) para un mismo
@@ -443,10 +450,11 @@ function liquidarEmpleado({ employee, period, novedades = [], autoConcepts = [],
   const transporte = calcularAuxilioTransporte(employee, diasTrabajados, diasPeriodoCompleto);
   if (transporte) devengados.transporte = transporte;
 
-  // IBC del periodo = sueldoTrabajado prorrateado (más auxilio de
-  // transporte NO se incluye — es no salarial por definición legal, nunca
-  // integra el IBC).
-  const ibc = sueldoTrabajado;
+  // IBC del periodo = sueldoTrabajado prorrateado + comisiones (salariales
+  // por definición: la comisión no salarial llega como Bonificación NS, ver
+  // commissionPayroll.service.js). El auxilio de transporte NO se incluye —
+  // es no salarial por definición legal, nunca integra el IBC.
+  const ibc = sueldoTrabajado + sumarComisiones(novedades);
   const { salud, fondoPension, fondoSP } = calcularDeduccionesLegales(employee, ibc);
   const deducciones = { salud, fondoPension };
   if (fondoSP) deducciones.fondoSP = fondoSP;

@@ -195,6 +195,47 @@ async function ensureRetentionPayableMappings(tenantId, transaction) {
 }
 
 /**
+ * ICA (causación por municipio, autorretención) y retenciones que practican
+ * los clientes sobre las ventas -- ver services/tax/ica.service.js. Mismo
+ * patrón idempotente que ensureRetentionPayableMappings: crea la cuenta si
+ * falta y el mapeo si falta; no toca mapeos que el tenant ya personalizó.
+ */
+const ICA_MAPPINGS = [
+  { event: 'sale_retefuente_receivable', code: '135520', name: 'Retención en la Fuente (a favor)', type: 'activo', parent: '1355' },
+  { event: 'sale_reteiva_receivable', code: '135517', name: 'Impuesto a las Ventas Retenido', type: 'activo', parent: '1355' },
+  { event: 'sale_reteica_receivable', code: '135518', name: 'Impuesto de Industria y Comercio Retenido', type: 'activo', parent: '1355' },
+  { event: 'ica_expense', code: '511505', name: 'Impuesto de Industria y Comercio', type: 'gasto', parent: '51' },
+  { event: 'ica_payable', code: '241205', name: 'Impuesto de Industria y Comercio por Pagar', type: 'pasivo', parent: '24' },
+  { event: 'autoica_receivable', code: '135518', name: 'Impuesto de Industria y Comercio Retenido', type: 'activo', parent: '1355' },
+  { event: 'autoica_payable', code: '236810', name: 'Autorretención de ICA por Pagar', type: 'pasivo', parent: '23' },
+];
+
+async function ensureIcaMappings(tenantId, transaction) {
+  const { ChartOfAccount, AccountMapping } = require('../../models');
+
+  const existing = await AccountMapping.findAll({ where: { tenant_id: tenantId, event_type: ICA_MAPPINGS.map((m) => m.event) }, transaction });
+  const existingEventTypes = new Set(existing.map((m) => m.event_type));
+  const missing = ICA_MAPPINGS.filter((m) => !existingEventTypes.has(m.event));
+  if (missing.length === 0) {
+    return { created: false, reason: 'El tenant ya tiene el mapeo de ICA y retenciones de ventas' };
+  }
+
+  for (const m of missing) {
+    let account = await ChartOfAccount.findOne({ where: { tenant_id: tenantId, code: m.code }, transaction });
+    if (!account) {
+      const parent = await ChartOfAccount.findOne({ where: { tenant_id: tenantId, code: m.parent }, transaction });
+      account = await ChartOfAccount.create(
+        { tenant_id: tenantId, code: m.code, name: m.name, account_type: m.type, parent_id: parent?.id || null, level: 4, accepts_entries: true, is_active: true },
+        { transaction }
+      );
+    }
+    await AccountMapping.create({ tenant_id: tenantId, event_type: m.event, account_id: account.id }, { transaction });
+  }
+
+  return { created: true, reason: `${missing.length} mapeo(s) de ICA / retenciones de ventas creados` };
+}
+
+/**
  * Reconciliación idempotente, corrible en cualquier momento (no depende de
  * migration bookkeeping): garantiza que un tenant tenga plan de cuentas +
  * mappings por defecto. Se corre automáticamente al arrancar el servidor
@@ -235,6 +276,7 @@ async function ensureAccountingSeeded(tenantId, transaction) {
     opening_balance_suspense: await ensureOpeningBalanceSuspenseAccount(tenantId, transaction),
     fixed_asset_depreciation: await ensureFixedAssetDepreciationMappings(tenantId, transaction),
     retention_payable: await ensureRetentionPayableMappings(tenantId, transaction),
+    ica: await ensureIcaMappings(tenantId, transaction),
   };
 
   return { created: Object.values(steps).some((s) => s.created), steps };
@@ -246,4 +288,5 @@ module.exports = {
   ensureOpeningBalanceSuspenseAccount,
   ensureFixedAssetDepreciationMappings,
   ensureRetentionPayableMappings,
+  ensureIcaMappings,
 };

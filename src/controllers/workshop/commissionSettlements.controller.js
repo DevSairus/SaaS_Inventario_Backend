@@ -686,6 +686,11 @@ const retryPayroll = async (req, res) => {
     if (settlement.payroll_novedad_id) {
       return res.status(400).json({ success: false, message: 'Esta liquidación ya está cargada a nómina' });
     }
+    // Ya se registró como gasto operativo por configuración: cargarla ahora
+    // a nómina duplicaría el costo.
+    if (settlement.payroll_status === 'no_reporta_nomina') {
+      return res.status(400).json({ success: false, message: 'Esta liquidación está configurada para no reportarse a nómina y ya se registró como gasto' });
+    }
 
     const technician = await User.findOne({ where: { id: settlement.technician_id, tenant_id }, attributes: ['id', 'first_name', 'last_name', 'email', 'cedula'] });
     if (!technician) return res.status(404).json({ success: false, message: 'Técnico no encontrado' });

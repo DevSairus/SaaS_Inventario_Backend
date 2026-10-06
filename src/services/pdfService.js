@@ -499,6 +499,8 @@ const generateSalePDF = async (res, sale, tenant) => {
     const taxBreakdown = sale.tax_breakdown || [];
     const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
     let totRows = isRemision ? 1 : 1 + (allTaxes.length || 1); // subtotal + impuestos (o IVA fallback)
+    const isAiu = !isRemision && sale.aiu_enabled;
+    if (isAiu) totRows += 4; // costo directo + A + I + U
     if ((sale.discount_amount || 0) > 0)          totRows++;
     if ((sale.global_discount_amount || 0) > 0)   totRows++;
     if (paidAmt > 0)                        totRows++;
@@ -540,11 +542,18 @@ const generateSalePDF = async (res, sale, tenant) => {
       if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
     } else {
       // Factura / Cotización: desglosar subtotal + impuestos + descuento
+      if (isAiu) {
+        // Factura AIU: el IVA es solo sobre la Utilidad (ver aiu.service.js)
+        drawRow('Costo directo', formatCurrency(sale.aiu_direct_amount));
+        drawRow(`Administración ${Number(sale.aiu_admin_pct)}%`, formatCurrency(sale.aiu_admin_amount));
+        drawRow(`Imprevistos ${Number(sale.aiu_unforeseen_pct)}%`, formatCurrency(sale.aiu_unforeseen_amount));
+        drawRow(`Utilidad ${Number(sale.aiu_profit_pct)}%`, formatCurrency(sale.aiu_profit_amount));
+      }
       drawRow('Subtotal', formatCurrency(sale.subtotal));
       // Mostrar todos los impuestos desde tax_breakdown
       const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
       for (const tax of allTaxes) {
-        drawRow(tax.name, formatCurrency(tax.amount));
+        drawRow(isAiu && tax.code === '01' ? 'IVA s/ Utilidad' : tax.name, formatCurrency(tax.amount));
       }
       if (allTaxes.length === 0) {
         // Fallback: si no hay breakdown, usar tax_amount como IVA

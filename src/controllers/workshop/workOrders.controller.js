@@ -548,7 +548,7 @@ const convertQuoteToWorkOrder = async (req, res) => {
         const product = await Product.findOne({ where: { id: saleItem.product_id, tenant_id }, transaction });
         if (product?.track_inventory) {
           const qty = parseFloat(saleItem.quantity);
-          if (parseFloat(product.current_stock) < qty) {
+          if (!product.allow_negative_stock && parseFloat(product.current_stock) < qty) {
             const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
             const alternatives = await getEquivalentsWithStock(product.id, tenant_id);
             await transaction.rollback();
@@ -1013,7 +1013,7 @@ async function createCatalogItem({
   }
 
   // Validar stock si es repuesto físico
-  if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && parseFloat(product.current_stock) < qty) {
+  if (!requiresApproval && item_type === 'repuesto' && product.track_inventory && !product.allow_negative_stock && parseFloat(product.current_stock) < qty) {
     const { getEquivalentsWithStock } = require('../../utils/equivalenceHelper');
     const alternatives = await getEquivalentsWithStock(product_id, tenant_id);
     throw new WorkOrderItemError(400, `Stock insuficiente de "${product.name}". Disponible: ${product.current_stock}`, alternatives);
@@ -2454,9 +2454,50 @@ const generateSale = async (req, res) => {
 
     // Recalculado desde billableItems (no desde order.total_amount) para que el
     // documento generado sea consistente con los ítems que realmente copia.
-    const { subtotal: saleSubtotal, tax_amount: saleTaxAmount } = calcTotals(billableItems);
+    let { subtotal: saleSubtotal, tax_amount: saleTaxAmount } = calcTotals(billableItems);
     const saleDiscount = parseFloat(order.discount_amount) || 0;
+
+    // Líneas del documento (copia de los ítems facturables de la OT). En una
+    // factura AIU quedan como costo directo sin IVA y A, I, U + IVA sobre la
+    // Utilidad se calculan aparte -- ver services/sales/aiu.service.js.
+    const saleLines = billableItems.map((item) => ({
+      item,
+      tax_percentage: item.tax_percentage,
+      tax_amount: item.tax_amount,
+      subtotal: item.subtotal,
+      total: item.total,
+    }));
+    const tenantTaxConfig = (await Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction }))?.tax_config || {};
+    const aiuService = require('../../services/sales/aiu.service');
+    let aiu = null;
+    let aiuResult = null;
+    try {
+      aiu = aiuService.resolveAiu(req.body, tenantTaxConfig);
+    } catch (aiuErr) {
+      await transaction.rollback();
+      return res.status(aiuErr.statusCode || 400).json({ success: false, message: aiuErr.message });
+    }
+    if (aiu) {
+      if (saleDiscount > 0) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'Una factura AIU no admite el descuento general de la OT: quítelo o aplíquelo en los ítems' });
+      }
+      aiuResult = aiuService.applyAiu(saleLines, aiu);
+      saleSubtotal = aiuResult.subtotal;
+      saleTaxAmount = aiuResult.iva;
+    }
     const saleTotalAmount = Math.max(0, saleSubtotal + saleTaxAmount - saleDiscount);
+
+    // Retenciones que practicará el cliente y desglose de impuestos (mismo
+    // cálculo que sales.controller.js#create; antes este flujo no lo hacía).
+    const taxService = require('../../services/taxService');
+    let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+    if (order.customer) {
+      retentions = aiuResult
+        ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, order.customer.retention_config || {}, 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
+        : taxService.calculateRetentions(saleLines, tenantTaxConfig, order.customer.retention_config || {});
+    }
+    const tax_breakdown = taxService.buildTaxBreakdown(aiuResult ? [...saleLines, ...aiuService.aiuTaxLines(aiuResult, aiu)] : saleLines, retentions);
 
     const sale = await Sale.create({
       tenant_id,
@@ -2496,10 +2537,20 @@ const generateSale = async (req, res) => {
       dian_status:      document_type === 'factura' ? 'pending' : 'not_applicable',
       notes: `Generada desde OT ${order.order_number}${order.work_performed ? '. ' + order.work_performed : ''}`.trim(),
       created_by: req.user.id,
+      retefuente_rate:   retentions.retefuente.rate,
+      retefuente_amount: retentions.retefuente.amount,
+      reteiva_rate:      retentions.reteiva.rate,
+      reteiva_amount:    retentions.reteiva.amount,
+      reteica_rate:      retentions.reteica.rate,
+      reteica_amount:    retentions.reteica.amount,
+      total_retentions:  retentions.total,
+      tax_breakdown,
+      ...(aiuResult ? aiuResult.fields : {}),
     }, { transaction });
 
     // Ítems de la venta + movimientos de inventario (solo los aprobados/facturables)
-    for (const item of billableItems) {
+    for (const line of saleLines) {
+      const { item } = line;
       // Obtener costo actual del producto si es un producto con inventario
       let unit_cost = 0;
       let product = null;
@@ -2549,10 +2600,10 @@ const generateSale = async (req, res) => {
         unit_cost,
         discount_percentage: 0,
         discount_amount:  0,
-        tax_percentage:   item.tax_percentage,
-        tax_amount:       item.tax_amount,
-        subtotal:         item.subtotal,
-        total:            item.total,
+        tax_percentage:   line.tax_percentage,
+        tax_amount:       line.tax_amount,
+        subtotal:         line.subtotal,
+        total:            line.total,
         technician_id:    item.technician_id || null,
         ...pickComboFields(item),
       }, { transaction });

@@ -193,6 +193,13 @@ const Supplier = sequelize.define('Supplier', {
     type: DataTypes.STRING(5),
     allowNull: true,
     comment: "Tipo de identificación DIAN ('13' cédula, '31' NIT, etc.) — si no se captura, se infiere de person_type"
+  },
+  // Entidad de nómina: 'eps' | 'afp' | 'cesantias' | 'arl' | 'ccf' | 'sena' |
+  // 'icbf' (puede tener varios). Filtra los selectores de fondos de nómina.
+  payroll_fund_types: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: [],
   }
 }, {
   tableName: 'suppliers',

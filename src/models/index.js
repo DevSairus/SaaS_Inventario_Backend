@@ -16,6 +16,8 @@ const JournalEntry = require('./accounting/JournalEntry');
 const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
 const AccountMappingAudit = require('./accounting/AccountMappingAudit');
+const AccountMigration = require('./accounting/AccountMigration');
+const { IcaMunicipality, IcaActivity, IcaSettlement } = require('./tax/IcaModels');
 const OpeningBalance = require('./accounting/OpeningBalance');
 const FixedAsset = require('./accounting/FixedAsset');
 const FixedAssetDepreciationEntry = require('./accounting/FixedAssetDepreciationEntry');
@@ -439,6 +441,9 @@ AccountMappingAudit.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' })
 AccountMappingAudit.belongsTo(ChartOfAccount, { foreignKey: 'previous_account_id', as: 'previous_account' });
 AccountMappingAudit.belongsTo(ChartOfAccount, { foreignKey: 'new_account_id', as: 'new_account' });
 AccountMappingAudit.belongsTo(User, { foreignKey: 'changed_by', as: 'changed_by_user' });
+AccountMigration.belongsTo(ChartOfAccount, { foreignKey: 'from_account_id', as: 'from_account' });
+AccountMigration.belongsTo(ChartOfAccount, { foreignKey: 'to_account_id', as: 'to_account' });
+AccountMigration.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
 
 SubscriptionPlan.hasMany(TenantSubscription, { foreignKey: 'plan_id', as: 'subscriptions' });
 TenantSubscription.belongsTo(SubscriptionPlan, { foreignKey: 'plan_id', as: 'plan' });
@@ -1058,6 +1063,10 @@ module.exports = {
   JournalEntryLine,
   AccountMapping,
   AccountMappingAudit,
+  AccountMigration,
+  IcaMunicipality,
+  IcaActivity,
+  IcaSettlement,
   OpeningBalance,
   FixedAsset,
   FixedAssetDepreciationEntry,

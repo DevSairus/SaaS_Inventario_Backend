@@ -48,6 +48,13 @@ const PayrollSetting = sequelize.define('PayrollSetting', {
   // Exoneración Art. 114-1 E.T.: el empleador no aporta salud (8.5%), SENA
   // ni ICBF por los trabajadores que devenguen menos de 10 SMLMV.
   employer_exonerated_114_1: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  // Cómo llega a nómina la comisión de mano de obra de los técnicos (ver
+  // commissionPayroll.service.js). Cada empleado puede tener su excepción
+  // en Employee.commission_payroll_mode.
+  //   salarial:    novedad "Comisiones" (integra IBC y prestaciones)
+  //   no_salarial: novedad "Bonificaciones" no salarial (Art. 128 CST)
+  //   no_reportar: no se reporta a nómina; queda como gasto operativo
+  commission_payroll_mode: { type: DataTypes.STRING(15), allowNull: false, defaultValue: 'salarial', validate: { isIn: [['salarial', 'no_salarial', 'no_reportar']] } },
   // Fondos a nivel de empresa (proveedores). EPS/AFP/cesantías van por
   // empleado (ver Employee.js).
   arl_supplier_id: { type: DataTypes.UUID, allowNull: true },

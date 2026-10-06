@@ -419,6 +419,12 @@ router.post(
       const { seedPayrollConceptsForTenant } = require('../services/payroll/payrollConceptsSeed.service');
       await seedPayrollConceptsForTenant(tenant.id, transaction);
 
+      // 3b-ter. Entidades de seguridad social y parafiscales más usadas
+      // (EPS, pensión, cesantías, ARL, cajas, SENA, ICBF) como proveedores
+      // marcados para nómina -- ver data/payroll-funds-colombia.js.
+      const { ensurePayrollFundSuppliers } = require('../services/payroll/payrollFundsSeed.service');
+      await ensurePayrollFundSuppliers(tenant.id, transaction);
+
       // 3c. Sede y bodega principal por defecto.
       //
       // Antes se dependía SOLO del backfill de la migración

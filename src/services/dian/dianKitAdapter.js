@@ -12,6 +12,7 @@ const { DOMParser, XMLSerializer } = require('@xmldom/xmldom');
 const { setNodeDependencies } = require('xadesjs');
 const { DianKit } = require('@dian-kit/sdk-node');
 const logger = require('../../config/logger');
+const { escXml } = require('./dianXmlBuilder');
 const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
 
 // Inicializar dependencias de Node para xadesjs/xmldsigjs/xml-core
@@ -450,7 +451,8 @@ function simplifyCustomerParty(xml) {
 
 function buildLegalMonetaryTotal(items) {
   const subtotal = items.reduce((s, it) => s + Number(it.subtotal || it.lineExtensionAmount || 0), 0);
-  const taxAmount = items.reduce((s, it) => s + Number(it.tax_amount || 0), 0);
+  // IVA + INC (el INC ya iba en los TaxTotal pero no en el total del documento).
+  const taxAmount = items.reduce((s, it) => s + Number(it.tax_amount || 0) + Number(it.inc_amount || 0), 0);
   const total = subtotal + taxAmount;
   return {
     lineExtensionAmount: subtotal,
@@ -467,7 +469,30 @@ function buildLegalMonetaryTotal(items) {
  * Crea y firma una factura usando dian-kit.
  * Retorna { xml, signedXml, cufe, documentNumber }.
  */
-async function createInvoice(tenant, { invoiceNumber, items, resolution, customer, sale, documentType }) {
+/**
+ * Factura AIU (tipo de operación 09, Anexo Técnico tabla TipoOperacion):
+ * @dian-kit solo admite 10/20/30 en su schema, así que el documento se arma
+ * como estándar y, ANTES de firmar, se cambia CustomizationID a 09 y se pone
+ * en la primera línea la nota "Contrato de servicios AIU por concepto de: …"
+ * (como en el ejemplo oficial Servicios.xml de la Caja de Herramientas). El
+ * CUFE no incluye CustomizationID, así que no cambia. Las líneas A/I/U las
+ * agrega dianService (ver aiu.service.js#aiuDianLines), con IVA solo en la
+ * Utilidad.
+ *
+ * MEJOR ESFUERZO: validar con un envío al set de habilitación antes de
+ * facturar AIU en producción.
+ */
+function patchAiuXml(xml, aiu) {
+  const note = `Contrato de servicios AIU por concepto de: ${aiu.object || ''}`.trim();
+  return xml
+    .replace(/<cbc:CustomizationID>[^<]*<\/cbc:CustomizationID>/, '<cbc:CustomizationID>09</cbc:CustomizationID>')
+    .replace(
+      /(<cac:InvoiceLine>\s*<cbc:ID>[^<]*<\/cbc:ID>)/,
+      `$1<cbc:Note>${escXml(note)}</cbc:Note>`
+    );
+}
+
+async function createInvoice(tenant, { invoiceNumber, items, resolution, customer, sale, documentType, aiu }) {
   const kit = getKit(tenant);
   const cfg = tenant.dian_config || {};
 
@@ -490,7 +515,7 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
     technicalKey: resolution.technical_key || cfg.technical_key,
   };
 
-  const result = await kit.createInvoice({
+  const input = {
     id: invoiceNumber,
     ...(documentType && { documentType }),
     issueDate: new Date(),
@@ -503,7 +528,21 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
       paymentForm: '1',
       paymentMethod: '10',
     },
-  });
+  };
+
+  let result;
+  if (aiu) {
+    // Mismo camino que kit.createInvoice (assembleDocument + processDocument),
+    // con el builder envuelto para parchear el XML antes de la firma.
+    const { buildInvoiceXml, DocumentType: DT, OperationType } = require('@dian-kit/core');
+    const doc = kit.assembleDocument(input, {
+      documentType: documentType || DT.FACTURA_VENTA,
+      operationType: OperationType.ESTANDAR,
+    });
+    result = await kit.processDocument(doc, (d, uuid, ssc) => patchAiuXml(buildInvoiceXml(d, uuid, ssc), aiu));
+  } else {
+    result = await kit.createInvoice(input);
+  }
 
   return {
     xml: result.xml,

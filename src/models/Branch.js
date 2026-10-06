@@ -51,6 +51,11 @@ const Branch = sequelize.define('Branch', {
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
+  },
+  // Municipio donde declara ICA esta sede (ver services/tax/ica.service.js).
+  ica_municipality_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
   }
 }, {
   tableName: 'branches',

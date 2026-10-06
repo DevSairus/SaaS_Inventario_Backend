@@ -303,6 +303,18 @@ const Sale = sequelize.define('Sale', {
   reteica_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   total_retentions:  { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   tax_breakdown:     { type: DataTypes.JSONB, defaultValue: [] },
+  // ── Factura AIU (ver services/sales/aiu.service.js) ──
+  // IVA solo sobre la Utilidad; aiu_direct_amount es el costo directo (suma
+  // de las líneas). subtotal = directo + A + I + U.
+  aiu_enabled:           { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  aiu_admin_pct:         { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_unforeseen_pct:    { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_profit_pct:        { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_direct_amount:     { type: DataTypes.DECIMAL(15, 2), allowNull: true },
+  aiu_admin_amount:      { type: DataTypes.DECIMAL(15, 2), allowNull: true },
+  aiu_unforeseen_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
+  aiu_profit_amount:     { type: DataTypes.DECIMAL(15, 2), allowNull: true },
+  aiu_object:            { type: DataTypes.TEXT, allowNull: true },
   // ─────────────────────────────────────────────────────────────────────
   created_by: {
     type: DataTypes.UUID,

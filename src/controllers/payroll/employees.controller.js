@@ -7,6 +7,7 @@ const NULLABLE_FIELDS = [
   'state', 'city', 'city_code', 'address', 'notes', 'employee_code',
   'work_state', 'work_city', 'work_city_code', 'work_address',
   'eps_supplier_id', 'pension_fund_supplier_id', 'severance_fund_supplier_id',
+  'commission_payroll_mode',
 ];
 
 // Campos `allowNull: false` del modelo — algunos son obligatorios sin
@@ -181,6 +182,7 @@ const createEmployee = async (req, res) => {
       pension_fund_supplier_id,
       severance_fund_supplier_id,
       arl_risk_class = 1,
+      commission_payroll_mode,
     } = req.body;
 
     if (!document_number || !first_name || !first_surname || !hire_date) {
@@ -246,6 +248,7 @@ const createEmployee = async (req, res) => {
       pension_fund_supplier_id: pension_fund_supplier_id || null,
       severance_fund_supplier_id: severance_fund_supplier_id || null,
       arl_risk_class: Number(arl_risk_class) || 1,
+      commission_payroll_mode: commission_payroll_mode || null,
       created_by: req.user.id || req.user.userId || null,
     });
 

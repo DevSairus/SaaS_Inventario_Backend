@@ -192,9 +192,18 @@ async function sendInvoiceToDian(sale, tenant) {
     // Antes llegaban igual al XML (y a sus totales) -- ahora se excluyen.
     // Combos configurados como "solo nombre y total" van como una línea por
     // tarifa de impuesto (ver utils/comboLines.js) -- el PDF muestra lo mismo.
-    const items = collapseComboLinesForDian(
+    let items = collapseComboLinesForDian(
       (sale.items || []).filter(i => i.approval_status !== 'rechazado')
     );
+
+    // Factura AIU: líneas de Administración, Imprevistos y Utilidad (IVA solo
+    // en la Utilidad) y tipo de operación 09 -- ver dianKitAdapter.createInvoice.
+    let aiu = null;
+    if (sale.aiu_enabled) {
+      const { aiuDianLines } = require('../sales/aiu.service');
+      items = [...items, ...aiuDianLines(sale)];
+      aiu = { object: sale.aiu_object || '' };
+    }
 
     // Usar dian-kit para generar y firmar el XML
     const { signedXml, cufe } = await dianKit.createInvoice(tenant, {
@@ -202,6 +211,7 @@ async function sendInvoiceToDian(sale, tenant) {
       items,
       resolution,
       sale,
+      aiu,
     });
 
     // Enviar a DIAN
@@ -408,7 +418,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       technicalKey: dianCfg.technical_key,
     };
 
-    const items = note.items?.length ? collapseComboLinesForDian(note.items) : [{
+    let items = note.items?.length ? collapseComboLinesForDian(note.items) : [{
       description: isDebit ? 'Cargo adicional' : 'Devolucion parcial',
       quantity: 1,
       unit_price: Number(note.total_amount || note.subtotal || 0),
@@ -417,6 +427,13 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       tax_rate: 0,
       unit_code: 'EA',
     }];
+
+    // Nota sobre factura AIU: líneas de Administración, Imprevistos y
+    // Utilidad acreditadas (IVA solo en la Utilidad), igual que en la factura.
+    if (note.aiu_enabled && note.items?.length) {
+      const { aiuDianLines } = require('../sales/aiu.service');
+      items = [...items, ...aiuDianLines(note)];
+    }
 
     // Dirección y tipo de identificación reales del comprador — denormalizados
     // en la venta/nota igual que customer_address/customer_tax_id (ver

@@ -11,6 +11,7 @@ const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
+const aiuService = require('../../services/sales/aiu.service');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
@@ -340,7 +341,7 @@ const create = async (req, res) => {
       // Usar taxService para calcular todos los impuestos
       const taxes = taxService.calculateItemTaxes(item, product, 'sale', tenantTaxConfig);
 
-      subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.total_taxes;
+      subtotal += taxes.base; discount_amount += taxes.discount; tax_amount += taxes.total_taxes;
       saleItems.push({
         tenant_id: tenantId,
         item_type: product.product_type === 'service' ? 'service' : 'product',
@@ -350,7 +351,7 @@ const create = async (req, res) => {
         quantity: item.quantity,
         unit_price: item.unit_price,
         discount_percentage: item.discount_percentage || 0,
-        discount_amount: item.quantity * item.unit_price - taxes.base,
+        discount_amount: taxes.discount,
         tax_percentage: taxes.iva.rate,
         tax_amount: taxes.iva.amount,
         inc_rate: taxes.inc.rate,
@@ -365,7 +366,26 @@ const create = async (req, res) => {
       });
     }
 
-    const preDiscountTotal = saleItems.reduce((sum, i) => sum + i.total, 0);
+    // Factura AIU: IVA solo sobre la Utilidad (ver services/sales/aiu.service.js).
+    let aiu = null;
+    let aiuResult = null;
+    try {
+      aiu = aiuService.resolveAiu(req.body, tenantTaxConfig);
+    } catch (aiuErr) {
+      await transaction.rollback();
+      return res.status(aiuErr.statusCode || 400).json({ success: false, message: aiuErr.message });
+    }
+    if (aiu) {
+      if ((parseFloat(global_discount_value) || 0) > 0) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'Una factura AIU no admite descuento global: aplique los descuentos por línea' });
+      }
+      aiuResult = aiuService.applyAiu(saleItems, aiu);
+      subtotal = aiuResult.subtotal;
+      tax_amount = aiuResult.iva;
+    }
+
+    const preDiscountTotal = aiuResult ? aiuResult.total : saleItems.reduce((sum, i) => sum + i.total, 0);
     const global_discount_amount = resolveGlobalDiscount(global_discount_type, global_discount_value, preDiscountTotal);
     const total_amount = preDiscountTotal - global_discount_amount;
 
@@ -387,11 +407,13 @@ const create = async (req, res) => {
     if (finalCustomerId) {
       const customer = await Customer.findByPk(finalCustomerId, { transaction });
       if (customer) {
-        retentions = taxService.calculateRetentions(saleItems, tenantTaxConfig, customer.retention_config || {});
+        retentions = aiuResult
+          ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, customer.retention_config || {}, 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
+          : taxService.calculateRetentions(saleItems, tenantTaxConfig, customer.retention_config || {});
       }
     }
 
-    const tax_breakdown = taxService.buildTaxBreakdown(saleItems, retentions);
+    const tax_breakdown = taxService.buildTaxBreakdown(aiuResult ? [...saleItems, ...aiuService.aiuTaxLines(aiuResult, aiu)] : saleItems, retentions);
 
     // Resolver plazo de pago: el que venga explícito en el body, si no, el
     // plazo por defecto configurado en el cliente (en días).
@@ -440,6 +462,7 @@ const create = async (req, res) => {
       reteica_amount:    retentions.reteica.amount,
       total_retentions:  retentions.total,
       tax_breakdown,
+      ...(aiuResult ? aiuResult.fields : {}),
     };
 
     // ── Campo vehículo: respetar configuración del tenant ────────────────────
@@ -630,6 +653,12 @@ const update = async (req, res) => {
 
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const { items, customer_data, ...rest } = req.body;
+    // Los campos aiu_* los calcula el servidor (más abajo), no se copian tal cual.
+    for (const key of Object.keys(rest)) if (key.startsWith('aiu_')) delete rest[key];
+    if (Object.keys(req.body).some((k) => k.startsWith('aiu_')) && !(Array.isArray(items) && items.length > 0)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Para cambiar la configuración AIU envíe también los ítems de la venta' });
+    }
     const updateData = { ...rest };
 
     if ('global_discount_type' in updateData && !['fixed', 'percentage'].includes(updateData.global_discount_type)) {
@@ -755,13 +784,13 @@ const update = async (req, res) => {
 
         const taxes = taxService.calculateItemTaxes(item, product, 'sale', tenantTaxConfig);
 
-        subtotal += taxes.base; discount_amount += (item.quantity * item.unit_price - taxes.base); tax_amount += taxes.total_taxes;
+        subtotal += taxes.base; discount_amount += taxes.discount; tax_amount += taxes.total_taxes;
         newItems.push({
           sale_id: id, tenant_id: tenantId,
           item_type: product.product_type === 'service' ? 'service' : 'product',
           product_id: product.id, product_name: product.name, product_sku: product.sku,
           quantity: item.quantity, unit_price: item.unit_price,
-          discount_percentage: item.discount_percentage || 0, discount_amount: item.quantity * item.unit_price - taxes.base,
+          discount_percentage: item.discount_percentage || 0, discount_amount: taxes.discount,
           tax_percentage: taxes.iva.rate, tax_amount: taxes.iva.amount,
           inc_rate: taxes.inc.rate, inc_amount: taxes.inc.amount,
           ica_rate: taxes.ica.rate, ica_amount: taxes.ica.amount,
@@ -772,12 +801,53 @@ const update = async (req, res) => {
         });
       }
 
+      // Factura AIU (ver services/sales/aiu.service.js)
+      let aiu = null;
+      try {
+        aiu = aiuService.resolveAiu(req.body, tenantTaxConfig, sale);
+      } catch (aiuErr) {
+        await transaction.rollback();
+        return res.status(aiuErr.statusCode || 400).json({ success: false, message: aiuErr.message });
+      }
+      let aiuResult = null;
+      if (aiu) {
+        const effDiscount = updateData.global_discount_value !== undefined ? updateData.global_discount_value : sale.global_discount_value;
+        if ((parseFloat(effDiscount) || 0) > 0) {
+          await transaction.rollback();
+          return res.status(400).json({ success: false, message: 'Una factura AIU no admite descuento global: aplique los descuentos por línea' });
+        }
+        aiuResult = aiuService.applyAiu(newItems, aiu);
+        subtotal = aiuResult.subtotal;
+        tax_amount = aiuResult.iva;
+      }
+
       await SaleItem.bulkCreate(newItems, { transaction });
 
-      lineItemsTotal = newItems.reduce((sum, i) => sum + i.total, 0);
+      lineItemsTotal = aiuResult ? aiuResult.total : newItems.reduce((sum, i) => sum + i.total, 0);
       updateData.subtotal        = subtotal;
       updateData.tax_amount      = tax_amount;
       updateData.discount_amount = discount_amount;
+      Object.assign(updateData, aiuResult ? aiuResult.fields : (sale.aiu_enabled ? aiuService.AIU_OFF_FIELDS : {}));
+
+      // Retenciones y desglose de impuestos se recalculan con los ítems
+      // nuevos (antes quedaban con los valores de la creación).
+      const effCustomerId = 'customer_id' in updateData ? updateData.customer_id : sale.customer_id;
+      let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+      if (effCustomerId) {
+        const retCustomer = await Customer.findOne({ where: { id: effCustomerId, tenant_id: tenantId }, attributes: ['retention_config'], transaction });
+        if (retCustomer) {
+          retentions = aiuResult
+            ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, retCustomer.retention_config || {}, 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
+            : taxService.calculateRetentions(newItems, tenantTaxConfig, retCustomer.retention_config || {});
+        }
+      }
+      Object.assign(updateData, {
+        retefuente_rate: retentions.retefuente.rate, retefuente_amount: retentions.retefuente.amount,
+        reteiva_rate: retentions.reteiva.rate, reteiva_amount: retentions.reteiva.amount,
+        reteica_rate: retentions.reteica.rate, reteica_amount: retentions.reteica.amount,
+        total_retentions: retentions.total,
+        tax_breakdown: taxService.buildTaxBreakdown(aiuResult ? [...newItems, ...aiuService.aiuTaxLines(aiuResult, aiu)] : newItems, retentions),
+      });
 
       // Advertencia (NO bloqueante) de "cantidad en trámite" — excluye esta
       // misma venta (excludeSaleId) para que sus propios ítems recién
@@ -796,6 +866,9 @@ const update = async (req, res) => {
       } catch (warnError) {
         logger.warn('No se pudo calcular advertencia de cantidad en trámite:', warnError.message);
       }
+    } else if (discountFieldsChanged && sale.aiu_enabled && (parseFloat(updateData.global_discount_value) || 0) > 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Una factura AIU no admite descuento global: aplique los descuentos por línea' });
     } else if (discountFieldsChanged) {
       // Ítems no cambiaron pero sí el descuento global -- reconstruir el
       // total pre-descuento-global desde lo ya persistido (total_amount
@@ -1303,12 +1376,12 @@ const cancel = async (req, res) => {
                 const advance = await CustomerAdvance.findOne({ where: { id: application.advance_id, tenant_id: tenantId } });
                 if (advance) {
                   const newAppliedAmount = Math.max(0, parseFloat(advance.applied_amount) - parseFloat(application.amount));
-                  const newBalance = parseFloat(advance.amount) - newAppliedAmount - parseFloat(advance.refunded_amount);
+                  const newBalance = parseFloat(advance.amount) - newAppliedAmount - parseFloat(advance.refunded_amount) - parseFloat(advance.reassigned_amount || 0);
                   await advance.update({
                     applied_amount: newAppliedAmount,
                     balance: newBalance,
                     // Solo reactiva si no estaba anulado/devuelto por fuera de esta aplicación.
-                    status: advance.status === 'fully_applied' ? 'active' : advance.status,
+                    status: ['fully_applied', 'reassigned'].includes(advance.status) ? 'active' : advance.status,
                   });
                 }
 
@@ -1366,6 +1439,90 @@ const markAsDelivered = async (req, res) => {
   } catch (error) {
     logger.error('Error actualizando venta:', error);
     res.status(500).json({ success: false, message: 'Error actualizando venta' });
+  }
+};
+
+// Registrar retenciones que practicó el cliente (ReteFuente / ReteIVA /
+// ReteICA): cuentan como abono a la venta (bajan el saldo pendiente) pero no
+// mueven caja -- sin recibo ni caja abierta. Ver
+// autoEntries.service.js#generateSaleRetentionEntry.
+const registerRetentions = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { id } = req.params;
+    const tenantId = req.tenant_id;
+    const userId = req.user.id;
+    const round2 = (n) => Math.round((parseFloat(n) || 0) * 100) / 100;
+    const retentions = {
+      retefuente: round2(req.body.retefuente),
+      reteiva: round2(req.body.reteiva),
+      reteica: round2(req.body.reteica),
+    };
+    if (Object.values(retentions).some((v) => v < 0)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Las retenciones no pueden ser negativas' });
+    }
+    const amount = round2(retentions.retefuente + retentions.reteiva + retentions.reteica);
+    if (amount <= 0) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Indique al menos una retención' });
+    }
+
+    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId }, lock: transaction.LOCK.UPDATE, transaction });
+    if (!sale) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+    }
+    if (sale.status === 'draft' || sale.status === 'cancelled') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Solo se registran retenciones en ventas confirmadas' });
+    }
+    if (!sale.customer_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'La venta no tiene cliente: no hay quién practique la retención' });
+    }
+
+    const total = parseFloat(sale.total_amount);
+    const alreadyPaid = parseFloat(sale.paid_amount || 0);
+    if (amount > total - alreadyPaid + 0.01) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: `Las retenciones (${amount}) superan el saldo pendiente de la venta (${round2(total - alreadyPaid)})` });
+    }
+
+    const paid_amount = round2(alreadyPaid + amount);
+    const payment_status = paid_amount >= total ? 'paid' : 'partial';
+    const payment_id = require('crypto').randomUUID();
+    const effectiveDate = req.body.date || new Date();
+    const payment_history = [...(sale.payment_history || []), {
+      payment_id,
+      date: effectiveDate,
+      amount,
+      method: 'Retención',
+      // source 'retention': no es dinero que entre a caja (cashflow lo excluye).
+      source: 'retention',
+      retentions,
+      user_id: userId,
+      notes: req.body.notes || null,
+      branch_id: req.branch_id,
+    }];
+
+    await sale.update({ paid_amount, payment_status, payment_history }, { transaction });
+    await transaction.commit();
+
+    setImmediate(async () => {
+      try {
+        const { generateSaleRetentionEntry } = require('../../services/accounting/autoEntries.service');
+        await generateSaleRetentionEntry({ payment_id, date: effectiveDate, retentions }, sale, tenantId, userId);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de retenciones (venta ${id}): ${err.message}`);
+      }
+    });
+
+    res.json({ success: true, message: 'Retenciones registradas', data: { paid_amount, payment_status, payment_id } });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    logger.error('Error registrando retenciones:', error);
+    res.status(500).json({ success: false, message: 'Error registrando retenciones' });
   }
 };
 
@@ -2074,6 +2231,7 @@ module.exports = {
   cancel,
   markAsDelivered,
   registerPayment,
+  registerRetentions,
   delete: deleteById,
   getStats,
   generatePDF,

@@ -8,6 +8,8 @@ const accountingController = require('../../controllers/payroll/payrollAccountin
 // admin/super_admin dentro del controller.
 router.get('/', settingsController.getPayrollSettings);
 router.put('/', settingsController.updatePayrollSettings);
+// Catálogo de EPS/AFP/ARL/cajas/SENA/ICBF como proveedores marcados para nómina
+router.post('/fund-catalog', settingsController.loadFundCatalog);
 // Cierre anual de cesantías e intereses (causación o ajuste según el modo) -- admin.
 router.post('/cesantias-year-end', accountingController.closeCesantiasYear);
 // Consignación anual de cesantías a los fondos

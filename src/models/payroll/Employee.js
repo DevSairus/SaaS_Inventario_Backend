@@ -123,6 +123,14 @@ const Employee = sequelize.define('Employee', {
     allowNull: false,
     defaultValue: true,
   },
+  // Excepción por empleado del tratamiento de la comisión de mano de obra
+  // (salarial | no_salarial | no_reportar). NULL = usar
+  // PayrollSetting.commission_payroll_mode del tenant.
+  commission_payroll_mode: {
+    type: DataTypes.STRING(15),
+    allowNull: true,
+    validate: { isIn: [['salarial', 'no_salarial', 'no_reportar']] },
+  },
   hire_date: {
     type: DataTypes.DATEONLY,
     allowNull: false,

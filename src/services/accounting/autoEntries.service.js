@@ -83,6 +83,12 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
 
       let productRevenue = productItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
       let serviceRevenue = serviceItems.reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      // Factura AIU: Administración, Imprevistos y Utilidad también son
+      // ingreso del contrato de servicios (el IVA, solo sobre la U, ya viene
+      // en sale.tax_amount).
+      if (sale.aiu_enabled) {
+        serviceRevenue += Number(sale.aiu_admin_amount || 0) + Number(sale.aiu_unforeseen_amount || 0) + Number(sale.aiu_profit_amount || 0);
+      }
 
       // CMV solo de productos con control de inventario (track_inventory):
       // uno sin control nunca tuvo una salida real de kardex que respalde el
@@ -713,9 +719,13 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
       const productRevenue = (items || [])
         .filter((i) => (i.item_type || 'product') === 'product')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
-      const serviceRevenue = (items || [])
+      let serviceRevenue = (items || [])
         .filter((i) => i.item_type === 'service' || i.item_type === 'free_line')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      // Nota sobre factura AIU: también se reversa el ingreso de A + I + U.
+      if (noteSale.aiu_enabled) {
+        serviceRevenue += Number(noteSale.aiu_admin_amount || 0) + Number(noteSale.aiu_unforeseen_amount || 0) + Number(noteSale.aiu_profit_amount || 0);
+      }
       const totalTax = Number(noteSale.tax_amount || 0);
       const total = Number(noteSale.total_amount || 0);
       const paid = Math.min(Number(noteSale.paid_amount || 0), total);
@@ -1091,6 +1101,117 @@ async function generateAdvanceRefundEntry(refund, advance, tenantId, userId, opt
 }
 
 /**
+ * Asiento de las retenciones que el CLIENTE le practicó a una venta
+ * (ReteFuente / ReteIVA / ReteICA), registradas desde cartera como un abono
+ * sin movimiento de caja (sales.controller.js#registerRetentions).
+ * source_type 'payment' con el payment_id del abono: así la cancelación de la
+ * venta lo reversa igual que cualquier otro abono.
+ *
+ *   D sale_retefuente_receivable / sale_reteiva_receivable / sale_reteica_receivable
+ *   C sale_receivable (cartera del cliente)
+ *
+ * La ReteICA queda en 135518 hasta que se cruza en la causación del ICA del
+ * municipio (services/tax/ica.service.js).
+ *
+ * @param {object} payment - { payment_id, date, retentions: { retefuente, reteiva, reteica } }
+ */
+async function generateSaleRetentionEntry(payment, sale, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const r = payment.retentions || {};
+      const parts = [
+        { key: 'retefuente', event: 'sale_retefuente_receivable', label: 'ReteFuente practicada por el cliente' },
+        { key: 'reteiva', event: 'sale_reteiva_receivable', label: 'ReteIVA practicada por el cliente' },
+        { key: 'reteica', event: 'sale_reteica_receivable', label: 'ReteICA practicada por el cliente' },
+      ].filter((p) => Number(r[p.key] || 0) > 0);
+      if (!parts.length) return null;
+
+      const lines = [];
+      let total = 0;
+      for (const p of parts) {
+        const amount = Number(r[p.key]);
+        total += amount;
+        lines.push({ account_id: await getMappedAccountId(tenantId, p.event, t), debit: amount, credit: 0, description: p.label, third_party_id: sale.customer_id || null });
+      }
+      lines.push({
+        account_id: await getMappedAccountId(tenantId, 'sale_receivable', t), debit: 0, credit: total,
+        description: 'Retenciones aplicadas a la cartera', third_party_id: sale.customer_id || null,
+      });
+
+      const entry = await createDraftEntry(tenantId, {
+        branchId: sale.branch_id,
+        entryDate: payment.date || new Date(),
+        sourceType: 'payment',
+        sourceId: payment.payment_id,
+        description: `Retenciones de la venta ${sale.sale_number || sale.id}`,
+        lines,
+        createdBy: userId,
+      }, t);
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `retenciones de venta ${sale.id}`, options);
+}
+
+/**
+ * Genera el asiento en borrador al REASIGNAR saldo de un anticipo a otro
+ * cliente (`source_type: 'customer_advance_reassignment'`, source = anticipo
+ * nuevo del cliente destino). No toca caja: solo cambia el tercero del
+ * pasivo 280505.
+ *
+ * @param {object} newAdvance - anticipo creado para el cliente destino
+ * @param {object} original - anticipo de origen (customer_id del tercero que sale)
+ */
+async function generateAdvanceReassignmentEntry(newAdvance, original, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Number(newAdvance.amount || 0);
+      if (amount <= 0) return null;
+
+      const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+      const lines = [
+        {
+          account_id: liabilityAccount, debit: amount, credit: 0,
+          description: `Reasignación de anticipo ${original.advance_number} — sale del cliente`,
+          third_party_id: original.customer_id || null,
+        },
+        {
+          account_id: liabilityAccount, debit: 0, credit: amount,
+          description: `Reasignación de anticipo — entra como ${newAdvance.advance_number}`,
+          third_party_id: newAdvance.customer_id || null,
+        },
+      ];
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: newAdvance.branch_id,
+          entryDate: new Date(),
+          sourceType: 'customer_advance_reassignment',
+          sourceId: newAdvance.id,
+          description: `Reasignación de anticipo ${original.advance_number} → ${newAdvance.advance_number}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `reasignación de anticipo ${original.id} → ${newAdvance.id}`, options);
+}
+
+/**
  * Última fecha calendario de un período 'YYYY-MM' (fecha del asiento de
  * depreciación -- se contabiliza al cierre del mes, no al día 1). Cálculo
  * duplicado a propósito frente a periodEndDate en fixedAssetDepreciation.service.js
@@ -1463,6 +1584,8 @@ module.exports = {
   generateAdvanceEntry,
   generateAdvanceApplicationEntry,
   generateAdvanceRefundEntry,
+  generateAdvanceReassignmentEntry,
+  generateSaleRetentionEntry,
   generateDepreciationEntry,
   generateLoanPaymentEntry,
   generateAdjustmentEntry,

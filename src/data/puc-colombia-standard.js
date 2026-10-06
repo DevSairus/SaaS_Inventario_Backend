@@ -26,6 +26,8 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '1355', name: 'Anticipo de Impuestos y Contribuciones', type: 'activo', parent_code: '13', accepts_entries: false },
   { code: '135515', name: 'IVA Descontable', type: 'activo', parent_code: '1355', accepts_entries: true },
   { code: '135520', name: 'Retención en la Fuente (a favor)', type: 'activo', parent_code: '1355', accepts_entries: true },
+  { code: '135517', name: 'Impuesto a las Ventas Retenido', type: 'activo', parent_code: '1355', accepts_entries: true },
+  { code: '135518', name: 'Impuesto de Industria y Comercio Retenido', type: 'activo', parent_code: '1355', accepts_entries: true },
 
   { code: '14', name: 'Inventarios', type: 'activo', parent_code: '1', accepts_entries: false },
   { code: '1435', name: 'Mercancías No Fabricadas por la Empresa', type: 'activo', parent_code: '14', accepts_entries: false },
@@ -49,6 +51,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '236505', name: 'Retención en la Fuente por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236710', name: 'IVA Retenido por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236805', name: 'Retención de ICA', type: 'pasivo', parent_code: '23', accepts_entries: true },
+  { code: '236810', name: 'Autorretención de ICA por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '237005', name: 'Aportes de Seguridad Social por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   // Retenciones y aportes de nómina (comprobantes de nómina -- ver
   // services/payroll/payrollAccountingService.js).
@@ -64,6 +67,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '24', name: 'Impuestos, Gravámenes y Tasas', type: 'pasivo', parent_code: '2', accepts_entries: false },
   { code: '240805', name: 'IVA por Pagar (Generado)', type: 'pasivo', parent_code: '24', accepts_entries: true },
   { code: '240405', name: 'Impuesto de Renta y Complementarios', type: 'pasivo', parent_code: '24', accepts_entries: true },
+  { code: '241205', name: 'Impuesto de Industria y Comercio por Pagar', type: 'pasivo', parent_code: '24', accepts_entries: true },
 
   { code: '25', name: 'Obligaciones Laborales', type: 'pasivo', parent_code: '2', accepts_entries: false },
   { code: '250505', name: 'Salarios por Pagar', type: 'pasivo', parent_code: '25', accepts_entries: true },
@@ -105,6 +109,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '5', name: 'GASTOS', type: 'gasto', parent_code: null, accepts_entries: false },
   { code: '51', name: 'Operacionales de Administración', type: 'gasto', parent_code: '5', accepts_entries: false },
   { code: '510506', name: 'Gastos de Personal (Nómina Admin.)', type: 'gasto', parent_code: '51', accepts_entries: true },
+  { code: '511505', name: 'Impuesto de Industria y Comercio', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '510510', name: 'Comisiones a Técnicos (Mano de Obra)', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '510515', name: 'Horas Extras y Recargos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '510527', name: 'Auxilio de Transporte', type: 'gasto', parent_code: '51', accepts_entries: true },
@@ -272,6 +277,16 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   // Anticipos de Clientes (pasivo): lo que la empresa "debe" a sus clientes
   // por dinero recibido antes de facturar. Ver Anticipos-Clientes-Analisis-y-Plan.md §7.
   customer_advance_liability: '280505',
+
+  // ICA (services/tax/ica.service.js) y retenciones que practican los
+  // clientes sobre las ventas (registro de retenciones en cartera).
+  sale_retefuente_receivable: '135520',
+  sale_reteiva_receivable: '135517',
+  sale_reteica_receivable: '135518',
+  ica_expense: '511505',
+  ica_payable: '241205',
+  autoica_receivable: '135518',
+  autoica_payable: '236810',
 
   // Activos Fijos — gasto de depreciación mensual (Fase 1 de
   // Contabilidad-Plan-Ejecucion-Fases-1-4.md). Las 5 categorías comparten

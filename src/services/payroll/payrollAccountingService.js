@@ -34,8 +34,8 @@
  *
  * MEJOR ESFUERZO -- limitaciones conocidas:
  *  - El IBC de los aportes del empleador es el mismo que usa
- *    payrollService.js#calcularDeduccionesLegales para el empleado (solo el
- *    básico del periodo; sin horas extra/comisiones, sin el 70% del salario
+ *    payrollService.js#calcularDeduccionesLegales para el empleado (básico
+ *    del periodo + comisiones; sin horas extra, sin el 70% del salario
  *    integral, sin pisos/topes de 1 y 25 SMLMV). Se mantiene igual a
  *    propósito para que empleado y empleador coticen sobre la misma base.
  *  - Intereses de cesantías en causación mensual: 12% de lo provisionado
@@ -149,9 +149,11 @@ function basesDeLiquidacion(liquidation) {
   const dev = liquidation?.devengados || {};
   const sueldo = Number(dev.basico?.sueldoTrabajado || 0);
   const transporte = Number(dev.transporte?.auxilioTransporte || 0);
-  const variables = HORAS_KEYS.reduce((s, k) => s + sumarValorNovedad(dev[k]), 0) + sumarValorNovedad(dev.comisiones);
+  const comisiones = sumarValorNovedad(dev.comisiones);
+  const variables = HORAS_KEYS.reduce((s, k) => s + sumarValorNovedad(dev[k]), 0) + comisiones;
   return {
-    ibc: sueldo,
+    // Mismo IBC que payrollService.js#liquidarEmpleado (básico + comisiones).
+    ibc: sueldo + comisiones,
     // Cesantías y prima: salario + auxilio de transporte + lo variable
     // salarial (horas extra/recargos, comisiones). Vacaciones: solo salario.
     prestacional: sueldo + transporte + variables,

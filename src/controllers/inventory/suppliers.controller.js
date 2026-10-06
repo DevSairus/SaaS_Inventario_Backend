@@ -1,6 +1,9 @@
 const { Supplier } = require('../../models/inventory');
 const { Op } = require('sequelize');
 const { sanitizeRetentionConcepts } = require('../../services/taxService');
+const { PAYROLL_FUND_TYPES } = require('../../data/payroll-funds-colombia');
+
+const sanitizeFundTypes = (value) => (Array.isArray(value) ? [...new Set(value.filter((t) => PAYROLL_FUND_TYPES.includes(t)))] : []);
 
 // retention_config: { is_exento, is_autoretenedor, retentions: [conceptos] }.
 // Los conceptos se normalizan en el servidor (código válido, tarifa > 0,
@@ -77,6 +80,17 @@ const getSuppliers = async (req, res) => {
 
     if (is_active !== undefined && is_active !== '') {
       where.is_active = is_active === 'true';
+    }
+    // Documento Soporte: solo proveedores no obligados a facturar.
+    if (req.query.is_obligated_to_invoice !== undefined && req.query.is_obligated_to_invoice !== '') {
+      where.is_obligated_to_invoice = req.query.is_obligated_to_invoice === 'true';
+    }
+    // Selectores de nómina: solo entidades marcadas con ese tipo.
+    if (req.query.payroll_fund_type) {
+      where.payroll_fund_types = { [Op.contains]: [req.query.payroll_fund_type] };
+    }
+    if (req.query.payroll_only === 'true') {
+      where.payroll_fund_types = { [Op.ne]: [] };
     }
 
     // Obtener proveedores
@@ -206,6 +220,7 @@ const createSupplier = async (req, res) => {
       fiscal_responsibilities,
       is_obligated_to_invoice = true,
       retention_config,
+      payroll_fund_types,
     } = req.body;
 
     // Validar campos requeridos
@@ -258,6 +273,7 @@ const createSupplier = async (req, res) => {
       fiscal_responsibilities: fiscal_responsibilities || [],
       is_obligated_to_invoice,
       retention_config: normalizeRetentionConfig(retention_config),
+      payroll_fund_types: sanitizeFundTypes(payroll_fund_types),
     });
 
     res.status(201).json({
@@ -356,6 +372,10 @@ const updateSupplier = async (req, res) => {
     Object.keys(updateData).forEach(key => {
       if (updateData[key] === undefined) delete updateData[key];
     });
+
+    if (updateData.payroll_fund_types !== undefined) {
+      updateData.payroll_fund_types = sanitizeFundTypes(updateData.payroll_fund_types);
+    }
 
     if (updateData.retention_config !== undefined) {
       updateData.retention_config = normalizeRetentionConfig(updateData.retention_config);

@@ -337,7 +337,7 @@ const createProduct = async (req, res) => {
       min_stock = 0, max_stock, product_type = 'simple',
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
-      tax_config, is_labor = false, vehicle, retention_concept
+      tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false
     } = req.body;
 
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
@@ -440,6 +440,9 @@ const createProduct = async (req, res) => {
         min_stock: (safeProductType === 'service' || safeProductType === 'vehicle') ? 0 : min_stock,
         max_stock: (safeProductType === 'service' || safeProductType === 'vehicle') ? null : max_stock,
         track_inventory: effectiveTrackInventory,
+        // Antes no se leía del formulario: todo producto nuevo quedaba sin
+        // permiso de vender con stock en 0 aunque se marcara la casilla.
+        allow_negative_stock: effectiveTrackInventory ? !!allow_negative_stock : false,
         is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
         tax_config: finalTaxConfig,
         is_labor: safeProductType === 'service' ? !!is_labor : false,
