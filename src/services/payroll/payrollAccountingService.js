@@ -77,7 +77,8 @@ const APORTES_EMPLEADOR = {
 // Decreto 1295/1994 Art. 26 -- tarifa de cotización por clase de riesgo.
 const ARL_TARIFAS = { 1: 0.522, 2: 1.044, 3: 2.436, 4: 4.35, 5: 6.96 };
 
-const WORKER_TYPE = { PENSIONADO: '02', APRENDIZ_LECTIVA: '03', APRENDIZ_PRODUCTIVA: '04' };
+// Aprendices / pensionados -- ver workerTypes.js.
+const { esAprendiz, esAprendizLectiva, esAprendizProductiva, esPensionado } = require('./workerTypes');
 
 const HORAS_KEYS = ['heds', 'hens', 'hrns', 'heddfs', 'hrddfs', 'hendfs', 'hrndfs'];
 
@@ -152,8 +153,10 @@ function basesDeLiquidacion(liquidation) {
   const comisiones = sumarValorNovedad(dev.comisiones);
   const variables = HORAS_KEYS.reduce((s, k) => s + sumarValorNovedad(dev[k]), 0) + comisiones;
   return {
-    // Mismo IBC que payrollService.js#liquidarEmpleado (básico + comisiones).
-    ibc: sueldo + comisiones,
+    // Mismo IBC que payrollService.js#liquidarEmpleado (ver ibc.service.js).
+    // Liquidaciones anteriores a ese cálculo no lo traen: se mantiene el de
+    // entonces (básico + comisiones), que fue con el que se descontó al empleado.
+    ibc: liquidation?.ibc?.ibc != null ? Number(liquidation.ibc.ibc) : sueldo + comisiones,
     // Cesantías y prima: salario + auxilio de transporte + lo variable
     // salarial (horas extra/recargos, comisiones). Vacaciones: solo salario.
     prestacional: sueldo + transporte + variables,
@@ -173,8 +176,7 @@ function calcularAportesYProvisiones({ employee, liquidation, settings, isLiquid
   const { ibc, prestacional, vacaciones: baseVacaciones } = basesDeLiquidacion(liquidation);
   const pct = (base, p) => round2(base * (p / 100));
 
-  const wt = employee.worker_type;
-  const aprendiz = wt === WORKER_TYPE.APRENDIZ_LECTIVA || wt === WORKER_TYPE.APRENDIZ_PRODUCTIVA;
+  const aprendiz = esAprendiz(employee);
   const integral = employee.salary_type === 'integral';
   const salarioEnSmlmv = Number(employee.base_salary || 0) / PAYROLL_CONSTANTS.SMLMV;
   const exonerado = !!settings.employer_exonerated_114_1 && !aprendiz && salarioEnSmlmv < APORTES_EMPLEADOR.TOPE_EXONERACION_SMLMV;
@@ -182,11 +184,11 @@ function calcularAportesYProvisiones({ employee, liquidation, settings, isLiquid
 
   const aportes = {
     eps: aprendiz ? pct(ibc, APORTES_EMPLEADOR.SALUD_APRENDIZ) : (exonerado ? 0 : pct(ibc, APORTES_EMPLEADOR.SALUD)),
-    pension: (aprendiz || wt === WORKER_TYPE.PENSIONADO)
+    pension: (aprendiz || esPensionado(employee))
       ? 0
       : pct(ibc, employee.high_risk_pension ? APORTES_EMPLEADOR.PENSION_ALTO_RIESGO : APORTES_EMPLEADOR.PENSION),
     // El aprendiz en etapa lectiva no cotiza ARL; en etapa productiva sí.
-    arl: wt === WORKER_TYPE.APRENDIZ_LECTIVA ? 0 : pct(ibc, ARL_TARIFAS[claseRiesgo] || ARL_TARIFAS[1]),
+    arl: esAprendizLectiva(employee) ? 0 : pct(ibc, ARL_TARIFAS[claseRiesgo] || ARL_TARIFAS[1]),
     ccf: aprendiz ? 0 : pct(ibc, APORTES_EMPLEADOR.CCF),
     sena: (aprendiz || exonerado) ? 0 : pct(ibc, APORTES_EMPLEADOR.SENA),
     icbf: (aprendiz || exonerado) ? 0 : pct(ibc, APORTES_EMPLEADOR.ICBF),
@@ -662,7 +664,7 @@ async function baseCesantiasDelAnio(tenantId, anio, t) {
   for (const d of docs) {
     if (d.period.period_type === 'liquidacion' || liquidados.has(d.employee_id) || !d.employee) continue;
     if (d.employee.salary_type === 'integral') continue;
-    if ([WORKER_TYPE.APRENDIZ_LECTIVA, WORKER_TYPE.APRENDIZ_PRODUCTIVA].includes(d.employee.worker_type)) continue;
+    if (esAprendiz(d.employee)) continue;
     const liquidation = liquidacionVigente(d);
     if (!liquidation) continue;
     const { prestacional, diasTrabajados } = basesDeLiquidacion(liquidation);
@@ -1235,6 +1237,10 @@ module.exports = {
   APORTES_EMPLEADOR,
   ARL_TARIFAS,
   basesDeLiquidacion,
+  esAprendiz,
+  esAprendizLectiva,
+  esAprendizProductiva,
+  esPensionado,
   calcularAportesYProvisiones,
   desglosarDevengados,
   liquidacionVigente,

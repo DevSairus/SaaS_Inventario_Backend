@@ -200,7 +200,23 @@ const Employee = sequelize.define('Employee', {
     defaultValue: 1,
     validate: { isIn: [[1, 2, 3, 4, 5]] },
     comment: 'Clase de riesgo ARL (I a V, Decreto 1295/1994)',
+  },  // ── PILA (ver services/payroll/pila/) ──
+  pila_work_center: {
+    type: DataTypes.STRING(9),
+    allowNull: true,
+    comment: 'Centro de trabajo registrado ante la ARL',
   },
+  arl_economic_activity: {
+    type: DataTypes.STRING(7),
+    allowNull: true,
+    comment: 'Actividad económica ARL (Decreto 768/2022, 7 dígitos); vacío = la de Configuración de Nómina',
+  },
+  arl_rate: {
+    type: DataTypes.DECIMAL(9, 7),
+    allowNull: true,
+    comment: 'Tarifa ARL exacta (fracción, ej. 0.0052200); vacío = la de su clase de riesgo',
+  },
+
   // ── Ubicación DIAN (mismo patrón que Supplier/Customer) ──
   country: {
     type: DataTypes.STRING(100),

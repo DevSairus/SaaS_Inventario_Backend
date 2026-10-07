@@ -221,6 +221,7 @@ const createSupplier = async (req, res) => {
       is_obligated_to_invoice = true,
       retention_config,
       payroll_fund_types,
+      pila_code,
     } = req.body;
 
     // Validar campos requeridos
@@ -274,6 +275,7 @@ const createSupplier = async (req, res) => {
       is_obligated_to_invoice,
       retention_config: normalizeRetentionConfig(retention_config),
       payroll_fund_types: sanitizeFundTypes(payroll_fund_types),
+      pila_code: String(pila_code || '').trim().toUpperCase().slice(0, 10) || null,
     });
 
     res.status(201).json({
@@ -372,6 +374,10 @@ const updateSupplier = async (req, res) => {
     Object.keys(updateData).forEach(key => {
       if (updateData[key] === undefined) delete updateData[key];
     });
+
+    if (updateData.pila_code !== undefined) {
+      updateData.pila_code = String(updateData.pila_code || '').trim().toUpperCase().slice(0, 10) || null;
+    }
 
     if (updateData.payroll_fund_types !== undefined) {
       updateData.payroll_fund_types = sanitizeFundTypes(updateData.payroll_fund_types);

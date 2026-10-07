@@ -17,6 +17,7 @@ const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
 const AccountMappingAudit = require('./accounting/AccountMappingAudit');
 const AccountMigration = require('./accounting/AccountMigration');
+const FormDraft = require('./common/FormDraft');
 const { IcaMunicipality, IcaActivity, IcaSettlement } = require('./tax/IcaModels');
 const OpeningBalance = require('./accounting/OpeningBalance');
 const FixedAsset = require('./accounting/FixedAsset');
@@ -1064,6 +1065,7 @@ module.exports = {
   AccountMapping,
   AccountMappingAudit,
   AccountMigration,
+  FormDraft,
   IcaMunicipality,
   IcaActivity,
   IcaSettlement,

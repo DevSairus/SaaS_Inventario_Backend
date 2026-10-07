@@ -11,7 +11,7 @@ const digits = (v) => String(v || '').replace(/\D/g, '');
 
 async function ensurePayrollFundSuppliers(tenantId, transaction) {
   const { Supplier } = require('../../models');
-  const existing = await Supplier.findAll({ where: { tenant_id: tenantId }, attributes: ['id', 'tax_id', 'payroll_fund_types'], transaction });
+  const existing = await Supplier.findAll({ where: { tenant_id: tenantId }, attributes: ['id', 'tax_id', 'payroll_fund_types', 'pila_code'], transaction });
 
   let created = 0;
   let tagged = 0;
@@ -24,9 +24,12 @@ async function ensurePayrollFundSuppliers(tenantId, transaction) {
     if (match) {
       const current = Array.isArray(match.payroll_fund_types) ? match.payroll_fund_types : [];
       const merged = [...new Set([...current, ...fund.types])];
-      if (merged.length !== current.length) {
-        await match.update({ payroll_fund_types: merged }, { transaction });
-        tagged += 1;
+      const patch = {};
+      if (merged.length !== current.length) patch.payroll_fund_types = merged;
+      if (fund.pila_code && !match.pila_code) patch.pila_code = fund.pila_code;
+      if (Object.keys(patch).length) {
+        await match.update(patch, { transaction });
+        if (patch.payroll_fund_types) tagged += 1;
       }
       continue;
     }
@@ -41,6 +44,7 @@ async function ensurePayrollFundSuppliers(tenantId, transaction) {
       is_active: true,
       is_obligated_to_invoice: true,
       payroll_fund_types: fund.types,
+      pila_code: fund.pila_code || null,
       notes: 'Entidad de seguridad social / parafiscal cargada desde el catálogo de Pitbox. Verifique el NIT contra el RUT antes de reportar.',
     }, { transaction });
     existing.push(supplier);

@@ -10,6 +10,9 @@
 // exógena conviene validar el NIT contra el RUT de cada entidad: fusiones,
 // liquidaciones y cambios de razón social son frecuentes en el sector.
 //
+// pila_code: código de la administradora en la PILA, solo donde es seguro;
+// el resto se completa en Proveedores o al importar una planilla anterior.
+//
 // Tipos: eps | afp (pensión) | cesantias | arl | ccf (caja de compensación)
 //        | sena | icbf
 
@@ -17,25 +20,25 @@ const PAYROLL_FUND_TYPES = ['eps', 'afp', 'cesantias', 'arl', 'ccf', 'sena', 'ic
 
 const PAYROLL_FUNDS_COLOMBIA = [
   // ── EPS ──
-  { name: 'Nueva EPS', business_name: 'NUEVA EMPRESA PROMOTORA DE SALUD S.A.', tax_id: '900156264', types: ['eps'] },
-  { name: 'EPS Sura', business_name: 'EPS Y MEDICINA PREPAGADA SURAMERICANA S.A.', tax_id: '800088702', types: ['eps'] },
-  { name: 'EPS Sanitas', business_name: 'ENTIDAD PROMOTORA DE SALUD SANITAS S.A.S.', tax_id: '800251440', types: ['eps'] },
-  { name: 'Salud Total EPS', business_name: 'SALUD TOTAL ENTIDAD PROMOTORA DE SALUD S.A.', tax_id: '800130907', types: ['eps'] },
-  { name: 'Famisanar EPS', business_name: 'EPS FAMISANAR S.A.S.', tax_id: '830003564', types: ['eps'] },
+  { name: 'Nueva EPS', business_name: 'NUEVA EMPRESA PROMOTORA DE SALUD S.A.', tax_id: '900156264', pila_code: 'EPS037', types: ['eps'] },
+  { name: 'EPS Sura', business_name: 'EPS Y MEDICINA PREPAGADA SURAMERICANA S.A.', tax_id: '800088702', pila_code: 'EPS010', types: ['eps'] },
+  { name: 'EPS Sanitas', business_name: 'ENTIDAD PROMOTORA DE SALUD SANITAS S.A.S.', tax_id: '800251440', pila_code: 'EPS005', types: ['eps'] },
+  { name: 'Salud Total EPS', business_name: 'SALUD TOTAL ENTIDAD PROMOTORA DE SALUD S.A.', tax_id: '800130907', pila_code: 'EPS002', types: ['eps'] },
+  { name: 'Famisanar EPS', business_name: 'EPS FAMISANAR S.A.S.', tax_id: '830003564', pila_code: 'EPS017', types: ['eps'] },
   { name: 'Coosalud EPS', business_name: 'COOSALUD ENTIDAD PROMOTORA DE SALUD S.A.', tax_id: '900226715', types: ['eps'] },
   { name: 'Mutual Ser EPS', business_name: 'MUTUAL SER EPS', tax_id: '806008394', types: ['eps'] },
-  { name: 'Aliansalud EPS', business_name: 'ALIANSALUD ENTIDAD PROMOTORA DE SALUD S.A.', tax_id: '830113831', types: ['eps'] },
-  { name: 'SOS EPS', business_name: 'SERVICIO OCCIDENTAL DE SALUD S.A. - S.O.S.', tax_id: '805001157', types: ['eps'] },
+  { name: 'Aliansalud EPS', business_name: 'ALIANSALUD ENTIDAD PROMOTORA DE SALUD S.A.', tax_id: '830113831', pila_code: 'EPS001', types: ['eps'] },
+  { name: 'SOS EPS', business_name: 'SERVICIO OCCIDENTAL DE SALUD S.A. - S.O.S.', tax_id: '805001157', pila_code: 'EPS018', types: ['eps'] },
   { name: 'Savia Salud EPS', business_name: 'ALIANZA MEDELLÍN ANTIOQUIA EPS S.A.S.', tax_id: '900604350', types: ['eps'] },
   // Compensar es EPS y caja de compensación con el mismo NIT.
-  { name: 'Compensar', business_name: 'CAJA DE COMPENSACIÓN FAMILIAR COMPENSAR', tax_id: '860066942', types: ['eps', 'ccf'] },
+  { name: 'Compensar', business_name: 'CAJA DE COMPENSACIÓN FAMILIAR COMPENSAR', tax_id: '860066942', pila_code: 'EPS008', types: ['eps', 'ccf'] },
 
   // ── Pensión y cesantías ──
-  { name: 'Colpensiones', business_name: 'ADMINISTRADORA COLOMBIANA DE PENSIONES - COLPENSIONES', tax_id: '900336004', types: ['afp'] },
-  { name: 'Porvenir', business_name: 'SOCIEDAD ADMINISTRADORA DE FONDOS DE PENSIONES Y CESANTÍAS PORVENIR S.A.', tax_id: '800224808', types: ['afp', 'cesantias'] },
-  { name: 'Protección', business_name: 'ADMINISTRADORA DE FONDOS DE PENSIONES Y CESANTÍAS PROTECCIÓN S.A.', tax_id: '800138188', types: ['afp', 'cesantias'] },
-  { name: 'Colfondos', business_name: 'COLFONDOS S.A. PENSIONES Y CESANTÍAS', tax_id: '800149496', types: ['afp', 'cesantias'] },
-  { name: 'Skandia', business_name: 'SKANDIA ADMINISTRADORA DE FONDOS DE PENSIONES Y CESANTÍAS S.A.', tax_id: '800148514', types: ['afp', 'cesantias'] },
+  { name: 'Colpensiones', business_name: 'ADMINISTRADORA COLOMBIANA DE PENSIONES - COLPENSIONES', tax_id: '900336004', pila_code: '25-14', types: ['afp'] },
+  { name: 'Porvenir', business_name: 'SOCIEDAD ADMINISTRADORA DE FONDOS DE PENSIONES Y CESANTÍAS PORVENIR S.A.', tax_id: '800224808', pila_code: '230301', types: ['afp', 'cesantias'] },
+  { name: 'Protección', business_name: 'ADMINISTRADORA DE FONDOS DE PENSIONES Y CESANTÍAS PROTECCIÓN S.A.', tax_id: '800138188', pila_code: '230201', types: ['afp', 'cesantias'] },
+  { name: 'Colfondos', business_name: 'COLFONDOS S.A. PENSIONES Y CESANTÍAS', tax_id: '800149496', pila_code: '231001', types: ['afp', 'cesantias'] },
+  { name: 'Skandia', business_name: 'SKANDIA ADMINISTRADORA DE FONDOS DE PENSIONES Y CESANTÍAS S.A.', tax_id: '800148514', pila_code: '230901', types: ['afp', 'cesantias'] },
   { name: 'Fondo Nacional del Ahorro', business_name: 'FONDO NACIONAL DEL AHORRO', tax_id: '899999284', types: ['cesantias'] },
 
   // ── ARL ──

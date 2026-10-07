@@ -58,6 +58,17 @@ const PayrollSetting = sequelize.define('PayrollSetting', {
   // Fondos a nivel de empresa (proveedores). EPS/AFP/cesantías van por
   // empleado (ver Employee.js).
   arl_supplier_id: { type: DataTypes.UUID, allowNull: true },
+  // Jornada semanal de la empresa (valor de la hora, horas laboradas PILA);
+  // vacía = máxima legal de la Ley 2101 -- ver services/payroll/jornada.js.
+  weekly_hours: { type: DataTypes.DECIMAL(4, 1), allowNull: true },
+  // PILA (encabezado de la planilla) -- ver services/payroll/pila/.
+  pila_contributor_type: { type: DataTypes.STRING(2), allowNull: false, defaultValue: '01' },
+  pila_presentation_form: { type: DataTypes.STRING(1), allowNull: false, defaultValue: 'U' },
+  pila_branch_code: { type: DataTypes.STRING(10), allowNull: true },
+  pila_branch_name: { type: DataTypes.STRING(40), allowNull: true },
+  arl_economic_activity: { type: DataTypes.STRING(7), allowNull: true },
+  // Plantilla del Excel de la PILA aprendida de una muestra; NULL = estándar.
+  pila_excel_template: { type: DataTypes.JSONB, allowNull: true },
   ccf_supplier_id: { type: DataTypes.UUID, allowNull: true },
   sena_supplier_id: { type: DataTypes.UUID, allowNull: true },
   icbf_supplier_id: { type: DataTypes.UUID, allowNull: true },

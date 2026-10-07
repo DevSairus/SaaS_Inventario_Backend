@@ -21,7 +21,10 @@ const ENUM_FIELDS = {
   prima_accrual_mode: ['monthly', 'on_payment'],
   vacaciones_accrual_mode: ['monthly', 'on_payment'],
   commission_payroll_mode: ['salarial', 'no_salarial', 'no_reportar'],
+  pila_presentation_form: ['U', 'S'],
 };
+// PILA y jornada -- texto libre corto (vacío = null).
+const TEXT_FIELDS = { pila_contributor_type: 2, pila_branch_code: 10, pila_branch_name: 40, arl_economic_activity: 7 };
 const SUPPLIER_FIELDS = ['arl_supplier_id', 'ccf_supplier_id', 'sena_supplier_id', 'icbf_supplier_id'];
 
 const getPayrollSettings = async (req, res) => {
@@ -79,6 +82,18 @@ const updatePayrollSettings = async (req, res) => {
         return res.status(400).json({ success: false, message: `${field} debe ser uno de: ${allowed.join(', ')}` });
       }
       updates[field] = req.body[field];
+    }
+    for (const [field, max] of Object.entries(TEXT_FIELDS)) {
+      if (req.body[field] === undefined) continue;
+      const value = String(req.body[field] ?? '').trim().slice(0, max);
+      updates[field] = value || (field === 'pila_contributor_type' ? '01' : null);
+    }
+    if (req.body.weekly_hours !== undefined) {
+      const h = req.body.weekly_hours === '' || req.body.weekly_hours === null ? null : Number(req.body.weekly_hours);
+      if (h !== null && (!Number.isFinite(h) || h <= 0 || h > 48)) {
+        return res.status(400).json({ success: false, message: 'La jornada semanal debe estar entre 1 y 48 horas' });
+      }
+      updates.weekly_hours = h;
     }
     if (req.body.employer_exonerated_114_1 !== undefined) {
       updates.employer_exonerated_114_1 = !!req.body.employer_exonerated_114_1;

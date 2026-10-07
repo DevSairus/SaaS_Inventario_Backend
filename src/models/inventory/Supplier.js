@@ -200,6 +200,12 @@ const Supplier = sequelize.define('Supplier', {
     type: DataTypes.JSONB,
     allowNull: false,
     defaultValue: [],
+  },
+  // Código de la administradora en la PILA (EPS037, 230301, 25-14, CCF03,
+  // 14-11...) -- distinto del NIT. Ver services/payroll/pila/.
+  pila_code: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
   }
 }, {
   tableName: 'suppliers',

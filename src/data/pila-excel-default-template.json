@@ -1,0 +1,751 @@
+{
+  "version": 1,
+  "source_name": "Estándar (encabezado del aportante + cotizantes en una hoja)",
+  "sheets": [
+    "Planilla base"
+  ],
+  "sections": [
+    {
+      "kind": "r1",
+      "sheet": "Planilla base",
+      "labelRow": 1,
+      "dataStartRow": 2,
+      "sampleRows": 1,
+      "columns": [
+        {
+          "col": 1,
+          "label": "Tipo de registro",
+          "field": "tipoRegistro",
+          "type": "text"
+        },
+        {
+          "col": 2,
+          "label": "Modalidad de la Planilla",
+          "field": "modalidad",
+          "type": "text"
+        },
+        {
+          "col": 3,
+          "label": "Secuencia",
+          "field": "secuencia",
+          "type": "number"
+        },
+        {
+          "col": 4,
+          "label": "Nombre o Razón Social del Aportante",
+          "field": "razonSocial",
+          "type": "text"
+        },
+        {
+          "col": 5,
+          "label": "Tipo Documento",
+          "field": "tipoDoc",
+          "type": "text"
+        },
+        {
+          "col": 6,
+          "label": "Nº de Identificación",
+          "field": "nit",
+          "type": "text"
+        },
+        {
+          "col": 7,
+          "label": "Digito de Verificación",
+          "field": "dv",
+          "type": "text"
+        },
+        {
+          "col": 8,
+          "label": "Tipo Planilla",
+          "field": "tipoPlanilla",
+          "type": "text"
+        },
+        {
+          "col": 9,
+          "label": "Número Planilla Asociada a esta planilla",
+          "field": "planillaAsociada",
+          "type": "auto"
+        },
+        {
+          "col": 10,
+          "label": "Fecha de Pago Planilla Asociada a esta planilla",
+          "field": "fechaPlanillaAsociada",
+          "type": "auto"
+        },
+        {
+          "col": 11,
+          "label": "Forma Presentación",
+          "field": "formaPresentacion",
+          "type": "text"
+        },
+        {
+          "col": 12,
+          "label": "Código Sucursal Aportante",
+          "field": "codigoSucursal",
+          "type": "auto"
+        },
+        {
+          "col": 13,
+          "label": "Nombre Sucursal",
+          "field": "nombreSucursal",
+          "type": "auto"
+        },
+        {
+          "col": 14,
+          "label": "Código ARL",
+          "field": "codigoArl",
+          "type": "text"
+        },
+        {
+          "col": 15,
+          "label": "Periodo Pago a Sistemas Diferentes a Salud",
+          "field": "periodoPension",
+          "type": "text"
+        },
+        {
+          "col": 16,
+          "label": "Periodo Pago al Sistema de Salud",
+          "field": "periodoSalud",
+          "type": "text"
+        },
+        {
+          "col": 17,
+          "label": "Número  de Planilla",
+          "field": "numeroRadicacion",
+          "type": "auto"
+        },
+        {
+          "col": 18,
+          "label": "Fecha de Pago",
+          "field": "fechaPago",
+          "type": "auto"
+        },
+        {
+          "col": 19,
+          "label": "Número total de cotizantes",
+          "field": "numeroCotizantes",
+          "type": "number"
+        },
+        {
+          "col": 20,
+          "label": "Valor Total Nómina",
+          "field": "valorNomina",
+          "type": "number"
+        },
+        {
+          "col": 21,
+          "label": "Tipo de Aportante",
+          "field": "tipoAportante",
+          "type": "text",
+          "pad": false
+        },
+        {
+          "col": 22,
+          "label": "Código del Operador de Información",
+          "field": "codigoOperador",
+          "type": "auto"
+        }
+      ]
+    },
+    {
+      "kind": "r2",
+      "sheet": "Planilla base",
+      "labelRow": 3,
+      "dataStartRow": 4,
+      "sampleRows": 5,
+      "columns": [
+        {
+          "col": 1,
+          "label": "Tipo de registro",
+          "field": "tipoRegistro",
+          "type": "number"
+        },
+        {
+          "col": 2,
+          "label": "Secuencia",
+          "field": "secuencia",
+          "type": "number"
+        },
+        {
+          "col": 3,
+          "label": "Tipo documento cotizante",
+          "field": "tipoDoc",
+          "type": "text"
+        },
+        {
+          "col": 4,
+          "label": "Documento cotizante",
+          "field": "documento",
+          "type": "text"
+        },
+        {
+          "col": 5,
+          "label": "Tipo de cotizante",
+          "field": "tipoCotizante",
+          "type": "number"
+        },
+        {
+          "col": 6,
+          "label": "Subtipo de cotizante",
+          "field": "subtipoCotizante",
+          "type": "number"
+        },
+        {
+          "col": 7,
+          "label": "Extranjero",
+          "field": "extranjero",
+          "type": "auto"
+        },
+        {
+          "col": 8,
+          "label": "Colombiano en el exterior",
+          "field": "colombianoExterior",
+          "type": "auto"
+        },
+        {
+          "col": 9,
+          "label": "Departamento",
+          "field": "departamento",
+          "type": "text"
+        },
+        {
+          "col": 10,
+          "label": "Municipio",
+          "field": "municipio",
+          "type": "text"
+        },
+        {
+          "col": 11,
+          "label": "Primer apellido",
+          "field": "primerApellido",
+          "type": "text"
+        },
+        {
+          "col": 12,
+          "label": "Segundo apellido",
+          "field": "segundoApellido",
+          "type": "text"
+        },
+        {
+          "col": 13,
+          "label": "Primer nombre",
+          "field": "primerNombre",
+          "type": "text"
+        },
+        {
+          "col": 14,
+          "label": "Segundo nombre",
+          "field": "segundoNombre",
+          "type": "text"
+        },
+        {
+          "col": 15,
+          "label": "ING",
+          "field": "ing",
+          "type": "auto"
+        },
+        {
+          "col": 16,
+          "label": "RET",
+          "field": "ret",
+          "type": "auto"
+        },
+        {
+          "col": 17,
+          "label": "TDE",
+          "field": "tde",
+          "type": "auto"
+        },
+        {
+          "col": 18,
+          "label": "TAE",
+          "field": "tae",
+          "type": "auto"
+        },
+        {
+          "col": 19,
+          "label": "TDP",
+          "field": "tdp",
+          "type": "auto"
+        },
+        {
+          "col": 20,
+          "label": "TAP",
+          "field": "tap",
+          "type": "auto"
+        },
+        {
+          "col": 21,
+          "label": "VSP",
+          "field": "vsp",
+          "type": "auto"
+        },
+        {
+          "col": 22,
+          "label": "Línea",
+          "field": "correcciones",
+          "type": "auto"
+        },
+        {
+          "col": 23,
+          "label": "VST",
+          "field": "vst",
+          "type": "text"
+        },
+        {
+          "col": 24,
+          "label": "SLN",
+          "field": "sln",
+          "type": "auto"
+        },
+        {
+          "col": 25,
+          "label": "IGE",
+          "field": "ige",
+          "type": "auto"
+        },
+        {
+          "col": 26,
+          "label": "LMA",
+          "field": "lma",
+          "type": "auto"
+        },
+        {
+          "col": 27,
+          "label": "VAC-LR",
+          "field": "vacLr",
+          "type": "auto"
+        },
+        {
+          "col": 28,
+          "label": "AVP",
+          "field": "avp",
+          "type": "auto"
+        },
+        {
+          "col": 29,
+          "label": "VCT",
+          "field": "vct",
+          "type": "auto"
+        },
+        {
+          "col": 30,
+          "label": "IRL",
+          "field": "irl",
+          "type": "number"
+        },
+        {
+          "col": 31,
+          "label": "AFP",
+          "field": "afp",
+          "type": "text"
+        },
+        {
+          "col": 32,
+          "label": "AFP Traslado",
+          "field": "afpTraslado",
+          "type": "auto"
+        },
+        {
+          "col": 33,
+          "label": "EPS",
+          "field": "eps",
+          "type": "text"
+        },
+        {
+          "col": 34,
+          "label": "EPS Traslado",
+          "field": "epsTraslado",
+          "type": "auto"
+        },
+        {
+          "col": 35,
+          "label": "CCF",
+          "field": "ccf",
+          "type": "text"
+        },
+        {
+          "col": 36,
+          "label": "Días AFP",
+          "field": "diasAfp",
+          "type": "number"
+        },
+        {
+          "col": 37,
+          "label": "Días EPS",
+          "field": "diasEps",
+          "type": "number"
+        },
+        {
+          "col": 38,
+          "label": "Días ARL",
+          "field": "diasArl",
+          "type": "number"
+        },
+        {
+          "col": 39,
+          "label": "Días CCF",
+          "field": "diasCcf",
+          "type": "number"
+        },
+        {
+          "col": 40,
+          "label": "Salario básico",
+          "field": "salarioBasico",
+          "type": "number"
+        },
+        {
+          "col": 41,
+          "label": "Salario integral",
+          "field": "salarioIntegral",
+          "type": "text"
+        },
+        {
+          "col": 42,
+          "label": "IBC AFP",
+          "field": "ibcAfp",
+          "type": "number"
+        },
+        {
+          "col": 43,
+          "label": "IBC EPS",
+          "field": "ibcEps",
+          "type": "number"
+        },
+        {
+          "col": 44,
+          "label": "IBC ARL",
+          "field": "ibcArl",
+          "type": "number"
+        },
+        {
+          "col": 45,
+          "label": "IBC CCF",
+          "field": "ibcCcf",
+          "type": "number"
+        },
+        {
+          "col": 46,
+          "label": "Tarifa AFP",
+          "field": "tarifaAfp",
+          "type": "number"
+        },
+        {
+          "col": 47,
+          "label": "Cotización AFP",
+          "field": "cotizacionAfp",
+          "type": "number"
+        },
+        {
+          "col": 48,
+          "label": "AVP afiliado",
+          "field": "avpAfiliado",
+          "type": "number"
+        },
+        {
+          "col": 49,
+          "label": "AVP aportante",
+          "field": "avpAportante",
+          "type": "number"
+        },
+        {
+          "col": 50,
+          "label": "Total AFP",
+          "field": "totalAfp",
+          "type": "number"
+        },
+        {
+          "col": 51,
+          "label": "Aporte FSP",
+          "field": "fsp",
+          "type": "number"
+        },
+        {
+          "col": 52,
+          "label": "Aporte FSPS",
+          "field": "fsps",
+          "type": "number"
+        },
+        {
+          "col": 53,
+          "label": "Valor no retenido",
+          "field": "valorNoRetenido",
+          "type": "number"
+        },
+        {
+          "col": 54,
+          "label": "Tarifa EPS",
+          "field": "tarifaEps",
+          "type": "number"
+        },
+        {
+          "col": 55,
+          "label": "Cotización EPS",
+          "field": "cotizacionEps",
+          "type": "number"
+        },
+        {
+          "col": 56,
+          "label": "Valor UPC",
+          "field": "valorUpc",
+          "type": "number"
+        },
+        {
+          "col": 57,
+          "label": "Número IGE",
+          "field": "autorizacionIge",
+          "type": "auto"
+        },
+        {
+          "col": 58,
+          "label": "Valor IGE",
+          "field": "valorIge",
+          "type": "number"
+        },
+        {
+          "col": 59,
+          "label": "Número LMA",
+          "field": "autorizacionLma",
+          "type": "auto"
+        },
+        {
+          "col": 60,
+          "label": "Valor LMA",
+          "field": "valorLma",
+          "type": "number"
+        },
+        {
+          "col": 61,
+          "label": "Tarifa ARL",
+          "field": "tarifaArl",
+          "type": "number"
+        },
+        {
+          "col": 62,
+          "label": "Centro de trabajo",
+          "field": "centroTrabajo",
+          "type": "number"
+        },
+        {
+          "col": 63,
+          "label": "Cotización ARL",
+          "field": "cotizacionArl",
+          "type": "number"
+        },
+        {
+          "col": 64,
+          "label": "Tarifa CCF",
+          "field": "tarifaCcf",
+          "type": "number"
+        },
+        {
+          "col": 65,
+          "label": "Aporte CCF",
+          "field": "aporteCcf",
+          "type": "number"
+        },
+        {
+          "col": 66,
+          "label": "Tarifa SENA",
+          "field": "tarifaSena",
+          "type": "number"
+        },
+        {
+          "col": 67,
+          "label": "Aporte SENA",
+          "field": "aporteSena",
+          "type": "number"
+        },
+        {
+          "col": 68,
+          "label": "Tarifa ICBF",
+          "field": "tarifaIcbf",
+          "type": "number"
+        },
+        {
+          "col": 69,
+          "label": "Aporte ICBF",
+          "field": "aporteIcbf",
+          "type": "number"
+        },
+        {
+          "col": 70,
+          "label": "Tarifa ESAP",
+          "field": "tarifaEsap",
+          "type": "number"
+        },
+        {
+          "col": 71,
+          "label": "Aporte ESAP",
+          "field": "aporteEsap",
+          "type": "number"
+        },
+        {
+          "col": 72,
+          "label": "Tarifa MEN",
+          "field": "tarifaMen",
+          "type": "number"
+        },
+        {
+          "col": 73,
+          "label": "Aporte MEN",
+          "field": "aporteMen",
+          "type": "number"
+        },
+        {
+          "col": 74,
+          "label": "Tipo documento UPC",
+          "field": "tipoDocUpc",
+          "type": "auto"
+        },
+        {
+          "col": 75,
+          "label": "Documento UPC",
+          "field": "documentoUpc",
+          "type": "auto"
+        },
+        {
+          "col": 76,
+          "label": "Exonerado",
+          "field": "exonerado",
+          "type": "text"
+        },
+        {
+          "col": 77,
+          "label": "ARL",
+          "field": "codigoArl",
+          "type": "text"
+        },
+        {
+          "col": 78,
+          "label": "Clase riesgo",
+          "field": "claseRiesgo",
+          "type": "text"
+        },
+        {
+          "col": 79,
+          "label": "Tarifa especial AFP",
+          "field": "tarifaEspecialPension",
+          "type": "auto"
+        },
+        {
+          "col": 80,
+          "label": "Fecha ING",
+          "field": "fechaIng",
+          "type": "auto"
+        },
+        {
+          "col": 81,
+          "label": "Fecha RET",
+          "field": "fechaRet",
+          "type": "auto"
+        },
+        {
+          "col": 82,
+          "label": "Fecha inicio VSP",
+          "field": "fechaVsp",
+          "type": "auto"
+        },
+        {
+          "col": 83,
+          "label": "Fecha inicio SLN",
+          "field": "fechaSlnInicio",
+          "type": "auto"
+        },
+        {
+          "col": 84,
+          "label": "Fecha final SLN",
+          "field": "fechaSlnFin",
+          "type": "auto"
+        },
+        {
+          "col": 85,
+          "label": "Fecha inicio IGE",
+          "field": "fechaIgeInicio",
+          "type": "auto"
+        },
+        {
+          "col": 86,
+          "label": "Fecha final IGE",
+          "field": "fechaIgeFin",
+          "type": "auto"
+        },
+        {
+          "col": 87,
+          "label": "Fecha inicio LMA",
+          "field": "fechaLmaInicio",
+          "type": "auto"
+        },
+        {
+          "col": 88,
+          "label": "Fecha final LMA",
+          "field": "fechaLmaFin",
+          "type": "auto"
+        },
+        {
+          "col": 89,
+          "label": "Fecha inicio VAC-LR",
+          "field": "fechaVacInicio",
+          "type": "auto"
+        },
+        {
+          "col": 90,
+          "label": "Fecha final VAC-LR",
+          "field": "fechaVacFin",
+          "type": "auto"
+        },
+        {
+          "col": 91,
+          "label": "Fecha inicio VCT",
+          "field": "fechaVctInicio",
+          "type": "auto"
+        },
+        {
+          "col": 92,
+          "label": "Fecha final VCT",
+          "field": "fechaVctFin",
+          "type": "auto"
+        },
+        {
+          "col": 93,
+          "label": "Fecha inicio IRL",
+          "field": "fechaIrlInicio",
+          "type": "auto"
+        },
+        {
+          "col": 94,
+          "label": "Fecha final IRL",
+          "field": "fechaIrlFin",
+          "type": "auto"
+        },
+        {
+          "col": 95,
+          "label": "IBC otros parafiscales",
+          "field": "ibcOtrosParafiscales",
+          "type": "number"
+        },
+        {
+          "col": 96,
+          "label": "Número horas laboradas",
+          "field": "horasLaboradas",
+          "type": "number"
+        },
+        {
+          "col": 97,
+          "label": "Fecha radicación exterior",
+          "field": "fechaRadicacionExterior",
+          "type": "auto"
+        },
+        {
+          "col": 98,
+          "label": "Actividad económica para ARL ",
+          "field": "actividadArl",
+          "type": "text"
+        }
+      ]
+    }
+  ],
+  "widths": {
+    "Planilla base": {}
+  }
+}

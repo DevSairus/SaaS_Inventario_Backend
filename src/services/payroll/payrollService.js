@@ -24,6 +24,9 @@
  */
 'use strict';
 
+const { calcularIBC } = require('./ibc.service');
+const { esAprendiz, esPensionado } = require('./workerTypes');
+
 /* ──────────────────────────────────────────────────────────
  * Constantes legales vigentes
  * ────────────────────────────────────────────────────────── */
@@ -147,23 +150,22 @@ function calcularAuxilioTransporte(employee, diasTrabajados, diasPeriodoCompleto
 
 /* ──────────────────────────────────────────────────────────
  * 3. Deducciones legales obligatorias — Salud, Pensión, FSP
- * IBC (Ingreso Base de Cotización) = sueldoTrabajado del Básico prorrateado
- * del periodo + comisiones. MEJOR ESFUERZO: en la práctica el IBC puede
- * incluir otros devengados salariales del periodo (horas extra, etc.) según
- * el caso — este cálculo cubre salario y comisiones. Si el tenant tiene devengados
- * salariales adicionales que deban integrar el IBC, ajustar antes de
- * habilitación.
+ * Sobre el IBC del periodo -- ver ibc.service.js (todo pago salarial,
+ * ausencias pagadas y regla del 40% de la Ley 1393).
  * ────────────────────────────────────────────────────────── */
 
 function calcularDeduccionesLegales(employee, ibc) {
-  const salud = {
-    porcentaje: PAYROLL_CONSTANTS.PORCENTAJE_SALUD_EMPLEADO,
-    deduccion: ibc * (PAYROLL_CONSTANTS.PORCENTAJE_SALUD_EMPLEADO / 100),
-  };
-  const fondoPension = {
-    porcentaje: PAYROLL_CONSTANTS.PORCENTAJE_PENSION_EMPLEADO,
-    deduccion: ibc * (PAYROLL_CONSTANTS.PORCENTAJE_PENSION_EMPLEADO / 100),
-  };
+  // Aprendices SENA: el empleador asume la salud completa y no hay pensión
+  // (Ley 789/2002) -- al aprendiz no se le descuenta nada. Pensionados: no
+  // cotizan pensión ni FSP, solo salud. El XML exige Salud y FondoPension
+  // siempre, así que van en 0% en vez de omitirse.
+  const aprendiz = esAprendiz(employee);
+  const sinPension = aprendiz || esPensionado(employee);
+  const pctSalud = aprendiz ? 0 : PAYROLL_CONSTANTS.PORCENTAJE_SALUD_EMPLEADO;
+  const pctPension = sinPension ? 0 : PAYROLL_CONSTANTS.PORCENTAJE_PENSION_EMPLEADO;
+  const salud = { porcentaje: pctSalud, deduccion: ibc * (pctSalud / 100) };
+  const fondoPension = { porcentaje: pctPension, deduccion: ibc * (pctPension / 100) };
+  if (sinPension) return { salud, fondoPension, fondoSP: null };
 
   let fondoSP = null;
   const salarioMensualEquivalente = Number(employee.base_salary); // el FSP se evalúa sobre el salario, no sobre el IBC prorrateado del periodo parcial
@@ -333,13 +335,6 @@ function aplicarNovedades(novedades, devengados, deducciones) {
   return { totalNovedadesDevengados, totalNovedadesDeducciones };
 }
 
-// Total de novedades 'Comisiones' (payload numérico, kind 'simpleList').
-function sumarComisiones(novedades) {
-  return (novedades || [])
-    .filter((n) => n.dian_category === 'Comisiones')
-    .reduce((s, n) => s + sumarValorNovedad(n.payload), 0);
-}
-
 /**
  * Suma las horas ("cantidad") reportadas en novedades de horas EXTRA
  * (ver CATEGORIAS_HORAS_EXTRA — excluye recargos) para un mismo
@@ -443,35 +438,64 @@ function resolverConceptosAutomaticos(autoConcepts, ibc) {
  *   (numeral 8.3, mismo mecanismo que factura) — se pasa tal cual a
  *   payrollXmlBuilder.js.
  */
+/**
+ * Días del periodo que el Básico NO paga porque los cubre otra novedad:
+ * incapacidades, vacaciones disfrutadas, licencias (maternidad/paternidad,
+ * remunerada, no remunerada) y huelgas. Antes no se descontaban: el
+ * empleado recibía el sueldo de los 30 días más la incapacidad/vacación.
+ * Las vacaciones compensadas (en dinero) no son días de ausencia.
+ */
+function diasAusenciaNovedades(novedades = []) {
+  const cantidad = (items) => (Array.isArray(items) ? items : (items ? [items] : []))
+    .reduce((s, it) => s + (Number(it?.cantidad) || 0), 0);
+  let dias = 0;
+  for (const n of novedades) {
+    const p = n?.payload;
+    if (!p) continue;
+    if (n.dian_category === 'Incapacidades' || n.dian_category === 'HuelgasLegales') dias += cantidad(p);
+    else if (n.dian_category === 'Vacaciones') dias += cantidad(p.comunes);
+    else if (n.dian_category === 'Licencias') dias += cantidad(p.maternidadPaternidad) + cantidad(p.remunerada) + cantidad(p.noRemunerada);
+  }
+  return dias;
+}
+
 function liquidarEmpleado({ employee, period, novedades = [], autoConcepts = [], diasNoRemunerados = 0, softwareSecurityCode }) {
-  const { diasTrabajados, sueldoTrabajado, diasPeriodoCompleto } = calcularBasico(employee, period, diasNoRemunerados);
+  const diasAusencia = diasAusenciaNovedades(novedades);
+  const { diasTrabajados, sueldoTrabajado, diasPeriodoCompleto } = calcularBasico(employee, period, diasNoRemunerados + diasAusencia);
 
   const devengados = { basico: { diasTrabajados, sueldoTrabajado } };
   const transporte = calcularAuxilioTransporte(employee, diasTrabajados, diasPeriodoCompleto);
   if (transporte) devengados.transporte = transporte;
 
-  // IBC del periodo = sueldoTrabajado prorrateado + comisiones (salariales
-  // por definición: la comisión no salarial llega como Bonificación NS, ver
-  // commissionPayroll.service.js). El auxilio de transporte NO se incluye —
-  // es no salarial por definición legal, nunca integra el IBC.
-  const ibc = sueldoTrabajado + sumarComisiones(novedades);
+  // Novedades capturadas primero: el IBC depende de ellas (horas extra,
+  // comisiones, incapacidades, vacaciones...). Ver ibc.service.js -- el
+  // auxilio de transporte nunca integra el IBC.
+  const deducciones = {};
+  const manuales = aplicarNovedades(novedades, devengados, deducciones);
+  const ibcDetalle = calcularIBC({ employee, devengados, diasPeriodo: diasPeriodoCompleto, smlmv: PAYROLL_CONSTANTS.SMLMV });
+  const { ibc } = ibcDetalle;
+
   const { salud, fondoPension, fondoSP } = calcularDeduccionesLegales(employee, ibc);
-  const deducciones = { salud, fondoPension };
+  deducciones.salud = salud;
+  deducciones.fondoPension = fondoPension;
   if (fondoSP) deducciones.fondoSP = fondoSP;
 
-  let devengadosTotal = sueldoTrabajado + (transporte ? transporte.auxilioTransporte : 0);
-  let deduccionesTotal = salud.deduccion + fondoPension.deduccion + (fondoSP ? fondoSP.deduccionSP : 0);
+  let devengadosTotal = sueldoTrabajado + (transporte ? transporte.auxilioTransporte : 0) + manuales.totalNovedadesDevengados;
+  let deduccionesTotal = salud.deduccion + fondoPension.deduccion + (fondoSP ? fondoSP.deduccionSP : 0) + manuales.totalNovedadesDeducciones;
 
+  // Conceptos automáticos (porcentaje sobre el IBC) después del IBC.
   const novedadesAuto = resolverConceptosAutomaticos(autoConcepts, ibc);
-  const { totalNovedadesDevengados, totalNovedadesDeducciones } = aplicarNovedades([...novedades, ...novedadesAuto], devengados, deducciones);
-  devengadosTotal += totalNovedadesDevengados;
-  deduccionesTotal += totalNovedadesDeducciones;
+  const auto = aplicarNovedades(novedadesAuto, devengados, deducciones);
+  devengadosTotal += auto.totalNovedadesDevengados;
+  deduccionesTotal += auto.totalNovedadesDeducciones;
 
   return {
     devengados,
     deducciones,
     devengadosTotal,
     deduccionesTotal,
+    // Desglose del IBC (no viaja al XML): lo usan la contabilidad y la PILA.
+    ibc: ibcDetalle,
     tiempoLaboradoDias: diasTrabajados,
     softwareSecurityCode,
     paymentDates: period.payment_date ? [period.payment_date] : [],
@@ -578,5 +602,6 @@ module.exports = {
   validarTopeHorasExtra,
   resolverConceptosAutomaticos,
   liquidarEmpleado,
+  diasAusenciaNovedades,
   resumenLiquidacionParaImpresion,
 };
