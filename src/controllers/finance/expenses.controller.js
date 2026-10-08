@@ -2,6 +2,8 @@
 const { Expense, Supplier, Branch, User } = require('../../models');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
+const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
+const { expenseNetPayable, expenseBalance, expensePaymentStatus } = require('../../utils/expenseAmounts');
 
 const CATEGORIES = [
   'arriendo', 'servicios_publicos', 'nomina', 'mantenimiento',
@@ -114,15 +116,14 @@ const getExpensesSummary = async (req, res) => {
     else if (from_date) where.expense_date = { [Op.gte]: from_date };
     else if (to_date) where.expense_date = { [Op.lte]: to_date };
 
-    const expenses = await Expense.findAll({ where, attributes: ['total_amount', 'paid_amount', 'payment_status', 'category'] });
+    const expenses = await Expense.findAll({ where, attributes: ['total_amount', 'total_retentions', 'paid_amount', 'payment_status', 'category'] });
 
     let totalAmount = 0, totalPending = 0;
     const byCategory = {};
     expenses.forEach(e => {
       const total = parseFloat(e.total_amount);
-      const balance = total - parseFloat(e.paid_amount || 0);
       totalAmount += total;
-      if (e.payment_status !== 'paid') totalPending += balance;
+      if (e.payment_status !== 'paid') totalPending += expenseBalance(e);
       byCategory[e.category] = (byCategory[e.category] || 0) + total;
     });
 
@@ -149,7 +150,7 @@ const createExpense = async (req, res) => {
     const {
       category, description, supplier_id, expense_date, due_date,
       total_amount, payment_method, is_recurring, receipt_url, notes,
-      branch_id, paid_now,
+      branch_id, paid_now, bank_account_id,
       // Documento Soporte DIAN (Fase 2) — subtotal/tax_rate/tax_amount son
       // opcionales para no romper llamadas existentes (frontend viejo /
       // integraciones): si no llega `subtotal`, se mantiene el
@@ -170,14 +171,13 @@ const createExpense = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Descripción y monto son obligatorios' });
     }
 
-    const expense_number = await generateExpenseNumber(tenant_id, transaction);
+    // Solo aplica si se paga ya: un gasto pendiente acredita expense_payable
+    // y la cuenta bancaria se elige en cada abono.
+    const selectedBankAccountId = paid_now
+      ? await resolveSelectedBankAccountId(tenant_id, bank_account_id, payment_method || 'Efectivo', transaction)
+      : null;
 
-    // Si se marca "pagar ahora", el gasto nace ya pagado en su totalidad
-    const initialPaidAmount = paid_now ? parseFloat(total_amount) : 0;
-    const initialStatus = paid_now ? 'paid' : 'pending';
-    const initialHistory = paid_now
-      ? [{ date: expense_date || new Date(), amount: parseFloat(total_amount), method: payment_method || 'Efectivo', user_id: req.user.id, notes: 'Pago al momento de registrar el gasto' }]
-      : [];
+    const expense_number = await generateExpenseNumber(tenant_id, transaction);
 
     // subtotal/tax_amount son la fuente de verdad cuando vienen — total_amount
     // se recalcula acá, no se toma directo del body, para que nunca queden
@@ -188,6 +188,16 @@ const createExpense = async (req, res) => {
     const resolvedRetefuenteAmount = retefuente_amount !== undefined ? parseFloat(retefuente_amount) : 0;
     const resolvedReteivaAmount = reteiva_amount !== undefined ? parseFloat(reteiva_amount) : 0;
     const resolvedReteicaAmount = reteica_amount !== undefined ? parseFloat(reteica_amount) : 0;
+
+    // Si se marca "pagar ahora", el gasto nace pagado por el neto: las
+    // retenciones no salen de caja, se le deben a la DIAN.
+    const initialPaidAmount = paid_now
+      ? expenseNetPayable({ total_amount: resolvedTotal, total_retentions: resolvedRetefuenteAmount + resolvedReteivaAmount + resolvedReteicaAmount })
+      : 0;
+    const initialStatus = paid_now ? 'paid' : 'pending';
+    const initialHistory = paid_now
+      ? [{ date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto' }]
+      : [];
 
     const expense = await Expense.create({
       tenant_id,
@@ -200,6 +210,7 @@ const createExpense = async (req, res) => {
       due_date: due_date || null,
       total_amount: resolvedTotal,
       payment_method: payment_method || null,
+      bank_account_id: selectedBankAccountId,
       payment_status: initialStatus,
       paid_amount: initialPaidAmount,
       payment_history: initialHistory,
@@ -240,6 +251,7 @@ const createExpense = async (req, res) => {
     res.status(201).json({ success: true, message: 'Gasto registrado exitosamente', data: created });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
     console.error('Error creando gasto:', error);
     res.status(500).json({ success: false, message: 'Error registrando el gasto' });
   }
@@ -274,14 +286,16 @@ const updateExpense = async (req, res) => {
       ? resolvedSubtotal + resolvedTaxAmount
       : (total_amount !== undefined ? parseFloat(total_amount) : expense.total_amount);
 
-    // No permitir bajar el total por debajo de lo ya pagado
-    if (resolvedTotal < parseFloat(expense.paid_amount || 0)) {
-      return res.status(400).json({ success: false, message: 'El monto no puede ser menor a lo ya pagado' });
-    }
-
     const resolvedRetefuenteAmount = retefuente_amount !== undefined ? parseFloat(retefuente_amount) : expense.retefuente_amount;
     const resolvedReteivaAmount = reteiva_amount !== undefined ? parseFloat(reteiva_amount) : expense.reteiva_amount;
     const resolvedReteicaAmount = reteica_amount !== undefined ? parseFloat(reteica_amount) : expense.reteica_amount;
+    const resolvedRetentions = parseFloat(resolvedRetefuenteAmount || 0) + parseFloat(resolvedReteivaAmount || 0) + parseFloat(resolvedReteicaAmount || 0);
+    const resolvedAmounts = { total_amount: resolvedTotal, total_retentions: resolvedRetentions };
+
+    // No permitir bajar el neto a pagar por debajo de lo ya pagado
+    if (expenseNetPayable(resolvedAmounts) < parseFloat(expense.paid_amount || 0) - 0.01) {
+      return res.status(400).json({ success: false, message: 'El monto neto (total menos retenciones) no puede ser menor a lo ya pagado' });
+    }
 
     await expense.update({
       category: category ?? expense.category,
@@ -305,7 +319,8 @@ const updateExpense = async (req, res) => {
       reteiva_amount: resolvedReteivaAmount,
       reteica_rate: reteica_rate !== undefined ? parseFloat(reteica_rate) : expense.reteica_rate,
       reteica_amount: resolvedReteicaAmount,
-      total_retentions: resolvedRetefuenteAmount + resolvedReteivaAmount + resolvedReteicaAmount,
+      total_retentions: resolvedRetentions,
+      payment_status: expensePaymentStatus(resolvedAmounts, expense.paid_amount),
     });
 
     res.json({ success: true, message: 'Gasto actualizado', data: expense });
@@ -340,7 +355,7 @@ const registerPayment = async (req, res) => {
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const userId = req.user.id;
-    const { amount, payment_method, payment_date, notes } = req.body;
+    const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await transaction.rollback();
@@ -357,30 +372,31 @@ const registerPayment = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Gasto no encontrado' });
     }
 
-    const total = parseFloat(expense.total_amount);
+    // Lo que se le debe al proveedor es el neto de retenciones (ver
+    // utils/expenseAmounts.js); antes se usaba total_amount.
     const alreadyPaid = parseFloat(expense.paid_amount || 0);
-    const remaining = total - alreadyPaid;
+    const remaining = expenseBalance(expense);
 
     if (remaining <= 0) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Este gasto ya está pagado en su totalidad' });
     }
 
-    const effectiveAmount = Math.min(parseFloat(amount), remaining);
-    const paid_amount = alreadyPaid + effectiveAmount;
+    const effectiveAmount = Math.round(Math.min(parseFloat(amount), remaining) * 100) / 100;
+    const paid_amount = Math.round((alreadyPaid + effectiveAmount) * 100) / 100;
+    const payment_status = expensePaymentStatus(expense, paid_amount);
 
-    let payment_status = 'pending';
-    if (paid_amount >= total) payment_status = 'paid';
-    else if (paid_amount > 0) payment_status = 'partial';
-
-    const payment_history = [...(expense.payment_history || [])];
-    payment_history.push({
+    const effectiveMethod = payment_method || expense.payment_method || 'Efectivo';
+    const selectedBankAccountId = await resolveSelectedBankAccountId(tenant_id, bank_account_id, effectiveMethod, transaction);
+    const payment = {
       date: payment_date || new Date(),
       amount: effectiveAmount,
-      method: payment_method || expense.payment_method || 'Efectivo',
+      method: effectiveMethod,
+      bank_account_id: selectedBankAccountId,
       user_id: userId,
       notes: notes || null
-    });
+    };
+    const payment_history = [...(expense.payment_history || []), payment];
 
     await expense.update(
       { paid_amount, payment_status, payment_method: payment_method || expense.payment_method, payment_history },
@@ -389,9 +405,21 @@ const registerPayment = async (req, res) => {
 
     await transaction.commit();
 
+    // Asiento del abono (cuentas por pagar vs caja/bancos), no bloqueante --
+    // mismo patrón que el asiento del gasto en createExpense.
+    setImmediate(async () => {
+      try {
+        const { generateExpensePaymentEntry } = require('../../services/accounting/autoEntries.service');
+        await generateExpensePaymentEntry(expense, payment, tenant_id, userId);
+      } catch (err) {
+        require('../../config/logger').warn(`[accounting] Error generando asiento de pago de gasto ${expense.id}: ${err.message}`);
+      }
+    });
+
     res.json({ success: true, message: 'Pago registrado exitosamente', data: expense });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
     console.error('Error registrando pago de gasto:', error);
     res.status(500).json({ success: false, message: 'Error registrando el pago' });
   }

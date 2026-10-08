@@ -9,6 +9,7 @@ const { sequelize } = require('../../config/database');
 const logger = require('../../config/logger');
 const { assertReadiness: assertCustomerDianReadiness } = require('./customerDianReadiness');
 const { collapseComboLinesForDian } = require('../../utils/comboLines');
+const { dianPaymentMeans } = require('../sales/paymentTerms.service');
 
 /* ──────────────────────────────────────────────────────────
  * Extrae configuración DIAN del tenant y valida campos
@@ -517,28 +518,41 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       billingReference: {
         id: ref.number,
         uuid: ref.cufe,
-        issueDate: new Date(ref.date),
+        // Mediodía UTC: dian-kit formatea con hora local, y medianoche UTC
+        // en un servidor con hora de Colombia caería el día anterior.
+        issueDate: new Date(`${String(ref.date).slice(0, 10)}T12:00:00Z`),
       },
+      // NC de una factura agrupada: siempre es la anulación total del
+      // documento (concepto 2), nunca una devolución parcial -- ver
+      // remisionInvoicing.annulConsolidatedInvoice.
       discrepancyResponse: {
         referenceId: ref.number,
-        responseCode: isDebit ? '1' : '1',
-        description: isDebit ? 'Intereses' : 'Devolucion parcial',
+        responseCode: !isDebit && ref.isConsolidated ? '2' : '1',
+        description: isDebit ? 'Intereses' : (ref.isConsolidated ? 'Anulacion de factura electronica' : 'Devolucion parcial'),
       },
       lines: dianKit.mapLines(items),
       taxTotals: dianKit.buildDocumentTaxTotals(items),
+      // total_amount de la nota viene NETO del descuento global; el bruto
+      // (TaxInclusiveAmount) lo recupera, y applyGlobalDiscount abajo pone
+      // AllowanceTotalAmount y PayableAmount (= total_amount, de ahí el CUDE).
       legalMonetaryTotal: {
         lineExtensionAmount: Number(note.subtotal || 0),
         taxExclusiveAmount: Number(note.subtotal || 0),
-        taxInclusiveAmount: Number(note.total_amount || 0),
+        taxInclusiveAmount: Math.round((Number(note.total_amount || 0) + Number(note.global_discount_amount || 0)) * 100) / 100,
         allowanceTotalAmount: 0,
         chargeTotalAmount: 0,
         prepaidAmount: 0,
         payableAmount: Number(note.total_amount || 0),
       },
-      paymentMeans: { paymentForm: '1', paymentMethod: '10' },
+      // Misma forma de pago que la factura referenciada (contado/crédito y
+      // vencimiento); si la factura no está en Pitbox, la de la propia nota.
+      paymentMeans: ref.paymentMeans || dianPaymentMeans(note),
     };
 
-    const result = await dianKit.createDocumentWithItemCodes(kit, isDebit ? 'debit' : 'credit', noteInput, items);
+    // Descuento global (solo NC): mismo AllowanceCharge de documento que la
+    // factura -- ver dianKitAdapter.applyGlobalDiscount.
+    const discountPatch = isDebit ? null : dianKit.applyGlobalDiscount(noteInput, note);
+    const result = await dianKit.createDocumentWithItemCodes(kit, isDebit ? 'debit' : 'credit', noteInput, items, discountPatch);
 
     const dianResponse = await dianKit.sendToDian(tenant, {
       signedXml: result.signedXml,
@@ -576,6 +590,16 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     });
 
     logger.info(`[DIAN ${docLabel}] ${noteNumber} → ${dianStatus} | CUDE: ${result.uuid?.substring(0, 16)}...`);
+
+    // NC aceptada sobre una factura agrupada: la factura queda anulada y sus
+    // remisiones vuelven a estar libres para facturar (solo efecto fiscal).
+    if (accepted && !isDebit && ref.isConsolidated) {
+      try {
+        await require('../sales/remisionInvoicing.service').releaseAnnulledConsolidated(ref.saleId, noteNumber);
+      } catch (releaseErr) {
+        logger.error(`[DIAN ${docLabel}] ${noteNumber} aceptada, pero no se liberaron las remisiones de la factura ${ref.number}: ${releaseErr.message}`);
+      }
+    }
 
     // Mismo requisito de entrega al comprador que las facturas (ver
     // sendInvoiceToDian) — también aplica a notas crédito/débito.
@@ -622,25 +646,41 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
 
 async function resolveNoteReference(note) {
   const { Sale } = require('../../models');
+  const { toDateOnly } = require('../sales/paymentTerms.service');
 
-  if (note.reference_invoice_number && note.reference_invoice_cufe) {
-    return {
-      number: note.reference_invoice_number,
-      cufe: note.reference_invoice_cufe,
-      date: note.reference_invoice_date || new Date().toISOString().split('T')[0],
-    };
-  }
-
-  if (note.reference_sale_id) {
-    const ref = await Sale.findByPk(note.reference_sale_id);
+  // Factura de Pitbox: número, CUFE, fecha de emisión y forma de pago salen
+  // de la propia factura. Va primero: anular una venta (voidSale) y las NC/ND
+  // del módulo DIAN también mandan reference_invoice_* armados a mano, con
+  // sale_date como fecha -- que en una factura convertida desde una remisión
+  // es la fecha de la remisión, no la de emisión de la factura.
+  const hasManualReference = Boolean(note.reference_invoice_number && note.reference_invoice_cufe);
+  const ref = note.reference_sale_id ? await Sale.findByPk(note.reference_sale_id) : null;
+  if (note.reference_sale_id && !(hasManualReference && !(ref?.dian_invoice_number && ref?.cufe))) {
     if (!ref) throw new Error(`No se encontró la factura referenciada (ID ${note.reference_sale_id}).`);
     if (!ref.dian_invoice_number || !ref.cufe) {
       throw new Error(`La factura referenciada (${ref.sale_number}) no ha sido enviada a la DIAN o no tiene CUFE.`);
     }
+    // Fecha de EMISIÓN (envío a la DIAN), en hora de Colombia. Antes era
+    // created_at en UTC: una venta creada después de las 7 p.m. quedaba con
+    // el día siguiente.
+    const issuedAt = ref.dian_sent_at || ref.dian_accepted_at || ref.created_at || new Date();
     return {
       number: ref.dian_invoice_number,
       cufe: ref.cufe,
-      date: ref.created_at?.toISOString().split('T')[0] || new Date().toISOString().split('T')[0],
+      date: toDateOnly(issuedAt),
+      // La nota hereda la forma de pago (contado/crédito) de su factura.
+      paymentMeans: dianPaymentMeans(ref),
+      saleId: ref.id,
+      isConsolidated: Boolean(ref.is_consolidated_invoice),
+    };
+  }
+
+  // Factura externa (no emitida desde Pitbox): datos manuales.
+  if (hasManualReference) {
+    return {
+      number: note.reference_invoice_number,
+      cufe: note.reference_invoice_cufe,
+      date: toDateOnly(note.reference_invoice_date || new Date()),
     };
   }
 
@@ -1081,6 +1121,7 @@ module.exports = {
   extractDianConfig,
   sendCreditNoteToDian,
   sendDebitNoteToDian,
+  resolveNoteReference,
   sendSupportDocumentToDian,
   sendSupportDocumentForPurchase,
   sendSupportDocumentForExpense,

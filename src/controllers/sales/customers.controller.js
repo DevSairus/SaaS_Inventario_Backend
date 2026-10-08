@@ -2,7 +2,7 @@
 const { Customer, Sale, SaleItem } = require('../../models');
 const { Op } = require('sequelize');
 const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
-const { shouldHideRemisiones, remisionExclusionWhere } = require('../../utils/remisionVisibility');
+const { economicSalesWhere } = require('../../utils/remisionVisibility');
 
 // Utilidad: el frontend envía full_name, la DB tiene first_name + last_name
 function splitFullName(fullName) {
@@ -91,10 +91,11 @@ const getById = async (req, res) => {
         {
           model: Sale,
           as: 'sales',
-          // Remisiones ocultas a no-admin si el tenant lo configuró
-          // (utils/remisionVisibility.js); required:false para que el
-          // cliente se devuelva aunque no le quede ninguna venta visible.
-          ...(shouldHideRemisiones(req) ? { where: remisionExclusionWhere(), required: false } : {}),
+          // Remisiones ocultas a no-admin si el tenant lo configuró, o
+          // facturas consolidadas si no (utils/remisionVisibility.js);
+          // required:false para que el cliente se devuelva aunque no le
+          // quede ninguna venta visible.
+          where: economicSalesWhere(req), required: false,
           include: [
             {
               model: SaleItem,

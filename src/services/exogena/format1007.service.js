@@ -37,6 +37,7 @@ async function buildRecords(tenantId, year, conceptBySourceKey) {
      FROM "${schema}"."sales" s
      LEFT JOIN "${schema}"."customers" c ON c.id = s.customer_id
      WHERE s.tenant_id = :tenantId AND s.status = 'completed'
+       AND s.is_consolidated_invoice IS NOT TRUE -- su ingreso está en las remisiones agrupadas
        AND s.sale_date BETWEEN :from AND :to
      GROUP BY s.customer_id, s.customer_tax_id, s.customer_document_type, c.first_name, c.last_name, c.business_name`,
     { replacements: { tenantId, from, to }, type: QueryTypes.SELECT }

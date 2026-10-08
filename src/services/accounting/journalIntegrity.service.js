@@ -38,6 +38,8 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
       where: {
         tenant_id: tenantId,
         status: 'completed',
+        // La factura consolidada no tiene asiento propio (ver remisionInvoicing.service.js)
+        is_consolidated_invoice: { [Op.not]: true },
         sale_date: { [Op.between]: [from, to] },
         ...branchFilter,
       },

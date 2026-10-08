@@ -48,6 +48,7 @@ async function fetchWithholding(req) {
      JOIN "${schema}"."customers" c ON c.id = s.customer_id
      WHERE s.tenant_id = :tenantId
        AND s.status = 'completed'
+       AND s.is_consolidated_invoice IS NOT TRUE
        AND s.sale_date BETWEEN :from AND :to
        AND (s.retefuente_amount > 0 OR s.reteica_amount > 0)
        AND (:branchId::uuid IS NULL OR s.branch_id = :branchId::uuid)

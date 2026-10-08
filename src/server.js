@@ -359,6 +359,9 @@ app.use('/api/radian',                         authMiddleware, tenantMiddleware,
 // Sin esta línea, cualquier usuario autenticado del tenant (un vendedor, un
 // bodeguero) podía postear, anular o reversar asientos, o cambiar el mapeo
 // de cuentas — no había segregación de funciones.
+// Selector de cuenta bancaria al cobrar/pagar: cualquier usuario del tenant
+// (cajero, vendedor), por eso va fuera del checkRole contable de abajo.
+app.get('/api/bank-account-options',           authMiddleware, tenantMiddleware, require('./controllers/accounting/bankAccounts.controller').options);
 app.use('/api/accounting',                     authMiddleware, tenantMiddleware, branchMiddleware, requireModule('accounting'), checkRole('admin', 'super_admin', 'manager', 'accountant'), accountingRoutes);
 app.use('/api/ai-assistant',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ai_assistant'), aiAssistantRoutes);
 app.use('/api/ensambladora/sync',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('ensambladora'), ensambladoraEventsRoutes);

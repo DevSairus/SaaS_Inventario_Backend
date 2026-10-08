@@ -12,6 +12,7 @@ const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
 const { getAccountingCashFlow } = require('../../services/accounting/cashReconciliation.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
+const { transferableAmount } = require('../../services/workshop/workOrderPayments.service');
 
 // Tolerancia para considerar que Tesorería y Contabilidad "coinciden" —
 // 1 peso de redondeo no es una alerta real.
@@ -84,9 +85,13 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
 
   pendingWorkOrders.forEach(w => {
     (w.payment_history || []).forEach(p => {
+      // Lo que pasó a anticipo del cliente (excedente al facturar, OT
+      // cancelada) ya se cuenta por el lado de anticipos, con la misma fecha.
+      const amount = transferableAmount(p);
+      if (amount <= 0) return;
       transactions.push({
         date: toDateOnly(p.date),
-        amount: parseFloat(p.amount) || 0,
+        amount,
         direction: 'in',
         source: 'work_order',
         reference: w.order_number,

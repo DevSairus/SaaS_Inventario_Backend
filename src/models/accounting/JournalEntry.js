@@ -22,7 +22,7 @@ const JournalEntry = sequelize.define(
       // la validación rechazaba el create y safeAutoGenerate se tragaba el
       // error, así que esos asientos nunca se creaban (ej. el de nómina).
       validate: { isIn: [[
-        'sale', 'purchase', 'purchase_payment', 'expense', 'cash_session', 'payment', 'customer_return', 'supplier_return', 'credit_note', 'debit_note', 'manual', 'adjustment',
+        'sale', 'purchase', 'purchase_payment', 'expense', 'expense_payment', 'cash_session', 'payment', 'work_order_payment', 'customer_return', 'supplier_return', 'credit_note', 'debit_note', 'manual', 'adjustment',
         'customer_advance', 'customer_advance_application', 'customer_advance_refund', 'customer_advance_reassignment', 'fixed_asset_depreciation', 'loan_payment',
         'reclassification', 'ica_settlement', 'ica_autoretention',
         'opening_balance', 'year_end_close', 'internal_consumption', 'inventory_adjustment', 'product_initial_stock', 'product_bulk_import',

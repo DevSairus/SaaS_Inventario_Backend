@@ -75,6 +75,18 @@ const CustomerAdvance = sequelize.define('CustomerAdvance', {
     type: DataTypes.STRING(50),
     allowNull: true,
   },
+  // Cuenta bancaria que recibió el anticipo (no efectivo) -- el asiento va a
+  // su subcuenta PUC propia (resolvePaymentAccount en autoEntries.service.js).
+  bank_account_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
+  // OT de la que salió este anticipo (abonos de una OT cancelada, o el
+  // excedente sobre lo facturado) -- ver services/workshop/workOrderPayments.service.js.
+  work_order_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
   received_date: {
     type: DataTypes.DATE,
     allowNull: false,

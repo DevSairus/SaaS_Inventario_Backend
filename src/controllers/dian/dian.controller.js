@@ -1388,6 +1388,13 @@ const createAndSendCreditNote = async (req, res) => {
       transaction,
     });
     if (!original) { await transaction.rollback(); return fail(res, 'Factura no encontrada', 404); }
+    // Factura que agrupa remisiones: la venta real está en las remisiones;
+    // una nota manual acá movería contabilidad que esta factura no tiene.
+    // Se anula con su propia acción (POST /sales/:id/annul-consolidated).
+    if (original.is_consolidated_invoice) {
+      await transaction.rollback();
+      return fail(res, 'Esta factura agrupa remisiones: anúlala con "Anular factura agrupada" desde el detalle de la venta.');
+    }
     if (!original.cufe) {
       await transaction.rollback();
       return fail(res, 'La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');
@@ -1517,7 +1524,13 @@ const createAndSendCreditNote = async (req, res) => {
       noteTax = aiuNote.tax;
     }
 
-    const noteTotal = noteSubtotal + noteTax;
+    // Parte del descuento global de la factura que le toca a lo acreditado
+    // (services/sales/globalDiscount.service.js): la NC va por el NETO, con
+    // el descuento como AllowanceCharge de documento -- igual que la factura.
+    // Antes acreditaba el valor de lista y superaba lo cobrado.
+    const { discountShare, round2 } = require('../../services/sales/globalDiscount.service');
+    const noteDiscount = discountShare(original, noteSubtotal + noteTax);
+    const noteTotal = round2(noteSubtotal + noteTax - noteDiscount);
     const noteNumber = `NC-${Date.now()}`;
 
     // Crear Sale como nota crédito
@@ -1541,6 +1554,7 @@ const createAndSendCreditNote = async (req, res) => {
       subtotal: noteSubtotal,
       tax_amount: noteTax,
       discount_amount: 0,
+      global_discount_amount: noteDiscount,
       total_amount: noteTotal,
       payment_method: original.payment_method,
       payment_status: 'paid',
@@ -1647,6 +1661,13 @@ const createAndSendDebitNote = async (req, res) => {
       transaction,
     });
     if (!original) { await transaction.rollback(); return fail(res, 'Factura no encontrada', 404); }
+    // Factura que agrupa remisiones: la venta real está en las remisiones;
+    // una nota manual acá movería contabilidad que esta factura no tiene.
+    // Se anula con su propia acción (POST /sales/:id/annul-consolidated).
+    if (original.is_consolidated_invoice) {
+      await transaction.rollback();
+      return fail(res, 'Esta factura agrupa remisiones: anúlala con "Anular factura agrupada" desde el detalle de la venta.');
+    }
     if (!original.cufe) {
       await transaction.rollback();
       return fail(res, 'La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');

@@ -18,6 +18,9 @@ const { resolveUnitCost } = require('../../utils/costResolver');
 const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
 const dianService = require('../../services/dian/dianService');
 const maintenanceService = require('../../services/workshop/maintenance.service');
+const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
+const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const woPayments = require('../../services/workshop/workOrderPayments.service');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -717,6 +720,39 @@ const changeStatus = async (req, res) => {
       }
     }
 
+    // ── Cancelación con abonos: el dinero queda como anticipo del cliente ──────
+    // (antes los abonos se quedaban colgados en una OT cancelada, sin forma
+    // de devolverlos ni aplicarlos). Se puede devolver desde Anticipos.
+    let cancelAdvances = [];
+    if (status === 'cancelado') {
+      const pending = (order.payment_history || []).filter((p) => woPayments.transferableAmount(p) > 0);
+      if (pending.length) {
+        if (!order.customer_id) {
+          await transaction.rollback();
+          return res.status(400).json({ success: false, message: 'Esta OT tiene abonos y no tiene cliente: asigna el cliente antes de cancelarla para dejar los abonos como anticipo.' });
+        }
+        const history = (order.payment_history || []).map((p) => (p.payment_id ? p : { ...p, payment_id: require('crypto').randomUUID() }));
+        const accountedIds = await woPayments.accountedPaymentIds(req.user.tenant_id, history.map((p) => p.payment_id), transaction);
+        const portions = history
+          .filter((p) => woPayments.transferableAmount(p) > 0)
+          .map((p) => ({ payment: p, amount: woPayments.transferableAmount(p), accounted: accountedIds.has(p.payment_id) }));
+        const branchId = req.branch_id
+          || await dianService.resolveDocumentBranchId({ warehouse_id: order.warehouse_id }, req.user.tenant_id, transaction);
+        cancelAdvances = await woPayments.moveToAdvances({
+          order,
+          portions,
+          tenantId: req.user.tenant_id,
+          userId: req.user.id,
+          branchId,
+          reason: `Abonos de la OT ${order.order_number} (cancelada)`,
+          transaction,
+        });
+        updates.payment_history = history.map((p) => ({ ...p, moved_to_advance_amount: Number(p.amount || 0) }));
+        updates.paid_amount = 0;
+        updates.payment_status = 'pending';
+      }
+    }
+
     // ── Cancelación: devolver stock de todos los repuestos descontados ──────────
     if (status === 'cancelado') {
       const items = await WorkOrderItem.findAll({
@@ -755,6 +791,10 @@ const changeStatus = async (req, res) => {
     await order.update(updates, { transaction });
     await transaction.commit();
 
+    if (cancelAdvances.length) {
+      setImmediate(() => woPayments.generateMovedAdvanceEntries(cancelAdvances, req.user.tenant_id, req.user.id));
+    }
+
     if (status === 'entregado') await generateMaintenanceRecordsSafe(order.id, req.user.tenant_id);
 
     // Retornar la OT completa con includes
@@ -777,7 +817,10 @@ const changeStatus = async (req, res) => {
       ],
     });
 
-    res.json({ success: true, message: `Estado actualizado a: ${status}`, data: full });
+    const advancesNote = cancelAdvances.length
+      ? `. Los abonos (${cancelAdvances.map((r) => r.advance.advance_number).join(', ')}) quedaron como anticipo del cliente`
+      : '';
+    res.json({ success: true, message: `Estado actualizado a: ${status}${advancesNote}`, data: full });
   } catch (error) {
     await transaction.rollback();
     logger.error('Error cambiando estado OT:', error);
@@ -847,6 +890,22 @@ const revertStatus = async (req, res) => {
     let documentVoidInfo = null;
     const sale = order.sale;
 
+    // Abonos de la OT que se trasladaron a la venta al facturarla: al anularla
+    // vuelven a ser abonos de la OT (que queda otra vez sin venta). Se sacan
+    // de la venta para que ni el flujo de caja los cuente dos veces ni la
+    // nota crédito los trate como dinero a devolver.
+    const woTransferred = (sale?.payment_history || []).filter((p) => p.source === 'work_order');
+    const releaseWorkOrderPayments = async (transaction) => {
+      if (!woTransferred.length) return;
+      const released = woPayments.round2(woTransferred.reduce((s, p) => s + Number(p.amount || 0), 0));
+      const paid = Math.max(woPayments.round2(Number(sale.paid_amount || 0) - released), 0);
+      await sale.update({
+        payment_history: sale.payment_history.filter((p) => p.source !== 'work_order'),
+        paid_amount: paid,
+        payment_status: paid <= 0 ? 'pending' : (paid >= Number(sale.total_amount) - 0.01 ? 'paid' : 'partial'),
+      }, { transaction });
+    };
+
     if (sale && !['cancelled', 'voided'].includes(sale.status)) {
       if (sale.dian_status === 'sending') {
         return res.status(409).json({
@@ -862,6 +921,7 @@ const revertStatus = async (req, res) => {
         if (fullItems.length === 0) {
           return res.status(400).json({ success: false, message: 'La factura no tiene ítems — no se puede generar la nota crédito' });
         }
+        await releaseWorkOrderPayments();
         const result = await voidSaleCore({
           sale_id: sale.id,
           tenant_id,
@@ -871,6 +931,16 @@ const revertStatus = async (req, res) => {
           work_order_target_status: target_status,
           retained_product_ids: retainedProductIds,
         });
+        // La nota crédito acreditó toda la cartera (sin los abonos): el
+        // ajuste deja la cartera en cero y los abonos otra vez en 2805.
+        if (woTransferred.length) {
+          setImmediate(async () => {
+            const { generateWorkOrderPaymentReopenEntry } = require('../../services/accounting/autoEntries.service');
+            for (const p of woTransferred) {
+              await generateWorkOrderPaymentReopenEntry(p, order, tenant_id, req.user.id);
+            }
+          });
+        }
         documentVoidInfo = {
           method: 'nota_credito',
           return_number: result.return_number,
@@ -904,6 +974,7 @@ const revertStatus = async (req, res) => {
               notes: `Reversión de OT ${order.order_number} por administrador — ${reason}`,
             }, transaction);
           }
+          await releaseWorkOrderPayments(transaction);
           await sale.update({
             status: 'cancelled',
             internal_notes: `Anulada por reversión de OT ${order.order_number} — ${reason}`,
@@ -920,6 +991,13 @@ const revertStatus = async (req, res) => {
           try {
             const { reverseSourceEntries } = require('../../services/accounting/autoEntries.service');
             await reverseSourceEntries('sale', sale.id, tenant_id, req.user.id, `OT ${order.order_number} reversada por administrador — ${reason}`);
+            // Reversar el asiento de la venta devuelve a 2805 los abonos que
+            // ya tenían asiento propio; los que no (se contabilizaron como
+            // cobro dentro de la venta) necesitan ahora su asiento de abono.
+            const { generateWorkOrderPaymentEntry } = require('../../services/accounting/autoEntries.service');
+            for (const p of woTransferred.filter((x) => !x.advance_accounted)) {
+              await generateWorkOrderPaymentEntry(p, order, tenant_id, req.user.id);
+            }
           } catch (err) {
             logger.warn(`[accounting] Error revirtiendo asiento de venta ${sale.id} (reversión de OT ${order.id}): ${err.message}`);
           }
@@ -2407,7 +2485,6 @@ const generateSale = async (req, res) => {
     }
 
     // Número del documento
-    const year   = new Date().getFullYear();
     // Sede del documento: la del request (branchMiddleware); si no hay --
     // super_admin -- la de la bodega de la OT o la principal del tenant.
     // Misma regla que usa dianService al numerar, para que la resolución
@@ -2434,17 +2511,15 @@ const generateSale = async (req, res) => {
         await transaction.rollback();
         return res.status(400).json({ success: false, message: 'No hay resolución DIAN activa para generar facturas. Configure la resolución en ajustes DIAN.' });
       }
-      sale_number = `${resolution.prefix || ''}${resolution.current_number}`;
+      // Siguiente provisional libre: otra factura aún sin enviar puede tener
+      // ya este mismo número (ver nextFreeSaleNumber).
+      const { nextFreeSaleNumber } = require('../sales/sales.controller');
+      sale_number = await nextFreeSaleNumber(tenant_id, resolution.prefix, Number(resolution.current_number), transaction);
     } else {
-      const prefix = 'REM';
-      const lastSale = await Sale.findOne({
-        where: { tenant_id, sale_number: { [Op.like]: `${prefix}-${year}-%` } },
-        order: [['sale_number', 'DESC']],
-        lock: transaction.LOCK.UPDATE,
-        transaction,
-      });
-      const saleSeq = lastSale ? parseInt(lastSale.sale_number.split('-')[2], 10) + 1 : 1;
-      sale_number = `${prefix}-${year}-${String(saleSeq).padStart(4, '0')}`;
+      // Mismo consecutivo REM que Ventas: salta también los REM de remisiones
+      // ya convertidas a factura (guardados en remision_number).
+      const { generateSaleNumber } = require('../sales/sales.controller');
+      sale_number = await generateSaleNumber(tenant_id, 'remision', transaction);
     }
 
     const customer     = order.customer;
@@ -2499,6 +2574,42 @@ const generateSale = async (req, res) => {
     }
     const tax_breakdown = taxService.buildTaxBreakdown(aiuResult ? [...saleLines, ...aiuService.aiuTaxLines(aiuResult, aiu)] : saleLines, retentions);
 
+    // Abonos cobrados en la OT: pasan a la venta como pagos ya recibidos
+    // (antes la venta nacía debiendo el total y los abonos desaparecían del
+    // flujo de caja, que deja de leer la OT cuando tiene sale_id). Los que
+    // ya tienen asiento propio (generateWorkOrderPaymentEntry, 2805) se
+    // cruzan contra Anticipos en el asiento de la venta; los anteriores a
+    // ese asiento se contabilizan ahí mismo como cobro a caja/bancos.
+    // Lo que exceda el total facturado queda como anticipo del cliente.
+    // Los abonos viejos sin payment_id reciben uno (se guarda también en la
+    // OT para poder reabrirlos si la OT se reversa).
+    const woHistory = (order.payment_history || []).map((p) => (p.payment_id ? p : { ...p, payment_id: require('crypto').randomUUID() }));
+    const accountedIds = await woPayments.accountedPaymentIds(tenant_id, woHistory.map((p) => p.payment_id), transaction);
+    let leftToBill = saleTotalAmount;
+    const transferredPayments = [];
+    const excessPortions = [];
+    const updatedWoHistory = woHistory.map((p) => {
+      const available = woPayments.transferableAmount(p);
+      if (available <= 0) return p;
+      const accounted = accountedIds.has(p.payment_id);
+      const inSale = woPayments.round2(Math.min(available, Math.max(leftToBill, 0)));
+      leftToBill = woPayments.round2(leftToBill - inSale);
+      if (inSale > 0) {
+        const { moved_to_advance_amount, ...rest } = p;
+        transferredPayments.push({ ...rest, amount: inSale, source: 'work_order', work_order_id: order.id, in_sale_entry: true, advance_accounted: accounted });
+      }
+      const excess = woPayments.round2(available - inSale);
+      if (excess <= 0) return p;
+      if (!order.customer_id) {
+        logger.warn(`[workOrders] OT ${order.order_number}: abono ${p.payment_id} excede lo facturado en ${excess} y la OT no tiene cliente para dejarlo como anticipo`);
+        return p;
+      }
+      excessPortions.push({ payment: p, amount: excess, accounted });
+      return { ...p, moved_to_advance_amount: woPayments.round2(Number(p.moved_to_advance_amount || 0) + excess) };
+    });
+    const salePaid = woPayments.round2(transferredPayments.reduce((sum, p) => sum + p.amount, 0));
+    const woMethods = [...new Set(transferredPayments.map((p) => p.method).filter(Boolean))];
+
     const sale = await Sale.create({
       tenant_id,
       branch_id: saleBranchId || null,
@@ -2533,7 +2644,18 @@ const generateSale = async (req, res) => {
       discount_amount:  order.discount_amount || 0,
       total_amount:     saleTotalAmount,
       status:           'pending',
-      payment_status:   'pending',
+      paid_amount:      salePaid,
+      payment_status:   salePaid <= 0 ? 'pending' : (salePaid >= saleTotalAmount - 0.01 ? 'paid' : 'partial'),
+      payment_method:   woMethods.length === 1 ? woMethods[0] : (woMethods.length > 1 ? 'mixed' : null),
+      // Contado si los abonos de la OT cubren el total; si no, crédito con el
+      // plazo enviado o el del cliente (XML DIAN + RADIAN, ver paymentTerms.service.js).
+      ...require('../../services/sales/paymentTerms.service').resolvePaymentTerms({
+        total: saleTotalAmount,
+        settled: salePaid,
+        creditDays: req.body.credit_days,
+        paymentTerms: customer?.payment_terms,
+      }),
+      payment_history:  transferredPayments,
       dian_status:      document_type === 'factura' ? 'pending' : 'not_applicable',
       notes: `Generada desde OT ${order.order_number}${order.work_performed ? '. ' + order.work_performed : ''}`.trim(),
       created_by: req.user.id,
@@ -2646,10 +2768,28 @@ const generateSale = async (req, res) => {
       }
     }
 
+    const excessAdvances = await woPayments.moveToAdvances({
+      order,
+      portions: excessPortions,
+      tenantId: tenant_id,
+      userId: req.user.id,
+      branchId: saleBranchId,
+      reason: `Excedente de abonos de la OT ${order.order_number} sobre lo facturado en ${sale_number}`,
+      transaction,
+    });
+
     // Vincular y cerrar OT
-    await order.update({ sale_id: sale.id, status: 'entregado', delivered_at: new Date() }, { transaction });
+    await order.update({
+      sale_id: sale.id, status: 'entregado', delivered_at: new Date(), payment_history: updatedWoHistory,
+      // Sin lo que pasó a anticipo (excedente): así, si la OT se reversa, su saldo vuelve a ser real.
+      paid_amount: woPayments.round2(updatedWoHistory.reduce((sum, p) => sum + woPayments.transferableAmount(p), 0)),
+    }, { transaction });
 
     await transaction.commit();
+
+    if (excessAdvances.length) {
+      setImmediate(() => woPayments.generateMovedAdvanceEntries(excessAdvances, tenant_id, req.user.id));
+    }
 
     await generateMaintenanceRecordsSafe(order.id, tenant_id);
 
@@ -2886,7 +3026,7 @@ const registerPayment = async (req, res) => {
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const userId = req.user.id;
-    const { amount, payment_method, payment_date, notes } = req.body;
+    const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await transaction.rollback();
@@ -2907,6 +3047,12 @@ const registerPayment = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'No se puede registrar un pago en una OT cancelada' });
     }
+    // Ya facturada: el cobro va contra la venta (cartera), no contra la OT --
+    // un abono acá quedaría en 2805 sin cruzarse nunca con la factura.
+    if (order.sale_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Esta OT ya tiene documento generado: registra el pago en la venta' });
+    }
 
     const total = parseFloat(order.total_amount || 0);
     const alreadyPaid = parseFloat(order.paid_amount || 0);
@@ -2926,16 +3072,60 @@ const registerPayment = async (req, res) => {
     if (total > 0 && paid_amount >= total) payment_status = 'paid';
     else if (paid_amount > 0) payment_status = 'partial';
 
-    const receipt_number = `REC-${Date.now().toString().slice(-6)}`;
-    const payment_history = [...(order.payment_history || [])];
-    payment_history.push({
-      date: payment_date || new Date(),
+    // Cobrar un abono mueve dinero hoy: caja abierta, igual que los cobros
+    // de ventas (solo para tenants con Tesorería activa).
+    let openSession = null;
+    if (await isTreasuryEnabled(tenant_id)) {
+      openSession = await getOpenSession(tenant_id, req.branch_id, transaction);
+      if (!openSession) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+      }
+    }
+
+    const effectiveMethod = payment_method || 'cash';
+    const selectedBankAccountId = await resolveSelectedBankAccountId(tenant_id, bank_account_id, effectiveMethod, transaction);
+    const payment_id = require('crypto').randomUUID();
+    const effectiveDate = payment_date || new Date();
+
+    // Recibo real (antes era un 'REC-xxxxxx' armado con la hora, sin fila en
+    // receipts ni consecutivo).
+    const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
+    const { Receipt } = require('../../models');
+    const receipt_number = await generateReceiptNumber(tenant_id, transaction);
+    const customerName = order.customer_id
+      ? await Customer.findOne({ where: { id: order.customer_id, tenant_id }, attributes: ['first_name', 'last_name', 'business_name'], transaction })
+          .then((c) => c && (c.business_name || `${c.first_name || ''} ${c.last_name || ''}`.trim()))
+      : null;
+    await Receipt.create({
+      tenant_id,
+      branch_id: req.branch_id,
+      receipt_number,
+      source_type: 'work_order',
+      source_id: order.id,
+      payment_id,
+      cash_session_id: openSession?.id || null,
       amount: effectiveAmount,
-      method: payment_method || 'cash',
+      method: effectiveMethod,
+      payment_date: effectiveDate,
+      reference: order.order_number,
+      customer_name: customerName,
+      created_by: userId,
+    }, { transaction });
+
+    const payment = {
+      payment_id,
+      date: effectiveDate,
+      amount: effectiveAmount,
+      method: effectiveMethod,
+      bank_account_id: selectedBankAccountId,
       user_id: userId,
       notes: notes || null,
+      cash_session_id: openSession?.id || null,
+      branch_id: req.branch_id,
       receipt_number,
-    });
+    };
+    const payment_history = [...(order.payment_history || []), payment];
 
     await order.update(
       { paid_amount, payment_status, payment_history },
@@ -2943,6 +3133,18 @@ const registerPayment = async (req, res) => {
     );
 
     await transaction.commit();
+
+    // Asiento del abono (caja/bancos vs anticipos de clientes: todavía no hay
+    // venta ni cartera), no bloqueante. Al facturar la OT, el asiento de la
+    // venta cruza este anticipo (ver generateSale).
+    setImmediate(async () => {
+      try {
+        const { generateWorkOrderPaymentEntry } = require('../../services/accounting/autoEntries.service');
+        await generateWorkOrderPaymentEntry(payment, order, tenant_id, userId);
+      } catch (err) {
+        logger.warn(`[accounting] Error generando asiento de abono a OT ${order.id}: ${err.message}`);
+      }
+    });
 
     const updatedOrder = await WorkOrder.findOne({
       where: { id, tenant_id },
@@ -2960,6 +3162,7 @@ const registerPayment = async (req, res) => {
     });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
     logger.error('Error registrando pago de OT:', error);
     res.status(500).json({ success: false, message: 'Error registrando el pago' });
   }

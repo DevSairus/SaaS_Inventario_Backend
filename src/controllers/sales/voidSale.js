@@ -96,6 +96,12 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
       await transaction.rollback();
       throw httpError(404, { success: false, message: 'Venta no encontrada' });
     }
+    const { lifecycleBlocker } = require('../../services/sales/remisionInvoicing.service');
+    const invoicingBlocker = lifecycleBlocker(sale);
+    if (invoicingBlocker) {
+      await transaction.rollback();
+      throw httpError(400, { success: false, message: invoicingBlocker });
+    }
     if (['draft', 'cancelled'].includes(sale.status)) {
       await transaction.rollback();
       throw httpError(400, {
@@ -159,9 +165,13 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
         condition:    reqItem.condition || 'used',
         // 'retained': el repuesto sigue consumido por la OT que generó esta
         // venta -- no vuelve a inventario (ver retained_product_ids arriba).
-        destination:  retainedProductIdSet.has(saleItem.product_id)
-          ? 'retained'
-          : (reqItem.condition === 'defective' ? 'quarantine' : 'inventory'),
+        // 'none': línea libre, sin producto de catálogo -- no hay nada que
+        // reingresar a inventario.
+        destination:  !saleItem.product_id
+          ? 'none'
+          : retainedProductIdSet.has(saleItem.product_id)
+            ? 'retained'
+            : (reqItem.condition === 'defective' ? 'quarantine' : 'inventory'),
         subtotal:     itemSubtot,
         tax:          itemTax,
         total:        itemSubtot + itemTax,
@@ -174,6 +184,12 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
       await transaction.rollback();
       throw httpError(400, { success: false, message: 'No hay ítems válidos para devolver' });
     }
+
+    // Parte del descuento global de la venta que le toca a lo devuelto: se
+    // devuelve el NETO, no el valor de las líneas (globalDiscount.service.js).
+    const { discountShare, round2 } = require('../../services/sales/globalDiscount.service');
+    const discount = discountShare(sale, subtotal + tax);
+    const returnTotal = round2(subtotal + tax - discount);
 
     // ── 3. Crear CustomerReturn ───────────────────────────────────────────────
     const return_number = await generateReturnNumber(tenant_id, transaction);
@@ -188,7 +204,8 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
       notes:        notes || null,
       subtotal,
       tax,
-      total_amount: subtotal + tax,
+      discount_amount: discount,
+      total_amount: returnTotal,
       status:       'approved',
       created_by:   user_id,
       approved_by:  user_id,
@@ -317,7 +334,10 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
             sale_date:        new Date(),
             subtotal,
             tax_amount:       tax,
-            total_amount:     subtotal + tax,
+            // Neto del descuento global: el XML lo lleva como AllowanceCharge
+            // de documento, igual que la factura (dianKitAdapter.applyGlobalDiscount).
+            global_discount_amount: discount,
+            total_amount:     returnTotal,
             discount_amount:  0,
             payment_method:   sale.payment_method,
             notes:            `Nota crédito por devolución ${return_number}. Ref: ${sale.sale_number}`,
@@ -363,7 +383,7 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
       sale,
       return_number,
       return_id:          customerReturn.id,
-      total_amount:       subtotal + tax,
+      total_amount:       returnTotal,
       items_count:        validatedItems.length,
       dian_status,
       document_type:      sale.document_type,

@@ -134,7 +134,7 @@ const TOOL_EXECUTORS = {
       return { success: false, message: 'No encontré ese gasto en esta empresa' };
     }
 
-    const remaining = Number(expense.total_amount) - Number(expense.paid_amount || 0);
+    const remaining = require('../../../utils/expenseAmounts').expenseBalance(expense);
     if (remaining <= 0) {
       return { success: false, message: `El gasto ${expense.expense_number} ya está pagado en su totalidad` };
     }

@@ -28,6 +28,12 @@ router.post('/:id/retentions',    salesController.registerRetentions);
 router.post('/:id/apply-advance', applyAdvanceToSale);
 router.post('/:id/void',          voidSale);              // ← anulación/devolución
 
+// Facturación de remisiones confirmadas (si el tenant lo habilitó)
+router.post('/consolidate-invoice',   salesController.consolidateInvoice);
+router.post('/:id/convert-to-invoice', salesController.convertToInvoice);
+router.post('/:id/revert-invoicing',   salesController.revertInvoicing);
+router.post('/:id/annul-consolidated', salesController.annulConsolidated);
+
 // Documentos
 router.get( '/:id/pdf',            salesController.generatePDF);
 router.post('/:id/send-whatsapp',  salesController.sendWhatsApp);

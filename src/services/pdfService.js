@@ -625,12 +625,18 @@ const generateSalePDF = async (res, sale, tenant) => {
     /* ══════════════════════════════════════════════════════════
        NOTAS DE LA VENTA (campo notes)
        ══════════════════════════════════════════════════════════ */
-    if (sale.notes && sale.notes.trim()) {
+    // Factura convertida desde una remisión: se deja la referencia al
+    // documento que el cliente ya recibió (la agrupada ya la trae en notes).
+    const observations = [
+      sale.notes?.trim(),
+      sale.document_type === 'factura' && sale.remision_number ? `Factura de la remisión ${sale.remision_number}` : null,
+    ].filter(Boolean).join('\n');
+    if (observations) {
       y += 20;
       if (y > 650) { doc.addPage(); y = 40; }
       doc.font('Helvetica-Bold').fontSize(8.5).fillColor(gray).text('OBSERVACIONES', MARGIN, y);
       y += 12;
-      doc.font('Helvetica').fontSize(9).fillColor(black).text(sale.notes, MARGIN, y, { width: INNER_W });
+      doc.font('Helvetica').fontSize(9).fillColor(black).text(observations, MARGIN, y, { width: INNER_W });
     }
 
     /* ══════════════════════════════════════════════════════════

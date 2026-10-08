@@ -23,6 +23,8 @@ const { signXml } = require('../dian/dianSignerService');
 const dianApiService = require('../dian/dianApiService');
 const { buildEventXml } = require('./radianXmlBuilder');
 const { addBusinessDays, isWithinBusinessDeadline } = require('./businessDays');
+// Contado/crédito decidido al emitir la factura (sales.payment_form)
+const { isCreditSale } = require('../sales/paymentTerms.service');
 
 // Prefijo del consecutivo del ApplicationResponse — regla de numeración de
 // eventos aún sin confirmar contra el Anexo (ver checklist §8 del plan:
@@ -329,6 +331,9 @@ async function emitAceptacionTacita034(saleId, tenantId, userId, declarantType =
   });
   if (!sale) throw new Error('Venta no encontrada');
   if (!sale.cufe) throw new Error('Esta venta no tiene CUFE.');
+  if (!isCreditSale(sale)) {
+    throw new Error('La aceptación tácita (034) solo aplica a facturas a crédito.');
+  }
   if (sale.radian_status !== '032_received') {
     throw new Error(`No se puede emitir el 034 — se requiere un 032 recibido del cliente sin 033/031 posterior (estado actual: "${sale.radian_status}").`);
   }
@@ -408,7 +413,7 @@ async function emitInscripcion036(saleId, tenantId, userId) {
   if (!['033_received', '034'].includes(sale.radian_status)) {
     throw new Error(`Solo se puede inscribir una factura ya aceptada (033 recibido o 034 emitido) — estado actual: "${sale.radian_status}".`);
   }
-  if (!(sale.credit_days > 0)) {
+  if (!isCreditSale(sale)) {
     throw new Error('Solo las facturas a crédito se inscriben como título valor.');
   }
 

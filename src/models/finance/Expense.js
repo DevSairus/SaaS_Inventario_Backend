@@ -104,6 +104,12 @@ const Expense = sequelize.define('Expense', {
     type: DataTypes.STRING(50),
     allowNull: true
   },
+  // Cuenta bancaria por la que salió el pago (no efectivo): el asiento va a
+  // su subcuenta PUC propia en vez de la genérica expense_bank_account.
+  bank_account_id: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   payment_status: {
     type: DataTypes.STRING(20),
     defaultValue: 'pending',

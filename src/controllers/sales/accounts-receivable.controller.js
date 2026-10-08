@@ -2,12 +2,21 @@
 const { Sale, SaleItem, Customer, User } = require('../../models');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
-const { shouldHideRemisiones } = require('../../utils/remisionVisibility');
+const { shouldHideRemisiones, consolidatedExclusionWhere } = require('../../utils/remisionVisibility');
 
 // Cartera = facturas y remisiones con saldo. Si el tenant oculta las
 // remisiones a no-admin (utils/remisionVisibility.js), esos usuarios solo
 // ven las facturas.
 const receivableDocumentTypes = (req) => (shouldHideRemisiones(req) ? ['factura'] : ['factura', 'remision']);
+
+// Con remisiones visibles, el saldo de una factura consolidada ya está en
+// sus remisiones agrupadas -- se excluye para no cobrarlo dos veces. Con
+// remisiones ocultas es al revés: la factura consolidada es la que se ve
+// (su paid_amount se sincroniza desde las remisiones).
+const receivableWhere = (req) => ({
+  document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
+  ...(shouldHideRemisiones(req) ? {} : consolidatedExclusionWhere()),
+});
 
 // Obtener resumen de cartera
 const getAccountsReceivableSummary = async (req, res) => {
@@ -17,7 +26,7 @@ const getAccountsReceivableSummary = async (req, res) => {
 
     const where = {
       tenant_id: tenantId,
-      document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
+      ...receivableWhere(req),
       status: { [Op.in]: ['pending', 'completed'] }, // pending = confirmada, completed = entregada
       payment_status: { [Op.in]: ['pending', 'partial'] } // Solo pendientes o parciales
     };
@@ -173,7 +182,7 @@ const getCustomerAccountsReceivable = async (req, res) => {
       where: {
         tenant_id: tenantId,
         customer_id: customerId,
-        document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
+        ...receivableWhere(req),
         status: { [Op.in]: ['pending', 'completed'] }, // pending = confirmada, completed = entregada
         payment_status: { [Op.in]: ['pending', 'partial'] }
       },
@@ -318,7 +327,7 @@ const getAgingReport = async (req, res) => {
     const invoices = await Sale.findAll({
       where: {
         tenant_id: tenantId,
-        document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
+        ...receivableWhere(req),
         status: { [Op.in]: ['pending', 'completed'] }, // pending = confirmada, completed = entregada
         payment_status: { [Op.in]: ['pending', 'partial'] }
       },

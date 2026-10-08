@@ -16,8 +16,8 @@ const ZERO_BUCKET = { efectivo: 0, tarjeta: 0, transferencia: 0, otro: 0 };
 function normalizeMethod(method) {
   const m = String(method || '').toLowerCase().trim();
   if (['efectivo', 'cash', 'contado'].includes(m)) return 'efectivo';
-  if (['tarjeta', 'card', 'credito', 'debito', 'tarjeta_credito', 'tarjeta_debito', 'tarjeta credito', 'tarjeta debito'].includes(m)) return 'tarjeta';
-  if (['transferencia', 'transfer', 'nequi', 'daviplata', 'pse', 'bancolombia'].includes(m)) return 'transferencia';
+  if (['tarjeta', 'card', 'credit_card', 'debit_card', 'credito', 'debito', 'tarjeta_credito', 'tarjeta_debito', 'tarjeta credito', 'tarjeta debito', 'tarjeta de crédito', 'tarjeta de débito'].includes(m)) return 'tarjeta';
+  if (['transferencia', 'transfer', 'transferencia bancaria', 'nequi', 'daviplata', 'pse', 'bancolombia'].includes(m)) return 'transferencia';
   return 'otro';
 }
 

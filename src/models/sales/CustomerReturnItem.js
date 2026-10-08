@@ -20,7 +20,8 @@ const CustomerReturnItem = sequelize.define('CustomerReturnItem', {
   },
   product_id: {
     type: DataTypes.UUID,
-    allowNull: false,
+    // null = línea libre de la venta (sin producto de catálogo)
+    allowNull: true,
     references: { model: 'products', key: 'id' }
   },
   quantity: {

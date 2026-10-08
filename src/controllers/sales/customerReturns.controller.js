@@ -153,7 +153,7 @@ const getCustomerReturnById = async (req, res) => {
           as: 'items',
           include: [
             { model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'barcode'] },
-            { model: SaleItem, as: 'saleItem', attributes: ['id', 'quantity', 'unit_price'] }
+            { model: SaleItem, as: 'saleItem', attributes: ['id', 'quantity', 'unit_price', 'product_name', 'product_sku', 'item_type'] }
           ]
         },
         {
@@ -223,6 +223,12 @@ const createCustomerReturn = async (req, res) => {
       await transaction.rollback();
       return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     }
+    const { lifecycleBlocker } = require('../../services/sales/remisionInvoicing.service');
+    const invoicingBlocker = lifecycleBlocker(sale);
+    if (invoicingBlocker) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: invoicingBlocker });
+    }
 
     // 2. Validar items a devolver
     for (const item of items) {
@@ -263,8 +269,12 @@ const createCustomerReturn = async (req, res) => {
 
     const returnItems = items.map(item => {
       const saleItem = sale.items.find(si => si.id === item.sale_item_id);
-      const itemSubtotal = parseFloat(item.quantity) * parseFloat(saleItem.unit_price);
-      const itemTax = itemSubtotal * (parseFloat(saleItem.tax_percentage || 0) / 100);
+      // Proporción del subtotal e IVA REALES de la línea (ya con su descuento
+      // por línea) -- mismo criterio que voidSale. Antes era cantidad ×
+      // precio unitario y la devolución ignoraba el descuento de la línea.
+      const ratio = parseFloat(item.quantity) / parseFloat(saleItem.quantity);
+      const itemSubtotal = parseFloat(saleItem.subtotal || 0) * ratio;
+      const itemTax = parseFloat(saleItem.tax_amount || 0) * ratio;
 
       subtotal += itemSubtotal;
       tax += itemTax;
@@ -276,14 +286,19 @@ const createCustomerReturn = async (req, res) => {
         unit_price: saleItem.unit_price,
         unit_cost: resolveUnitCost(saleItem, saleItem.product),
         condition: item.condition || 'used',
-        destination: item.condition === 'defective' ? 'quarantine' : 'inventory',
+        // 'none': línea libre, sin producto de catálogo que reingresar.
+        destination: !saleItem.product_id ? 'none' : (item.condition === 'defective' ? 'quarantine' : 'inventory'),
         subtotal: itemSubtotal,
         tax: itemTax,
         total: itemSubtotal + itemTax
       };
     });
 
-    const total_amount = subtotal + tax;
+    // Neto de la parte del descuento global que le toca a lo devuelto
+    // (services/sales/globalDiscount.service.js).
+    const { discountShare, round2 } = require('../../services/sales/globalDiscount.service');
+    const discount_amount = discountShare(sale, subtotal + tax);
+    const total_amount = round2(subtotal + tax - discount_amount);
 
     // 4. Advisory lock + generar número de forma atómica
     //
@@ -319,6 +334,7 @@ const createCustomerReturn = async (req, res) => {
       notes,
       subtotal,
       tax,
+      discount_amount,
       total_amount,
       status: 'pending',
       created_by: req.user.id

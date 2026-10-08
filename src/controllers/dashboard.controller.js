@@ -4,7 +4,7 @@ const { Product, Sale, SaleItem, Purchase, Customer, InventoryMovement, Warehous
 const { Op, fn, col, literal } = require('sequelize');
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../utils/branchFilter');
 const { getEffectiveModulesForTenantId } = require('../services/moduleAccess');
-const { shouldHideRemisiones, remisionExclusionWhere, workOrderRemisionSqlCondition, applyWorkOrderRemisionFilter } = require('../utils/remisionVisibility');
+const { shouldHideRemisiones, economicSalesWhere, workOrderRemisionSqlCondition, applyWorkOrderRemisionFilter } = require('../utils/remisionVisibility');
 
 // Qué roles necesitan ver cada categoría de alerta en el dashboard general.
 // Mismo criterio que ya se usa en el frontend (SALES_FINANCE_ROLES /
@@ -59,17 +59,19 @@ exports.getKPIs = async (req, res) => {
     // Remisiones ocultas a no-admin (utils/remisionVisibility.js): la
     // exclusión viaja junto con el filtro de sede, que ya se esparce en todas
     // las consultas de Sale / SaleItem de este endpoint.
+    // Sin ocultamiento, la que sale es la factura consolidada (su ingreso ya
+    // está en las remisiones agrupadas).
     const hideRemisiones = shouldHideRemisiones(req);
     const saleBranchWhere = {
       ...(branchId ? { branch_id: branchId } : {}),
-      ...(hideRemisiones ? { [Op.and]: [remisionExclusionWhere()] } : {}),
+      [Op.and]: [economicSalesWhere(req)],
     };
     const saleItemBranchWhere = {
       ...(branchId ? { '$sale.branch_id$': branchId } : {}),
       ...(hideRemisiones ? { [Op.and]: [{ [Op.or]: [
         { '$sale.document_type$': null },
         { '$sale.document_type$': { [Op.ne]: 'remision' } },
-      ] }] } : {}),
+      ] }] } : { '$sale.is_consolidated_invoice$': { [Op.not]: true } }),
     };
     const branchWarehouseId = branchId
       ? (await getBranchWarehouseIds(tenantId, branchId))[0] || '00000000-0000-0000-0000-000000000000'

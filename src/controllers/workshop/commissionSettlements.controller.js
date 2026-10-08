@@ -83,6 +83,7 @@ async function getProductItemsByTechnician({ tenant_id, user_id, date_from, date
           ...saleDateFilter,
           status: { [Op.in]: ['completed', 'pending'] },
           document_type: { [Op.in]: ['remision', 'factura'] },
+          is_consolidated_invoice: { [Op.not]: true }, // la comisión ya está en sus remisiones
           ...(woSaleIds.length ? { id: { [Op.notIn]: woSaleIds } } : {}),
         }, required: true,
         attributes: ['id', 'sale_number', 'sale_date', 'status', 'product_settled_at'] },
@@ -95,6 +96,7 @@ async function getProductItemsByTechnician({ tenant_id, user_id, date_from, date
     tenant_id,
     status: { [Op.in]: ['completed', 'pending'] },
     document_type: { [Op.in]: ['remision', 'factura'] },
+    is_consolidated_invoice: { [Op.not]: true },
     ...(not_settled ? { product_settled_at: null } : {}),
     ...(date_from || date_to ? { sale_date: dateFilter } : {}),
     ...(woSaleIds.length ? { id: { [Op.notIn]: woSaleIds } } : {}),
@@ -218,6 +220,7 @@ async function getDirectSales({ tenant_id, user_id, date_from, date_to, product_
     ...(user_id ? { technician_id: user_id } : { technician_id: { [Op.not]: null } }),
     status: { [Op.in]: ['completed', 'pending'] },
     document_type: { [Op.in]: ['remision', 'factura'] }, // excluir cotizaciones
+    is_consolidated_invoice: { [Op.not]: true }, // la comisión ya está en sus remisiones
     ...(excludedIds.length ? { id: { [Op.notIn]: excludedIds } } : {}),
   };
 

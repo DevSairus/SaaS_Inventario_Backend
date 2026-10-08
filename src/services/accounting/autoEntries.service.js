@@ -69,6 +69,32 @@ async function reverseSourceEntries(sourceType, sourceId, tenantId, userId, reas
  * para algún evento, el asiento no se genera (se loguea el warning) — no
  * bloquea la venta. Revisar logs periódicamente mientras se afina el mapeo.
  */
+const LEGACY_CONFIRM_NOTE = 'Pago registrado al confirmar la venta';
+
+/**
+ * Pagos de payment_history que se contabilizan dentro del asiento de la
+ * venta (no tienen asiento propio):
+ *  - los marcados `in_sale_entry` (pagos al confirmar, incluido cada medio
+ *    de un pago mixto, y abonos de OT trasladados al facturarla);
+ *  - si no hay marcados, los pagos al confirmar de antes de la marca
+ *    (reconocibles por su nota);
+ *  - y si tampoco, el paid_amount de la venta como un solo pago con su
+ *    payment_method (ventas muy viejas), descontando lo que vino de
+ *    anticipos o retenciones, que tienen su propio asiento.
+ */
+function salePaymentsForEntry(sale) {
+  const history = sale.payment_history || [];
+  const flagged = history.filter((p) => p.in_sale_entry);
+  if (flagged.length) return flagged;
+  const legacyConfirm = history.filter((p) => p.notes === LEGACY_CONFIRM_NOTE);
+  if (legacyConfirm.length) return legacyConfirm;
+  const ownEntries = history
+    .filter((p) => p.source === 'advance' || p.source === 'retention')
+    .reduce((s, p) => s + Number(p.amount || 0), 0);
+  const legacyPaid = Number(sale.paid_amount || 0) - ownEntries;
+  return legacyPaid > 0 ? [{ amount: legacyPaid, method: sale.payment_method }] : [];
+}
+
 async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
@@ -126,18 +152,28 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
       }
 
       const total = Number(sale.total_amount || 0);
-      const paid = Math.min(Number(sale.paid_amount || 0), total);
-      const pending = total - paid;
-
       const lines = [];
 
-      // Debe: efectivo/bancos por lo pagado + cartera por lo pendiente
-      if (paid > 0) {
-        const pm = (sale.payment_method || '').toLowerCase();
-        const isCash = pm.includes('efectivo') || pm.includes('cash');
-        const account_id = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
-        lines.push({ account_id, debit: paid, credit: 0, description: 'Cobro de la venta' });
+      // Debe: una línea por cada pago que entra en ESTE asiento (cada uno a
+      // su caja/banco, o a Anticipos si era un abono de OT ya contabilizado)
+      // + cartera por lo pendiente. Los abonos posteriores tienen su propio
+      // asiento (generatePaymentEntry) y no entran acá.
+      let paid = 0;
+      for (const p of salePaymentsForEntry(sale)) {
+        const amount = Math.round(Math.min(Number(p.amount || 0), total - paid) * 100) / 100;
+        if (amount <= 0) continue;
+        const fromWorkOrderAdvance = p.source === 'work_order' && p.advance_accounted;
+        const account_id = fromWorkOrderAdvance
+          ? await getMappedAccountId(tenantId, 'customer_advance_liability', t)
+          : await resolvePaymentAccount(tenantId, p, t, SALE_ACCOUNTS);
+        lines.push({
+          account_id, debit: amount, credit: 0,
+          description: fromWorkOrderAdvance ? 'Abono recibido en la OT' : 'Cobro de la venta',
+          third_party_id: fromWorkOrderAdvance ? (sale.customer_id || null) : undefined,
+        });
+        paid += amount;
       }
+      const pending = Math.round((total - paid) * 100) / 100;
       if (pending > 0) {
         const account_id = await getMappedAccountId(tenantId, 'sale_receivable', t);
         // third_party_id solo en la línea de cartera: es lo que alimenta el
@@ -201,7 +237,7 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
  * abono, así cada uno es reversable individualmente (ej. si se cancela la
  * venta después de varios abonos) sin tocar el asiento original de la venta.
  *
- * @param {object} payment - { payment_id, amount, method, date }
+ * @param {object} payment - { payment_id, amount, method, date, bank_account_id? }
  * @param {object} sale - venta (para customer_id, branch_id, sale_number)
  */
 async function generatePaymentEntry(payment, sale, tenantId, userId, options = {}) {
@@ -211,9 +247,7 @@ async function generatePaymentEntry(payment, sale, tenantId, userId, options = {
       const amount = Number(payment.amount || 0);
       if (amount <= 0) return null;
 
-      const pm = (payment.method || '').toLowerCase();
-      const isCash = pm.includes('efectivo') || pm.includes('cash');
-      const debitAccount = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+      const debitAccount = await resolvePaymentAccount(tenantId, payment, t, SALE_ACCOUNTS);
       const receivableAccount = await getMappedAccountId(tenantId, 'sale_receivable', t);
 
       const lines = [
@@ -246,6 +280,94 @@ async function generatePaymentEntry(payment, sale, tenantId, userId, options = {
       throw error;
     }
   }, `abono ${payment.payment_id} (venta ${sale.id})`, options);
+}
+
+/**
+ * Asiento de un abono cobrado en una OT antes de facturarla. Todavía no hay
+ * venta ni cartera, así que se reconoce como anticipo del cliente:
+ *   Débito  1105 Caja / 1110 Bancos (o la subcuenta de la cuenta bancaria)
+ *   Crédito 2805 Anticipos de clientes (tercero = cliente)
+ * Al facturar la OT, el asiento de la venta debita 2805 por estos abonos
+ * (ver salePaymentsForEntry / generateSale en workOrders.controller.js).
+ *
+ * @param {object} payment - { payment_id, amount, method, date, bank_account_id?, branch_id? }
+ * @param {object} order - OT (para customer_id, order_number)
+ */
+async function generateWorkOrderPaymentEntry(payment, order, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Math.round(Number(payment.amount || 0) * 100) / 100;
+      if (amount <= 0) return null;
+      const debitAccount = await resolvePaymentAccount(tenantId, payment, t, SALE_ACCOUNTS);
+      const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: payment.branch_id || null,
+          entryDate: payment.date ? String(payment.date).slice(0, 10) : new Date(),
+          sourceType: 'work_order_payment',
+          sourceId: payment.payment_id,
+          description: `Abono a OT ${order.order_number || order.id}${payment.method ? ` (${payment.method})` : ''}`,
+          lines: [
+            { account_id: debitAccount, debit: amount, credit: 0, description: 'Cobro de abono a OT' },
+            { account_id: liabilityAccount, debit: 0, credit: amount, description: 'Abono recibido antes de facturar la OT', third_party_id: order.customer_id || null },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `abono ${payment.payment_id} (OT ${order.id})`, options);
+}
+
+/**
+ * Reapertura de un abono de OT cuya factura se anuló con nota crédito al
+ * reversar la OT (revertStatus). El asiento de la venta había cruzado el
+ * abono (D 2805, o D Caja si no tenía asiento propio) y la nota crédito,
+ * con el abono ya sacado de la venta, acredita toda la cartera; este ajuste
+ * deja la cartera en cero y el abono otra vez como anticipo de la OT:
+ *   Débito  1305 Clientes (tercero = cliente)
+ *   Crédito 2805 Anticipos de clientes
+ * Usa source 'work_order_payment' con el payment_id del abono: al volver a
+ * facturar la OT, generateSale lo reconoce como abono ya contabilizado.
+ */
+async function generateWorkOrderPaymentReopenEntry(payment, order, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Math.round(Number(payment.amount || 0) * 100) / 100;
+      if (amount <= 0) return null;
+      const receivableAccount = await getMappedAccountId(tenantId, 'sale_receivable', t);
+      const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: payment.branch_id || null,
+          entryDate: new Date(),
+          sourceType: 'work_order_payment',
+          sourceId: payment.payment_id,
+          description: `Reapertura de abono a OT ${order.order_number || order.id} (factura anulada)`,
+          lines: [
+            { account_id: receivableAccount, debit: amount, credit: 0, description: 'Abono de OT sacado de la factura anulada', third_party_id: order.customer_id || null },
+            { account_id: liabilityAccount, debit: 0, credit: amount, description: 'Abono vuelve a quedar como anticipo de la OT', third_party_id: order.customer_id || null },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `reapertura de abono ${payment.payment_id} (OT ${order.id})`, options);
 }
 
 /**
@@ -386,11 +508,18 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
 }
 
 /**
- * Cuenta de caja o bancos para un pago a proveedor: la subcuenta de la
- * cuenta bancaria elegida (bank_account_id) si viene; si no, Caja para
- * efectivo y Bancos para lo demás (transferencia, tarjeta, cheque...).
+ * Cuenta de caja o bancos para un cobro o pago: la subcuenta de la cuenta
+ * bancaria elegida (bank_account_id) si viene; si no, Caja para efectivo y
+ * Bancos para lo demás (transferencia, tarjeta, cheque...).
+ *
+ * `cashEvent` / `bankEvents` eligen el mapeo según el flujo (compras por
+ * defecto; ventas y gastos pasan los suyos). Los bankEvents se prueban en
+ * orden: no todos los flujos tienen mapeo propio de bancos.
  */
-async function resolvePaymentAccount(tenantId, payment, t) {
+async function resolvePaymentAccount(tenantId, payment, t, {
+  cashEvent = 'purchase_cash_account',
+  bankEvents = ['purchase_bank_account', 'expense_bank_account', 'sale_bank_account'],
+} = {}) {
   if (payment.bank_account_id) {
     const { BankAccount } = require('../../models');
     const bank = await BankAccount.findOne({ where: { id: payment.bank_account_id, tenant_id: tenantId }, attributes: ['chart_of_account_id'], transaction: t });
@@ -398,15 +527,16 @@ async function resolvePaymentAccount(tenantId, payment, t) {
   }
   const pm = String(payment.method || '').toLowerCase();
   if (pm.includes('efectivo') || pm.includes('cash')) {
-    return getMappedAccountId(tenantId, 'purchase_cash_account', t);
+    return getMappedAccountId(tenantId, cashEvent, t);
   }
-  // No hay mapeo propio de "bancos para compras": se usa el de gastos y,
-  // si tampoco está, el de ventas (todos apuntan a 111005 por defecto).
-  for (const event of ['purchase_bank_account', 'expense_bank_account', 'sale_bank_account']) {
+  for (const event of bankEvents) {
     try { return await getMappedAccountId(tenantId, event, t); } catch (e) { /* siguiente */ }
   }
-  throw new Error('No hay cuenta de bancos mapeada (expense_bank_account / sale_bank_account)');
+  throw new Error(`No hay cuenta de bancos mapeada (${bankEvents.join(' / ')})`);
 }
+
+const SALE_ACCOUNTS = { cashEvent: 'sale_cash_account', bankEvents: ['sale_bank_account'] };
+const EXPENSE_ACCOUNTS = { cashEvent: 'expense_cash_account', bankEvents: ['expense_bank_account', 'sale_bank_account'] };
 
 /**
  * Asiento de un pago (o abono) a proveedor sobre una compra:
@@ -467,13 +597,9 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
       const netPayable = total - totalRetentions;
 
       const expenseAccount = await getMappedAccountId(tenantId, `expense_category:${expense.category}`, t);
-      const pm = (expense.payment_method || '').toLowerCase();
-      const isCash = pm.includes('efectivo') || pm.includes('cash');
-      const creditAccount = await getMappedAccountId(
-        tenantId,
-        !isPaid ? 'expense_payable' : (isCash ? 'expense_cash_account' : 'expense_bank_account'),
-        t
-      );
+      const creditAccount = isPaid
+        ? await resolvePaymentAccount(tenantId, { method: expense.payment_method, bank_account_id: expense.bank_account_id }, t, EXPENSE_ACCOUNTS)
+        : await getMappedAccountId(tenantId, 'expense_payable', t);
 
       const lines = [
         { account_id: expenseAccount, debit: total, credit: 0, description: expense.description },
@@ -514,6 +640,46 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
       throw error;
     }
   }, `gasto ${expense.id}`, options);
+}
+
+/**
+ * Asiento de un abono sobre un gasto que se registró pendiente (el asiento
+ * del gasto acreditó expense_payable). Mismo esquema que el pago a proveedor:
+ *   Débito  2335 Costos y gastos por pagar (tercero = proveedor)
+ *   Crédito 1105 Caja / 1110 Bancos (o la subcuenta de la cuenta bancaria)
+ * payment = { amount, date, method, bank_account_id?, notes? }
+ */
+async function generateExpensePaymentEntry(expense, payment, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Math.round(Number(payment.amount || 0) * 100) / 100;
+      if (amount <= 0) throw new Error('Pago sin monto');
+      const payableAccount = await getMappedAccountId(tenantId, 'expense_payable', t);
+      const creditAccount = await resolvePaymentAccount(tenantId, payment, t, EXPENSE_ACCOUNTS);
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: expense.branch_id,
+          entryDate: payment.date ? String(payment.date).slice(0, 10) : new Date(),
+          sourceType: 'expense_payment',
+          sourceId: expense.id,
+          description: `Pago de gasto ${expense.expense_number || expense.id}${payment.method ? ` (${payment.method})` : ''}`,
+          lines: [
+            { account_id: payableAccount, debit: amount, credit: 0, description: 'Pago de gasto', third_party_id: expense.supplier_id || null },
+            { account_id: creditAccount, debit: 0, credit: amount, description: payment.notes || 'Salida por pago de gasto' },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `pago de gasto ${expense.id}`, options);
 }
 
 /**
@@ -610,12 +776,17 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
     try {
       // free_line se agrupa con 'service' — mismo criterio que generateSaleEntry
       // (sin producto de catálogo ni costo, es ingreso puro igual que un servicio).
-      const productRevenue = (items || [])
+      const grossProductRevenue = (items || [])
         .filter((i) => (i.saleItem?.item_type || 'product') === 'product')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
-      const serviceRevenue = (items || [])
+      const grossServiceRevenue = (items || [])
         .filter((i) => i.saleItem?.item_type === 'service' || i.saleItem?.item_type === 'free_line')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      // Descuento global: la venta reconoció el ingreso ya descontado
+      // (generateSaleEntry); la devolución reversa la misma proporción, no el
+      // valor de lista. total_amount de la devolución ya viene neto.
+      const { productRevenue, serviceRevenue } = require('../sales/globalDiscount.service')
+        .splitRevenueDiscount(grossProductRevenue, grossServiceRevenue, Number(customerReturn.discount_amount || 0));
       const totalTax = Number(customerReturn.tax || 0);
       const totalReturned = Number(customerReturn.total_amount || 0);
 
@@ -716,7 +887,7 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
-      const productRevenue = (items || [])
+      let productRevenue = (items || [])
         .filter((i) => (i.item_type || 'product') === 'product')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
       let serviceRevenue = (items || [])
@@ -726,6 +897,10 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
       if (noteSale.aiu_enabled) {
         serviceRevenue += Number(noteSale.aiu_admin_amount || 0) + Number(noteSale.aiu_unforeseen_amount || 0) + Number(noteSale.aiu_profit_amount || 0);
       }
+      // Parte del descuento global de la factura (la nota ya trae el total
+      // neto): se reversa el ingreso descontado, igual que se reconoció.
+      ({ productRevenue, serviceRevenue } = require('../sales/globalDiscount.service')
+        .splitRevenueDiscount(productRevenue, serviceRevenue, Number(noteSale.global_discount_amount || 0)));
       const totalTax = Number(noteSale.tax_amount || 0);
       const total = Number(noteSale.total_amount || 0);
       const paid = Math.min(Number(noteSale.paid_amount || 0), total);
@@ -955,9 +1130,7 @@ async function generateAdvanceEntry(advance, tenantId, userId, options = {}) {
       const amount = Number(advance.amount || 0);
       if (amount <= 0) return null;
 
-      const pm = (advance.method || '').toLowerCase();
-      const isCash = pm.includes('efectivo') || pm.includes('cash');
-      const debitAccount = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+      const debitAccount = await resolvePaymentAccount(tenantId, advance, t, SALE_ACCOUNTS);
       const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
 
       const lines = [
@@ -1053,7 +1226,7 @@ async function generateAdvanceApplicationEntry(application, sale, tenantId, user
  * 280505 Anticipos de Clientes (débito) vs Caja/Bancos (crédito) — sale
  * dinero de caja, no hay factura de por medio.
  *
- * @param {object} refund - { id, amount, method, refund_date }
+ * @param {object} refund - { id, amount, method, bank_account_id?, refund_date }
  * @param {object} advance - anticipo original (para customer_id, branch_id, advance_number)
  */
 async function generateAdvanceRefundEntry(refund, advance, tenantId, userId, options = {}) {
@@ -1063,9 +1236,10 @@ async function generateAdvanceRefundEntry(refund, advance, tenantId, userId, opt
       const amount = Number(refund.amount || 0);
       if (amount <= 0) return null;
 
-      const pm = (refund.method || advance.method || '').toLowerCase();
-      const isCash = pm.includes('efectivo') || pm.includes('cash');
-      const creditAccount = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
+      const creditAccount = await resolvePaymentAccount(tenantId, {
+        method: refund.method || advance.method,
+        bank_account_id: refund.bank_account_id,
+      }, t, SALE_ACCOUNTS);
       const liabilityAccount = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
 
       const lines = [
@@ -1572,10 +1746,14 @@ async function generateBulkInventoryEntry({ description, totalValue }, tenantId,
 
 module.exports = {
   generateSaleEntry,
+  salePaymentsForEntry,
   generatePaymentEntry,
+  generateWorkOrderPaymentEntry,
+  generateWorkOrderPaymentReopenEntry,
   generatePurchaseEntry,
   generatePurchasePaymentEntry,
   generateExpenseEntry,
+  generateExpensePaymentEntry,
   generateCashSessionEntry,
   generateCustomerReturnEntry,
   generateCreditNoteEntry,

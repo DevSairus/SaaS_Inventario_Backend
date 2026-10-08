@@ -38,6 +38,7 @@ async function buildRecords(tenantId, year) {
      FROM "${schema}"."sales" s
      LEFT JOIN "${schema}"."customers" c ON c.id = s.customer_id
      WHERE s.tenant_id = :tenantId AND s.status = 'completed'
+       AND s.is_consolidated_invoice IS NOT TRUE -- su ingreso está en las remisiones agrupadas
        AND s.payment_status IN ('pending', 'partial')
        AND s.sale_date <= :cutoff
      GROUP BY s.customer_id, s.customer_tax_id, s.customer_document_type, c.first_name, c.last_name, c.business_name, s.customer_city_code, s.customer_address

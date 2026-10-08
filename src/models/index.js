@@ -487,6 +487,10 @@ User.hasMany(Sale, { foreignKey: 'technician_id', as: 'technician_sales' });
 Sale.hasMany(SaleItem, { foreignKey: 'sale_id', as: 'items' });
 SaleItem.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
 
+// Factura consolidada ↔ remisiones agrupadas (services/sales/remisionInvoicing.service.js)
+Sale.hasMany(Sale, { foreignKey: 'invoiced_in_sale_id', as: 'invoiced_remisiones' });
+Sale.belongsTo(Sale, { foreignKey: 'invoiced_in_sale_id', as: 'consolidated_invoice' });
+
 SaleItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(SaleItem, { foreignKey: 'product_id', as: 'sale_items' });
 

@@ -173,6 +173,13 @@ const Sale = sequelize.define('Sale', {
     defaultValue: null,
     comment: 'Fecha límite de pago = sale_date + credit_days.',
   },
+  // 'contado' | 'credito' -- ver services/sales/paymentTerms.service.js
+  // (XML DIAN PaymentMeans + RADIAN). NULL en ventas anteriores al campo.
+  payment_form: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    validate: { isIn: [['contado', 'credito']] },
+  },
   payment_terms: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -294,8 +301,24 @@ const Sale = sequelize.define('Sale', {
     onDelete: 'SET NULL',
     comment: 'Para notas crédito/débito: factura original que referencian (persistido para poder reenviar).',
   },
+  // ── Remisión → factura (ver services/sales/remisionInvoicing.service.js) ──
+  // Conversión individual: la misma venta pasa a factura y remision_number
+  // conserva el REM-XXXX original. Agrupación: is_consolidated_invoice marca
+  // la factura nueva (solo documento fiscal: se excluye de los agregados
+  // económicos, ver utils/remisionVisibility.js) y cada remisión agrupada
+  // apunta a ella con invoiced_in_sale_id.
+  remision_number:         { type: DataTypes.STRING(50), allowNull: true },
+  converted_to_invoice_at: { type: DataTypes.DATE, allowNull: true },
+  converted_to_invoice_by: { type: DataTypes.UUID, allowNull: true, references: { model: 'users', key: 'id' } },
+  is_consolidated_invoice: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  invoiced_in_sale_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'sales', key: 'id' },
+    onDelete: 'SET NULL',
+  },
   // ── Retenciones ─────────────────────────────────────────────────────
-  retefuente_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
+  retefuente_rate:  { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
   retefuente_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },
   reteiva_rate:      { type: DataTypes.DECIMAL(5, 2), defaultValue: 0 },
   reteiva_amount:    { type: DataTypes.DECIMAL(15, 2), defaultValue: 0 },

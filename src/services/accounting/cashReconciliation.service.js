@@ -57,12 +57,15 @@ const CASH_AND_BANK_EVENTS = [
  * por tenant desde /accounting/mapeo-cuentas.
  */
 async function getCashAndBankAccountIds(tenantId) {
-  const { AccountMapping } = require('../../models');
+  const { AccountMapping, BankAccount } = require('../../models');
   const mappings = await AccountMapping.findAll({
     where: { tenant_id: tenantId, event_type: { [Op.in]: CASH_AND_BANK_EVENTS } },
     attributes: ['account_id'],
   });
-  return [...new Set(mappings.map((m) => m.account_id))];
+  // Cobros y pagos con cuenta bancaria elegida van a su subcuenta propia
+  // (resolvePaymentAccount en autoEntries.service.js), no al mapeo genérico.
+  const banks = await BankAccount.findAll({ where: { tenant_id: tenantId }, attributes: ['chart_of_account_id'] });
+  return [...new Set([...mappings.map((m) => m.account_id), ...banks.map((b) => b.chart_of_account_id)])];
 }
 
 /**

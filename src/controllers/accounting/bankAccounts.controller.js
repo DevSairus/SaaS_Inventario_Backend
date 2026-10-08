@@ -31,6 +31,24 @@ exports.list = async (req, res) => {
   }
 };
 
+// GET /api/bank-account-options -- montado fuera de /api/accounting: lo usa
+// el selector de cuenta bancaria al cobrar/pagar (ventas, cartera, gastos),
+// donde el usuario puede no tener rol contable. Solo cuentas activas y
+// datos para mostrarlas, sin la subcuenta PUC.
+exports.options = async (req, res) => {
+  try {
+    const accounts = await BankAccount.findAll({
+      where: { tenant_id: req.tenant_id, is_active: true },
+      attributes: ['id', 'bank_name', 'account_alias', 'account_number'],
+      order: [['bank_name', 'ASC']],
+    });
+    res.json({ success: true, data: accounts });
+  } catch (error) {
+    logger.error('Error en bankAccounts.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al listar cuentas bancarias' });
+  }
+};
+
 // GET /bank-accounts/:id
 exports.getById = async (req, res) => {
   try {

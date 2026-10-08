@@ -20,6 +20,7 @@ const {
 } = require('../../models');
 const { generateAdvanceNumber } = require('../../services/finance/advanceNumber.service');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { markAdvanceForAlertCheck } = require('../../middleware/autoCheckAdvanceAlerts.middleware');
 const logger = require('../../config/logger');
 const audit = require('../../utils/audit');
@@ -31,7 +32,7 @@ const createAdvance = async (req, res) => {
     const tenant_id = req.tenant_id;
     const branch_id = req.branch_id;
     const user_id = req.user_id || req.user?.id;
-    const { customer_id, amount, method, received_date, reference_note, triggers_iva } = req.body;
+    const { customer_id, amount, method, received_date, reference_note, triggers_iva, bank_account_id } = req.body;
 
     if (!customer_id) {
       await transaction.rollback();
@@ -60,6 +61,7 @@ const createAdvance = async (req, res) => {
     }
 
     const effectiveAmount = parseFloat(amount);
+    const selectedBankAccountId = await resolveSelectedBankAccountId(tenant_id, bank_account_id, method || 'Efectivo', transaction);
     const advance_number = await generateAdvanceNumber(tenant_id, transaction);
 
     const advance = await CustomerAdvance.create({
@@ -72,6 +74,7 @@ const createAdvance = async (req, res) => {
       refunded_amount: 0,
       balance: effectiveAmount,
       method: method || 'Efectivo',
+      bank_account_id: selectedBankAccountId,
       received_date: received_date || new Date(),
       cash_session_id: openSession?.id || null,
       reference_note: reference_note || null,
@@ -97,6 +100,7 @@ const createAdvance = async (req, res) => {
     res.status(201).json({ success: true, message: 'Anticipo registrado exitosamente', data: advance });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
     logger.error('Error registrando anticipo:', error);
     res.status(500).json({ success: false, message: 'Error registrando anticipo' });
   }
@@ -241,10 +245,16 @@ const applyAdvanceToSale = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Esta venta está cancelada' });
     }
-
-    const total = parseFloat(sale.total_amount);
-    const alreadyPaid = parseFloat(sale.paid_amount || 0);
-    const remaining = total - alreadyPaid;
+    // Factura consolidada (services/sales/remisionInvoicing.service.js): la
+    // cartera está en sus remisiones -- el anticipo se reparte entre las que
+    // tienen saldo, la más antigua primero (igual que un pago). Cada tramo
+    // es una aplicación propia sobre su remisión.
+    const invoicing = require('../../services/sales/remisionInvoicing.service');
+    const targets = sale.is_consolidated_invoice
+      ? await invoicing.lockPendingRemisiones(sale.id, tenant_id, transaction)
+      : [sale];
+    const pendingOf = (t) => parseFloat(t.total_amount) - parseFloat(t.paid_amount || 0);
+    const remaining = targets.reduce((sum, t) => sum + pendingOf(t), 0);
     if (remaining <= 0) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Esta venta ya está pagada en su totalidad' });
@@ -260,11 +270,13 @@ const applyAdvanceToSale = async (req, res) => {
       return res.status(400).json({ success: false, message: `El total a aplicar (${requestedTotal}) supera el saldo pendiente de la venta (${remaining})` });
     }
 
-    const createdApplications = [];
-    const payment_history = [...(sale.payment_history || [])];
+    const createdApplications = []; // { application, target }
+    const histories = new Map(targets.map((t) => [t.id, [...(t.payment_history || [])]]));
+    const applied = new Map(targets.map((t) => [t.id, 0]));
+    let targetIdx = 0;
 
     for (const req_app of applications) {
-      const appAmount = parseFloat(req_app.amount || 0);
+      let appAmount = parseFloat(req_app.amount || 0);
       if (appAmount <= 0) continue;
 
       // SELECT FOR UPDATE sobre cada anticipo — evita que dos facturas
@@ -291,45 +303,65 @@ const applyAdvanceToSale = async (req, res) => {
         return res.status(400).json({ success: false, message: `El anticipo ${advance.advance_number} solo tiene ${advance.balance} disponibles` });
       }
 
-      const application = await CustomerAdvanceApplication.create({
-        tenant_id,
-        advance_id: advance.id,
-        sale_id: sale.id,
-        amount: appAmount,
-        application_date: new Date(),
-        status: 'active',
-        created_by: user_id,
-      }, { transaction });
-      createdApplications.push(application);
+      const applicationDate = new Date();
+      while (appAmount > 0.001 && targetIdx < targets.length) {
+        const target = targets[targetIdx];
+        const room = Math.round((pendingOf(target) - applied.get(target.id)) * 100) / 100;
+        if (room <= 0.001) { targetIdx += 1; continue; }
+        const piece = Math.round(Math.min(appAmount, room) * 100) / 100;
 
-      const newAppliedAmount = parseFloat(advance.applied_amount) + appAmount;
+        const application = await CustomerAdvanceApplication.create({
+          tenant_id,
+          advance_id: advance.id,
+          sale_id: target.id,
+          amount: piece,
+          application_date: applicationDate,
+          status: 'active',
+          created_by: user_id,
+        }, { transaction });
+        createdApplications.push({ application, target });
+
+        histories.get(target.id).push({
+          payment_id: application.id,
+          date: application.application_date,
+          amount: piece,
+          method: 'Anticipo',
+          source: 'advance',
+          advance_id: advance.id,
+          advance_number: advance.advance_number,
+          application_id: application.id,
+          user_id,
+          branch_id: target.branch_id,
+        });
+        applied.set(target.id, Math.round((applied.get(target.id) + piece) * 100) / 100);
+        appAmount = Math.round((appAmount - piece) * 100) / 100;
+      }
+
+      const usedAmount = parseFloat(req_app.amount) - appAmount;
+      const newAppliedAmount = parseFloat(advance.applied_amount) + usedAmount;
       const newBalance = parseFloat(advance.amount) - newAppliedAmount - parseFloat(advance.refunded_amount) - parseFloat(advance.reassigned_amount || 0);
       await advance.update({
         applied_amount: newAppliedAmount,
         balance: newBalance,
         status: newBalance <= 0.01 ? 'fully_applied' : 'active',
       }, { transaction });
-
-      payment_history.push({
-        payment_id: application.id,
-        date: application.application_date,
-        amount: appAmount,
-        method: 'Anticipo',
-        source: 'advance',
-        advance_id: advance.id,
-        advance_number: advance.advance_number,
-        application_id: application.id,
-        user_id,
-        branch_id: sale.branch_id,
-      });
     }
 
-    const paid_amount = alreadyPaid + requestedTotal;
-    let payment_status = 'pending';
-    if (paid_amount >= total) payment_status = 'paid';
-    else if (paid_amount > 0) payment_status = 'partial';
+    for (const target of targets) {
+      const add = applied.get(target.id);
+      if (!(add > 0)) continue;
+      const total = parseFloat(target.total_amount);
+      // Redondeo a centavos: 55859.83 = 44965.30 + 10894.53 en flotante da
+      // 55859.829999… y la remisión quedaba "parcial" estando pagada.
+      const paid_amount = Math.round((parseFloat(target.paid_amount || 0) + add) * 100) / 100;
+      let payment_status = 'pending';
+      if (paid_amount >= total - 0.005) payment_status = 'paid';
+      else if (paid_amount > 0) payment_status = 'partial';
+      await target.update({ paid_amount, payment_status, payment_history: histories.get(target.id) }, { transaction });
+    }
 
-    await sale.update({ paid_amount, payment_status, payment_history }, { transaction });
+    const consolidatedId = sale.is_consolidated_invoice ? sale.id : sale.invoiced_in_sale_id;
+    if (consolidatedId) await invoicing.syncConsolidatedInvoice(consolidatedId, transaction);
 
     await transaction.commit();
 
@@ -337,8 +369,8 @@ const applyAdvanceToSale = async (req, res) => {
     setImmediate(async () => {
       try {
         const { generateAdvanceApplicationEntry } = require('../../services/accounting/autoEntries.service');
-        for (const application of createdApplications) {
-          await generateAdvanceApplicationEntry(application, sale, tenant_id, user_id);
+        for (const { application, target } of createdApplications) {
+          await generateAdvanceApplicationEntry(application, target, tenant_id, user_id);
         }
       } catch (err) {
         logger.warn(`[accounting] Error generando asiento de aplicación de anticipo (venta ${id}): ${err.message}`);
@@ -346,7 +378,7 @@ const applyAdvanceToSale = async (req, res) => {
     });
     // Cada anticipo aplicado cambió de saldo (o quedó en 0) — resolver su
     // alerta de antigüedad si ya no aplica.
-    for (const application of createdApplications) {
+    for (const { application } of createdApplications) {
       markAdvanceForAlertCheck(application.advance_id, tenant_id);
     }
 
@@ -367,7 +399,7 @@ const refundAdvance = async (req, res) => {
     const tenant_id = req.tenant_id;
     const branch_id = req.branch_id;
     const user_id = req.user_id || req.user?.id;
-    const { amount, method, reason } = req.body;
+    const { amount, method, reason, bank_account_id } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await transaction.rollback();
@@ -407,11 +439,17 @@ const refundAdvance = async (req, res) => {
     const refund_id = require('crypto').randomUUID();
     const refund_date = new Date();
     const effectiveMethod = method || advance.method || 'Efectivo';
+    // Sin cuenta explícita, la devolución sale de la misma cuenta bancaria
+    // por la que entró el anticipo (si no es efectivo y sigue activa).
+    const selectedBankAccountId = bank_account_id !== undefined
+      ? await resolveSelectedBankAccountId(tenant_id, bank_account_id, effectiveMethod, transaction)
+      : await resolveSelectedBankAccountId(tenant_id, advance.bank_account_id, effectiveMethod, transaction).catch(() => null);
     const refund_history = [...(advance.refund_history || []), {
       refund_id,
       amount: refundAmount,
       date: refund_date,
       method: effectiveMethod,
+      bank_account_id: selectedBankAccountId,
       user_id,
       reason: reason || null,
     }];
@@ -432,7 +470,7 @@ const refundAdvance = async (req, res) => {
       try {
         const { generateAdvanceRefundEntry } = require('../../services/accounting/autoEntries.service');
         await generateAdvanceRefundEntry(
-          { id: refund_id, amount: refundAmount, method: effectiveMethod, refund_date },
+          { id: refund_id, amount: refundAmount, method: effectiveMethod, bank_account_id: selectedBankAccountId, refund_date },
           advance,
           tenant_id,
           user_id
@@ -446,6 +484,7 @@ const refundAdvance = async (req, res) => {
     res.json({ success: true, message: 'Anticipo devuelto exitosamente', data: advance });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
     logger.error('Error devolviendo anticipo:', error);
     res.status(500).json({ success: false, message: 'Error devolviendo anticipo' });
   }
@@ -478,6 +517,12 @@ const voidAdvance = async (req, res) => {
     if (advance.status === 'voided') {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Este anticipo ya está anulado' });
+    }
+    // Nacido de abonos de una OT (cancelada o con excedente al facturar): el
+    // dinero sí entró, no es un error de digitación -- se devuelve, no se anula.
+    if (advance.work_order_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Este anticipo viene de abonos de una orden de trabajo: no se puede anular, usa "Devolver" si hay que reintegrar el dinero.' });
     }
     if (parseFloat(advance.applied_amount) > 0) {
       await transaction.rollback();
@@ -592,6 +637,7 @@ const reassignAdvance = async (req, res) => {
       amount,
       balance: amount,
       method: advance.method,
+      bank_account_id: advance.bank_account_id,
       // Se conserva la fecha en que entró el dinero (antigüedad del anticipo).
       received_date: advance.received_date,
       cash_session_id: null,

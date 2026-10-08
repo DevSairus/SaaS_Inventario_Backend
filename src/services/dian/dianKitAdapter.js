@@ -14,6 +14,7 @@ const { DianKit } = require('@dian-kit/sdk-node');
 const logger = require('../../config/logger');
 const { escXml } = require('./dianXmlBuilder');
 const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
+const { dianPaymentMeans } = require('../sales/paymentTerms.service');
 
 // Inicializar dependencias de Node para xadesjs/xmldsigjs/xml-core
 // IMPORTANTE: debe ejecutarse ANTES de cualquier uso de DianKit
@@ -468,6 +469,48 @@ function buildLegalMonetaryTotal(items) {
 }
 
 /**
+ * Descuento global de la venta (sale.global_discount_amount, ver
+ * resolveGlobalDiscount en sales.controller.js): se resta DESPUÉS de
+ * impuestos, así que NO cambia la base gravable -- en el Anexo Técnico es un
+ * cac:AllowanceCharge a nivel de documento (ChargeIndicator=false) +
+ * LegalMonetaryTotal/AllowanceTotalAmount, y PayableAmount = TaxInclusive -
+ * descuento. Antes no se transmitía: la DIAN recibía el total sin descuento
+ * y la factura no coincidía con lo cobrado.
+ * @dian-kit solo arma AllowanceCharge por línea, así que el nodo del
+ * documento se inyecta ANTES de firmar (mismo mecanismo que patchAiuXml).
+ * El PayableAmount sí va en el input: de ahí sale el ValTot del CUFE.
+ * PENDIENTE validar en habilitación: si la DIAN exige
+ * AllowanceChargeReasonCode a nivel de documento.
+ */
+function applyGlobalDiscount(input, sale) {
+  const discount = Math.round(Number(sale?.global_discount_amount || 0) * 100) / 100;
+  if (!(discount > 0)) return null;
+  const lmt = input.legalMonetaryTotal;
+  const base = Math.round(lmt.taxInclusiveAmount * 100) / 100;
+  if (discount > base) throw new Error(`El descuento global (${discount}) supera el total de la factura (${base}).`);
+  lmt.allowanceTotalAmount = discount;
+  lmt.payableAmount = Math.round((base - discount) * 100) / 100;
+  const factor = base > 0 ? (discount / base) * 100 : 0;
+  const amt = (n) => n.toFixed(2);
+  const node = '<cac:AllowanceCharge>'
+    + '<cbc:ID>1</cbc:ID>'
+    + '<cbc:ChargeIndicator>false</cbc:ChargeIndicator>'
+    + '<cbc:AllowanceChargeReason>Descuento global</cbc:AllowanceChargeReason>'
+    + `<cbc:MultiplierFactorNumeric>${factor.toFixed(2)}</cbc:MultiplierFactorNumeric>`
+    + `<cbc:Amount currencyID="COP">${amt(discount)}</cbc:Amount>`
+    + `<cbc:BaseAmount currencyID="COP">${amt(base)}</cbc:BaseAmount>`
+    + '</cac:AllowanceCharge>';
+  // Orden UBL: ... PaymentMeans, AllowanceCharge, TaxTotal, LegalMonetaryTotal.
+  return (xml) => {
+    const taxIdx = xml.indexOf('<cac:TaxTotal');
+    const totalIdx = xml.indexOf('<cac:LegalMonetaryTotal');
+    const at = taxIdx >= 0 && taxIdx < totalIdx ? taxIdx : totalIdx;
+    if (at < 0) throw new Error('No se encontró dónde insertar el descuento global en el XML.');
+    return xml.slice(0, at) + node + xml.slice(at);
+  };
+}
+
+/**
  * Crea y firma una factura usando dian-kit.
  * Retorna { xml, signedXml, cufe, documentNumber }.
  */
@@ -565,24 +608,27 @@ async function createInvoice(tenant, { invoiceNumber, items, resolution, custome
     technicalKey: resolution.technical_key || cfg.technical_key,
   };
 
+  const issueDate = new Date();
   const input = {
     id: invoiceNumber,
     ...(documentType && { documentType }),
-    issueDate: new Date(),
-    issueTime: new Date(),
+    issueDate,
+    issueTime: issueDate,
     customer: buildCounterpartyData(customer, sale),
     lines: mapLines(items),
     taxTotals: buildDocumentTaxTotals(items),
     legalMonetaryTotal: buildLegalMonetaryTotal(items),
-    paymentMeans: {
-      paymentForm: '1',
-      paymentMethod: '10',
-    },
+    // Contado (1) / crédito (2, con PaymentDueDate) según sale.payment_form
+    // -- antes iba siempre contado/efectivo, y una factura a crédito no
+    // quedaba reportada como tal para RADIAN (título valor).
+    paymentMeans: dianPaymentMeans(sale, issueDate),
   };
 
+  const discountPatch = applyGlobalDiscount(input, sale);
+  const patches = [aiu ? (xml) => patchAiuXml(xml, aiu) : null, discountPatch].filter(Boolean);
   const result = await createDocumentWithItemCodes(
     kit, 'invoice', input, items,
-    aiu ? (xml) => patchAiuXml(xml, aiu) : null
+    patches.length ? (xml) => patches.reduce((acc, patch) => patch(acc), xml) : null
   );
 
   return {
@@ -1537,6 +1583,8 @@ async function callRemoteDianService(baseUrls, path, body) {
 }
 
 module.exports = {
+  applyGlobalDiscount,
+  buildLegalMonetaryTotal,
   getKit,
   invalidateKit,
   createInvoice,

@@ -4,6 +4,7 @@ const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, D
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
+const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer } = require('../../services/pdfService');
 const whatsappService = require('../../services/whatsappService');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
@@ -72,7 +73,8 @@ const getAll = async (req, res) => {
     // Remisiones ocultas a no-admin si el tenant lo configuró
     // (utils/remisionVisibility.js) -- va en Op.and para no chocar con el
     // Op.or de quote_view / search.
-    applyRemisionFilter(req, where);
+    // Facturas consolidadas sí se listan: son documentos (no se suman, ver getStats).
+    applyRemisionFilter(req, where, { includeConsolidated: true });
 
     if (customer_name) {
       where.customer_name = { [Op.iLike]: `%${customer_name}%` };
@@ -168,8 +170,22 @@ const getById = async (req, res) => {
           as: 'returns',
           attributes: ['id', 'return_number', 'return_date', 'total_amount', 'status', 'reason'],
           required: false,
-        }
-      ]
+        },
+        // Facturación de remisiones (services/sales/remisionInvoicing.service.js)
+        {
+          model: Sale,
+          as: 'invoiced_remisiones',
+          attributes: ['id', 'sale_number', 'sale_date', 'total_amount', 'paid_amount', 'payment_status'],
+          required: false,
+        },
+        {
+          model: Sale,
+          as: 'consolidated_invoice',
+          attributes: ['id', 'sale_number', 'dian_status', 'status'],
+          required: false,
+        },
+      ],
+      order: [[{ model: Sale, as: 'invoiced_remisiones' }, 'sale_date', 'ASC']],
     });
 
     if (!sale) {
@@ -180,6 +196,10 @@ const getById = async (req, res) => {
     saleData.created_by_name = saleData.creator
       ? [saleData.creator.first_name, saleData.creator.last_name].filter(Boolean).join(' ')
       : null;
+    if (sale.document_type === 'remision') {
+      const { getEligibility } = require('../../services/sales/remisionInvoicing.service');
+      saleData.invoicing = await getEligibility(sale, tenantId);
+    }
 
     res.json({ success: true, data: saleData });
   } catch (error) {
@@ -911,10 +931,41 @@ const confirm = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenant_id;
     const userId = req.user_id || req.user?.id;
-    const { payment_method, paid_amount, document_type } = req.body;
+    const { payment_method, paid_amount, document_type, bank_account_id, payment_splits, credit_days, advance_amount } = req.body;
 
     if (!payment_method) {
       return res.status(400).json({ success: false, message: 'Debe especificar el método de pago' });
+    }
+
+    // Cuenta bancaria que recibió el pago (transferencia, tarjeta...): viaja
+    // en el pago inicial de payment_history y el asiento la usa. En un pago
+    // mixto, cada medio trae la suya y queda como un pago aparte (antes el
+    // desglose se ignoraba y todo el valor iba a Bancos, efectivo incluido).
+    let selectedBankAccountId;
+    let splits = null;
+    try {
+      if (payment_method === 'mixed') {
+        if (!Array.isArray(payment_splits) || payment_splits.length === 0) {
+          return res.status(400).json({ success: false, message: 'El pago mixto requiere el desglose por medio de pago' });
+        }
+        splits = [];
+        for (const sp of payment_splits) {
+          const splitAmount = Math.round(parseFloat(sp?.amount) * 100) / 100;
+          if (!sp?.method || sp.method === 'mixed' || !(splitAmount > 0)) {
+            return res.status(400).json({ success: false, message: 'Cada medio del pago mixto necesita un método y un monto mayor a 0' });
+          }
+          splits.push({
+            method: sp.method,
+            amount: splitAmount,
+            bank_account_id: await resolveSelectedBankAccountId(tenantId, sp.bank_account_id, sp.method),
+          });
+        }
+      } else {
+        selectedBankAccountId = await resolveSelectedBankAccountId(tenantId, bank_account_id, payment_method);
+      }
+    } catch (err) {
+      if (err.status === 400) return res.status(400).json({ success: false, message: err.message });
+      throw err;
     }
 
     // document_type es opcional — si se envía, debe ser uno de los tipos válidos
@@ -936,69 +987,25 @@ const confirm = async (req, res) => {
     // abrir la transacción; se reutiliza más abajo en vez de recalcularlo.
     const finalDocType = document_type || (sale.document_type !== null ? sale.document_type : 'remision');
 
-    // Si se factura un producto tipo 'vehicle', su ficha de Vehicle debe traer
-    // ya los datos que pide el organismo de tránsito (VIN, motor, color, etc.)
-    // -- si falta alguno, es mejor bloquear la factura ahora que descubrirlo
-    // ya emitida y sin forma fácil de corregirla.
-    if (finalDocType === 'factura') {
-      const vehicleItemProductIds = sale.items
-        .filter(i => i.approval_status !== 'rechazado' && i.product_id)
-        .map(i => i.product_id);
-      if (vehicleItemProductIds.length > 0) {
-        const vehicleProducts = await Product.findAll({
-          where: { id: { [Op.in]: vehicleItemProductIds }, tenant_id: tenantId, product_type: 'vehicle' },
-          include: [{ model: Vehicle, as: 'vehicle' }],
-        });
-        const REQUIRED_VEHICLE_FIELDS = [
-          ['vin', 'VIN/Chasis'], ['engine_number', 'Número de motor'],
-          ['brand', 'Marca'], ['model', 'Línea'], ['year', 'Modelo (año)'], ['color', 'Color'],
-        ];
-        const incomplete = [];
-        for (const product of vehicleProducts) {
-          if (!product.vehicle) {
-            incomplete.push(`${product.name}: no tiene una ficha de vehículo asociada`);
-            continue;
-          }
-          const missing = REQUIRED_VEHICLE_FIELDS
-            .filter(([field]) => !product.vehicle[field])
-            .map(([, label]) => label);
-          if (missing.length > 0) {
-            incomplete.push(`${product.name}: falta ${missing.join(', ')}`);
-          }
-        }
-        if (incomplete.length > 0) {
-          return res.status(400).json({
-            success: false,
-            message: `No se puede facturar: faltan datos del vehículo requeridos para tránsito. ${incomplete.join(' | ')}`,
-          });
-        }
-      }
-    }
-
-    // Si se va a facturar electrónicamente, el cliente debe tener ciudad
-    // DIVIPOLA y tipo de identificación -- si faltan, hoy dianKitAdapter
-    // caía al fallback hardcodeado de Bogotá/Cundinamarca (el hallazgo
-    // original de la auditoría). Se valida contra el registro vivo del
-    // Customer (no lo que ya tenga cacheado la Sale) para no bloquear un
-    // cliente que ya se completó después de crear el borrador. Si pasa, se
-    // reutiliza acá abajo para refrescar el snapshot denormalizado de la
-    // Sale con el que realmente se factura.
+    // Requisitos de factura electrónica (compartidos con la facturación de
+    // remisiones, ver services/sales/remisionInvoicing.service.js):
+    // - productos tipo 'vehicle' con su ficha completa para tránsito -- es
+    //   mejor bloquear ahora que descubrirlo ya emitida;
+    // - cliente con ciudad DIVIPOLA y tipo de identificación, validado contra
+    //   el registro vivo del Customer (no lo cacheado en la Sale) -- sin
+    //   esto dianKitAdapter caía al fallback de Bogotá/Cundinamarca. El
+    //   Customer validado se reutiliza abajo para refrescar el snapshot
+    //   denormalizado de la Sale con el que realmente se factura.
     let freshCustomerForDian = null;
-    if (finalDocType === 'factura' && sale.customer_id) {
-      freshCustomerForDian = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } });
-      const { checkReadiness } = require('../../services/dian/customerDianReadiness');
-      const { ready, missing } = checkReadiness({
-        customer_city_code: freshCustomerForDian?.city_code,
-        customer_document_type: freshCustomerForDian?.document_type,
-      });
-      if (!ready) {
-        return res.status(422).json({
-          success: false,
-          code: 'DIAN_CUSTOMER_INCOMPLETE',
-          message: `No se puede facturar: falta ${missing.map(m => m.label).join(', ')} en la ficha del cliente. Complétala e intenta de nuevo.`,
-          customerId: sale.customer_id,
-          missingFields: missing.map(m => m.key),
-        });
+    if (finalDocType === 'factura') {
+      const invoicing = require('../../services/sales/remisionInvoicing.service');
+      const vehicleError = await invoicing.checkVehicleData(sale.items, tenantId);
+      if (vehicleError) return res.status(400).json({ success: false, message: vehicleError });
+      try {
+        freshCustomerForDian = await invoicing.loadDianReadyCustomer(sale.customer_id, tenantId);
+      } catch (err) {
+        if (err.status !== 422) throw err;
+        return res.status(422).json({ success: false, message: err.message, ...err.extra });
       }
     }
 
@@ -1111,16 +1118,39 @@ const confirm = async (req, res) => {
         }
       }
 
-      const amountPaid = paid_amount !== undefined ? parseFloat(paid_amount) : parseFloat(sale.total_amount);
+      const amountPaid = splits
+        ? Math.round(splits.reduce((sum, sp) => sum + sp.amount, 0) * 100) / 100
+        : (paid_amount !== undefined ? parseFloat(paid_amount) : parseFloat(sale.total_amount));
+      if (splits && amountPaid > parseFloat(sale.total_amount) + 1) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'El pago mixto suma más que el total de la venta' });
+      }
       const updateData = { status: 'completed', payment_method, paid_amount: amountPaid };
 
       if (amountPaid >= parseFloat(sale.total_amount)) updateData.payment_status = 'paid';
       else if (amountPaid > 0) updateData.payment_status = 'partial';
       else updateData.payment_status = 'pending';
 
+      // Contado / crédito (+ plazo y vencimiento) -- queda fijo en la venta
+      // y de ahí sale el PaymentMeans del XML DIAN y la elegibilidad RADIAN
+      // (services/sales/paymentTerms.service.js). advance_amount: anticipos
+      // que el modal aplica justo después de confirmar -- cuentan como pago
+      // para decidir la forma, aunque el abono llegue en otra llamada.
+      if (finalDocType !== 'cotizacion') {
+        const { resolvePaymentTerms } = require('../../services/sales/paymentTerms.service');
+        Object.assign(updateData, resolvePaymentTerms({
+          total: parseFloat(sale.total_amount),
+          settled: amountPaid + (parseFloat(advance_amount) || 0),
+          baseDate: sale.sale_date || new Date(),
+          creditDays: credit_days,
+          dueDate: sale.due_date,
+          paymentTerms: sale.payment_terms,
+        }));
+      }
+
       // Registrar el pago inicial en payment_history para que Flujo de Caja
       // (que solo lee payment_history) refleje el ingreso, igual que registerPayment.
-      let initialPayment = null;
+      let initialPayments = [];
       let openSession = null;
       if (amountPaid > 0) {
         // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
@@ -1136,16 +1166,21 @@ const confirm = async (req, res) => {
           }
         }
 
-        initialPayment = {
+        // in_sale_entry: se contabiliza dentro del asiento de la venta, una
+        // línea por pago (ver salePaymentsForEntry en autoEntries.service.js).
+        const parts = splits || [{ method: payment_method, amount: amountPaid, bank_account_id: selectedBankAccountId }];
+        initialPayments = parts.map((part) => ({
           payment_id: require('crypto').randomUUID(),
           date: sale.sale_date || new Date(),
-          amount: amountPaid,
-          method: payment_method,
+          amount: part.amount,
+          method: part.method,
+          bank_account_id: part.bank_account_id || null,
+          in_sale_entry: true,
           user_id: userId,
           notes: 'Pago registrado al confirmar la venta',
           cash_session_id: openSession?.id || null,
           branch_id: req.branch_id,
-        };
+        }));
       }
 
       // ── Asignar tipo de documento al confirmar ───────────────────────────────
@@ -1169,39 +1204,37 @@ const confirm = async (req, res) => {
       // document_type cacheado en la Sale desde antes de que el cliente se
       // completara.
       if (finalDocType === 'factura' && freshCustomerForDian) {
-        updateData.customer_city_code       = freshCustomerForDian.city_code;
-        updateData.customer_city_name       = freshCustomerForDian.city;
-        updateData.customer_department_name = freshCustomerForDian.state;
-        updateData.customer_document_type   = freshCustomerForDian.document_type;
+        const { customerSnapshot } = require('../../services/sales/remisionInvoicing.service');
+        Object.assign(updateData, customerSnapshot(freshCustomerForDian));
       }
 
       // El recibo se numera al final, ya con el sale_number definitivo
       // (la renumeración de arriba puede cambiarlo respecto al de la Sale
       // recién creada), y viaja en el mismo payment_history entry.
-      if (initialPayment) {
+      if (initialPayments.length > 0) {
         const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
         const { Receipt } = require('../../models');
-        const receipt_number = await generateReceiptNumber(tenantId, transaction);
-        initialPayment.receipt_number = receipt_number;
-        await Receipt.create({
-          tenant_id: tenantId,
-          branch_id: req.branch_id,
-          receipt_number,
-          source_type: 'sale',
-          source_id: sale.id,
-          payment_id: initialPayment.payment_id,
-          cash_session_id: openSession?.id || null,
-          amount: initialPayment.amount,
-          method: initialPayment.method,
-          payment_date: initialPayment.date,
-          reference: updateData.sale_number || sale.sale_number,
-          customer_name: sale.customer_name,
-          created_by: userId,
-        }, { transaction });
+        for (const initialPayment of initialPayments) {
+          const receipt_number = await generateReceiptNumber(tenantId, transaction);
+          initialPayment.receipt_number = receipt_number;
+          await Receipt.create({
+            tenant_id: tenantId,
+            branch_id: req.branch_id,
+            receipt_number,
+            source_type: 'sale',
+            source_id: sale.id,
+            payment_id: initialPayment.payment_id,
+            cash_session_id: openSession?.id || null,
+            amount: initialPayment.amount,
+            method: initialPayment.method,
+            payment_date: initialPayment.date,
+            reference: updateData.sale_number || sale.sale_number,
+            customer_name: sale.customer_name,
+            created_by: userId,
+          }, { transaction });
+        }
 
-        const payment_history = [...(sale.payment_history || [])];
-        payment_history.push(initialPayment);
-        updateData.payment_history = payment_history;
+        updateData.payment_history = [...(sale.payment_history || []), ...initialPayments];
       }
 
       const wasQuote = sale.document_type === 'cotizacion';
@@ -1304,6 +1337,9 @@ const cancel = async (req, res) => {
 
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     if (sale.status === 'cancelled') return res.status(400).json({ success: false, message: 'La venta ya está cancelada' });
+    const { lifecycleBlocker } = require('../../services/sales/remisionInvoicing.service');
+    const invoicingBlocker = lifecycleBlocker(sale);
+    if (invoicingBlocker) return res.status(400).json({ success: false, message: invoicingBlocker });
 
     const transaction = await sequelize.transaction();
     try {
@@ -1481,44 +1517,70 @@ const registerRetentions = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'La venta no tiene cliente: no hay quién practique la retención' });
     }
-
-    const total = parseFloat(sale.total_amount);
-    const alreadyPaid = parseFloat(sale.paid_amount || 0);
-    if (amount > total - alreadyPaid + 0.01) {
+    // Factura consolidada (services/sales/remisionInvoicing.service.js): el
+    // cliente retiene sobre el total de la factura, pero la cartera vive en
+    // sus remisiones -- cada retención se reparte en proporción al saldo
+    // pendiente de cada una (un registro y un asiento por remisión).
+    const invoicing = require('../../services/sales/remisionInvoicing.service');
+    const targets = sale.is_consolidated_invoice
+      ? await invoicing.lockPendingRemisiones(sale.id, tenantId, transaction)
+      : [sale];
+    const pendingOf = (t) => round2(parseFloat(t.total_amount) - parseFloat(t.paid_amount || 0));
+    const totalPending = round2(targets.reduce((sum, t) => sum + pendingOf(t), 0));
+    if (amount > totalPending + 0.01) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: `Las retenciones (${amount}) superan el saldo pendiente de la venta (${round2(total - alreadyPaid)})` });
+      return res.status(400).json({ success: false, message: `Las retenciones (${amount}) superan el saldo pendiente de la venta (${totalPending})` });
+    }
+    const shares = invoicing.splitProportionally(retentions, targets.map(pendingOf));
+
+    const effectiveDate = req.body.date || new Date();
+    const applied = [];
+    for (let i = 0; i < targets.length; i += 1) {
+      const target = targets[i];
+      const share = shares[i];
+      const shareAmount = round2(share.retefuente + share.reteiva + share.reteica);
+      if (shareAmount <= 0) continue;
+      const total = parseFloat(target.total_amount);
+      const paid_amount = round2(parseFloat(target.paid_amount || 0) + shareAmount);
+      const payment_status = paid_amount >= total ? 'paid' : 'partial';
+      const payment_id = require('crypto').randomUUID();
+      const payment_history = [...(target.payment_history || []), {
+        payment_id,
+        date: effectiveDate,
+        amount: shareAmount,
+        method: 'Retención',
+        // source 'retention': no es dinero que entre a caja (cashflow lo excluye).
+        source: 'retention',
+        retentions: share,
+        user_id: userId,
+        notes: req.body.notes || (target.id !== sale.id ? `Retención sobre la factura ${sale.sale_number}` : null),
+        branch_id: req.branch_id,
+      }];
+      await target.update({ paid_amount, payment_status, payment_history }, { transaction });
+      applied.push({ target, payment_id, share, paid_amount, payment_status });
     }
 
-    const paid_amount = round2(alreadyPaid + amount);
-    const payment_status = paid_amount >= total ? 'paid' : 'partial';
-    const payment_id = require('crypto').randomUUID();
-    const effectiveDate = req.body.date || new Date();
-    const payment_history = [...(sale.payment_history || []), {
-      payment_id,
-      date: effectiveDate,
-      amount,
-      method: 'Retención',
-      // source 'retention': no es dinero que entre a caja (cashflow lo excluye).
-      source: 'retention',
-      retentions,
-      user_id: userId,
-      notes: req.body.notes || null,
-      branch_id: req.branch_id,
-    }];
-
-    await sale.update({ paid_amount, payment_status, payment_history }, { transaction });
+    const consolidatedId = sale.is_consolidated_invoice ? sale.id : sale.invoiced_in_sale_id;
+    if (consolidatedId) await invoicing.syncConsolidatedInvoice(consolidatedId, transaction);
     await transaction.commit();
 
     setImmediate(async () => {
-      try {
-        const { generateSaleRetentionEntry } = require('../../services/accounting/autoEntries.service');
-        await generateSaleRetentionEntry({ payment_id, date: effectiveDate, retentions }, sale, tenantId, userId);
-      } catch (err) {
-        logger.warn(`[accounting] Error generando asiento de retenciones (venta ${id}): ${err.message}`);
+      const { generateSaleRetentionEntry } = require('../../services/accounting/autoEntries.service');
+      for (const { target, payment_id, share } of applied) {
+        try {
+          await generateSaleRetentionEntry({ payment_id, date: effectiveDate, retentions: share }, target, tenantId, userId);
+        } catch (err) {
+          logger.warn(`[accounting] Error generando asiento de retenciones (venta ${target.id}): ${err.message}`);
+        }
       }
     });
 
-    res.json({ success: true, message: 'Retenciones registradas', data: { paid_amount, payment_status, payment_id } });
+    const refreshed = await Sale.findByPk(id, { attributes: ['paid_amount', 'payment_status'] });
+    res.json({
+      success: true,
+      message: applied.length > 1 ? `Retenciones registradas, repartidas entre ${applied.length} remisiones` : 'Retenciones registradas',
+      data: { paid_amount: refreshed.paid_amount, payment_status: refreshed.payment_status, payment_ids: applied.map((a) => a.payment_id) },
+    });
   } catch (error) {
     if (!transaction.finished) await transaction.rollback();
     logger.error('Error registrando retenciones:', error);
@@ -1533,7 +1595,7 @@ const registerPayment = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenant_id;
     const userId = req.user.id;
-    const { amount, payment_method, payment_date, notes } = req.body;
+    const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await transaction.rollback();
@@ -1555,9 +1617,15 @@ const registerPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No se puede registrar pago en una venta en borrador' });
     }
 
-    const total = parseFloat(sale.total_amount);
-    const alreadyPaid = parseFloat(sale.paid_amount || 0);
-    const remaining = total - alreadyPaid;
+    // Factura consolidada (services/sales/remisionInvoicing.service.js): la
+    // cartera vive en sus remisiones, así que el pago se reparte entre las
+    // que tienen saldo, la más antigua primero -- un recibo y un asiento por
+    // remisión. La factura solo refleja el total (syncConsolidatedInvoice).
+    const invoicing = require('../../services/sales/remisionInvoicing.service');
+    const targets = sale.is_consolidated_invoice
+      ? await invoicing.lockPendingRemisiones(sale.id, tenantId, transaction)
+      : [sale];
+    const remaining = targets.reduce((sum, t) => sum + (parseFloat(t.total_amount) - parseFloat(t.paid_amount || 0)), 0);
 
     if (remaining <= 0) {
       await transaction.rollback();
@@ -1575,70 +1643,89 @@ const registerPayment = async (req, res) => {
       }
     }
 
-    // Limitar el monto al saldo pendiente para evitar sobrepagos
-    const effectiveAmount = Math.min(parseFloat(amount), remaining);
-    const paid_amount = alreadyPaid + effectiveAmount;
-
-    let payment_status = 'pending';
-    if (paid_amount >= total) payment_status = 'paid';
-    else if (paid_amount > 0) payment_status = 'partial';
-
-    const payment_id = require('crypto').randomUUID();
-    const payment_history = [...(sale.payment_history || [])];
     const effectiveMethod = payment_method || sale.payment_method || 'Efectivo';
     const effectiveDate = payment_date || new Date();
-
+    const selectedBankAccountId = await resolveSelectedBankAccountId(tenantId, bank_account_id, effectiveMethod, transaction);
     const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
     const { Receipt } = require('../../models');
-    const receipt_number = await generateReceiptNumber(tenantId, transaction);
-    await Receipt.create({
-      tenant_id: tenantId,
-      branch_id: req.branch_id,
-      receipt_number,
-      source_type: 'sale',
-      source_id: sale.id,
-      payment_id,
-      cash_session_id: openSession?.id || null,
-      amount: effectiveAmount,
-      method: effectiveMethod,
-      payment_date: effectiveDate,
-      reference: sale.sale_number,
-      customer_name: sale.customer_name,
-      created_by: userId,
-    }, { transaction });
 
-    payment_history.push({
-      payment_id,
-      date: effectiveDate,
-      amount: effectiveAmount,
-      method: effectiveMethod,
-      user_id: userId,
-      notes: notes || null,
-      cash_session_id: openSession?.id || null,
-      branch_id: req.branch_id,
-      receipt_number,
-    });
+    // Limitar el monto al saldo pendiente para evitar sobrepagos
+    let toApply = Math.min(parseFloat(amount), remaining);
+    const appliedPayments = [];
+    for (const target of targets) {
+      if (toApply <= 0) break;
+      const total = parseFloat(target.total_amount);
+      const alreadyPaid = parseFloat(target.paid_amount || 0);
+      const effectiveAmount = Math.round(Math.min(toApply, total - alreadyPaid) * 100) / 100;
+      if (effectiveAmount <= 0) continue;
+      toApply = Math.round((toApply - effectiveAmount) * 100) / 100;
+      // Redondeo a centavos: la suma en flotante puede quedar en .829999… y
+      // la venta seguiría "parcial" estando pagada.
+      const paid_amount = Math.round((alreadyPaid + effectiveAmount) * 100) / 100;
 
-    await sale.update(
-      { paid_amount, payment_status, payment_method: payment_method || sale.payment_method, payment_history },
-      { transaction }
-    );
+      let payment_status = 'pending';
+      if (paid_amount >= total - 0.005) payment_status = 'paid';
+      else if (paid_amount > 0) payment_status = 'partial';
+
+      const payment_id = require('crypto').randomUUID();
+      const payment_history = [...(target.payment_history || [])];
+      const receipt_number = await generateReceiptNumber(tenantId, transaction);
+      await Receipt.create({
+        tenant_id: tenantId,
+        branch_id: req.branch_id,
+        receipt_number,
+        source_type: 'sale',
+        source_id: target.id,
+        payment_id,
+        cash_session_id: openSession?.id || null,
+        amount: effectiveAmount,
+        method: effectiveMethod,
+        payment_date: effectiveDate,
+        reference: target.id === sale.id ? sale.sale_number : `${target.sale_number} (factura ${sale.sale_number})`,
+        customer_name: target.customer_name,
+        created_by: userId,
+      }, { transaction });
+
+      payment_history.push({
+        payment_id,
+        date: effectiveDate,
+        amount: effectiveAmount,
+        method: effectiveMethod,
+        bank_account_id: selectedBankAccountId,
+        user_id: userId,
+        notes: notes || null,
+        cash_session_id: openSession?.id || null,
+        branch_id: req.branch_id,
+        receipt_number,
+      });
+
+      await target.update(
+        { paid_amount, payment_status, payment_method: payment_method || target.payment_method, payment_history },
+        { transaction }
+      );
+      appliedPayments.push({ target, payment_id, effectiveAmount });
+    }
+
+    const consolidatedId = sale.is_consolidated_invoice ? sale.id : sale.invoiced_in_sale_id;
+    if (consolidatedId) await invoicing.syncConsolidatedInvoice(consolidatedId, transaction);
 
     await transaction.commit();
 
     // Asiento contable del abono (caja/bancos vs cartera), no bloqueante —
     // mismo patrón fire-and-forget que el asiento de la venta en confirm().
     setImmediate(async () => {
-      try {
-        const { generatePaymentEntry } = require('../../services/accounting/autoEntries.service');
-        await generatePaymentEntry(
-          { payment_id, amount: effectiveAmount, method: effectiveMethod, date: effectiveDate },
-          sale,
-          tenantId,
-          userId
-        );
-      } catch (err) {
-        logger.warn(`[accounting] Error generando asiento de abono (venta ${id}): ${err.message}`);
+      for (const { target, payment_id, effectiveAmount } of appliedPayments) {
+        try {
+          const { generatePaymentEntry } = require('../../services/accounting/autoEntries.service');
+          await generatePaymentEntry(
+            { payment_id, amount: effectiveAmount, method: effectiveMethod, date: effectiveDate, bank_account_id: selectedBankAccountId },
+            target,
+            tenantId,
+            userId
+          );
+        } catch (err) {
+          logger.warn(`[accounting] Error generando asiento de abono (venta ${target.id}): ${err.message}`);
+        }
       }
     });
 
@@ -1649,6 +1736,7 @@ const registerPayment = async (req, res) => {
     res.json({ success: true, message: 'Pago registrado exitosamente', data: updatedSale });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
     logger.error('Error registrando pago:', error);
     res.status(500).json({ success: false, message: 'Error registrando pago' });
   }
@@ -1685,7 +1773,7 @@ const getStats = async (req, res) => {
     if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
     else if (from_date) where.sale_date = { [Op.gte]: from_date };
     else if (to_date) where.sale_date = { [Op.lte]: to_date };
-    applyRemisionFilter(req, where); // mismas ventas que lista getAll
+    applyRemisionFilter(req, where); // mismas ventas que getAll, sin facturas consolidadas (su ingreso está en las remisiones)
 
     const stats = await Sale.findAll({
       where,
@@ -1799,6 +1887,20 @@ const generatePaymentReceipt = async (req, res) => {
 // ─── Función auxiliar para generar número de venta ───────────────────────────
 // FACTURAS: usa el consecutivo de la resolución DIAN activa (prefijo + número)
 // REMISIONES / COTIZACIONES: consecutivo interno REM-YYYY-XXXX / COT-YYYY-XXXX
+// El provisional de una factura es prefijo + current_number de la
+// resolución, que solo avanza al ENVIAR a la DIAN: si otra factura todavía
+// no se ha enviado, ya tiene ese mismo número y el índice único
+// (tenant_id, sale_number) revienta la confirmación. Se toma el siguiente libre.
+async function nextFreeSaleNumber(tenant_id, prefix, startNumber, transaction, excludeId = null) {
+  let n = startNumber;
+  const taken = (number) => Sale.count({
+    where: { tenant_id, sale_number: number, ...(excludeId ? { id: { [Op.ne]: excludeId } } : {}) },
+    transaction,
+  });
+  while (await taken(`${prefix || ''}${n}`)) n += 1;
+  return `${prefix || ''}${n}`;
+}
+
 async function generateSaleNumber(tenant_id, document_type, transaction, excludeId = null, branch_id = null) {
   // Sin tipo aún (borrador): número provisional BOD-
   if (!document_type || document_type === null) {
@@ -1834,6 +1936,18 @@ async function generateSaleNumber(tenant_id, document_type, transaction, exclude
       const lastNumber = lastSale.sale_number.split('-').pop();
       sequence = parseInt(lastNumber) + 1;
     }
+    // Una remisión convertida a factura guarda su REM-XXXX en
+    // remision_number: ese número ya se usó y no se puede volver a emitir.
+    if (prefix === 'REM') {
+      const lastConverted = await Sale.findOne({
+        where: { tenant_id, remision_number: { [Op.like]: `${prefix}-${year}-%` } },
+        order: [['remision_number', 'DESC']],
+        transaction,
+      });
+      if (lastConverted) {
+        sequence = Math.max(sequence, parseInt(lastConverted.remision_number.split('-').pop()) + 1);
+      }
+    }
     return `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
   }
 
@@ -1848,7 +1962,7 @@ async function generateSaleNumber(tenant_id, document_type, transaction, exclude
   if (resolution) {
     // El dian_invoice_number definitivo se asigna al enviar (con lock en dianService)
     // El sale_number usa el consecutivo actual como referencia provisional
-    return `${resolution.prefix}${resolution.current_number}`;
+    return nextFreeSaleNumber(tenant_id, resolution.prefix, Number(resolution.current_number), transaction, excludeId);
   }
 
   // Fallback: si no hay resolución DIAN configurada, usar numeración interna
@@ -2222,7 +2336,102 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
   }
 }
 
+// ── Facturación de remisiones (services/sales/remisionInvoicing.service.js) ──
+function invoicingErrorResponse(res, error, fallbackMessage) {
+  if (error.status) {
+    return res.status(error.status).json({ success: false, message: error.message, ...(error.extra || {}) });
+  }
+  logger.error(fallbackMessage, error);
+  return res.status(500).json({ success: false, message: fallbackMessage });
+}
+
+// POST /sales/:id/convert-to-invoice -- la misma remisión pasa a factura
+const convertToInvoice = async (req, res) => {
+  try {
+    const userId = req.user_id || req.user?.id;
+    const { convertRemisionToInvoice } = require('../../services/sales/remisionInvoicing.service');
+    const result = await convertRemisionToInvoice({ saleId: req.params.id, tenantId: req.tenant_id, userId });
+    await audit({
+      tenant_id: req.tenant_id, user_id: userId, action: 'CONVERT_REMISION_TO_INVOICE',
+      entity: 'sale', entity_id: result.sale_id, changes: result, req,
+    });
+    const updatedSale = await Sale.findByPk(result.sale_id, {
+      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }],
+    });
+    res.json({ success: true, message: `Remisión ${result.remision_number} convertida en la factura ${result.sale_number}. Se está enviando a la DIAN.`, data: updatedSale });
+  } catch (error) {
+    invoicingErrorResponse(res, error, 'Error convirtiendo la remisión a factura');
+  }
+};
+
+// POST /sales/consolidate-invoice { sale_ids, notes } -- varias remisiones → una factura
+const consolidateInvoice = async (req, res) => {
+  try {
+    const userId = req.user_id || req.user?.id;
+    const { consolidateRemisiones } = require('../../services/sales/remisionInvoicing.service');
+    const result = await consolidateRemisiones({
+      saleIds: req.body?.sale_ids, tenantId: req.tenant_id, userId, notes: req.body?.notes,
+    });
+    await audit({
+      tenant_id: req.tenant_id, user_id: userId, action: 'CONSOLIDATE_REMISIONES_INVOICE',
+      entity: 'sale', entity_id: result.sale_id, changes: result, req,
+    });
+    res.status(201).json({
+      success: true,
+      message: `Factura ${result.sale_number} creada con las remisiones ${result.remision_numbers.join(', ')}. Se está enviando a la DIAN.`,
+      data: result,
+    });
+  } catch (error) {
+    invoicingErrorResponse(res, error, 'Error agrupando las remisiones en una factura');
+  }
+};
+
+// POST /sales/:id/revert-invoicing -- solo si la DIAN la rechazó o falló el envío
+const revertInvoicing = async (req, res) => {
+  try {
+    const userId = req.user_id || req.user?.id;
+    const invoicing = require('../../services/sales/remisionInvoicing.service');
+    const result = await invoicing.revertInvoicing({ saleId: req.params.id, tenantId: req.tenant_id, userId });
+    await audit({
+      tenant_id: req.tenant_id, user_id: userId, action: 'REVERT_REMISION_INVOICING',
+      entity: 'sale', entity_id: req.params.id, changes: result, req,
+    });
+    res.json({
+      success: true,
+      message: result.reverted === 'consolidated'
+        ? `Factura anulada; las remisiones ${result.released.join(', ')} quedaron libres para facturar de nuevo.`
+        : `La venta volvió a ser la remisión ${result.sale_number}.`,
+      data: result,
+    });
+  } catch (error) {
+    invoicingErrorResponse(res, error, 'Error revirtiendo la facturación');
+  }
+};
+
+// POST /sales/:id/annul-consolidated { reason } -- NC de anulación de una
+// factura agrupada ya aceptada (solo efecto fiscal; libera las remisiones)
+const annulConsolidated = async (req, res) => {
+  try {
+    const userId = req.user_id || req.user?.id;
+    const { annulConsolidatedInvoice } = require('../../services/sales/remisionInvoicing.service');
+    const result = await annulConsolidatedInvoice({ saleId: req.params.id, tenantId: req.tenant_id, userId, reason: req.body?.reason });
+    await audit({
+      tenant_id: req.tenant_id, user_id: userId, action: 'ANNUL_CONSOLIDATED_INVOICE',
+      entity: 'sale', entity_id: req.params.id, changes: result, req,
+    });
+    res.status(201).json({
+      success: true,
+      message: `Se está enviando a la DIAN la nota crédito que anula la factura ${result.invoice_number}. Cuando la acepte, las remisiones quedarán libres para facturar de nuevo.`,
+      data: result,
+    });
+  } catch (error) {
+    invoicingErrorResponse(res, error, 'Error anulando la factura agrupada');
+  }
+};
+
 module.exports = {
+  generateSaleNumber,
+  nextFreeSaleNumber,
   getAll,
   getById,
   create,
@@ -2232,6 +2441,10 @@ module.exports = {
   markAsDelivered,
   registerPayment,
   registerRetentions,
+  convertToInvoice,
+  consolidateInvoice,
+  revertInvoicing,
+  annulConsolidated,
   delete: deleteById,
   getStats,
   generatePDF,

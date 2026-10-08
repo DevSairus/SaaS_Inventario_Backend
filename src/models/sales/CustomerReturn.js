@@ -50,6 +50,13 @@ const CustomerReturn = sequelize.define('CustomerReturn', {
     allowNull: false,
     defaultValue: 0
   },
+  // Parte del descuento global de la venta (services/sales/globalDiscount.service.js);
+  // total_amount = subtotal + tax - discount_amount.
+  discount_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: false,
+    defaultValue: 0,
+  },
   total_amount: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,

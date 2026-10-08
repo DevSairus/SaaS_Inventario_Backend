@@ -43,10 +43,31 @@ function remisionExclusionWhere() {
   return { [Op.or]: [{ document_type: null }, { document_type: { [Op.ne]: 'remision' } }] };
 }
 
+// ── Factura consolidada (varias remisiones → una factura) ────────────────
+// Ver services/sales/remisionInvoicing.service.js. Esa factura es solo el
+// documento fiscal: el ingreso, los pagos y la cartera siguen en las
+// remisiones agrupadas. Para no contar dos veces la misma venta:
+//   - remisiones visibles (caso normal): se excluye la factura consolidada
+//     de los agregados económicos;
+//   - remisiones ocultas: las remisiones (también las agrupadas) quedan
+//     fuera y la factura consolidada las representa.
+// Los listados de documentos (historial de ventas) muestran la factura
+// consolidada siempre (`includeConsolidated`).
+function consolidatedExclusionWhere() {
+  return { is_consolidated_invoice: { [Op.not]: true } };
+}
+
+// Fragmento de `where` con las ventas que cuentan como ingreso para este
+// request, o null si no hay que excluir nada.
+function economicSalesWhere(req, { includeConsolidated = false } = {}) {
+  if (shouldHideRemisiones(req)) return remisionExclusionWhere();
+  return includeConsolidated ? null : consolidatedExclusionWhere();
+}
+
 // Agrega la exclusión a un `where` existente sin pisar otros Op.and / Op.or.
-function applyRemisionFilter(req, where) {
-  if (!shouldHideRemisiones(req)) return where;
-  const exclusion = remisionExclusionWhere();
+function applyRemisionFilter(req, where, options = {}) {
+  const exclusion = economicSalesWhere(req, options);
+  if (!exclusion) return where;
   where[Op.and] = [...(where[Op.and] || []), exclusion];
   return where;
 }
@@ -54,9 +75,16 @@ function applyRemisionFilter(req, where) {
 // Condición para SQL crudo: `AND ${remisionSqlCondition(req, 's')}`.
 // Devuelve 'TRUE' si no aplica, para poder concatenarla siempre.
 function remisionSqlCondition(req, alias = 's') {
-  if (!shouldHideRemisiones(req)) return 'TRUE';
-  const col = alias ? `${alias}.document_type` : 'document_type';
-  return `${col} IS DISTINCT FROM 'remision'`;
+  const prefix = alias ? `${alias}.` : '';
+  if (!shouldHideRemisiones(req)) return consolidatedSqlCondition(alias);
+  return `${prefix}document_type IS DISTINCT FROM 'remision'`;
+}
+
+// SQL crudo sin request (exógena, integridad contable...): siempre se
+// excluye la factura consolidada -- el ingreso está en sus remisiones.
+function consolidatedSqlCondition(alias = 's') {
+  const prefix = alias ? `${alias}.` : '';
+  return `${prefix}is_consolidated_invoice IS NOT TRUE`;
 }
 
 // Condición SQL sobre work_orders: excluye las OT cuya venta generada es una
@@ -65,7 +93,7 @@ function remisionSqlCondition(req, alias = 's') {
 function workOrderRemisionSqlCondition(req, alias = 'wo') {
   if (!shouldHideRemisiones(req)) return 'TRUE';
   const schema = getCurrentSchema() || 'public';
-  return `NOT EXISTS (SELECT 1 FROM "${schema}"."sales" rs WHERE rs.id = ${alias}.sale_id AND rs.document_type = 'remision')`;
+  return `NOT EXISTS (SELECT 1 FROM "${schema}"."sales" rs WHERE rs.id = ${alias}.sale_id AND rs.document_type = 'remision' AND rs.invoiced_in_sale_id IS NULL)`;
 }
 
 // Igual, para un `where` de Sequelize sobre WorkOrder (o un include de él).
@@ -81,6 +109,9 @@ module.exports = {
   canSeeAllRemisiones,
   shouldHideRemisiones,
   remisionExclusionWhere,
+  consolidatedExclusionWhere,
+  economicSalesWhere,
+  consolidatedSqlCondition,
   applyRemisionFilter,
   remisionSqlCondition,
   workOrderRemisionSqlCondition,
