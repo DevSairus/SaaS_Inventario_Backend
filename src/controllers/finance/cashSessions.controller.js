@@ -287,4 +287,4 @@ const getSessionPayments = async (req, res) => {
   }
 };
 
-module.exports = { getCurrentSession, openSession, getSessionSummary, closeSession, listSessions, getSessionById, getSessionPayments };
+module.exports = { getCurrentSession, openSession, getSessionSummary, closeSession, listSessions, getSessionById, getSessionPayments, calculateExpected, normalizeMethod };

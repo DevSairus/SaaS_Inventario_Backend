@@ -24,6 +24,101 @@ const SERVICE_TYPES = ['service', 'servicio', 'mano_obra'];
 // Tipos de ítem que cuentan como producto/repuesto
 const PRODUCT_TYPES = ['product', 'repuesto'];
 
+// Comisión sobre lo que el cliente se quedó: descuenta en memoria de cada
+// línea de venta lo devuelto en devoluciones APROBADAS (cantidad, subtotal y
+// total en proporción). Antes un producto devuelto seguía generando comisión.
+async function netSaleItemsOfReturns(saleItems, transaction) {
+  const { CustomerReturn: ReturnModel, CustomerReturnItem: ReturnItemModel } = require('../../models');
+  const items = (saleItems || []).filter((i) => i && i.id);
+  if (!items.length) return;
+  const saleIds = [...new Set(items.map((i) => i.sale_id).filter(Boolean))];
+  if (!saleIds.length) return;
+  const approved = await ReturnModel.findAll({
+    where: { sale_id: { [Op.in]: saleIds }, status: 'approved' },
+    attributes: ['id'],
+    transaction,
+  });
+  if (!approved.length) return;
+  const returnedLines = await ReturnItemModel.findAll({
+    where: { return_id: { [Op.in]: approved.map((r) => r.id) }, sale_item_id: { [Op.in]: items.map((i) => i.id) } },
+    attributes: ['sale_item_id', 'quantity'],
+    transaction,
+  });
+  const returned = new Map();
+  for (const line of returnedLines) returned.set(line.sale_item_id, (returned.get(line.sale_item_id) || 0) + Number(line.quantity || 0));
+  for (const item of items) {
+    const qty = Number(item.quantity || 0);
+    const back = returned.get(item.id) || 0;
+    if (!(back > 0) || !(qty > 0)) continue;
+    const factor = Math.max(qty - back, 0) / qty;
+    const scale = (field) => Math.round(Number(item[field] || 0) * factor * 100) / 100;
+    item.setDataValue('total', scale('total'));
+    item.setDataValue('subtotal', scale('subtotal'));
+    item.setDataValue('quantity', Math.max(qty - back, 0));
+  }
+}
+
+// Lo mismo para líneas de OT: lo devuelto sobre la FACTURA que generó la OT
+// se descuenta de su línea de OT. El vínculo es sale_items.work_order_item_id
+// (desde 2026101002); facturas anteriores se emparejan por producto dentro de
+// la misma factura.
+async function netWorkOrderItemsOfReturns(woItems, transaction) {
+  const { CustomerReturn: ReturnModel, CustomerReturnItem: ReturnItemModel } = require('../../models');
+  const items = (woItems || []).filter((i) => i && i.id && i.work_order_id);
+  if (!items.length) return;
+  const orders = await WorkOrder.findAll({
+    where: { id: { [Op.in]: [...new Set(items.map((i) => i.work_order_id))] }, sale_id: { [Op.not]: null } },
+    attributes: ['id', 'sale_id'],
+    transaction,
+  });
+  if (!orders.length) return;
+  const saleByOrder = new Map(orders.map((o) => [o.id, o.sale_id]));
+  const saleIds = [...new Set(orders.map((o) => o.sale_id))];
+  const approved = await ReturnModel.findAll({
+    where: { sale_id: { [Op.in]: saleIds }, status: 'approved' },
+    attributes: ['id'],
+    transaction,
+  });
+  if (!approved.length) return;
+  const returnedLines = await ReturnItemModel.findAll({
+    where: { return_id: { [Op.in]: approved.map((r) => r.id) } },
+    attributes: ['sale_item_id', 'quantity'],
+    transaction,
+  });
+  const returnedBySaleItem = new Map();
+  for (const l of returnedLines) returnedBySaleItem.set(l.sale_item_id, (returnedBySaleItem.get(l.sale_item_id) || 0) + Number(l.quantity || 0));
+  const saleItems = await SaleItem.findAll({
+    where: { sale_id: { [Op.in]: saleIds } },
+    attributes: ['id', 'sale_id', 'work_order_item_id', 'product_id', 'product_name', 'quantity'],
+    transaction,
+  });
+
+  const used = new Set();
+  const matchSaleItem = (woItem) => {
+    const saleId = saleByOrder.get(woItem.work_order_id);
+    if (!saleId) return null;
+    const direct = saleItems.find((si) => si.work_order_item_id === woItem.id);
+    if (direct) return direct;
+    const legacy = saleItems.find((si) => !si.work_order_item_id && si.sale_id === saleId && !used.has(si.id)
+      && (woItem.product_id ? si.product_id === woItem.product_id : si.product_name === woItem.product_name));
+    if (legacy) used.add(legacy.id);
+    return legacy || null;
+  };
+
+  for (const woItem of items) {
+    const saleItem = matchSaleItem(woItem);
+    if (!saleItem) continue;
+    const back = returnedBySaleItem.get(saleItem.id) || 0;
+    const qty = Number(saleItem.quantity || woItem.quantity || 0);
+    if (!(back > 0) || !(qty > 0)) continue;
+    const factor = Math.max(qty - back, 0) / qty;
+    const scale = (field) => Math.round(Number(woItem[field] || 0) * factor * 100) / 100;
+    woItem.setDataValue('total', scale('total'));
+    if (woItem.subtotal !== undefined) woItem.setDataValue('subtotal', scale('subtotal'));
+    if (woItem.quantity !== undefined) woItem.setDataValue('quantity', Math.round(Number(woItem.quantity || 0) * factor * 10000) / 10000);
+  }
+}
+
 // ── Helper: Items de productos por técnico (ítem-level con fallback a orden/venta) ─────────────
 // Devuelve array de { uid, user_name, role, source, ref_number, ref_date, ref_id,
 //                    product_name, product_sku, quantity, unit_price, subtotal, total }
@@ -112,6 +207,12 @@ async function getProductItemsByTechnician({ tenant_id, user_id, date_from, date
     ],
   });
 
+  await netWorkOrderItemsOfReturns([...woItemsWithTech, ...fallbackOrders.flatMap((o) => o.items || [])]);
+  await netSaleItemsOfReturns([
+    ...saleItemsWithTech,
+    ...fallbackSales.flatMap((sale) => (sale.items || []).map((item) => { item.setDataValue('sale_id', item.sale_id || sale.id); return item; })),
+  ]);
+
   // ── Consolidar en una lista plana ──────────────────────────────────────────
   const rows = [];
 
@@ -171,7 +272,8 @@ async function getProductItemsByTechnician({ tenant_id, user_id, date_from, date
     }
   }
 
-  return rows;
+  // Líneas devueltas en su totalidad no generan comisión.
+  return rows.filter((r) => !(r.quantity <= 0));
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -235,15 +337,17 @@ async function getDirectSales({ tenant_id, user_id, date_from, date_to, product_
   if (product_settled_field === 'null') where.product_settled_at = null;
   if (labor_settled_field   === 'null') where.labor_settled_at   = null;
 
-  return Sale.findAll({
+  const sales = await Sale.findAll({
     where,
     include: [
-      { model: SaleItem, as: 'items', attributes: ['item_type', 'product_name', 'total'] },
+      { model: SaleItem, as: 'items', attributes: ['id', 'sale_id', 'item_type', 'product_name', 'quantity', 'subtotal', 'total'] },
       { model: User, as: 'technician', attributes: ['id', 'first_name', 'last_name', 'role'] },
     ],
     order: [['sale_date', 'DESC']],
     transaction,
   });
+  await netSaleItemsOfReturns(sales.flatMap((sale) => sale.items || []), transaction);
+  return sales;
 }
 
 function calcAmountsFromSale(sale) {
@@ -400,9 +504,10 @@ const preview = async (req, res) => {
     }
     const orders = await WorkOrder.findAll({
       where: woWhere,
-      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total', 'commission_category_id'] }],
+      include: [{ model: WorkOrderItem, as: 'items', attributes: ['id', 'work_order_id', 'item_type', 'product_id', 'product_name', 'quantity', 'total', 'commission_category_id'] }],
       order: [['received_at', 'DESC']],
     });
+    await netWorkOrderItemsOfReturns(orders.flatMap((o) => o.items || []));
 
     // Ventas directas del mismo usuario no liquidadas en labor
     const directSales = await getDirectSales({
@@ -466,9 +571,10 @@ const create = async (req, res) => {
     }
     const orders = await WorkOrder.findAll({
       where: woWhere,
-      include: [{ model: WorkOrderItem, as: 'items', attributes: ['item_type', 'total', 'commission_category_id'] }],
+      include: [{ model: WorkOrderItem, as: 'items', attributes: ['id', 'work_order_id', 'item_type', 'product_id', 'product_name', 'quantity', 'total', 'commission_category_id'] }],
       transaction,
     });
+    await netWorkOrderItemsOfReturns(orders.flatMap((o) => o.items || []), transaction);
 
     // Ventas directas no liquidadas en labor
     const directSales = await getDirectSales({
@@ -916,4 +1022,6 @@ const getProductSettlementById = async (req, res) => {
   }
 };
 
-module.exports = { preview, create, list, getById, getTechnicians, retryPayroll, productCommissionReport, productPreview, createProductSettlement, listProductSettlements, getProductSettlementById };
+module.exports = { preview, create, list, getById, getTechnicians, retryPayroll, productCommissionReport, productPreview, createProductSettlement, listProductSettlements, getProductSettlementById,
+  // Expuestos para tests (src/__tests__/commissionReturns.test.js).
+  netSaleItemsOfReturns, netWorkOrderItemsOfReturns };

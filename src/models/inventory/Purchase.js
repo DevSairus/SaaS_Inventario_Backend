@@ -150,6 +150,12 @@ const Purchase = sequelize.define('Purchase', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0
   },
+  // Parte no pagada cancelada por devoluciones a proveedor aprobadas (ver
+  // utils/purchaseAmounts.js#purchaseBalance).
+  returned_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    defaultValue: 0
+  },
   payment_history: {
     type: DataTypes.JSONB,
     defaultValue: [],

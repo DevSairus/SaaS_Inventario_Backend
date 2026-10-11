@@ -395,16 +395,21 @@ async function syncConsolidatedInvoice(invoiceId, transaction) {
   if (!invoiceId) return;
   const remisiones = await Sale.findAll({
     where: { invoiced_in_sale_id: invoiceId },
-    attributes: ['paid_amount'],
+    attributes: ['paid_amount', 'returned_amount'],
     transaction,
   });
   const invoice = await Sale.findByPk(invoiceId, { transaction });
   if (!invoice) return;
   const total = parseFloat(invoice.total_amount);
+  // Devoluciones aprobadas sobre las remisiones (returned_amount) también
+  // bajan el saldo de la factura que las agrupa.
+  const returned = Math.min(round2(remisiones.reduce((s, r) => s + parseFloat(r.returned_amount || 0), 0)), total);
   const paid = Math.min(round2(remisiones.reduce((s, r) => s + parseFloat(r.paid_amount || 0), 0)), total);
+  const collectible = total - returned;
   await invoice.update({
     paid_amount: paid,
-    payment_status: paid >= total - 0.005 ? 'paid' : (paid > 0 ? 'partial' : 'pending'),
+    returned_amount: returned,
+    payment_status: paid >= collectible - 0.005 ? 'paid' : (paid > 0 ? 'partial' : 'pending'),
   }, { transaction });
 }
 

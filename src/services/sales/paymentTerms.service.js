@@ -71,7 +71,19 @@ const PAYMENT_METHOD_CODES = {
   transfer: '47', transferencia: '47',
   credit_card: '48', tarjeta: '48', tarjeta_credito: '48',
   debit_card: '49', tarjeta_debito: '49',
+  transferencia_bancaria: '47',
 };
+
+// Las pantallas guardan etiquetas en español ("Tarjeta de Crédito",
+// "Transferencia Bancaria") o códigos ("transfer"): se normalizan a la clave
+// de PAYMENT_METHOD_CODES -- sin esto caían en ZZZ.
+function paymentMethodKey(method) {
+  return String(method || '')
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().trim()
+    .replace(/\s+de\s+/g, ' ')
+    .replace(/\s+/g, '_');
+}
 
 /**
  * PaymentMeans del XML de la factura. Crédito → ID 2, código ZZZ (acuerdo
@@ -90,7 +102,7 @@ function dianPaymentMeans(sale, issueDate = new Date()) {
     if (!due || due < issue) due = issue;
     return { paymentForm: '2', paymentMethod: 'ZZZ', dueDate: new Date(`${due}T12:00:00Z`) };
   }
-  const method = String(sale.payment_method || '').toLowerCase();
+  const method = paymentMethodKey(sale.payment_method);
   return { paymentForm: '1', paymentMethod: PAYMENT_METHOD_CODES[method] || 'ZZZ' };
 }
 

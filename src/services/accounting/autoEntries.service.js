@@ -240,6 +240,15 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
  * @param {object} payment - { payment_id, amount, method, date, bank_account_id? }
  * @param {object} sale - venta (para customer_id, branch_id, sale_number)
  */
+// Fecha del asiento de un pago. payment.date llega como string ISO (leído de
+// payment_history) o como objeto Date (pago recién creado con `new Date()`):
+// String(date).slice(0, 10) daba "Fri Oct 09", que se interpreta como 2001.
+function paymentEntryDate(value) {
+  if (!value) return new Date();
+  if (value instanceof Date) return isNaN(value.getTime()) ? new Date() : value;
+  return String(value).slice(0, 10);
+}
+
 async function generatePaymentEntry(payment, sale, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
@@ -305,7 +314,7 @@ async function generateWorkOrderPaymentEntry(payment, order, tenantId, userId, o
         tenantId,
         {
           branchId: payment.branch_id || null,
-          entryDate: payment.date ? String(payment.date).slice(0, 10) : new Date(),
+          entryDate: paymentEntryDate(payment.date),
           sourceType: 'work_order_payment',
           sourceId: payment.payment_id,
           description: `Abono a OT ${order.order_number || order.id}${payment.method ? ` (${payment.method})` : ''}`,
@@ -556,7 +565,7 @@ async function generatePurchasePaymentEntry(purchase, payment, tenantId, userId,
         tenantId,
         {
           branchId: purchase.branch_id,
-          entryDate: payment.date ? String(payment.date).slice(0, 10) : new Date(),
+          entryDate: paymentEntryDate(payment.date),
           sourceType: 'purchase_payment',
           sourceId: purchase.id,
           description: `Pago a proveedor — Compra ${purchase.purchase_number || purchase.id}${payment.method ? ` (${payment.method})` : ''}`,
@@ -661,7 +670,7 @@ async function generateExpensePaymentEntry(expense, payment, tenantId, userId, o
         tenantId,
         {
           branchId: expense.branch_id,
-          entryDate: payment.date ? String(payment.date).slice(0, 10) : new Date(),
+          entryDate: paymentEntryDate(payment.date),
           sourceType: 'expense_payment',
           sourceId: expense.id,
           description: `Pago de gasto ${expense.expense_number || expense.id}${payment.method ? ` (${payment.method})` : ''}`,
@@ -779,9 +788,16 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
       const grossProductRevenue = (items || [])
         .filter((i) => (i.saleItem?.item_type || 'product') === 'product')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
-      const grossServiceRevenue = (items || [])
+      let grossServiceRevenue = (items || [])
         .filter((i) => i.saleItem?.item_type === 'service' || i.saleItem?.item_type === 'free_line')
         .reduce((s, i) => s + Number(i.subtotal || 0), 0);
+      // Venta AIU: el subtotal de la devolución incluye A + I + U prorrateados
+      // (customerReturns.controller.js); van a ingreso por servicios, como en
+      // generateSaleEntry.
+      if (sale.aiu_enabled) {
+        const itemsSubtotal = (items || []).reduce((s, i) => s + Number(i.subtotal || 0), 0);
+        grossServiceRevenue += Math.max(Number(customerReturn.subtotal || 0) - itemsSubtotal, 0);
+      }
       // Descuento global: la venta reconoció el ingreso ya descontado
       // (generateSaleEntry); la devolución reversa la misma proporción, no el
       // valor de lista. total_amount de la devolución ya viene neto.
@@ -796,13 +812,24 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
         .filter((i) => i.product?.track_inventory && i.destination === 'inventory')
         .reduce((s, i) => s + Number(i.quantity || 0) * Number(i.unit_cost || 0), 0);
 
-      // Reparto pagado/pendiente en la misma proporción que tenía la venta
-      // original — una devolución no siempre implica devolver efectivo.
-      const saleTotal = Number(sale.total_amount || 0);
-      const salePaid = Math.min(Number(sale.paid_amount || 0), saleTotal);
-      const paidRatio = saleTotal > 0 ? salePaid / saleTotal : 0;
-      const moneyBackPaid = Math.round(totalReturned * paidRatio * 100) / 100;
-      const moneyBackPending = Math.round((totalReturned - moneyBackPaid) * 100) / 100;
+      // Liquidación fijada al aprobar (services/returns/returnSettlement.js):
+      // cartera que baja, retenciones del cliente que se reversan y dinero del
+      // cliente (excedente). Devoluciones anteriores a esos campos: reparto en
+      // la proporción pagada de la venta, como antes.
+      let moneyBackPending; // baja la cartera
+      let moneyBackPaid;    // dinero del cliente (caja/banco o saldo a favor)
+      let retentionReversal = null;
+      if (customerReturn.receivable_reduction != null) {
+        moneyBackPending = Number(customerReturn.receivable_reduction || 0);
+        moneyBackPaid = Number(customerReturn.money_back_amount || 0);
+        retentionReversal = customerReturn.retention_reversal || null;
+      } else {
+        const saleTotal = Number(sale.total_amount || 0);
+        const salePaid = Math.min(Number(sale.paid_amount || 0), saleTotal);
+        const paidRatio = saleTotal > 0 ? salePaid / saleTotal : 0;
+        moneyBackPaid = Math.round(totalReturned * paidRatio * 100) / 100;
+        moneyBackPending = Math.round((totalReturned - moneyBackPaid) * 100) / 100;
+      }
 
       const lines = [];
 
@@ -822,14 +849,35 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
 
       // Haber: sale efectivo/bancos (reintegro) y/o se reduce cartera
       if (moneyBackPaid > 0) {
-        const pm = (sale.payment_method || '').toLowerCase();
-        const isCash = pm.includes('efectivo') || pm.includes('cash');
-        const account_id = await getMappedAccountId(tenantId, isCash ? 'sale_cash_account' : 'sale_bank_account', t);
-        lines.push({ account_id, debit: 0, credit: moneyBackPaid, description: 'Reintegro por devolución (parte ya cobrada)' });
+        // settlement_type (approveCustomerReturn): 'credit' = queda como saldo
+        // a favor (anticipo, sin salida de dinero); 'refund' = se devolvió por
+        // el medio/cuenta elegidos al aprobar. Devoluciones anteriores a ese
+        // campo: medio de pago de la venta, como antes.
+        if (customerReturn.settlement_type === 'credit') {
+          const account_id = await getMappedAccountId(tenantId, 'customer_advance_liability', t);
+          lines.push({ account_id, debit: 0, credit: moneyBackPaid, description: 'Saldo a favor del cliente por devolución (parte ya cobrada)', third_party_id: sale.customer_id || null });
+        } else {
+          const account_id = await resolvePaymentAccount(tenantId, {
+            method: customerReturn.refund_method || sale.payment_method,
+            bank_account_id: customerReturn.refund_bank_account_id || null,
+          }, t, SALE_ACCOUNTS);
+          lines.push({ account_id, debit: 0, credit: moneyBackPaid, description: 'Reintegro por devolución (parte ya cobrada)' });
+        }
       }
       if (moneyBackPending > 0) {
         const account_id = await getMappedAccountId(tenantId, 'sale_receivable', t);
         lines.push({ account_id, debit: 0, credit: moneyBackPending, description: 'Reducción de cartera por devolución', third_party_id: sale.customer_id || null });
+      }
+      // Retenciones que el cliente practicó sobre lo devuelto: se reversa la
+      // retención a favor (1355), no se devuelve dinero que nunca entró.
+      if (retentionReversal) {
+        const RETENTION_EVENTS = { retefuente: 'sale_retefuente_receivable', reteiva: 'sale_reteiva_receivable', reteica: 'sale_reteica_receivable' };
+        for (const [key, event] of Object.entries(RETENTION_EVENTS)) {
+          const value = Math.round(Number(retentionReversal[key] || 0) * 100) / 100;
+          if (value <= 0) continue;
+          const account_id = await getMappedAccountId(tenantId, event, t);
+          lines.push({ account_id, debit: 0, credit: value, description: `Reversión de ${key === 'retefuente' ? 'ReteFuente' : key === 'reteiva' ? 'ReteIVA' : 'ReteICA'} practicada por el cliente (devolución)`, third_party_id: sale.customer_id || null });
+        }
       }
 
       // Reversión de costo de venta / inventario, solo lo que vuelve a stock
@@ -846,7 +894,10 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
         tenantId,
         {
           branchId: sale.branch_id,
-          entryDate: customerReturn.return_date || new Date(),
+          // Fecha de APROBACIÓN (cuando ocurre el hecho económico): la de
+          // creación podía caer en un período ya cerrado y el asiento fallaba
+          // en silencio, dejando la devolución sin contabilidad.
+          entryDate: customerReturn.approved_at || new Date(),
           sourceType: 'customer_return',
           sourceId: customerReturn.id,
           description: `Devolución de cliente ${customerReturn.return_number} — venta ${sale.sale_number || sale.id}`,
@@ -1073,16 +1124,74 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
         lines.push({ account_id: ivaAccount, debit: 0, credit: taxReturned, description: 'Reversión de IVA descontable por devolución' });
       }
 
-      // Debe: reintegro de dinero (si ya se había pagado) o reducción de cuenta por pagar
-      const isCash = purchase.payment_status === 'paid';
-      const debitAccount = await getMappedAccountId(tenantId, isCash ? 'purchase_cash_account' : 'purchase_payable', t);
-      lines.push({
-        account_id: debitAccount,
-        debit: totalReturned,
-        credit: 0,
-        description: isCash ? 'Reintegro por devolución a proveedor' : 'Reducción de cuenta por pagar por devolución',
-        third_party_id: isCash ? null : (purchase.supplier_id || null),
-      });
+      // Debe. Con settlement_type (approveSupplierReturn): la parte no pagada
+      // y el saldo a favor reducen Proveedores; el reintegro entra por el
+      // medio/cuenta elegidos al aprobar. Mismo reparto que el controlador
+      // (purchaseReturnSplit). Devoluciones anteriores: todo o nada según si
+      // la compra estaba pagada, como antes.
+      if (supplierReturn.payable_reduction != null) {
+        // Liquidación fijada al aprobar (services/returns/returnSettlement.js).
+        const reduction = Number(supplierReturn.payable_reduction || 0);
+        const moneyBack = Number(supplierReturn.money_back_amount || 0);
+        const toPayable = Math.round((reduction + (supplierReturn.settlement_type === 'credit' ? moneyBack : 0)) * 100) / 100;
+        if (toPayable > 0) {
+          const account_id = await getMappedAccountId(tenantId, 'purchase_payable', t);
+          lines.push({
+            account_id, debit: toPayable, credit: 0,
+            description: supplierReturn.settlement_type === 'credit' && moneyBack > 0
+              ? 'Reducción de cuenta por pagar y saldo a favor por devolución'
+              : 'Reducción de cuenta por pagar por devolución',
+            third_party_id: purchase.supplier_id || null,
+          });
+        }
+        if (moneyBack > 0 && supplierReturn.settlement_type !== 'credit') {
+          const account_id = await resolvePaymentAccount(tenantId, {
+            method: supplierReturn.refund_method || purchase.payment_method,
+            bank_account_id: supplierReturn.refund_bank_account_id || null,
+          }, t);
+          lines.push({ account_id, debit: moneyBack, credit: 0, description: 'Reintegro del proveedor por devolución' });
+        }
+        // Retenciones practicadas sobre lo devuelto: ya no se le deben a la DIAN.
+        const reversal = supplierReturn.retention_reversal || {};
+        const RETENTION_EVENTS = { retefuente: 'purchase_retefuente_payable', reteiva: 'purchase_reteiva_payable', reteica: 'purchase_reteica_payable' };
+        for (const [key, event] of Object.entries(RETENTION_EVENTS)) {
+          const value = Math.round(Number(reversal[key] || 0) * 100) / 100;
+          if (value <= 0) continue;
+          const account_id = await getMappedAccountId(tenantId, event, t);
+          lines.push({ account_id, debit: value, credit: 0, description: `Reversión de ${key === 'retefuente' ? 'ReteFuente' : key === 'reteiva' ? 'ReteIVA' : 'ReteICA'} practicada (devolución a proveedor)` });
+        }
+      } else if (supplierReturn.settlement_type || purchase.paid_amount !== undefined) {
+        const { purchaseReturnSplit } = require('../../utils/purchaseAmounts');
+        const { paid, pending } = purchaseReturnSplit(purchase, totalReturned);
+        const toPayable = Math.round((pending + (supplierReturn.settlement_type === 'credit' ? paid : 0)) * 100) / 100;
+        if (toPayable > 0) {
+          const account_id = await getMappedAccountId(tenantId, 'purchase_payable', t);
+          lines.push({
+            account_id, debit: toPayable, credit: 0,
+            description: supplierReturn.settlement_type === 'credit' && paid > 0
+              ? 'Reducción de cuenta por pagar y saldo a favor por devolución'
+              : 'Reducción de cuenta por pagar por devolución',
+            third_party_id: purchase.supplier_id || null,
+          });
+        }
+        if (paid > 0 && supplierReturn.settlement_type !== 'credit') {
+          const account_id = await resolvePaymentAccount(tenantId, {
+            method: supplierReturn.refund_method || purchase.payment_method,
+            bank_account_id: supplierReturn.refund_bank_account_id || null,
+          }, t);
+          lines.push({ account_id, debit: paid, credit: 0, description: 'Reintegro del proveedor por devolución' });
+        }
+      } else {
+        const isCash = purchase.payment_status === 'paid';
+        const debitAccount = await getMappedAccountId(tenantId, isCash ? 'purchase_cash_account' : 'purchase_payable', t);
+        lines.push({
+          account_id: debitAccount,
+          debit: totalReturned,
+          credit: 0,
+          description: isCash ? 'Reintegro por devolución a proveedor' : 'Reducción de cuenta por pagar por devolución',
+          third_party_id: isCash ? null : (purchase.supplier_id || null),
+        });
+      }
 
       if (lines.length === 0) return null;
 
@@ -1090,7 +1199,7 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
         tenantId,
         {
           branchId: purchase.branch_id,
-          entryDate: supplierReturn.return_date || new Date(),
+          entryDate: supplierReturn.approved_at || new Date(), // fecha de aprobación (ver devolución de cliente)
           sourceType: 'supplier_return',
           sourceId: supplierReturn.id,
           description: `Devolución a proveedor ${supplierReturn.return_number} — compra ${purchase.purchase_number || purchase.id}`,

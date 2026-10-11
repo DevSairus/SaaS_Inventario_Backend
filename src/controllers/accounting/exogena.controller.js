@@ -45,6 +45,7 @@ exports.list = async (req, res) => {
     const data = EXOGENA_FORMATS.map((f) => ({
       ...f,
       is_enabled: configByCode[f.code]?.is_enabled || false,
+      options: configByCode[f.code]?.options || {},
     }));
 
     res.json({ success: true, data, document_types: EXOGENA_DOCUMENT_TYPES });
@@ -54,7 +55,12 @@ exports.list = async (req, res) => {
   }
 };
 
-// PUT /exogena/formats/:code  { is_enabled }
+// Opciones permitidas por formato (ver migración 2026101003).
+const FORMAT_OPTIONS = {
+  prior_year_returns: { formats: ['1001', '1003'], values: ['skip', 'subtract'] },
+};
+
+// PUT /exogena/formats/:code  { is_enabled?, options? }
 exports.toggle = async (req, res) => {
   try {
     const meta = requireKnownFormat(req.params.code, res);
@@ -64,7 +70,20 @@ exports.toggle = async (req, res) => {
       where: { tenant_id: req.tenant_id, format_code: req.params.code },
       defaults: { is_enabled: false },
     });
-    await config.update({ is_enabled: Boolean(req.body.is_enabled) });
+    const updates = {};
+    if (req.body.is_enabled !== undefined) updates.is_enabled = Boolean(req.body.is_enabled);
+    if (req.body.options && typeof req.body.options === 'object') {
+      const options = { ...(config.options || {}) };
+      for (const [key, value] of Object.entries(req.body.options)) {
+        const def = FORMAT_OPTIONS[key];
+        if (!def || !def.formats.includes(req.params.code) || !def.values.includes(value)) {
+          return res.status(400).json({ success: false, message: `Opción no válida para el formato ${req.params.code}: ${key}` });
+        }
+        options[key] = value;
+      }
+      updates.options = options;
+    }
+    await config.update(updates);
 
     res.json({ success: true, data: config });
   } catch (error) {

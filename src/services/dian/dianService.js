@@ -102,9 +102,19 @@ async function getNextConsecutive(tenantId, branchId, isTest = false, transactio
     lock: transaction ? transaction.LOCK.UPDATE : undefined,
   });
 
-  const docLabel = { invoice: 'de facturación', credit_note: 'de nota crédito', debit_note: 'de nota débito' }[documentType] || '';
+  const docLabel = {
+    invoice: 'de facturación',
+    credit_note: 'de nota crédito',
+    debit_note: 'de nota débito',
+    support_document: 'de Documento Soporte',
+    support_document_adjustment: 'de Nota de Ajuste al Documento Soporte',
+    payroll: 'de nómina electrónica',
+  }[documentType] || 'para este tipo de documento';
   if (!resolution) {
-    throw new Error(`No existe resolución DIAN ${docLabel} ${isTest ? 'de pruebas ' : ''}activa para esta sede. Las notas crédito/débito requieren su propia resolución de numeración — regístrala en Facturación Electrónica DIAN → Resoluciones.`);
+    const ownResolutionHint = documentType === 'invoice'
+      ? ''
+      : ' Este tipo de documento requiere su propia resolución de numeración, distinta a la de facturación.';
+    throw new Error(`No existe resolución DIAN ${docLabel} ${isTest ? 'de pruebas ' : ''}activa para esta sede.${ownResolutionHint} Regístrala en Ajustes → Facturación Electrónica DIAN → Resoluciones.`);
   }
 
   // Reintento de una venta que ya tenía número asignado (rechazada o con
@@ -856,7 +866,7 @@ async function sendSupportDocumentForPurchase(purchaseId, tenant, userId) {
   });
   if (!purchase) throw new Error('Compra no encontrada.');
   if (!purchase.requires_support_document) {
-    throw new Error('Esta compra no está marcada para generar Documento Soporte (revisa el flag en la compra).');
+    throw new Error('Esta compra no está marcada para generar Documento Soporte (activa "Requiere Documento Soporte" en la compra).');
   }
   if (!purchase.supplier) {
     throw new Error('Esta compra no tiene proveedor asociado.');
@@ -909,7 +919,7 @@ async function sendSupportDocumentForExpense(expenseId, tenant, userId, adHocSel
   });
   if (!expense) throw new Error('Gasto no encontrado.');
   if (!expense.requires_support_document) {
-    throw new Error('Este gasto no está marcado para generar Documento Soporte (revisa el flag en el gasto).');
+    throw new Error('Este gasto no está marcado para generar Documento Soporte (activa "Requiere Documento Soporte" en el gasto).');
   }
 
   let seller;

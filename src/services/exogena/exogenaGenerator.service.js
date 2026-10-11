@@ -40,6 +40,13 @@ async function effectiveConceptMap(tenantId, formatCode) {
   return { ...suggested, ...Object.fromEntries(mappings.map((m) => [m.source_key, m.concept_code])) };
 }
 
+// Opciones del formato para el tenant (exogena_format_configs.options).
+async function formatOptions(tenantId, formatCode) {
+  const { ExogenaFormatConfig } = require('../../models');
+  const config = await ExogenaFormatConfig.findOne({ where: { tenant_id: tenantId, format_code: formatCode }, attributes: ['options'] });
+  return config?.options || {};
+}
+
 async function resolveRecords(tenantId, formatCode, year) {
   const meta = EXOGENA_FORMAT_BY_CODE[formatCode];
   const service = FORMAT_SERVICES[formatCode];
@@ -53,7 +60,9 @@ async function resolveRecords(tenantId, formatCode, year) {
     conceptBySourceKey = await effectiveConceptMap(tenantId, formatCode);
   }
 
-  const { records, skipped } = await service.buildRecords(tenantId, year, conceptBySourceKey);
+  const options = await formatOptions(tenantId, formatCode);
+
+  const { records, skipped } = await service.buildRecords(tenantId, year, conceptBySourceKey, options);
   return { meta, service, records, skipped };
 }
 
@@ -115,4 +124,5 @@ async function generateExcel(tenantId, formatCode, year, tenant) {
   };
 }
 
-module.exports = { generate, generateExcel, effectiveConceptMap, ExogenaGenerationError };
+module.exports = {
+  formatOptions, generate, generateExcel, effectiveConceptMap, ExogenaGenerationError };

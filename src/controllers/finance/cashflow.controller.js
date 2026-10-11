@@ -6,7 +6,7 @@
 // sistema hoy registra movimiento real de efectivo/dinero. Si en el futuro
 // se agrega un módulo de caja/bancos con transacciones propias, este
 // endpoint debería sumarlas aquí también en vez de reemplazarlas.
-const { Sale, Purchase, Expense, Supplier, Tenant, WorkOrder, CustomerAdvance, Customer } = require('../../models');
+const { Sale, Purchase, Expense, Supplier, Tenant, WorkOrder, CustomerAdvance, Customer, OpeningBalance, CustomerReturn, SupplierReturn } = require('../../models');
 const { Op } = require('sequelize');
 const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
@@ -20,6 +20,10 @@ const RECONCILIATION_TOLERANCE = 1;
 
 const toDateOnly = (value) => {
   if (!value) return null;
+  // Columnas DATE llegan como objeto Date (p. ej. received_date del anticipo):
+  // String(date) daba "Fri Oct 09 ..." -> "Fri" y el movimiento quedaba fuera
+  // de cualquier filtro por fecha (cuadre de caja incluido).
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
   return String(value).split('T')[0].split(' ')[0];
 };
 
@@ -27,7 +31,7 @@ const toDateOnly = (value) => {
 // Compras y Gastos. Usado tanto por el JSON de la pantalla como por el PDF,
 // para que ambos siempre muestren exactamente los mismos números.
 const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) => {
-  const [sales, purchases, expenses, pendingWorkOrders, advances] = await Promise.all([
+  const [sales, purchases, expenses, pendingWorkOrders, advances, openingBalances, returnRefunds, supplierRefunds] = await Promise.all([
     Sale.findAll({
       where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
       attributes: ['id', 'sale_number', 'customer_name', 'payment_history', 'branch_id']
@@ -58,7 +62,35 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     CustomerAdvance.findAll({
       where: { tenant_id, status: { [Op.ne]: 'voided' } },
       include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] }],
-      attributes: ['id', 'advance_number', 'amount', 'received_date', 'method', 'branch_id', 'cash_session_id', 'refund_history', 'reassigned_from_id'],
+      attributes: ['id', 'advance_number', 'amount', 'received_date', 'method', 'branch_id', 'cash_session_id', 'refund_history', 'reassigned_from_id', 'customer_return_id'],
+    }),
+    // Abonos a saldos iniciales (Contabilidad → Saldos Iniciales): cobros de
+    // cartera vieja (entrada) o pagos a proveedores (salida).
+    OpeningBalance.findAll({
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
+      include: [
+        { model: Customer, as: 'customer', attributes: ['first_name', 'last_name', 'business_name'] },
+        { model: Supplier, as: 'supplier', attributes: ['name'] },
+      ],
+      attributes: ['id', 'type', 'reference', 'branch_id', 'payment_history'],
+    }),
+    // Dinero devuelto al cliente por la parte ya pagada de una devolución
+    // (settlement_type 'refund', ver approveCustomerReturn).
+    // Una devolución reversada conserva su reintegro original (ya ocurrió) y
+    // suma el movimiento inverso (reversal_*).
+    CustomerReturn.findAll({
+      where: { tenant_id, status: { [Op.in]: ['approved', 'reversed'] }, settlement_type: 'refund', refund_amount: { [Op.gt]: 0 } },
+      include: [{ model: Customer, as: 'customer', attributes: ['first_name', 'last_name', 'business_name'] }],
+      attributes: ['id', 'return_number', 'refund_amount', 'refund_method', 'refund_date', 'refund_branch_id', 'refund_cash_session_id',
+        'status', 'reversal_amount', 'reversal_method', 'reversed_at', 'reversal_branch_id', 'reversal_cash_session_id'],
+    }),
+    // Dinero que el proveedor reintegró por la parte ya pagada de una
+    // devolución (settlement_type 'refund', ver approveSupplierReturn).
+    SupplierReturn.findAll({
+      where: { tenant_id, status: { [Op.in]: ['approved', 'reversed'] }, settlement_type: 'refund', refund_amount: { [Op.gt]: 0 } },
+      include: [{ model: Supplier, as: 'supplier', attributes: ['name'] }],
+      attributes: ['id', 'return_number', 'refund_amount', 'refund_method', 'refund_date', 'refund_branch_id', 'refund_cash_session_id',
+        'status', 'reversal_amount', 'reversal_method', 'reversed_at', 'reversal_branch_id', 'reversal_cash_session_id'],
     }),
   ]);
 
@@ -115,8 +147,9 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // esa plata ya se contó aquí (ver §6 del análisis: sumarla otra vez
     // sería doble conteo).
     // Un anticipo nacido de una reasignación no es dinero nuevo: ya se contó
-    // en el anticipo de origen.
-    if (!a.reassigned_from_id) transactions.push({
+    // en el anticipo de origen. Tampoco el saldo a favor de una devolución
+    // (customer_return_id): ese dinero entró con el pago de la venta.
+    if (!a.reassigned_from_id && !a.customer_return_id) transactions.push({
       date: toDateOnly(a.received_date),
       amount: parseFloat(a.amount) || 0,
       direction: 'in',
@@ -139,13 +172,93 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
         reference: a.advance_number,
         detail: `Devolución de anticipo a ${customerName}`,
         method: r.method || a.method || null,
-        branch_id: a.branch_id,
+        branch_id: r.branch_id || a.branch_id,
+        cash_session_id: r.cash_session_id || null,
       });
     });
   });
 
+  openingBalances.forEach(ob => {
+    const isReceivable = ob.type === 'receivable';
+    const party = isReceivable
+      ? (ob.customer?.business_name || `${ob.customer?.first_name || ''} ${ob.customer?.last_name || ''}`.trim() || 'Cliente')
+      : (ob.supplier?.name || 'Proveedor');
+    (ob.payment_history || []).forEach(pay => {
+      transactions.push({
+        date: toDateOnly(pay.date),
+        amount: parseFloat(pay.amount) || 0,
+        direction: isReceivable ? 'in' : 'out',
+        source: isReceivable ? 'opening_receivable' : 'opening_payable',
+        reference: ob.reference || 'Saldo inicial',
+        detail: party,
+        method: pay.method || null,
+        branch_id: pay.branch_id || ob.branch_id,
+        cash_session_id: pay.cash_session_id || null,
+      });
+    });
+  });
+
+  returnRefunds.forEach(r => {
+    const customerName = r.customer
+      ? (r.customer.business_name || `${r.customer.first_name || ''} ${r.customer.last_name || ''}`.trim())
+      : 'Cliente';
+    transactions.push({
+      date: toDateOnly(r.refund_date),
+      amount: parseFloat(r.refund_amount) || 0,
+      direction: 'out',
+      source: 'customer_return_refund',
+      reference: r.return_number,
+      detail: `Reintegro por devolución a ${customerName}`,
+      method: r.refund_method || null,
+      branch_id: r.refund_branch_id,
+      cash_session_id: r.refund_cash_session_id || null,
+    });
+    if (r.status === 'reversed' && Number(r.reversal_amount) > 0) {
+      transactions.push({
+        date: toDateOnly(r.reversed_at),
+        amount: parseFloat(r.reversal_amount) || 0,
+        direction: 'in',
+        source: 'customer_return_reversal',
+        reference: r.return_number,
+        detail: `Reversión de devolución: ${customerName} reintegra el dinero`,
+        method: r.reversal_method || null,
+        branch_id: r.reversal_branch_id,
+        cash_session_id: r.reversal_cash_session_id || null,
+      });
+    }
+  });
+
+  supplierRefunds.forEach(r => {
+    transactions.push({
+      date: toDateOnly(r.refund_date),
+      amount: parseFloat(r.refund_amount) || 0,
+      direction: 'in',
+      source: 'supplier_return_refund',
+      reference: r.return_number,
+      detail: `Reintegro de ${r.supplier?.name || 'proveedor'} por devolución`,
+      method: r.refund_method || null,
+      branch_id: r.refund_branch_id,
+      cash_session_id: r.refund_cash_session_id || null,
+    });
+    if (r.status === 'reversed' && Number(r.reversal_amount) > 0) {
+      transactions.push({
+        date: toDateOnly(r.reversed_at),
+        amount: parseFloat(r.reversal_amount) || 0,
+        direction: 'out',
+        source: 'supplier_return_reversal',
+        reference: r.return_number,
+        detail: `Reversión de devolución: se le devuelve el reintegro a ${r.supplier?.name || 'proveedor'}`,
+        method: r.reversal_method || null,
+        branch_id: r.reversal_branch_id,
+        cash_session_id: r.reversal_cash_session_id || null,
+      });
+    }
+  });
+
   purchases.forEach(p => {
-    (p.payment_history || []).forEach(pay => {
+    // Saldo a favor de una devolución aplicado a la compra: no es dinero
+    // que salga (ver supplierReturns.controller.js#applySupplierCredit).
+    (p.payment_history || []).filter(pay => pay.source !== 'supplier_credit').forEach(pay => {
       transactions.push({
         date: toDateOnly(pay.date),
         amount: parseFloat(pay.amount) || 0,

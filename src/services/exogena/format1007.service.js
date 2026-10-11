@@ -43,6 +43,27 @@ async function buildRecords(tenantId, year, conceptBySourceKey) {
     { replacements: { tenantId, from, to }, type: QueryTypes.SELECT }
   );
 
+  // Devoluciones de clientes aprobadas en el año: van en dred
+  // (devoluciones, rebajas y descuentos), por cliente. Un cliente con
+  // devoluciones pero sin ventas en el año (venta del año anterior) sale con
+  // ibru 0.
+  const { approvedCustomerReturns } = require('../returns/returnFiscalData');
+  const returns = await approvedCustomerReturns(tenantId, from, to);
+  const keyOf = (r) => r.customer_id || `nit:${r.tax_id}`;
+  const byCustomer = new Map(rows.map((r) => [keyOf(r), { ...r, dred: Number(r.dred || 0) }]));
+  for (const ret of returns) {
+    const key = keyOf(ret);
+    if (!byCustomer.has(key)) {
+      byCustomer.set(key, {
+        customer_id: ret.customer_id, tax_id: ret.tax_id || ret.customer_tax_id, document_type: ret.document_type,
+        first_name: ret.first_name, last_name: ret.last_name, business_name: ret.business_name, ibru: 0, dred: 0,
+      });
+    }
+    byCustomer.get(key).dred += ret.base;
+  }
+  rows.length = 0;
+  rows.push(...byCustomer.values());
+
   const skipped = [];
   if (!cpt) {
     return { records: [], skipped: [{ reason: 'sin_concepto_mapeado', source_key: SOURCE_KEY_SALE }] };

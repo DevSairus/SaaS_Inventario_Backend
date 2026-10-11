@@ -18,7 +18,7 @@ const { QueryTypes } = require('sequelize');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { mapCustomerToExogena } = require('./thirdPartyMapper');
 
-async function buildRecords(tenantId, year) {
+async function buildRecords(tenantId, year, _conceptBySourceKey, options = {}) {
   const schema = getCurrentSchema() || 'public';
   const from = `${year}-01-01`;
   const to = `${year}-12-31`;
@@ -37,9 +37,33 @@ async function buildRecords(tenantId, year) {
     { replacements: { tenantId, from, to }, type: QueryTypes.SELECT }
   );
 
+  // Devoluciones de clientes aprobadas en el año sobre facturas con
+  // ReteFuente: bajan la base (valor) y la retención en proporción a lo
+  // devuelto (services/returns/returnFiscalData.js). Las de facturas de años
+  // anteriores dependen de la opción del tenant (prior_year_returns): 'skip'
+  // (por defecto, esa retención ya se declaró) o 'subtract' (se resta este año).
+  const { approvedCustomerReturns, isPriorYearDocument } = require('../returns/returnFiscalData');
+  const subtractPriorYear = options.prior_year_returns === 'subtract';
   const skipped = [];
+  const keyOf = (r) => r.customer_id || `nit:${r.tax_id}`;
+  const byCustomer = new Map(rows.map((r) => [keyOf(r), { ...r, valor: Number(r.valor || 0), ret: Number(r.ret || 0) }]));
+  for (const ret of await approvedCustomerReturns(tenantId, from, to)) {
+    if (!(Number(ret.sale_retefuente) > 0)) continue;
+    if (isPriorYearDocument(ret.sale_date, year) && !subtractPriorYear) continue;
+    const key = keyOf(ret);
+    if (!byCustomer.has(key)) {
+      // Restar sin retenciones del cliente este año dejaría el registro en
+      // negativo: se informa para ajustarlo a mano.
+      skipped.push({ reason: 'devolucion_sin_retenciones_en_el_ano', customer_id: ret.customer_id, return_number: ret.return_number });
+      continue;
+    }
+    const acc = byCustomer.get(key);
+    acc.valor -= ret.base;
+    acc.ret -= ret.retefuente_share;
+  }
+
   const records = [];
-  for (const row of rows) {
+  for (const row of [...byCustomer.values()].map((r) => ({ ...r, valor: Math.max(r.valor, 0), ret: Math.max(r.ret, 0) }))) {
     if (!row.tax_id) {
       skipped.push({ reason: 'cliente_sin_nit', customer_id: row.customer_id });
       continue;

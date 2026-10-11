@@ -17,15 +17,22 @@ function purchaseNetPayable(purchase) {
   return round2(Math.max(total - retentions, 0));
 }
 
-/** Saldo pendiente con el proveedor (neto - pagado), nunca negativo. */
+/**
+ * Saldo pendiente con el proveedor (neto - pagado - devuelto), nunca
+ * negativo. returned_amount = parte no pagada cancelada por devoluciones a
+ * proveedor aprobadas (supplierReturns.controller.js).
+ */
 function purchaseBalance(purchase) {
-  return round2(Math.max(purchaseNetPayable(purchase) - Number(purchase?.paid_amount || 0), 0));
+  return round2(Math.max(
+    purchaseNetPayable(purchase) - Number(purchase?.paid_amount || 0) - Number(purchase?.returned_amount || 0),
+    0
+  ));
 }
 
-/** 'pending' | 'partial' | 'paid' según lo pagado contra el neto. */
+/** 'pending' | 'partial' | 'paid' según lo pagado contra el neto (menos lo devuelto). */
 function purchasePaymentStatus(purchase, paidAmount) {
   const paid = Number(paidAmount ?? purchase?.paid_amount ?? 0);
-  const net = purchaseNetPayable(purchase);
+  const net = Math.max(purchaseNetPayable(purchase) - Number(purchase?.returned_amount || 0), 0);
   if (paid >= net - 0.01) return 'paid';
   if (paid > 0) return 'partial';
   return 'pending';
@@ -54,4 +61,47 @@ function payablePurchaseWhere() {
   };
 }
 
-module.exports = { purchaseNetPayable, purchaseBalance, purchasePaymentStatus, isPayablePurchase, payablePurchaseWhere, round2 };
+// Plazo por defecto cuando la compra no trae due_date (proveedor sin
+// payment_terms): mismo criterio de 30 días que usa Cartera.
+const DEFAULT_PAYABLE_TERM_DAYS = 30;
+
+/**
+ * Fecha de vencimiento efectiva ('YYYY-MM-DD'): due_date si existe; si no,
+ * purchase_date + 30 días. Única regla para Cuentas por Pagar, antigüedad y
+ * alertas -- antes CxP sumaba 30 días y las alertas usaban la fecha de compra.
+ */
+function purchaseEffectiveDueDate(purchase) {
+  if (purchase?.due_date) return String(purchase.due_date).slice(0, 10);
+  if (!purchase?.purchase_date) return null;
+  const d = new Date(`${String(purchase.purchase_date).slice(0, 10)}T00:00:00Z`);
+  if (isNaN(d.getTime())) return null;
+  d.setUTCDate(d.getUTCDate() + DEFAULT_PAYABLE_TERM_DAYS);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Días vencidos respecto a hoy (negativo = aún no vence). */
+function purchaseDaysOverdue(purchase, today = new Date()) {
+  const due = purchaseEffectiveDueDate(purchase);
+  if (!due) return 0;
+  const todayUtc = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
+  return Math.round((todayUtc - new Date(`${due}T00:00:00Z`).getTime()) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * Reparte una devolución a proveedor en parte ya pagada y parte pendiente,
+ * en la proporción pagada del neto de la compra. Misma regla en el
+ * controlador (cartera, caja) y en el asiento (generateSupplierReturnEntry).
+ */
+function purchaseReturnSplit(purchase, returnTotal) {
+  const total = round2(Number(returnTotal || 0));
+  const net = purchaseNetPayable(purchase);
+  const paid = Math.min(Number(purchase?.paid_amount || 0), net);
+  const ratio = net > 0 ? paid / net : 0;
+  const paidPart = round2(total * ratio);
+  return { paid: paidPart, pending: round2(total - paidPart) };
+}
+
+module.exports = {
+  purchaseNetPayable, purchaseBalance, purchasePaymentStatus, isPayablePurchase, payablePurchaseWhere, round2,
+  DEFAULT_PAYABLE_TERM_DAYS, purchaseEffectiveDueDate, purchaseDaysOverdue, purchaseReturnSplit,
+};

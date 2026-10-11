@@ -19,11 +19,12 @@ const {
   CustomerAdvance, CustomerAdvanceApplication, Sale, Customer, JournalEntry,
 } = require('../../models');
 const { generateAdvanceNumber } = require('../../services/finance/advanceNumber.service');
-const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { getOpenSession, isTreasuryEnabled, assertCashAvailable } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { markAdvanceForAlertCheck } = require('../../middleware/autoCheckAdvanceAlerts.middleware');
 const logger = require('../../config/logger');
 const audit = require('../../utils/audit');
+const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 
 // ── POST /customer-advances — recibir un anticipo ───────────────────────────
 const createAdvance = async (req, res) => {
@@ -122,9 +123,15 @@ const listAdvances = async (req, res) => {
       if (to_date) where.received_date[Op.lte] = new Date(`${to_date}T23:59:59`);
     }
     if (search) {
+      // También por cliente: antes la pantalla filtraba nombre/NIT solo entre
+      // los 50 anticipos cargados.
       where[Op.or] = [
         { advance_number: { [Op.iLike]: `%${search}%` } },
         { reference_note: { [Op.iLike]: `%${search}%` } },
+        { '$customer.business_name$': { [Op.iLike]: `%${search}%` } },
+        { '$customer.first_name$': { [Op.iLike]: `%${search}%` } },
+        { '$customer.last_name$': { [Op.iLike]: `%${search}%` } },
+        { '$customer.tax_id$': { [Op.iLike]: `%${search}%` } },
       ];
     }
 
@@ -253,7 +260,7 @@ const applyAdvanceToSale = async (req, res) => {
     const targets = sale.is_consolidated_invoice
       ? await invoicing.lockPendingRemisiones(sale.id, tenant_id, transaction)
       : [sale];
-    const pendingOf = (t) => parseFloat(t.total_amount) - parseFloat(t.paid_amount || 0);
+    const pendingOf = (t) => saleBalance(t);
     const remaining = targets.reduce((sum, t) => sum + pendingOf(t), 0);
     if (remaining <= 0) {
       await transaction.rollback();
@@ -350,13 +357,10 @@ const applyAdvanceToSale = async (req, res) => {
     for (const target of targets) {
       const add = applied.get(target.id);
       if (!(add > 0)) continue;
-      const total = parseFloat(target.total_amount);
       // Redondeo a centavos: 55859.83 = 44965.30 + 10894.53 en flotante da
       // 55859.829999… y la remisión quedaba "parcial" estando pagada.
       const paid_amount = Math.round((parseFloat(target.paid_amount || 0) + add) * 100) / 100;
-      let payment_status = 'pending';
-      if (paid_amount >= total - 0.005) payment_status = 'paid';
-      else if (paid_amount > 0) payment_status = 'partial';
+      const payment_status = salePaymentStatus(target, paid_amount);
       await target.update({ paid_amount, payment_status, payment_history: histories.get(target.id) }, { transaction });
     }
 
@@ -439,6 +443,8 @@ const refundAdvance = async (req, res) => {
     const refund_id = require('crypto').randomUUID();
     const refund_date = new Date();
     const effectiveMethod = method || advance.method || 'Efectivo';
+    // Efectivo: que lo haya en la caja (según el cuadre de la sesión).
+    await assertCashAvailable(openSession, refundAmount, effectiveMethod);
     // Sin cuenta explícita, la devolución sale de la misma cuenta bancaria
     // por la que entró el anticipo (si no es efectivo y sigue activa).
     const selectedBankAccountId = bank_account_id !== undefined
@@ -450,6 +456,9 @@ const refundAdvance = async (req, res) => {
       date: refund_date,
       method: effectiveMethod,
       bank_account_id: selectedBankAccountId,
+      // Caja de la que salió (cuadre de esa sesión, no de otra del mismo día).
+      cash_session_id: openSession?.id || null,
+      branch_id: branch_id || advance.branch_id || null,
       user_id,
       reason: reason || null,
     }];
@@ -523,6 +532,13 @@ const voidAdvance = async (req, res) => {
     if (advance.work_order_id) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Este anticipo viene de abonos de una orden de trabajo: no se puede anular, usa "Devolver" si hay que reintegrar el dinero.' });
+    }
+    // Saldo a favor de una devolución: no tiene asiento de recepción propio
+    // (el pasivo lo creó el asiento de la devolución), así que anularlo
+    // dejaría el pasivo sin reversar. Se devuelve o se aplica, no se anula.
+    if (advance.customer_return_id) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Este saldo a favor viene de una devolución: no se puede anular. Aplícalo a una factura o usa "Devolver" para reintegrar el dinero.' });
     }
     if (parseFloat(advance.applied_amount) > 0) {
       await transaction.rollback();

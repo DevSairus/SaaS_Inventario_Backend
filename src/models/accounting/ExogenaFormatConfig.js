@@ -17,6 +17,8 @@ const ExogenaFormatConfig = sequelize.define(
     tenant_id: { type: DataTypes.UUID, allowNull: false },
     format_code: { type: DataTypes.STRING(10), allowNull: false },
     is_enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    // Opciones del formato (migración 2026101003), p. ej. { prior_year_returns: 'skip' | 'subtract' }.
+    options: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
   },
   {
     tableName: 'exogena_format_configs',

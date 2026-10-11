@@ -5,9 +5,34 @@ const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
-const { purchaseNetPayable, purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2 } = require('../../utils/purchaseAmounts');
+const { purchaseNetPayable, purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2, purchaseDaysOverdue, purchaseEffectiveDueDate } = require('../../utils/purchaseAmounts');
 
 // Obtener resumen de cuentas por pagar
+// Saldo a favor con proveedores que quedó sin aplicar al aprobar una
+// devolución (no había compras pendientes): se muestra en Cuentas por Pagar
+// para aplicarlo (POST /inventory/supplier-returns/:id/apply-credit).
+const availableSupplierCredits = async (tenantId) => {
+  const { SupplierReturn, Supplier: SupplierModel } = require('../../models');
+  const rows = await SupplierReturn.findAll({
+    where: {
+      tenant_id: tenantId,
+      status: 'approved',
+      settlement_type: 'credit',
+      credit_amount: { [Op.gt]: sequelize.col('credit_applied_amount') },
+    },
+    include: [{ model: SupplierModel, as: 'supplier', attributes: ['id', 'name'] }],
+    attributes: ['id', 'return_number', 'supplier_id', 'credit_amount', 'credit_applied_amount'],
+    order: [['approved_at', 'ASC']],
+  });
+  return rows.map((r) => ({
+    supplier_return_id: r.id,
+    return_number: r.return_number,
+    supplier_id: r.supplier_id,
+    supplier_name: r.supplier?.name || 'Proveedor',
+    available: round2(Number(r.credit_amount || 0) - Number(r.credit_applied_amount || 0)),
+  }));
+};
+
 const getAccountsPayableSummary = async (req, res) => {
   try {
     const tenantId = req.user.tenant_id;
@@ -48,7 +73,7 @@ const getAccountsPayableSummary = async (req, res) => {
       order: [['purchase_date', 'ASC']],
       attributes: [
         'id', 'purchase_number', 'purchase_date', 'due_date', 'supplier_id',
-        'total_amount', 'total_retentions', 'paid_amount', 'payment_status', 'payment_method',
+        'total_amount', 'total_retentions', 'paid_amount', 'returned_amount', 'payment_status', 'payment_method',
         'payment_history', 'invoice_number', 'status'
       ]
     });
@@ -59,12 +84,8 @@ const getAccountsPayableSummary = async (req, res) => {
 
     const purchasesWithDetails = pendingPurchases.map(purchase => {
       const balance = purchaseBalance(purchase); // neto de retenciones
-      // Si hay due_date se usa esa fecha para vencimiento; si no, se cae al
-      // mismo criterio de 30 días desde la compra que usa Cartera.
-      const referenceDate = purchase.due_date ? new Date(purchase.due_date) : new Date(purchase.purchase_date);
-      const daysOverdue = purchase.due_date
-        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
-        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      // due_date o, si falta, compra + 30 días (misma regla que las alertas).
+      const daysOverdue = purchaseDaysOverdue(purchase, today);
       const isOverdue = daysOverdue > 0;
 
       totalPayable += balance;
@@ -75,6 +96,8 @@ const getAccountsPayableSummary = async (req, res) => {
         purchase_number: purchase.purchase_number,
         purchase_date: purchase.purchase_date,
         due_date: purchase.due_date,
+        // Vencimiento usado para el cálculo (due_date o compra + 30 días).
+        effective_due_date: purchaseEffectiveDueDate(purchase),
         invoice_number: purchase.invoice_number,
         supplier_id: purchase.supplier_id,
         supplier: purchase.supplier,
@@ -127,7 +150,8 @@ const getAccountsPayableSummary = async (req, res) => {
           total_suppliers: Object.keys(bySupplier).length
         },
         by_supplier: Object.values(bySupplier),
-        all_purchases: purchasesWithDetails
+        all_purchases: purchasesWithDetails,
+        supplier_credits: await availableSupplierCredits(tenantId)
       }
     });
   } catch (error) {
@@ -163,10 +187,7 @@ const getSupplierAccountsPayable = async (req, res) => {
 
     const purchasesWithDetails = purchases.map(purchase => {
       const balance = purchaseBalance(purchase); // neto de retenciones
-      const referenceDate = purchase.due_date ? new Date(purchase.due_date) : new Date(purchase.purchase_date);
-      const daysOverdue = purchase.due_date
-        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
-        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      const daysOverdue = purchaseDaysOverdue(purchase, today);
       const isOverdue = daysOverdue > 0;
 
       totalBalance += balance;
@@ -175,6 +196,7 @@ const getSupplierAccountsPayable = async (req, res) => {
       return {
         ...purchase.toJSON(),
         balance,
+        effective_due_date: purchaseEffectiveDueDate(purchase),
         days_overdue: Math.max(daysOverdue, 0),
         is_overdue: isOverdue
       };
@@ -279,8 +301,7 @@ const getAgingReport = async (req, res) => {
 
     purchases.forEach(purchase => {
       const balance = purchaseBalance(purchase); // neto de retenciones
-      const referenceDate = purchase.due_date ? new Date(purchase.due_date) : new Date(purchase.purchase_date);
-      const daysOverdue = Math.max(Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)), 0);
+      const daysOverdue = Math.max(purchaseDaysOverdue(purchase, today), 0);
 
       const purchaseData = {
         id: purchase.id,

@@ -55,7 +55,7 @@ function resolveConcept(conceptBySourceKey, sourceKey) {
 
 // Concepto de retención de cada ítem comprado — misma cadena que el motor de
 // retenciones: producto → categoría → proveedor (por defecto) → tipo.
-function purchaseItemsSql(schema) {
+function purchaseItemsSql(schema, { anyDate = false } = {}) {
   return `
     SELECT p.id AS purchase_id, p.supplier_id, pi.subtotal,
            COALESCE(NULLIF(pr.retention_concept, ''), NULLIF(c.retention_concept, ''),
@@ -67,7 +67,7 @@ function purchaseItemsSql(schema) {
     LEFT JOIN "${schema}"."products" pr ON pr.id = pi.product_id
     LEFT JOIN "${schema}"."categories" c ON c.id = pr.category_id
     WHERE p.tenant_id = :tenantId AND p.status NOT IN ('draft', 'cancelled')
-      AND p.purchase_date BETWEEN :from AND :to`;
+      ${anyDate ? '' : 'AND p.purchase_date BETWEEN :from AND :to'}`;
 }
 
 async function fetchSourceKeys(tenantId, year) {
@@ -186,7 +186,7 @@ async function fetchPurchaseRows(tenantId, from, to) {
   return rows;
 }
 
-async function fetchRows(tenantId, year) {
+async function fetchRows(tenantId, year, options = {}) {
   const schema = getCurrentSchema() || 'public';
   const from = `${year}-01-01`;
   const to = `${year}-12-31`;
@@ -206,12 +206,59 @@ async function fetchRows(tenantId, year) {
     { replacements: { tenantId, from, to, excludedCategories: EXCLUDED_EXPENSE_CATEGORIES }, type: QueryTypes.SELECT }
   );
 
-  return [...purchaseRows, ...expenseRows];
+  return [...purchaseRows, ...expenseRows, ...await fetchSupplierReturnRows(tenantId, from, to, Number(year), options)];
+}
+
+/**
+ * Devoluciones a proveedor aprobadas en el año: filas NEGATIVAS de pago,
+ * ReteFuente y ReteIVA (comun), repartidas por concepto en proporción a las
+ * bases de la compra devuelta. Al agrupar por (concepto, proveedor) netean
+ * contra los pagos; un total negativo se reporta en 0.
+ */
+async function fetchSupplierReturnRows(tenantId, from, to, year, options = {}) {
+  const { approvedSupplierReturns, isPriorYearDocument } = require('../returns/returnFiscalData');
+  // Compras de años anteriores: según la opción del tenant (prior_year_returns,
+  // por defecto 'skip' -- ese pago y su retención ya se declararon).
+  const subtractPriorYear = options.prior_year_returns === 'subtract';
+  const returns = (await approvedSupplierReturns(tenantId, from, to))
+    .filter((r) => subtractPriorYear || !isPriorYearDocument(r.purchase_date, year));
+  if (!returns.length) return [];
+  const schema = getCurrentSchema() || 'public';
+  const purchaseIds = [...new Set(returns.map((r) => r.purchase_id))];
+  const items = await sequelize.query(
+    `SELECT x.* FROM (${purchaseItemsSql(schema, { anyDate: true })}) x WHERE x.purchase_id IN (:purchaseIds)`,
+    { replacements: { tenantId, purchaseIds }, type: QueryTypes.SELECT }
+  );
+  const basesByPurchase = new Map();
+  for (const it of items) {
+    if (!basesByPurchase.has(it.purchase_id)) basesByPurchase.set(it.purchase_id, new Map());
+    const m = basesByPurchase.get(it.purchase_id);
+    m.set(it.concept_id, (m.get(it.concept_id) || 0) + Number(it.subtotal || 0));
+  }
+  const rows = [];
+  for (const ret of returns) {
+    const bases = basesByPurchase.get(ret.purchase_id);
+    if (!bases || bases.size === 0) continue;
+    const totalBase = [...bases.values()].reduce((s, b) => s + b, 0);
+    for (const [conceptId, b] of bases) {
+      const w = totalBase > 0 ? b / totalBase : 0;
+      rows.push({
+        supplier_id: ret.supplier_id, tax_id: ret.tax_id, document_type: ret.document_type, person_type: ret.person_type,
+        name: ret.name, business_name: ret.business_name, city_code: ret.city_code, address: ret.address,
+        source_key: `${PURCHASE_PREFIX}${conceptId}`,
+        pago: -Math.round(ret.base * w * 100) / 100,
+        retp: -Math.round(ret.reversal.retefuente * w * 100) / 100,
+        comun: -Math.round(ret.reversal.reteiva * w * 100) / 100,
+      });
+    }
+  }
+  return rows;
 }
 
 /** Totales por fuente (pago y ReteFuente) para mostrar en el panel de conceptos. */
 async function summarizeSourceKeys(tenantId, year) {
-  const rows = await fetchRows(tenantId, year);
+  const options = await require('./exogenaGenerator.service').formatOptions(tenantId, '1001');
+  const rows = await fetchRows(tenantId, year, options);
   const out = {};
   for (const r of rows) {
     if (!out[r.source_key]) out[r.source_key] = { pago: 0, retp: 0, suppliers: new Set() };
@@ -228,8 +275,8 @@ async function summarizeSourceKeys(tenantId, year) {
 /**
  * @returns {{ records: Array<object>, skipped: Array<object> }}
  */
-async function buildRecords(tenantId, year, conceptBySourceKey) {
-  const rows = await fetchRows(tenantId, year);
+async function buildRecords(tenantId, year, conceptBySourceKey, options = {}) {
+  const rows = await fetchRows(tenantId, year, options);
   const skipped = [];
 
   // Agrupa por (proveedor, concepto) -- la llave única del formato exige
@@ -261,13 +308,14 @@ async function buildRecords(tenantId, year, conceptBySourceKey) {
 
   const records = [...byKey.values()].map((r) => ({
     ...r,
-    pago: Math.round(r.pago),
+    // Neto de devoluciones (filas negativas): nunca por debajo de 0.
+    pago: Math.max(Math.round(r.pago), 0),
     pnded: Math.round(r.pnded),
     ided: Math.round(r.ided),
     inded: Math.round(r.inded),
-    retp: Math.round(r.retp),
+    retp: Math.max(Math.round(r.retp), 0),
     reta: Math.round(r.reta),
-    comun: Math.round(r.comun),
+    comun: Math.max(Math.round(r.comun), 0),
     ndom: Math.round(r.ndom),
   }));
 

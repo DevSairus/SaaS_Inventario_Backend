@@ -304,8 +304,8 @@ app.use('/api/notifications',                  authMiddleware, tenantMiddleware,
 app.use('/api/dashboard',                      authMiddleware, tenantMiddleware, dashboardRoutes);
 
 // Estas rutas específicas ANTES de /api/sales para evitar conflicto con /:id
-app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware, branchMiddleware, customerReturnsRoutes);
-app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, branchMiddleware, supplierReturnsRoutes);
+app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerReturnsRoutes);
+app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), supplierReturnsRoutes);
 app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, branchMiddleware, transfersRoutes);
 app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, branchMiddleware, internalConsumptionsRoutes);
 
@@ -332,7 +332,7 @@ app.use('/api/crm/reward-rules',                authMiddleware, tenantMiddleware
 app.use('/api/crm/rewards',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmRewardsRoutes);
 app.use('/api/crm/gamification-settings',      authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmGamificationSettingsRoutes);
 app.use('/api/crm/whatsapp',                   authMiddleware, tenantMiddleware, branchMiddleware, requireModule('crm'), crmWhatsappCloudRoutes);
-app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, accountsReceivableRoutes);
+app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, requireModule('receivables'), accountsReceivableRoutes);
 app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);
 app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), expensesRoutes);
 app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashflowRoutes);

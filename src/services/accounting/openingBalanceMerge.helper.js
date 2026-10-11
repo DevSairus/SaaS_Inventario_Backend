@@ -33,10 +33,13 @@ function normalizeOpeningBalanceAsSaleRow(ob) {
     sale_date: ob.issue_date,
     due_date: ob.due_date,
     customer_id: ob.customer_id,
-    customer_name: ob.customer ? `${ob.customer.first_name || ''} ${ob.customer.last_name || ''}`.trim() : 'Cliente',
+    customer_name: ob.customer
+      ? (ob.customer.business_name || `${ob.customer.first_name || ''} ${ob.customer.last_name || ''}`.trim() || 'Cliente')
+      : 'Cliente',
     customer: ob.customer || null,
     total_amount: parseFloat(ob.total_amount),
     paid_amount: parseFloat(ob.paid_amount || 0),
+    returned_amount: 0,
     payment_status: ob.payment_status,
     payment_method: null,
     payment_history: ob.payment_history || [],

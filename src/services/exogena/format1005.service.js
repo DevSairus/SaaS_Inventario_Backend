@@ -5,9 +5,9 @@
 // Anexo técnico: T3.21 (F1005 v8, Resolución 000227/2025).
 //
 // Agrega Purchase por proveedor: IVA pagado (tax_amount) como impuesto
-// descontable. Devoluciones (ivade) y IVA no descontable art. 490 (ivavcg)
-// no se rastrean hoy en Pitbox -- se reportan en 0 (ivavcg es opcional en
-// el XSD; ivade es obligatorio y DIAN acepta 0 explícito).
+// descontable. ivade = IVA de las devoluciones de clientes aprobadas en el
+// año (services/returns/returnFiscalData.js). IVA no descontable art. 490
+// (ivavcg) no se rastrea hoy -- se reporta en 0 (opcional en el XSD).
 //
 // Atributos según XSD: tdoc, nid, dv, apl1, apl2, nom1, nom2, raz, vimp,
 // ivade, ivavcg.
@@ -36,19 +36,54 @@ async function buildRecords(tenantId, year) {
 
   const skipped = [];
   const records = [];
+
+  // IVA resultante por devoluciones en ventas (ivade), por cliente: el IVA de
+  // las devoluciones de clientes aprobadas en el año. Si el tercero también
+  // es proveedor, se suma en su mismo registro (una fila por nid).
+  const { approvedCustomerReturns } = require('../returns/returnFiscalData');
+  const { mapCustomerToExogena } = require('./thirdPartyMapper');
+  const ivadeByNid = new Map();
+  for (const ret of await approvedCustomerReturns(tenantId, from, to)) {
+    if (!(ret.tax_net > 0)) continue;
+    if (!(ret.tax_id || ret.customer_tax_id)) {
+      skipped.push({ reason: 'cliente_sin_nit', customer_id: ret.customer_id });
+      continue;
+    }
+    const tp = mapCustomerToExogena({ ...ret, tax_id: ret.tax_id || ret.customer_tax_id });
+    const key = `${tp.tdoc}|${tp.nid}`;
+    if (!ivadeByNid.has(key)) ivadeByNid.set(key, { tp, value: 0 });
+    ivadeByNid.get(key).value += ret.tax_net;
+  }
+
   for (const row of rows) {
     if (!row.tax_id) {
       skipped.push({ reason: 'proveedor_sin_nit', supplier_id: row.supplier_id });
       continue;
     }
     const thirdParty = mapSupplierToExogena(row);
+    const ivadeKey = `${thirdParty.tdoc}|${thirdParty.nid}`;
+    const ivade = ivadeByNid.get(ivadeKey)?.value || 0;
+    ivadeByNid.delete(ivadeKey);
     records.push({
       tdoc: thirdParty.tdoc, nid: thirdParty.nid, dv: thirdParty.dv,
       apl1: thirdParty.apl1 || null, apl2: thirdParty.apl2 || null,
       nom1: thirdParty.nom1 || null, nom2: thirdParty.nom2 || null,
       raz: thirdParty.raz || null,
       vimp: Math.round(Number(row.vimp || 0)),
-      ivade: 0,
+      ivade: Math.round(ivade),
+      ivavcg: 0,
+    });
+  }
+
+  // Clientes con devoluciones que no son proveedores del año: solo ivade.
+  for (const { tp, value } of ivadeByNid.values()) {
+    records.push({
+      tdoc: tp.tdoc, nid: tp.nid, dv: tp.dv,
+      apl1: tp.apl1 || null, apl2: tp.apl2 || null,
+      nom1: tp.nom1 || null, nom2: tp.nom2 || null,
+      raz: tp.raz || null,
+      vimp: 0,
+      ivade: Math.round(value),
       ivavcg: 0,
     });
   }

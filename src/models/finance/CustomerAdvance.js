@@ -87,6 +87,12 @@ const CustomerAdvance = sequelize.define('CustomerAdvance', {
     type: DataTypes.UUID,
     allowNull: true,
   },
+  // Devolución de cliente que dejó este saldo a favor: no es dinero nuevo
+  // (ya entró con el pago de la venta), Flujo de Caja no lo cuenta.
+  customer_return_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
   received_date: {
     type: DataTypes.DATE,
     allowNull: false,

@@ -8,6 +8,12 @@ const SOURCE_LABELS = {
   work_order: 'Abono OT',
   customer_advance: 'Anticipo recibido',
   customer_advance_refund: 'Devolución anticipo',
+  customer_return_refund: 'Reintegro por devolución',
+  supplier_return_refund: 'Reintegro de proveedor',
+  customer_return_reversal: 'Reversión de devolución (cliente)',
+  supplier_return_reversal: 'Reversión de devolución (proveedor)',
+  opening_receivable: 'Abono saldo inicial',
+  opening_payable: 'Pago saldo inicial',
 };
 
 // Los valores ya vienen como 'YYYY-MM-DD' (fecha de negocio, sin hora).

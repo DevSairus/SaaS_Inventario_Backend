@@ -39,19 +39,54 @@ async function buildRecords(tenantId, year) {
 
   const skipped = [];
   const records = [];
+
+  // IVA recuperado en devoluciones en compras (iva), por proveedor: el IVA de
+  // las devoluciones a proveedor aprobadas en el año. Si el tercero también
+  // es cliente, se suma en su mismo registro (una fila por nid).
+  const { approvedSupplierReturns } = require('../returns/returnFiscalData');
+  const { mapSupplierToExogena } = require('./thirdPartyMapper');
+  const ivaByNid = new Map();
+  for (const ret of await approvedSupplierReturns(tenantId, from, to)) {
+    if (!(ret.tax_net > 0)) continue;
+    if (!ret.tax_id) {
+      skipped.push({ reason: 'proveedor_sin_nit', supplier_id: ret.supplier_id });
+      continue;
+    }
+    const tp = mapSupplierToExogena(ret);
+    const key = `${tp.tdoc}|${tp.nid}`;
+    if (!ivaByNid.has(key)) ivaByNid.set(key, { tp, value: 0 });
+    ivaByNid.get(key).value += ret.tax_net;
+  }
+
   for (const row of rows) {
     if (!row.tax_id) {
       skipped.push({ reason: 'cliente_sin_nit', customer_id: row.customer_id });
       continue;
     }
     const thirdParty = mapCustomerToExogena(row);
+    const ivaKey = `${thirdParty.tdoc}|${thirdParty.nid}`;
+    const ivaRecovered = ivaByNid.get(ivaKey)?.value || 0;
+    ivaByNid.delete(ivaKey);
     records.push({
       tdoc: thirdParty.tdoc, nid: thirdParty.nid, dv: thirdParty.dv,
       apl1: thirdParty.apl1 || null, apl2: thirdParty.apl2 || null,
       nom1: thirdParty.nom1 || null, nom2: thirdParty.nom2 || null,
       raz: thirdParty.raz || null,
       imp: Math.round(Number(row.imp || 0)),
-      iva: 0,
+      iva: Math.round(ivaRecovered),
+      icon: 0,
+    });
+  }
+
+  // Proveedores con devoluciones que no son clientes del año: solo iva.
+  for (const { tp, value } of ivaByNid.values()) {
+    records.push({
+      tdoc: tp.tdoc, nid: tp.nid, dv: tp.dv,
+      apl1: tp.apl1 || null, apl2: tp.apl2 || null,
+      nom1: tp.nom1 || null, nom2: tp.nom2 || null,
+      raz: tp.raz || null,
+      imp: 0,
+      iva: Math.round(value),
       icon: 0,
     });
   }

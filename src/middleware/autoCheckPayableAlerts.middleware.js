@@ -45,7 +45,7 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
     const purchase = await Purchase.findOne({
       where: { id: purchase_id, tenant_id },
       attributes: [
-        'id', 'due_date', 'purchase_date', 'total_amount', 'total_retentions', 'paid_amount',
+        'id', 'due_date', 'purchase_date', 'total_amount', 'total_retentions', 'paid_amount', 'returned_amount',
         'payment_status', 'status', 'invoice_number'
       ]
     });
@@ -55,13 +55,11 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
     // Neto de retenciones: lo retenido se le debe a la DIAN, no al proveedor.
     const balance = require('../utils/purchaseAmounts').purchaseBalance(purchase);
 
-    // Igual que en getAgingReport (accountsPayable.controller.js): si la
-    // compra no tiene due_date explícito (proveedor sin payment_terms
-    // configurado), se usa purchase_date como referencia en vez de
-    // descartar la compra por completo -- de lo contrario cualquier compra
-    // sin plazo de pago explícito nunca generaba alerta, sin importar
-    // cuántos días llevara pendiente.
-    const referenceDate = purchase.due_date || purchase.purchase_date;
+    // Misma regla que Cuentas por Pagar (utils/purchaseAmounts.js): due_date
+    // o, si la compra no lo trae (proveedor sin payment_terms), compra + 30
+    // días. Antes se usaba purchase_date tal cual y la compra salía "vencida"
+    // al día siguiente, mientras CxP la mostraba al día.
+    const referenceDate = require('../utils/purchaseAmounts').purchaseEffectiveDueDate(purchase);
 
     // Ya pagada, en borrador o cancelada, o sin ninguna fecha de referencia: resolver cualquier alerta activa
     // Obligación real: recibida (total/parcial) o confirmada con factura del proveedor.
@@ -119,13 +117,13 @@ async function checkAlertsForPurchase(purchase_id, tenant_id) {
           purchase_id: purchase.id,
           alert_type: alertType,
           severity,
-          due_date: purchase.due_date,
+          due_date: referenceDate,
           balance,
           days_to_due: daysToDue,
           status: 'active'
         });
       } else {
-        await existingAlert.update({ balance, days_to_due: daysToDue, severity });
+        await existingAlert.update({ balance, days_to_due: daysToDue, severity, due_date: referenceDate });
       }
     } else {
       // Aún no está en rango de alerta: resolver cualquier alerta activa previa

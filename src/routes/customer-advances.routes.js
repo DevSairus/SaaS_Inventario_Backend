@@ -7,9 +7,11 @@ const { checkRole } = require('../middleware/auth');
 router.get('/',           ctrl.listAdvances);
 router.get('/:id',        ctrl.getAdvanceById);
 router.post('/',          ctrl.createAdvance);
-router.post('/:id/refund', ctrl.refundAdvance);
-router.post('/:id/void',   ctrl.voidAdvance);
+// Devolver o anular un anticipo mueve caja y reversa asientos: solo gestión.
+router.post('/:id/refund', checkRole('admin', 'manager', 'accountant'), ctrl.refundAdvance);
+router.post('/:id/void',   checkRole('admin', 'manager', 'accountant'), ctrl.voidAdvance);
 // Reasignar a otro cliente: solo personal de contabilidad.
-router.post('/:id/reassign', checkRole('admin', 'super_admin', 'accountant'), ctrl.reassignAdvance);
+// Mismos roles de gestión que Devolver/Anular.
+router.post('/:id/reassign', checkRole('admin', 'manager', 'accountant'), ctrl.reassignAdvance);
 
 module.exports = router;

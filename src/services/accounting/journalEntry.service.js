@@ -298,7 +298,29 @@ async function safeAutoGenerate(fn, context, { rethrow = false } = {}) {
   }
 }
 
+/**
+ * Lanza un error 400 si el período contable de `date` está cerrado. Para
+ * operaciones que generan asiento automático después del commit (devoluciones):
+ * se valida ANTES de mover inventario y cartera, porque si no el asiento falla
+ * en silencio y la operación queda sin contabilidad.
+ */
+async function assertPeriodOpen(tenantId, date = new Date(), transaction) {
+  const { FiscalPeriod } = require('../../models');
+  const d = new Date(date);
+  const period = await FiscalPeriod.findOne({
+    where: { tenant_id: tenantId, year: d.getFullYear(), month: d.getMonth() + 1 },
+    attributes: ['status', 'year', 'month'],
+    transaction,
+  });
+  if (period?.status === 'closed') {
+    const err = new Error(`El período contable ${period.month}/${period.year} está cerrado: reábrelo en Contabilidad para registrar esta operación.`);
+    err.status = 400;
+    throw err;
+  }
+}
+
 module.exports = {
+  assertPeriodOpen,
   generateEntryNumber,
   getMappedAccountId,
   getOrCreatePeriod,

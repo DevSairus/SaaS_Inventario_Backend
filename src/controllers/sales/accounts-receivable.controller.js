@@ -1,8 +1,44 @@
 // backend/src/controllers/sales/accounts-receivable.controller.js
-const { Sale, SaleItem, Customer, User } = require('../../models');
-const { sequelize } = require('../../config/database');
+const { Sale, SaleItem, Customer, User, OpeningBalance } = require('../../models');
 const { Op } = require('sequelize');
 const { shouldHideRemisiones, consolidatedExclusionWhere } = require('../../utils/remisionVisibility');
+const { saleBalance } = require('../../utils/saleAmounts');
+const { normalizeOpeningBalanceAsSaleRow } = require('../../services/accounting/openingBalanceMerge.helper');
+
+const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+// Días vencidos (negativo = aún no vence). Con due_date se vence al día
+// siguiente; sin due_date (ventas históricas sin plazo) se asumen 30 días
+// desde la venta.
+const daysOverdueOf = (invoice, today) => {
+  const referenceDate = new Date(invoice.due_date || invoice.sale_date);
+  const days = Math.floor((today - referenceDate) / MS_PER_DAY);
+  return invoice.due_date ? days : days - 30;
+};
+
+// Saldos iniciales de cartera (OpeningBalance 'receivable', registrados en
+// Contabilidad → Saldos Iniciales) con el mismo shape que una venta. Antes
+// existían en contabilidad pero no aparecían en Cuentas por Cobrar.
+const pendingOpeningReceivables = async (tenantId, { customer_id, from_date, to_date } = {}) => {
+  const where = {
+    tenant_id: tenantId,
+    type: 'receivable',
+    status: 'active',
+    payment_status: { [Op.in]: ['pending', 'partial'] },
+  };
+  if (customer_id) where.customer_id = customer_id;
+  if (from_date || to_date) {
+    where.issue_date = {};
+    if (from_date) where.issue_date[Op.gte] = from_date;
+    if (to_date) where.issue_date[Op.lte] = to_date;
+  }
+  const rows = await OpeningBalance.findAll({
+    where,
+    include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name', 'tax_id', 'email', 'phone'] }],
+    order: [['issue_date', 'ASC']],
+  });
+  return rows.map(normalizeOpeningBalanceAsSaleRow);
+};
 
 // Cartera = facturas y remisiones con saldo. Si el tenant oculta las
 // remisiones a no-admin (utils/remisionVisibility.js), esos usuarios solo
@@ -63,12 +99,14 @@ const getAccountsReceivableSummary = async (req, res) => {
         'customer_name',
         'total_amount',
         'paid_amount',
+        'returned_amount',
         'payment_status',
         'payment_method',
         'payment_history',
         'document_type' // ✅ AGREGADO: Incluir tipo de documento
       ]
     });
+    pendingInvoices.push(...await pendingOpeningReceivables(tenantId, { customer_id, from_date, to_date }));
 
     // Calcular totales
     let totalReceivable = 0;
@@ -76,14 +114,9 @@ const getAccountsReceivableSummary = async (req, res) => {
     const today = new Date();
 
     const invoicesWithDetails = pendingInvoices.map(invoice => {
-      const balance = parseFloat(invoice.total_amount) - parseFloat(invoice.paid_amount || 0);
-      // Si hay due_date se usa esa fecha para vencimiento; si no, se cae al
-      // criterio anterior de 30 días desde la venta (compatibilidad con
-      // ventas históricas sin plazo asignado).
-      const referenceDate = invoice.due_date ? new Date(invoice.due_date) : new Date(invoice.sale_date);
-      const daysOverdue = invoice.due_date
-        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
-        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      // Neto de devoluciones aprobadas (returned_amount).
+      const balance = saleBalance(invoice);
+      const daysOverdue = daysOverdueOf(invoice, today);
       const isOverdue = daysOverdue > 0;
 
       totalReceivable += balance;
@@ -101,13 +134,16 @@ const getAccountsReceivableSummary = async (req, res) => {
         customer: invoice.customer,
         total_amount: parseFloat(invoice.total_amount),
         paid_amount: parseFloat(invoice.paid_amount || 0),
+        returned_amount: parseFloat(invoice.returned_amount || 0),
         balance,
         payment_status: invoice.payment_status,
         payment_method: invoice.payment_method,
         days_overdue: Math.max(daysOverdue, 0),
         is_overdue: isOverdue,
         payment_history: invoice.payment_history || [],
-        document_type: invoice.document_type // ✅ AGREGADO: Incluir tipo de documento
+        document_type: invoice.document_type, // ✅ AGREGADO: Incluir tipo de documento
+        // Saldo inicial: se abona por /accounting/opening-balances/:id/payments.
+        is_opening_balance: !!invoice.is_opening_balance
       };
     });
 
@@ -195,17 +231,15 @@ const getCustomerAccountsReceivable = async (req, res) => {
       ],
       order: [['sale_date', 'DESC']]
     });
+    invoices.push(...await pendingOpeningReceivables(tenantId, { customer_id: customerId }));
 
     let totalBalance = 0;
     let totalOverdue = 0;
     const today = new Date();
 
     const invoicesWithDetails = invoices.map(invoice => {
-      const balance = parseFloat(invoice.total_amount) - parseFloat(invoice.paid_amount || 0);
-      const referenceDate = invoice.due_date ? new Date(invoice.due_date) : new Date(invoice.sale_date);
-      const daysOverdue = invoice.due_date
-        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
-        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      const balance = saleBalance(invoice);
+      const daysOverdue = daysOverdueOf(invoice, today);
       const isOverdue = daysOverdue > 0;
 
       totalBalance += balance;
@@ -273,7 +307,7 @@ const getPaymentHistory = async (req, res) => {
       });
     }
 
-    const balance = parseFloat(sale.total_amount) - parseFloat(sale.paid_amount || 0);
+    const balance = saleBalance(sale);
     const paymentHistory = sale.payment_history || [];
 
     // Enriquecer historial con información de usuarios (una sola query)
@@ -303,6 +337,7 @@ const getPaymentHistory = async (req, res) => {
           customer: sale.customer,
           total_amount: parseFloat(sale.total_amount),
           paid_amount: parseFloat(sale.paid_amount || 0),
+          returned_amount: parseFloat(sale.returned_amount || 0),
           balance,
           payment_status: sale.payment_status
         },
@@ -340,6 +375,7 @@ const getAgingReport = async (req, res) => {
       ],
       order: [['sale_date', 'ASC']]
     });
+    invoices.push(...await pendingOpeningReceivables(tenantId));
 
     const today = new Date();
     const aging = {
@@ -358,11 +394,8 @@ const getAgingReport = async (req, res) => {
     };
 
     invoices.forEach(invoice => {
-      const balance = parseFloat(invoice.total_amount) - parseFloat(invoice.paid_amount || 0);
-      const referenceDate = invoice.due_date ? new Date(invoice.due_date) : new Date(invoice.sale_date);
-      const daysOverdue = invoice.due_date
-        ? Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24))
-        : Math.floor((today - referenceDate) / (1000 * 60 * 60 * 24)) - 30;
+      const balance = saleBalance(invoice);
+      const daysOverdue = daysOverdueOf(invoice, today);
 
       const invoiceData = {
         id: invoice.id,
@@ -376,7 +409,8 @@ const getAgingReport = async (req, res) => {
         paid_amount: parseFloat(invoice.paid_amount || 0),
         balance,
         days_overdue: Math.max(daysOverdue, 0),
-        document_type: invoice.document_type // ✅ AGREGADO: Incluir tipo de documento
+        document_type: invoice.document_type, // ✅ AGREGADO: Incluir tipo de documento
+        is_opening_balance: !!invoice.is_opening_balance
       };
 
       totals.total += balance;

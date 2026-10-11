@@ -2727,6 +2727,8 @@ const generateSale = async (req, res) => {
         subtotal:         line.subtotal,
         total:            line.total,
         technician_id:    item.technician_id || null,
+        // Para descontar de la comisión de la OT lo devuelto sobre esta factura.
+        work_order_item_id: item.id,
         ...pickComboFields(item),
       }, { transaction });
 

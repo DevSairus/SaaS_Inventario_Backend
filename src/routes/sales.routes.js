@@ -5,6 +5,7 @@ const salesController = require('../controllers/sales/sales.controller');
 const voidSale        = require('../controllers/sales/voidSale');
 const { applyAdvanceToSale } = require('../controllers/finance/customerAdvances.controller');
 const { checkAccountOwnership } = require('../middleware/checkAccountOwnership');
+const { checkRole } = require('../middleware/auth');
 
 // Estadísticas (debe ir antes de /:id)
 router.get('/stats', salesController.getStats);
@@ -26,7 +27,9 @@ router.post('/:id/payments',      salesController.registerPayment);
 // Retenciones que practicó el cliente (abono sin caja)
 router.post('/:id/retentions',    salesController.registerRetentions);
 router.post('/:id/apply-advance', applyAdvanceToSale);
-router.post('/:id/void',          voidSale);              // ← anulación/devolución
+// Anulación/devolución: crea Y aprueba la devolución (inventario, cartera,
+// caja, nota crédito) -- mismo permiso que aprobar una devolución.
+router.post('/:id/void',          checkRole('admin', 'manager', 'accountant'), voidSale);
 
 // Facturación de remisiones confirmadas (si el tenant lo habilitó)
 router.post('/consolidate-invoice',   salesController.consolidateInvoice);

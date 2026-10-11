@@ -78,6 +78,32 @@ async function fetchWithholding(req) {
     reteica_amount: Number(r.reteica_amount),
   }));
 
+  // Devoluciones de clientes aprobadas en el período sobre facturas con
+  // retención: la retención de lo devuelto se reversa (en proporción a lo
+  // devuelto sobre la factura). Filas NEGATIVAS para que netee en el total
+  // por cliente y en el certificado.
+  const { approvedCustomerReturns } = require('../../services/returns/returnFiscalData');
+  const returns = await approvedCustomerReturns(req.tenant_id, from, to, { customerId: customer_id || null, branchId: branch_id || null });
+  for (const r of returns) {
+    if (!r.customer_id || !(Number(r.sale_retefuente) > 0 || Number(r.sale_reteica) > 0)) continue;
+    sales.push({
+      id: r.id,
+      sale_number: `${r.return_number} (devolución de ${r.sale_number})`,
+      sale_date: String(r.approved_at instanceof Date ? r.approved_at.toISOString() : r.approved_at).slice(0, 10),
+      customer_id: r.customer_id,
+      customer_name: nameOf(r),
+      customer_tax_id: r.customer_tax_id || r.tax_id,
+      subtotal: -r.base,
+      tax_amount: -r.tax_net,
+      total_amount: -Number(r.total_amount || 0),
+      retefuente_rate: null,
+      retefuente_amount: -r.retefuente_share,
+      reteica_rate: null,
+      reteica_amount: -r.reteica_share,
+      is_return: true,
+    });
+  }
+
   const byCustomer = new Map();
   for (const s of sales) {
     if (!byCustomer.has(s.customer_id)) {

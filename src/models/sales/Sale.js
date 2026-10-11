@@ -194,6 +194,11 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0,
   },
+  // Cartera cancelada por devoluciones aprobadas (ver utils/saleAmounts.js).
+  returned_amount: {
+    type: DataTypes.DECIMAL(15, 2),
+    defaultValue: 0,
+  },
   payment_history: {
     type: DataTypes.JSONB,
     defaultValue: [],

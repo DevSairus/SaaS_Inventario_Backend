@@ -706,132 +706,23 @@ const checkSupportDocumentStatus = (sourceType) => async (req, res) => {
  * debería darse en Documentos Soporte generados ANTES de la Fase 5.
  * ────────────────────────────────────────────────────────── */
 const createSupportDocumentAdjustment = async (req, res) => {
-  const { sequelize: seq } = require('../../config/database');
-  const { SupportDocument, SupportDocumentAdjustment, Purchase, PurchaseItem, Supplier, Expense } = require('../../models');
-  const transaction = await seq.transaction();
   try {
-    const { supportDocumentId } = req.params;
-    const tenantId = req.tenant_id;
-    const { adjustment_type, reason, items, amount } = req.body;
-
-    if (!['credit', 'debit'].includes(adjustment_type)) {
-      await transaction.rollback();
-      return fail(res, "adjustment_type debe ser 'credit' o 'debit'");
-    }
-    if (!reason) {
-      await transaction.rollback();
-      return fail(res, 'El motivo es obligatorio');
-    }
-
-    const supportDocument = await SupportDocument.findOne({
-      where: { id: supportDocumentId, tenant_id: tenantId },
-      include: [
-        { model: Purchase, as: 'purchase', include: [{ model: Supplier, as: 'supplier' }] },
-        { model: Expense, as: 'expense', include: [{ model: Supplier, as: 'supplier' }] },
-      ],
-      transaction,
+    const { createSupportDocumentAdjustment: createAdjustment } = require('../../services/dian/supportDocumentAdjustment.service');
+    const adjustment = await createAdjustment({
+      tenantId: req.tenant_id,
+      supportDocumentId: req.params.supportDocumentId,
+      adjustment_type: req.body.adjustment_type,
+      reason: req.body.reason,
+      items: req.body.items,
+      amount: req.body.amount,
+      userId: req.user.id,
     });
-    if (!supportDocument) { await transaction.rollback(); return fail(res, 'Documento Soporte no encontrado', 404); }
-    if (supportDocument.dian_status !== 'accepted' || !supportDocument.cuds) {
-      await transaction.rollback();
-      return fail(res, 'El Documento Soporte debe estar aceptado por la DIAN antes de generar una Nota de Ajuste.');
-    }
-
-    const source = supportDocument.source_type === 'purchase' ? supportDocument.purchase : supportDocument.expense;
-    const supplier = source?.supplier;
-    if (!supplier && !supportDocument.seller_snapshot) {
-      await transaction.rollback();
-      return fail(res, 'Esta Nota de Ajuste no se puede generar: el Documento Soporte original no tiene un proveedor real asociado ni datos de vendedor guardados. Vincula un proveedor primero.');
-    }
-
-    // Calcular ítems de la nota de ajuste — mismo criterio que createAndSendDebitNote
-    const noteItems = [];
-    let noteSubtotal = 0;
-    let noteTax = 0;
-
-    if (items && Array.isArray(items) && items.length > 0) {
-      for (const item of items) {
-        const qty = parseFloat(item.quantity) || 1;
-        const price = parseFloat(item.unit_price) || 0;
-        const taxPct = parseFloat(item.tax_percentage) || 0;
-        const subtot = qty * price;
-        const tax = subtot * taxPct / 100;
-
-        noteSubtotal += subtot;
-        noteTax += tax;
-        noteItems.push({
-          id: String(noteItems.length + 1),
-          description: item.description || 'Ajuste',
-          quantity: qty,
-          unit_code: 'EA',
-          unit_price: price,
-          subtotal: subtot,
-          tax_amount: tax,
-          tax_rate: taxPct,
-        });
-      }
-    } else if (amount && parseFloat(amount) > 0) {
-      const amt = parseFloat(amount);
-      noteSubtotal = amt;
-      noteItems.push({
-        id: '1',
-        description: reason || 'Ajuste al Documento Soporte',
-        quantity: 1,
-        unit_code: 'EA',
-        unit_price: amt,
-        subtotal: amt,
-        tax_amount: 0,
-        tax_rate: 0,
-      });
-    } else {
-      await transaction.rollback();
-      return fail(res, 'Debe especificar ítems o un monto para la Nota de Ajuste');
-    }
-
-    const noteTotal = noteSubtotal + noteTax;
-
-    const adjustment = await SupportDocumentAdjustment.create({
-      tenant_id: tenantId,
-      support_document_id: supportDocument.id,
-      adjustment_type,
-      reason,
-      items: noteItems,
-      subtotal: noteSubtotal,
-      tax_amount: noteTax,
-      total_amount: noteTotal,
-      dian_status: 'pending',
-      created_by: req.user.id,
-    }, { transaction });
-
-    await transaction.commit();
-
-    const tenant = await Tenant.findByPk(tenantId);
-    // Prioriza el proveedor real vigente (datos más al día que el snapshot
-    // si el proveedor se editó desde el envío original) -- el snapshot es
-    // solo el fallback para cuando no hay Supplier vinculado (vendedor
-    // ad-hoc, ver nota de Fase 5 arriba).
-    const seller = supplier ? dianKit.buildSellerFromSupplier(supplier) : supportDocument.seller_snapshot;
-    const retentions = {
-      retefuente_rate: source.retefuente_rate, retefuente_amount: source.retefuente_amount,
-      reteiva_rate: source.reteiva_rate, reteiva_amount: source.reteiva_amount,
-      reteica_rate: source.reteica_rate, reteica_amount: source.reteica_amount,
-    };
-
-    setImmediate(async () => {
-      try {
-        await dianService.sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, seller, tenant, retentions);
-        logger.info(`[DIAN] Nota de Ajuste creada para Documento Soporte ${supportDocument.id}`);
-      } catch (err) {
-        logger.error(`[DIAN] Error enviando Nota de Ajuste de ${supportDocument.id}:`, err.message);
-      }
-    });
-
     ok(res, {
       data: adjustment,
       message: 'Nota de Ajuste creada. Envío a DIAN en proceso.',
     }, 201);
   } catch (e) {
-    if (transaction && !transaction.finished) await transaction.rollback();
+    if (e.status) return fail(res, e.message, e.status);
     logger.error('Error createSupportDocumentAdjustment:', e);
     fail(res, e.message || 'Error al crear la Nota de Ajuste', 500);
   }
@@ -1369,253 +1260,15 @@ const diagnoseCert = async (req, res) => {
  * Si no se envía ninguno, se asume devolución total.
  * ────────────────────────────────────────────────────────── */
 const createAndSendCreditNote = async (req, res) => {
-  const { sequelize: seq } = require('../../config/database');
-  const transaction = await seq.transaction();
   try {
-    const { saleId } = req.params;
-    const tenantId = req.tenant_id;
-    const { items, amount, reason } = req.body;
-
-    if (!reason) {
-      await transaction.rollback();
-      return fail(res, 'El motivo es obligatorio');
-    }
-
-    // Cargar factura original
-    const original = await Sale.findOne({
-      where: { id: saleId, tenant_id: tenantId, document_type: 'factura' },
-      include: [{ model: SaleItem, as: 'items' }],
-      transaction,
-    });
-    if (!original) { await transaction.rollback(); return fail(res, 'Factura no encontrada', 404); }
-    // Factura que agrupa remisiones: la venta real está en las remisiones;
-    // una nota manual acá movería contabilidad que esta factura no tiene.
-    // Se anula con su propia acción (POST /sales/:id/annul-consolidated).
-    if (original.is_consolidated_invoice) {
-      await transaction.rollback();
-      return fail(res, 'Esta factura agrupa remisiones: anúlala con "Anular factura agrupada" desde el detalle de la venta.');
-    }
-    if (!original.cufe) {
-      await transaction.rollback();
-      return fail(res, 'La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');
-    }
-    if (!original.items?.length) {
-      await transaction.rollback();
-      return fail(res, 'La factura no tiene ítems');
-    }
-
-    // Calcular ítems de la nota crédito
-    const noteItems = [];
-    let noteSubtotal = 0;
-    let noteTax = 0;
-
-    if (items && Array.isArray(items) && items.length > 0) {
-      // ── Modo: por ítems seleccionados ──
-      for (const reqItem of items) {
-        const saleItem = original.items.find(i => i.id === reqItem.sale_item_id);
-        if (!saleItem) { await transaction.rollback(); return fail(res, `Ítem ${reqItem.sale_item_id} no pertenece a esta factura`); }
-
-        const qtyReq = parseFloat(reqItem.quantity);
-        if (!qtyReq || qtyReq <= 0) continue;
-        if (qtyReq > parseFloat(saleItem.quantity)) {
-          await transaction.rollback();
-          return fail(res, `${saleItem.product_name}: máximo ${saleItem.quantity} unidades`);
-        }
-
-        const ratio = qtyReq / parseFloat(saleItem.quantity);
-        const itemSubtot = parseFloat(saleItem.subtotal || 0) * ratio;
-        const itemTax = parseFloat(saleItem.tax_amount || 0) * ratio;
-
-        noteSubtotal += itemSubtot;
-        noteTax += itemTax;
-        noteItems.push({
-          item_type: saleItem.item_type || 'product',
-          product_name: saleItem.product_name,
-          product_sku: saleItem.product_sku,
-          product_id: saleItem.product_id,
-          quantity: qtyReq,
-          unit_price: parseFloat(saleItem.unit_price),
-          discount_amount: 0,
-          discount_percentage: 0,
-          tax_percentage: parseFloat(saleItem.tax_percentage || 0),
-          tax_amount: itemTax,
-          subtotal: itemSubtot,
-          total: itemSubtot + itemTax,
-          ...pickComboFields(saleItem),
-          _source_item_id: saleItem.id,
-          _full_quantity: qtyReq === parseFloat(saleItem.quantity),
-        });
-      }
-      // Un combo "solo nombre y total" se acredita resumido solo si entra
-      // completo (todas sus líneas, cantidades totales); si no, la nota
-      // muestra los componentes acreditados.
-      for (const noteItem of noteItems) {
-        if (!noteItem.combo_group_id || noteItem.combo_show_breakdown) continue;
-        const groupLines = original.items.filter(i => i.combo_group_id === noteItem.combo_group_id);
-        const complete = groupLines.every(gl => noteItems.some(n => n._source_item_id === gl.id && n._full_quantity));
-        if (!complete) noteItem.combo_show_breakdown = true;
-      }
-    } else if (amount && parseFloat(amount) > 0) {
-      // ── Modo: monto fijo — distribuir proporcionalmente ──
-      const targetAmount = Math.min(parseFloat(amount), parseFloat(original.total_amount));
-      const totalRatio = targetAmount / parseFloat(original.total_amount);
-
-      for (const si of original.items) {
-        const itemSubtot = parseFloat(si.subtotal || 0) * totalRatio;
-        const itemTax = parseFloat(si.tax_amount || 0) * totalRatio;
-        const qty = parseFloat(si.quantity) * totalRatio;
-
-        noteSubtotal += itemSubtot;
-        noteTax += itemTax;
-        noteItems.push({
-          item_type: si.item_type || 'product',
-          product_name: si.product_name,
-          product_sku: si.product_sku,
-          product_id: si.product_id,
-          quantity: Math.round(qty * 100) / 100,
-          unit_price: parseFloat(si.unit_price),
-          discount_amount: 0,
-          discount_percentage: 0,
-          tax_percentage: parseFloat(si.tax_percentage || 0),
-          tax_amount: itemTax,
-          subtotal: itemSubtot,
-          total: itemSubtot + itemTax,
-          ...pickComboFields(si),
-        });
-      }
-    } else {
-      // ── Modo: devolución total ──
-      for (const si of original.items) {
-        const itemSubtot = parseFloat(si.subtotal || 0);
-        const itemTax = parseFloat(si.tax_amount || 0);
-
-        noteSubtotal += itemSubtot;
-        noteTax += itemTax;
-        noteItems.push({
-          item_type: si.item_type || 'product',
-          product_name: si.product_name,
-          product_sku: si.product_sku,
-          product_id: si.product_id,
-          quantity: parseFloat(si.quantity),
-          unit_price: parseFloat(si.unit_price),
-          discount_amount: 0,
-          discount_percentage: 0,
-          tax_percentage: parseFloat(si.tax_percentage || 0),
-          tax_amount: itemTax,
-          subtotal: itemSubtot,
-          total: itemSubtot + itemTax,
-          ...pickComboFields(si),
-        });
-      }
-    }
-
-    if (noteItems.length === 0) {
-      await transaction.rollback();
-      return fail(res, 'No hay ítems válidos para la nota crédito');
-    }
-
-    // Factura AIU: A, I, U y el IVA (que va solo sobre la U) se acreditan
-    // en proporción al costo directo acreditado -- ver aiu.service.js#prorateAiu.
-    let aiuNote = null;
-    if (original.aiu_enabled) {
-      const { prorateAiu } = require('../../services/sales/aiu.service');
-      aiuNote = prorateAiu(original, noteSubtotal);
-      noteSubtotal = aiuNote.subtotal;
-      noteTax = aiuNote.tax;
-    }
-
-    // Parte del descuento global de la factura que le toca a lo acreditado
-    // (services/sales/globalDiscount.service.js): la NC va por el NETO, con
-    // el descuento como AllowanceCharge de documento -- igual que la factura.
-    // Antes acreditaba el valor de lista y superaba lo cobrado.
-    const { discountShare, round2 } = require('../../services/sales/globalDiscount.service');
-    const noteDiscount = discountShare(original, noteSubtotal + noteTax);
-    const noteTotal = round2(noteSubtotal + noteTax - noteDiscount);
-    const noteNumber = `NC-${Date.now()}`;
-
-    // Crear Sale como nota crédito
-    const noteSale = await Sale.create({
-      tenant_id: tenantId,
-      branch_id: original.branch_id,
-      reference_sale_id: original.id,
-      sale_number: noteNumber,
-      document_type: 'nota_credito',
-      sale_date: new Date(),
-      customer_id: original.customer_id,
-      customer_name: original.customer_name,
-      customer_tax_id: original.customer_tax_id,
-      customer_email: original.customer_email,
-      customer_phone: original.customer_phone,
-      customer_address: original.customer_address,
-      customer_city_code: original.customer_city_code,
-      customer_city_name: original.customer_city_name,
-      customer_department_name: original.customer_department_name,
-      customer_document_type: original.customer_document_type,
-      subtotal: noteSubtotal,
-      tax_amount: noteTax,
-      discount_amount: 0,
-      global_discount_amount: noteDiscount,
-      total_amount: noteTotal,
-      payment_method: original.payment_method,
-      payment_status: 'paid',
-      paid_amount: noteTotal,
-      status: 'completed',
-      notes: `Nota crédito para factura ${original.dian_invoice_number || original.sale_number}. Motivo: ${reason}`,
-      dian_status: 'pending',
-      ...(aiuNote ? aiuNote.fields : {}),
-    }, { transaction });
-
-    // Crear ítems de la nota crédito
-    for (const item of noteItems) {
-      await SaleItem.create({
-        sale_id: noteSale.id,
-        tenant_id: tenantId,
-        item_type: item.item_type || 'product',
-        product_id: item.product_id,
-        product_name: item.product_name,
-        product_sku: item.product_sku,
-        quantity: item.quantity,
-        unit_price: item.unit_price,
-        discount_percentage: 0,
-        discount_amount: 0,
-        tax_percentage: item.tax_percentage,
-        tax_amount: item.tax_amount,
-        subtotal: item.subtotal,
-        total: item.total,
-        unit_cost: 0,
-        ...pickComboFields(item),
-      }, { transaction });
-    }
-
-    await transaction.commit();
-
-    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea).
-    setImmediate(async () => {
-      try {
-        const { generateCreditNoteEntry } = require('../../services/accounting/autoEntries.service');
-        await generateCreditNoteEntry(noteSale, noteItems, tenantId, req.user.id);
-      } catch (err) {
-        logger.warn(`[accounting] Error generando asiento de la nota crédito ${noteSale.id}: ${err.message}`);
-      }
-    });
-
-    // Enviar a DIAN (async)
-    const tenant = await Tenant.findByPk(tenantId);
-    setImmediate(async () => {
-      try {
-        await dianService.sendCreditNoteToDian({
-          ...noteSale.toJSON(),
-          items: noteItems,
-          reference_sale_id: original.id,
-          reference_invoice_number: original.dian_invoice_number || original.sale_number,
-          reference_invoice_cufe: original.cufe,
-          reference_invoice_date: original.sale_date,
-        }, tenant);
-        logger.info(`[DIAN] NC ${noteNumber} enviada para factura ${original.sale_number}`);
-      } catch (err) {
-        logger.error(`[DIAN] Error enviando NC ${noteNumber}:`, err.message);
-        await Sale.update({ dian_status: 'rejected', dian_error_message: err.message }, { where: { id: noteSale.id } });
-      }
+    const { createAndSendCreditNote: createNote } = require('../../services/sales/creditNote.service');
+    const { noteSale } = await createNote({
+      tenantId: req.tenant_id,
+      saleId: req.params.saleId,
+      items: req.body.items,
+      amount: req.body.amount,
+      reason: req.body.reason,
+      userId: req.user.id,
     });
 
     const completeNote = await Sale.findByPk(noteSale.id, {
@@ -1627,7 +1280,7 @@ const createAndSendCreditNote = async (req, res) => {
       message: 'Nota crédito creada. Envío a DIAN en proceso.',
     }, 201);
   } catch (e) {
-    if (transaction && !transaction.finished) await transaction.rollback();
+    if (e.status) return fail(res, e.message, e.status);
     logger.error('Error createAndSendCreditNote:', e);
     fail(res, e.message || 'Error al crear nota crédito', 500);
   }

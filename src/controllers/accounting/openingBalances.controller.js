@@ -10,6 +10,8 @@ const { sequelize } = require('../../config/database');
 const { OpeningBalance, Customer, Supplier } = require('../../models');
 const openingBalanceService = require('../../services/accounting/openingBalance.service');
 const logger = require('../../config/logger');
+const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 
 // GET /api/accounting/opening-balances?type=receivable|payable
 exports.list = async (req, res) => {
@@ -165,7 +167,7 @@ exports.registerPayment = async (req, res) => {
   const t = await sequelize.transaction();
   try {
     const { id } = req.params;
-    const { amount, payment_method, payment_date, notes } = req.body;
+    const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await t.rollback();
@@ -194,18 +196,39 @@ exports.registerPayment = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Este saldo inicial ya está pagado en su totalidad' });
     }
 
+    // Igual que un pago de venta (sales.controller.js#registerPayment): con
+    // Tesorería exige caja abierta en la sede y el abono queda ligado a esa
+    // caja -- antes no aparecía en el cuadre ni en Flujo de Caja.
+    let openSession = null;
+    if (await isTreasuryEnabled(req.tenant_id)) {
+      openSession = await getOpenSession(req.tenant_id, req.branch_id, t);
+      if (!openSession) {
+        await t.rollback();
+        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
+      }
+    }
+    const effectiveMethod = payment_method || 'Efectivo';
+    const selectedBankAccountId = await resolveSelectedBankAccountId(req.tenant_id, bank_account_id, effectiveMethod, t);
+
     const effectiveAmount = Math.min(parseFloat(amount), remaining);
     const paid_amount = alreadyPaid + effectiveAmount;
     const payment_status = paid_amount >= total ? 'paid' : 'partial';
 
     const { getMappedAccountId, createDraftEntry, postEntry } = require('../../services/accounting/journalEntry.service');
-    const isBank = payment_method && /transfer|banco|tarjeta/i.test(payment_method);
+    const isBank = !/efectivo|cash/i.test(effectiveMethod); // mismo criterio que bankAccountSelection
     const cashOrBankKey = openingBalance.type === 'receivable'
       ? (isBank ? 'sale_bank_account' : 'sale_cash_account')
       : (isBank ? 'purchase_bank_account' : 'purchase_cash_account');
     const controlKey = openingBalance.type === 'receivable' ? 'sale_receivable' : 'purchase_payable';
 
-    const cashOrBankAccountId = await getMappedAccountId(req.tenant_id, cashOrBankKey, t);
+    // Cuenta bancaria elegida: su subcuenta PUC propia (como en ventas/gastos).
+    let cashOrBankAccountId = null;
+    if (selectedBankAccountId) {
+      const { BankAccount } = require('../../models');
+      const bank = await BankAccount.findOne({ where: { id: selectedBankAccountId, tenant_id: req.tenant_id }, attributes: ['chart_of_account_id'], transaction: t });
+      cashOrBankAccountId = bank?.chart_of_account_id || null;
+    }
+    if (!cashOrBankAccountId) cashOrBankAccountId = await getMappedAccountId(req.tenant_id, cashOrBankKey, t);
     const controlAccountId = await getMappedAccountId(req.tenant_id, controlKey, t);
     const thirdPartyId = openingBalance.type === 'receivable' ? openingBalance.customer_id : openingBalance.supplier_id;
 
@@ -238,7 +261,11 @@ exports.registerPayment = async (req, res) => {
     payment_history.push({
       date: payment_date || new Date(),
       amount: effectiveAmount,
-      method: payment_method || 'Efectivo',
+      method: effectiveMethod,
+      bank_account_id: selectedBankAccountId,
+      branch_id: req.branch_id || openingBalance.branch_id || null,
+      cash_session_id: openSession?.id || null,
+      payment_id: require('crypto').randomUUID(),
       user_id: req.user?.id,
       notes: notes || null,
       journal_entry_id: entry.id,
@@ -249,7 +276,7 @@ exports.registerPayment = async (req, res) => {
     await t.commit();
     res.json({ success: true, message: 'Pago registrado', data: openingBalance });
   } catch (error) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     logger.error(`[openingBalances.registerPayment] ${error.message}`);
     res.status(400).json({ success: false, message: error.message });
   }

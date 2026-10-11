@@ -19,6 +19,7 @@ const { buildStockWarnings } = require('../../services/inventory/stockInProcess.
 const { resolveUnitCost } = require('../../utils/costResolver');
 const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
 const { applyRemisionFilter } = require('../../utils/remisionVisibility');
+const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
 // que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
@@ -1525,7 +1526,7 @@ const registerRetentions = async (req, res) => {
     const targets = sale.is_consolidated_invoice
       ? await invoicing.lockPendingRemisiones(sale.id, tenantId, transaction)
       : [sale];
-    const pendingOf = (t) => round2(parseFloat(t.total_amount) - parseFloat(t.paid_amount || 0));
+    const pendingOf = (t) => saleBalance(t);
     const totalPending = round2(targets.reduce((sum, t) => sum + pendingOf(t), 0));
     if (amount > totalPending + 0.01) {
       await transaction.rollback();
@@ -1540,9 +1541,8 @@ const registerRetentions = async (req, res) => {
       const share = shares[i];
       const shareAmount = round2(share.retefuente + share.reteiva + share.reteica);
       if (shareAmount <= 0) continue;
-      const total = parseFloat(target.total_amount);
       const paid_amount = round2(parseFloat(target.paid_amount || 0) + shareAmount);
-      const payment_status = paid_amount >= total ? 'paid' : 'partial';
+      const payment_status = salePaymentStatus(target, paid_amount);
       const payment_id = require('crypto').randomUUID();
       const payment_history = [...(target.payment_history || []), {
         payment_id,
@@ -1625,7 +1625,7 @@ const registerPayment = async (req, res) => {
     const targets = sale.is_consolidated_invoice
       ? await invoicing.lockPendingRemisiones(sale.id, tenantId, transaction)
       : [sale];
-    const remaining = targets.reduce((sum, t) => sum + (parseFloat(t.total_amount) - parseFloat(t.paid_amount || 0)), 0);
+    const remaining = targets.reduce((sum, t) => sum + saleBalance(t), 0);
 
     if (remaining <= 0) {
       await transaction.rollback();
@@ -1654,18 +1654,15 @@ const registerPayment = async (req, res) => {
     const appliedPayments = [];
     for (const target of targets) {
       if (toApply <= 0) break;
-      const total = parseFloat(target.total_amount);
       const alreadyPaid = parseFloat(target.paid_amount || 0);
-      const effectiveAmount = Math.round(Math.min(toApply, total - alreadyPaid) * 100) / 100;
+      const effectiveAmount = Math.round(Math.min(toApply, saleBalance(target)) * 100) / 100;
       if (effectiveAmount <= 0) continue;
       toApply = Math.round((toApply - effectiveAmount) * 100) / 100;
       // Redondeo a centavos: la suma en flotante puede quedar en .829999… y
       // la venta seguiría "parcial" estando pagada.
       const paid_amount = Math.round((alreadyPaid + effectiveAmount) * 100) / 100;
 
-      let payment_status = 'pending';
-      if (paid_amount >= total - 0.005) payment_status = 'paid';
-      else if (paid_amount > 0) payment_status = 'partial';
+      const payment_status = salePaymentStatus(target, paid_amount);
 
       const payment_id = require('crypto').randomUUID();
       const payment_history = [...(target.payment_history || [])];

@@ -20,6 +20,8 @@ const SaleItem = sequelize.define('SaleItem', {
     references: { model: 'sales', key: 'id' },
     onDelete: 'CASCADE',
   },
+  // Línea de la OT de la que salió (workOrders.controller.js#generateSale).
+  work_order_item_id: { type: DataTypes.UUID, allowNull: true },
   // ── Tipo de línea ─────────────────────────────────────────
   item_type: {
     type: DataTypes.ENUM('product', 'service', 'free_line'),

@@ -34,7 +34,7 @@ async function buildRecords(tenantId, year) {
   const rows = await sequelize.query(
     `SELECT s.customer_id, s.customer_tax_id AS tax_id, s.customer_document_type AS document_type,
             c.first_name, c.last_name, c.business_name, s.customer_city_code AS city_code, s.customer_address AS address,
-            SUM(s.total_amount - s.paid_amount) AS sal
+            SUM(s.total_amount - s.paid_amount - COALESCE(s.returned_amount, 0)) AS sal
      FROM "${schema}"."sales" s
      LEFT JOIN "${schema}"."customers" c ON c.id = s.customer_id
      WHERE s.tenant_id = :tenantId AND s.status = 'completed'
@@ -42,7 +42,7 @@ async function buildRecords(tenantId, year) {
        AND s.payment_status IN ('pending', 'partial')
        AND s.sale_date <= :cutoff
      GROUP BY s.customer_id, s.customer_tax_id, s.customer_document_type, c.first_name, c.last_name, c.business_name, s.customer_city_code, s.customer_address
-     HAVING SUM(s.total_amount - s.paid_amount) > 0`,
+     HAVING SUM(s.total_amount - s.paid_amount - COALESCE(s.returned_amount, 0)) > 0`,
     { replacements: { tenantId, cutoff }, type: QueryTypes.SELECT }
   );
 

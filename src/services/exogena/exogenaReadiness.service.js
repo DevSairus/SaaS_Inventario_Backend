@@ -44,7 +44,8 @@ async function checkReadiness(tenantId, formatCode, year) {
     const { effectiveConceptMap } = require('./exogenaGenerator.service');
     conceptBySourceKey = await effectiveConceptMap(tenantId, formatCode);
   }
-  const { records, skipped } = await service.buildRecords(tenantId, year, conceptBySourceKey);
+  const options = await require('./exogenaGenerator.service').formatOptions(tenantId, formatCode);
+  const { records, skipped } = await service.buildRecords(tenantId, year, conceptBySourceKey, options);
 
   return {
     ready: missingConcepts.length === 0,

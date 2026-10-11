@@ -177,6 +177,62 @@ async function fetchWithholdingPracticed(req) {
     }
   }
 
+  // Devoluciones a proveedor aprobadas en el período: reversan la retención
+  // de lo devuelto (ya no se le debe a la DIAN). Líneas NEGATIVAS con el
+  // mismo concepto y tarifa de la retención original, para que netee en el
+  // resumen por concepto, por proveedor y en el certificado.
+  const { approvedSupplierReturns } = require('../../services/returns/returnFiscalData');
+  const returns = await approvedSupplierReturns(req.tenant_id, from, to, { supplierId: supplier_id || null, branchId: branch_id || null });
+  const CODE_OF = { retefuente: '07', reteiva: '05', reteica: '06' };
+  for (const r of returns) {
+    const base = {
+      source: 'supplier_return',
+      doc_id: r.id,
+      doc_number: r.return_number,
+      doc_reference: `Devolución de la compra ${r.purchase_number}${r.invoice_number ? ` (fact. ${r.invoice_number})` : ''}`,
+      doc_date: String(r.approved_at instanceof Date ? r.approved_at.toISOString() : r.approved_at).slice(0, 10),
+      ...supplierOf(r),
+    };
+    const detail = Array.isArray(r.applied_retentions) ? r.applied_retentions : [];
+    for (const [key, code] of Object.entries(CODE_OF)) {
+      const reversed = Number(r.reversal[key] || 0);
+      if (!(reversed > 0)) continue;
+      const concepts = detail.filter((l) => l.code === code && Number(l.amount) > 0);
+      if (concepts.length > 0) {
+        const total = concepts.reduce((acc, l) => acc + Number(l.amount), 0);
+        let assigned = 0;
+        concepts.forEach((l, idx) => {
+          const amount = idx === concepts.length - 1 ? round2(reversed - assigned) : round2(reversed * (Number(l.amount) / total));
+          assigned = round2(assigned + amount);
+          lines.push({
+            ...base,
+            code,
+            type_name: TYPE_NAMES[code],
+            concept: l.concept || TYPE_NAMES[code],
+            rate: Number(l.rate),
+            rate_unit: code === '06' ? '‰' : '%',
+            base: -round2(Number(l.base || 0) * (amount / Number(l.amount))),
+            amount: -amount,
+          });
+        });
+      } else {
+        const rate = Number(r[`${key}_rate`] || 0);
+        const docBase = code === '05' ? Number(r.purchase_tax || 0) : Number(r.purchase_subtotal || 0);
+        const docAmount = rate > 0 ? docBase * rate / (code === '06' ? 1000 : 100) : 0;
+        lines.push({
+          ...base,
+          code,
+          type_name: TYPE_NAMES[code],
+          concept: `${TYPE_NAMES[code]} compras`,
+          rate,
+          rate_unit: code === '06' ? '‰' : '%',
+          base: -round2(docAmount > 0 ? docBase * (reversed / docAmount) : 0),
+          amount: -round2(reversed),
+        });
+      }
+    }
+  }
+
   lines.sort((a, b) => String(a.doc_date).localeCompare(String(b.doc_date)) || String(a.doc_number).localeCompare(String(b.doc_number)));
 
   // ── Por concepto (tipo + concepto + tarifa) ──

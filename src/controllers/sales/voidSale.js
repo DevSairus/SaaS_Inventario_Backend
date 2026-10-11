@@ -67,7 +67,13 @@ async function generateReturnNumber(tenant_id, transaction) {
 // reingresarlos a inventario -- solo reversa lo que la venta descontó por su
 // cuenta. La devolución normal de cliente post-entrega (voidSale HTTP,
 // llamado sin este parámetro) no se ve afectada: sigue reingresando todo.
-async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes, work_order_target_status = 'cancelado', retained_product_ids = [] }) {
+// settlement: { settlement_type, payment_method, bank_account_id } -- qué
+// hacer con la parte YA PAGADA de lo devuelto (devolver dinero / saldo a
+// favor), igual que al aprobar una devolución (customerReturns.controller.js).
+// undefined = flujo de reversión de OT (workOrders.controller.js), que ya
+// devolvió sus abonos a la OT antes de llamar: se mantiene el reintegro
+// contable por el medio de pago de la venta, sin pasar por caja.
+async function voidSaleCore({ sale_id, tenant_id, user_id, branch_id = null, items, reason, notes, work_order_target_status = 'cancelado', retained_product_ids = [], settlement }) {
   const transaction = await sequelize.transaction();
   const retainedProductIdSet = new Set(retained_product_ids || []);
 
@@ -112,6 +118,21 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
       });
     }
 
+    if (sale.dian_status === 'sending') {
+      await transaction.rollback();
+      throw httpError(409, { success: false, message: 'La factura está en envío a la DIAN: espera la respuesta antes de anularla.' });
+    }
+
+    // Cantidades: válidas, líneas repetidas agrupadas y tope = vendido -
+    // devuelto (pendientes y aprobadas) -- mismo helper que crear/aprobar.
+    const { validateReturnQuantities, settleCustomerReturn } = require('./customerReturns.controller');
+    try {
+      await validateReturnQuantities(sale, items, { countPending: true, transaction });
+    } catch (validationError) {
+      await transaction.rollback();
+      throw httpError(400, { success: false, message: validationError.message });
+    }
+
     // ── 2. Validar ítems ──────────────────────────────────────────────────────
     let subtotal = 0;
     let tax      = 0;
@@ -135,19 +156,6 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
         });
       }
 
-      const alreadyReturned = (await CustomerReturnItem.sum('quantity', {
-        where: { sale_item_id: saleItem.id },
-        transaction,
-      })) || 0;
-
-      const remaining = parseFloat(saleItem.quantity) - parseFloat(alreadyReturned);
-      if (qtyReq > remaining) {
-        await transaction.rollback();
-        throw httpError(400, {
-          success: false,
-          message: `${saleItem.product_name}: solo quedan ${remaining} unidades por devolver`,
-        });
-      }
 
       const ratio      = qtyReq / parseFloat(saleItem.quantity);
       const itemSubtot = parseFloat(saleItem.subtotal || 0) * ratio;
@@ -187,6 +195,16 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
 
     // Parte del descuento global de la venta que le toca a lo devuelto: se
     // devuelve el NETO, no el valor de las líneas (globalDiscount.service.js).
+    // Factura AIU: A, I, U y el IVA (que va solo sobre la U) se devuelven en
+    // proporción al costo directo devuelto -- mismo criterio que la nota
+    // crédito (aiu.service.js#prorateAiu). Sin esto la devolución acreditaba
+    // solo el costo directo y quedaba por debajo de lo facturado.
+    if (sale.aiu_enabled) {
+      const aiu = require('../../services/sales/aiu.service').prorateAiu(sale, subtotal);
+      subtotal = aiu.subtotal;
+      tax = aiu.tax;
+    }
+
     const { discountShare, round2 } = require('../../services/sales/globalDiscount.service');
     const discount = discountShare(sale, subtotal + tax);
     const returnTotal = round2(subtotal + tax - discount);
@@ -252,6 +270,18 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
         }
       }
     }
+
+    // ── 4b. Cartera y parte ya pagada ─────────────────────────────────────────
+    // Antes la anulación no bajaba el saldo de la venta ni registraba en caja
+    // el dinero devuelto (el asiento sí lo sacaba de caja).
+    await require('../../services/accounting/journalEntry.service').assertPeriodOpen(tenant_id, new Date(), transaction);
+    const settlementFields = await settleCustomerReturn(
+      customerReturn,
+      settlement === undefined ? null : (settlement || {}),
+      { user: { id: user_id, tenant_id }, branch_id },
+      transaction
+    );
+    await customerReturn.update(settlementFields, { transaction });
 
     // ── 5. Commit ─────────────────────────────────────────────────────────────
     await transaction.commit();
@@ -395,6 +425,8 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, items, reason, notes,
       await transaction.rollback().catch(() => {});
     }
     if (error.statusCode) throw error; // ya es un httpError, propagar tal cual
+    // Validaciones de settleCustomerReturn (falta elegir, sin caja abierta, etc.)
+    if (error.status === 400) throw httpError(400, { success: false, message: error.message });
     logger.error('[VOID] Error en voidSaleCore:', error);
     throw httpError(500, { success: false, message: process.env.NODE_ENV === 'development' ? 'Error al procesar la anulación: ' + error.message : 'Error al procesar la anulación' });
   }
@@ -406,7 +438,7 @@ const voidSale = async (req, res) => {
   const { id }    = req.params;
   const tenant_id = req.tenant_id;
   const user_id   = req.user_id || req.user?.id;
-  const { items, reason, notes } = req.body;
+  const { items, reason, notes, settlement_type, payment_method, bank_account_id } = req.body;
 
   if (!items || !Array.isArray(items) || items.length === 0)
     return res.status(400).json({ success: false, message: 'Debe indicar al menos un ítem a devolver' });
@@ -414,7 +446,10 @@ const voidSale = async (req, res) => {
     return res.status(400).json({ success: false, message: 'El motivo es obligatorio' });
 
   try {
-    const result = await voidSaleCore({ sale_id: id, tenant_id, user_id, items, reason, notes });
+    const result = await voidSaleCore({
+      sale_id: id, tenant_id, user_id, branch_id: req.branch_id || null, items, reason, notes,
+      settlement: { settlement_type, payment_method, bank_account_id },
+    });
 
     return res.status(201).json({
       success: true,
