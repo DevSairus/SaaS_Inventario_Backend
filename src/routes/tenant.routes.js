@@ -8,6 +8,8 @@ const {
   uploadLogo,
   deleteLogo
 } = require('../controllers/tenant.controller');
+const { getLabelPrinting, updateLabelPrinting } = require('../controllers/labelPrinting.controller');
+const { checkRole } = require('../middleware/auth');
 
 // Configurar multer para subida de imágenes
 const upload = multer({
@@ -32,6 +34,11 @@ router.get('/config', getTenantConfig);
 
 // Actualizar configuración del tenant
 router.put('/config', updateTenantConfig);
+
+// Perfiles de impresión de etiquetas: leerlos cualquiera (para imprimir),
+// editarlos solo gestión (labelPrinting.controller.js).
+router.get('/label-printing', getLabelPrinting);
+router.put('/label-printing', checkRole('admin', 'manager'), updateLabelPrinting);
 
 // Subir logo
 router.post('/logo', upload.single('logo'), uploadLogo);
