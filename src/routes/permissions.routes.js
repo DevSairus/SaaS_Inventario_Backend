@@ -2,10 +2,16 @@ const express = require('express');
 const router = express.Router();
 const permissionsController = require('../controllers/permissions.controller');
 const { authMiddleware } = require('../middleware/auth');
+const { isRestrictedPlatformUser } = require('../middleware/platformScope');
 
 // Middleware de rol admin
-const requireAdmin = (req, res, next) => {
+const requireAdmin = async (req, res, next) => {
   if (!['super_admin', 'admin'].includes(req.user?.role)) {
+    return res.status(403).json({ success: false, message: 'Acceso denegado' });
+  }
+  // Superadmin con acceso restringido a algunas empresas: no toca permisos
+  // globales por rol (ver middleware/platformScope.js).
+  if (req.user.role === 'super_admin' && await isRestrictedPlatformUser(req.user.id)) {
     return res.status(403).json({ success: false, message: 'Acceso denegado' });
   }
   next();

@@ -1564,14 +1564,21 @@ async function callRemoteDianService(baseUrls, path, body) {
     const url = `${baseUrl}${path}`;
     logger.info(`[DIAN Proxy] → ${url}`);
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-      },
-      body: JSON.stringify(body),
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      // fetch solo dice "fetch failed": el servicio DIAN (túnel) no responde.
+      const cause = e.cause?.code || e.cause?.message || e.message;
+      throw new Error(`No se pudo conectar con el servicio DIAN (${baseUrl}): ${cause}. Verifique que dian-service esté encendido y que DIAN_SERVICE_URL en Railway tenga la URL actual del túnel.`);
+    }
 
     if (!response.ok) {
       const err = await response.text();

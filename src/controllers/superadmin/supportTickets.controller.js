@@ -14,6 +14,10 @@ const logger = require('../../config/logger');
 const TICKET_STATUSES = ['open', 'in_progress', 'waiting_customer', 'resolved', 'closed'];
 const TICKET_PRIORITIES = ['low', 'medium', 'high', 'urgent'];
 
+// Usuario de plataforma con acceso restringido: solo tickets de sus empresas
+// (middleware/platformScope.js). Un ticket ajeno responde 404, como si no existiera.
+const canSeeTicket = (req, ticket) => !req.platformScope || req.platformScope.canSeeTenant(ticket.tenant_id);
+
 // GET /api/superadmin/support/tickets — bandeja con filtros
 const listTickets = async (req, res) => {
   try {
@@ -31,6 +35,9 @@ const listTickets = async (req, res) => {
     if (assigned_agent_id) where.assigned_agent_id = assigned_agent_id;
     if (start_date && end_date) {
       where.created_at = { [Op.between]: [new Date(start_date), new Date(end_date)] };
+    }
+    if (req.platformScope?.restricted) {
+      where[Op.and] = [{ tenant_id: { [Op.in]: req.platformScope.tenantIds } }];
     }
     if (search) {
       where[Op.or] = [
@@ -91,7 +98,7 @@ const getTicketDetail = async (req, res) => {
       ],
     });
 
-    if (!ticket) {
+    if (!ticket || !canSeeTicket(req, ticket)) {
       return res.status(404).json({ success: false, message: 'Ticket no encontrado' });
     }
 
@@ -113,7 +120,7 @@ const updateTicket = async (req, res) => {
     const { status, priority, assigned_agent_id } = req.body;
 
     const ticket = await SupportTicket.findByPk(id);
-    if (!ticket) {
+    if (!ticket || !canSeeTicket(req, ticket)) {
       return res.status(404).json({ success: false, message: 'Ticket no encontrado' });
     }
 
@@ -173,7 +180,7 @@ const addMessage = async (req, res) => {
     }
 
     const ticket = await SupportTicket.findByPk(id);
-    if (!ticket) {
+    if (!ticket || !canSeeTicket(req, ticket)) {
       return res.status(404).json({ success: false, message: 'Ticket no encontrado' });
     }
 

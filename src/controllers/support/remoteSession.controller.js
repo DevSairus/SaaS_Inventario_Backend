@@ -29,7 +29,9 @@ const createSession = async (req, res) => {
         { model: Tenant, as: 'tenant', attributes: ['id', 'company_name'] },
       ],
     });
-    if (!ticket) {
+    // Usuario de plataforma con acceso restringido: solo tickets de sus
+    // empresas (middleware/platformScope.js).
+    if (!ticket || (req.platformScope && !req.platformScope.canSeeTenant(ticket.tenant_id))) {
       return res.status(404).json({ success: false, message: 'Ticket no encontrado' });
     }
 
@@ -120,7 +122,9 @@ const getTenantUsers = async (req, res) => {
   try {
     const { tenant_id } = req.params;
     const users = await User.findAll({
-      where: { tenant_id, is_active: true },
+      // Solo usuarios que inician sesión: un técnico sin acceso al sistema
+      // nunca recibiría la solicitud de acceso remoto.
+      where: { tenant_id, is_active: true, has_system_access: true },
       attributes: ['id', 'first_name', 'last_name', 'email', 'role'],
       order: [['first_name', 'ASC']],
     });
@@ -217,6 +221,9 @@ const listSessions = async (req, res) => {
     if (status) where.status = status;
     if (agent_id) where.agent_id = agent_id;
     if (tenant_id) where.tenant_id = tenant_id;
+    if (req.platformScope?.restricted) {
+      where[Op.and] = [{ tenant_id: { [Op.in]: req.platformScope.tenantIds } }];
+    }
     if (start_date && end_date) {
       where.created_at = { [Op.between]: [new Date(start_date), new Date(end_date)] };
     }

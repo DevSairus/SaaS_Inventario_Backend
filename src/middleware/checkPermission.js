@@ -20,8 +20,10 @@ const checkPermission = (permissionName) => {
         return next();
       }
 
+      // La tabla permissions no tiene columna is_active: filtrar por ella
+      // tiraba error SQL (500) para cualquier rol distinto de super_admin.
       const permission = await Permission.findOne({
-        where: { name: permissionName, is_active: true }
+        where: { name: permissionName }
       });
 
       if (!permission) {
@@ -77,7 +79,7 @@ const checkPermissions = (permissions = []) => {
 
       for (const permName of permissions) {
         const permission = await Permission.findOne({
-          where: { name: permName, is_active: true }
+          where: { name: permName }
         });
 
         if (!permission) {
@@ -134,7 +136,7 @@ const checkAnyPermission = (permissions = []) => {
 
       for (const permName of permissions) {
         const permission = await Permission.findOne({
-          where: { name: permName, is_active: true }
+          where: { name: permName }
         });
 
         if (!permission) continue;

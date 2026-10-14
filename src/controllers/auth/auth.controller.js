@@ -191,7 +191,11 @@ const login = async (req, res) => {
           first_name: user.first_name,
           last_name: user.last_name,
           role: user.role,
-          tenant_id: user.tenant_id
+          tenant_id: user.tenant_id,
+          // Usuarios de plataforma (ver middleware/platformScope.js). Solo
+          // para la UI: el backend vuelve a leerlos de la BD en cada request.
+          is_owner: user.role === 'super_admin' && user.is_owner === true,
+          all_tenants_access: user.all_tenants_access !== false
         }
       }
     });

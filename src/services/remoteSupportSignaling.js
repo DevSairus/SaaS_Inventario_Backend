@@ -34,16 +34,42 @@ function initRemoteSupportSignaling(io) {
       socket.join(`user:${socket.user.id}`);
     }
 
-    socket.on('session:join', ({ sessionId }) => {
-      socket.join(`session:${sessionId}`);
-      if (!socket.data.sessionIds) socket.data.sessionIds = new Set();
-      socket.data.sessionIds.add(sessionId);
-      socket.emit('session:joined', { sessionId });
-      socket.to(`session:${sessionId}`).emit('session:peer-joined', { sessionId });
-      console.log(`[WS] ${socket.user?.id} → sala ${sessionId}`);
+    // Solo el agente o el cliente de la sesión entran a la sala, y solo
+    // mientras esté pendiente/activa. Antes cualquier usuario autenticado
+    // (de cualquier empresa) podía unirse con el id y ver la pantalla o
+    // mandar input. socket.data.sessionRoles: sessionId -> 'agent' | 'client'.
+    socket.on('session:join', async ({ sessionId } = {}) => {
+      try {
+        const { RemoteSupportSession } = require('../models');
+        const session = sessionId && await RemoteSupportSession.findByPk(sessionId, {
+          attributes: ['id', 'agent_id', 'user_id', 'status'],
+        });
+        const userId = socket.user?.id;
+        const role = session && (session.agent_id === userId ? 'agent' : session.user_id === userId ? 'client' : null);
+        if (!session || !role || !['pending', 'active'].includes(session.status)) {
+          socket.emit('session:error', { sessionId, message: 'No autorizado para esta sesión' });
+          console.warn(`[WS] join rechazado: ${userId} → sesión ${sessionId}`);
+          return;
+        }
+        socket.join(`session:${sessionId}`);
+        if (!socket.data.sessionIds) socket.data.sessionIds = new Set();
+        if (!socket.data.sessionRoles) socket.data.sessionRoles = new Map();
+        socket.data.sessionIds.add(sessionId);
+        socket.data.sessionRoles.set(sessionId, role);
+        socket.emit('session:joined', { sessionId });
+        socket.to(`session:${sessionId}`).emit('session:peer-joined', { sessionId });
+        console.log(`[WS] ${userId} (${role}) → sala ${sessionId}`);
+      } catch (err) {
+        console.error('[WS] Error en session:join:', err.message);
+        socket.emit('session:error', { sessionId, message: 'Error al unirse a la sesión' });
+      }
     });
 
-    socket.on('session:frame', ({ sessionId, frame }) => {
+    const roleIn = (sessionId) => socket.data.sessionRoles?.get(sessionId) || null;
+
+    // La pantalla la manda el cliente; el input, el agente.
+    socket.on('session:frame', ({ sessionId, frame } = {}) => {
+      if (roleIn(sessionId) !== 'client') return;
       socket.to(`session:${sessionId}`).emit('session:frame', { frame });
       if (!socket._frameCount) socket._frameCount = 0;
       socket._frameCount++;
@@ -51,12 +77,14 @@ function initRemoteSupportSignaling(io) {
     });
 
     // Input del agente → retransmitir al cliente
-    socket.on('session:input', ({ sessionId, input }) => {
+    socket.on('session:input', ({ sessionId, input } = {}) => {
+      if (roleIn(sessionId) !== 'agent') return;
       socket.to(`session:${sessionId}`).emit('session:input', { input });
       console.log(`[WS] Input relay: ${input?.type} (sala ${sessionId})`);
     });
 
-    socket.on('session:end', async ({ sessionId }) => {
+    socket.on('session:end', async ({ sessionId } = {}) => {
+      if (!roleIn(sessionId)) return;
       try {
         const closed = await closeSession(sessionId);
         console.log(`[WS] session:end de ${socket.user?.id} → sesión ${sessionId} (bd actualizada: ${closed})`);

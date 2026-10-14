@@ -4,6 +4,7 @@ const router = express.Router();
 const { authMiddleware } = require('../middleware/auth');
 const { checkPermission } = require('../middleware/checkPermission');
 const { denyImpersonation } = require('../middleware/denyImpersonation');
+const { UUID, loadPlatformScope, tenantScopeWhere, restrictedRoutePolicy } = require('../middleware/platformScope');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -22,7 +23,28 @@ const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
 // asignado en RolePermission — ver backend/src/middleware/denyImpersonation.js.
 // Cada ruta abajo sigue trayendo su propio authMiddleware (redundante pero
 // inofensivo: solo re-decodifica el mismo token).
-router.use(authMiddleware, denyImpersonation);
+router.use(authMiddleware, denyImpersonation, loadPlatformScope);
+
+// Usuarios de plataforma con acceso restringido (middleware/platformScope.js):
+// solo estas rutas, y el UUID de empresa de la URL tiene que estar en su
+// alcance. Lo que no está acá (planes, migraciones, integraciones globales,
+// permisos por rol, crear/eliminar empresas...) queda solo para el owner y
+// los superadmin sin restricción. Una ruta nueva queda denegada por defecto.
+const T = `(${UUID})`;
+router.use(restrictedRoutePolicy([
+  ['GET', /^\/tenants\/?$/],
+  ['GET|PUT', new RegExp(`^/tenants/${T}/?$`)],
+  ['POST', new RegExp(`^/tenants/${T}/(?:toggle-status|remision-visibility)$`)],
+  ['GET|POST|PUT|PATCH|DELETE', new RegExp(`^/tenants/${T}/users(?:/.*)?$`)],
+  ['GET', new RegExp(`^/tenants/${T}/subscription-detail$`)],
+  ['PUT', new RegExp(`^/tenants/${T}/(?:change-plan|billing-config|change-subscription-status|set-trial-date)$`)],
+  ['POST', new RegExp(`^/tenants/${T}/extend-trial$`)],
+  ['GET|POST|DELETE', new RegExp(`^/tenants/${T}/mercadopago-config$`)],
+  // Routers montados aparte bajo /api/superadmin (server.js), con su propia
+  // política: este router los ve pasar primero y no debe bloquearlos.
+  ['GET|POST|PUT|PATCH|DELETE', /^\/(?:blog|support|platform-users)(?:\/|$)/],
+  ['GET', /^\/(?:modules-catalog|subscription-plans|all-subscriptions|dashboard|analytics\/overview|analytics\/tenants|trials-expiring|trials\/expiring|subscription-invoices|divipola)\/?$/],
+]));
 
 const Tenant = require('../models/Tenant');
 const User = require('../models/User');
@@ -35,6 +57,13 @@ const { MODULES_CATALOG } = require('../config/modules.catalog');
 const { invalidateModulesCache, invalidateAllModulesCache, getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 const { FEATURE_KEY: REMISION_FEATURE_KEY, isRemisionHidingEnabled } = require('../utils/remisionVisibility');
 const { withSessionsRevoked } = require('../utils/sessionRevocation');
+
+// amount es DECIMAL: Sequelize lo devuelve como string ("69000.00") y sumarlo
+// directo concatenaba. Se normaliza a valor mensual (anual / 12) para MRR.
+const monthlyAmount = (sub) => {
+  const amount = Number(sub?.amount) || 0;
+  return sub?.billing_cycle === 'yearly' ? amount / 12 : amount;
+};
 
 // ============================================
 // GESTIÓN DE TENANTS
@@ -57,7 +86,7 @@ router.get(
         is_active,
       } = req.query;
 
-      const where = {};
+      const where = { ...tenantScopeWhere(req) };
 
       if (search) {
         where[Op.or] = [
@@ -954,6 +983,7 @@ router.get(
   async (req, res) => {
     try {
       const subscriptions = await TenantSubscription.findAll({
+        where: tenantScopeWhere(req, 'tenant_id'),
         include: [
           {
             model: SubscriptionPlan,
@@ -1255,10 +1285,12 @@ router.get(
   checkPermission('superadmin.view_all'),
   async (req, res) => {
     try {
-      const totalTenants = await Tenant.count();
-      const activeTenants = await Tenant.count({ where: { is_active: true } });
+      const scopeT = tenantScopeWhere(req);
+      const scopeS = tenantScopeWhere(req, 'tenant_id');
+      const totalTenants = await Tenant.count({ where: scopeT });
+      const activeTenants = await Tenant.count({ where: { ...scopeT, is_active: true } });
       const trialTenants = await TenantSubscription.count({
-        where: { status: 'trial' },
+        where: { ...scopeS, status: 'trial' },
       });
 
       const startOfMonth = new Date();
@@ -1266,23 +1298,23 @@ router.get(
       startOfMonth.setHours(0, 0, 0, 0);
 
       const newTenantsThisMonth = await Tenant.count({
-        where: { created_at: { [Op.gte]: startOfMonth } },
+        where: { ...scopeT, created_at: { [Op.gte]: startOfMonth } },
       });
 
-      const totalUsers = await User.count();
+      const totalUsers = await User.count({ where: scopeS });
 
+      // Solo suscripciones pagas: un trial no es ingreso recurrente.
       const activeSubscriptions = await TenantSubscription.findAll({
-        where: { status: { [Op.in]: ['active', 'trial'] } },
+        where: { ...scopeS, status: 'active' },
         attributes: ['amount', 'billing_cycle'],
       });
 
-      const mrr = activeSubscriptions
-        .filter((s) => s.billing_cycle === 'monthly')
-        .reduce((sum, s) => sum + (s.amount || 0), 0);
+      const mrr = activeSubscriptions.reduce((sum, s) => sum + monthlyAmount(s), 0);
 
       const arr = mrr * 12;
 
       const tenantsByPlan = await TenantSubscription.findAll({
+        where: scopeS,
         attributes: [
           [
             TenantSubscription.sequelize.fn(
@@ -1309,6 +1341,7 @@ router.get(
       }));
 
       const recentTenants = await Tenant.findAll({
+        where: scopeT,
         limit: 5,
         order: [['created_at', 'DESC']],
         include: [
@@ -1338,6 +1371,7 @@ router.get(
 
       const trialEndingSoon = await TenantSubscription.findAll({
         where: {
+          ...scopeS,
           status: 'trial',
           trial_ends_at: {
             [Op.lte]: sevenDaysFromNow,
@@ -1412,11 +1446,12 @@ router.get(
         where:
           start_date && end_date
             ? {
+                ...tenantScopeWhere(req),
                 created_at: {
                   [Op.between]: [new Date(start_date), new Date(end_date)],
                 },
               }
-            : {},
+            : tenantScopeWhere(req),
         group: [
           Tenant.sequelize.fn(
             'DATE_TRUNC',
@@ -1449,7 +1484,9 @@ router.get(
       let revenueIsEstimate = true;
       try {
         const ncfClient = require('../services/ncf/ncfClient');
-        const config = await ncfClient.getConfig();
+        // La facturación real del Núcleo es de toda la plataforma: un usuario
+        // con acceso restringido solo ve el estimado de sus empresas.
+        const config = req.platformScope?.restricted ? null : await ncfClient.getConfig();
         if (config?.is_active) {
           const real = await ncfClient.obtenerFacturacionMensual(24);
           if (real) {
@@ -1464,8 +1501,8 @@ router.get(
       // Estado de cobro -- cuántos tenants están suspendidos por impago
       // ahora mismo, y cuántos están en el margen de gracia (vencidos pero
       // todavía no suspendidos). Ver ncfSyncService.revisarSuspensiones.
-      const tenantsSuspendidos = await Tenant.count({ where: { subscription_status: 'suspended' } });
-      const tenantsPorVencer = await TenantSubscription.count({ where: { status: 'past_due' } });
+      const tenantsSuspendidos = await Tenant.count({ where: { ...tenantScopeWhere(req), subscription_status: 'suspended' } });
+      const tenantsPorVencer = await TenantSubscription.count({ where: { ...tenantScopeWhere(req, 'tenant_id'), status: 'past_due' } });
 
       // ✅ ESTRUCTURA CORRECTA
       res.json({
@@ -1494,6 +1531,7 @@ router.get(
   async (req, res) => {
     try {
       const planDistribution = await TenantSubscription.findAll({
+        where: tenantScopeWhere(req, 'tenant_id'),
         attributes: [
           [
             TenantSubscription.sequelize.fn(
@@ -1515,6 +1553,7 @@ router.get(
       });
 
       const topTenants = await Tenant.findAll({
+        where: tenantScopeWhere(req),
         limit: 10,
         order: [['created_at', 'DESC']],
         include: [
@@ -1541,7 +1580,7 @@ router.get(
               id: t.id,
               company_name: t.company_name,
               plan: sub?.plan?.slug || 'free',
-              total_revenue: (sub?.amount || 0) * 12,
+              total_revenue: sub?.status === 'active' ? monthlyAmount(sub) * 12 : 0,
             };
           }),
           conversionRate: 0,
@@ -1566,6 +1605,7 @@ router.get(
 
       const tenants = await TenantSubscription.findAll({
         where: {
+          ...tenantScopeWhere(req, 'tenant_id'),
           status: 'trial',
           trial_ends_at: {
             [Op.lte]: daysFromNow,
@@ -1609,6 +1649,7 @@ router.get(
   async (req, res) => {
     try {
       const invoices = await SubscriptionInvoice.findAll({
+        where: tenantScopeWhere(req, 'tenant_id'),
         include: [
           {
             model: Tenant,
@@ -1660,6 +1701,7 @@ router.get(
 
       const tenants = await TenantSubscription.findAll({
         where: {
+          ...tenantScopeWhere(req, 'tenant_id'),
           status: 'trial',
           trial_ends_at: {
             [Op.lte]: daysFromNow,

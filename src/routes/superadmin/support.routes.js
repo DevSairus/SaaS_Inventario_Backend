@@ -14,50 +14,86 @@
 const express = require('express');
 const router = express.Router();
 const { authMiddleware } = require('../../middleware/auth');
-const { checkPermission } = require('../../middleware/checkPermission');
 const { denyImpersonation } = require('../../middleware/denyImpersonation');
+const { UUID, loadPlatformScope, restrictedRoutePolicy } = require('../../middleware/platformScope');
 const uploadSupport = require('../../middleware/uploadSupport');
 
 const ticketsController = require('../../controllers/superadmin/supportTickets.controller');
 const statsController = require('../../controllers/superadmin/supportStats.controller');
 const faqController = require('../../controllers/superadmin/supportFaq.controller');
+const remoteSessionController = require('../../controllers/support/remoteSession.controller');
 
 // Mismo patrón que routes/superadmin.routes.js: nada de este router es
 // alcanzable desde una sesión impersonada.
-router.use(authMiddleware, denyImpersonation);
+router.use(authMiddleware, denyImpersonation, loadPlatformScope);
+
+// Bandeja de soporte: super_admin y support. Antes era checkPermission(
+// 'superadmin.view_all' / 'manage_all'), que solo dejaba pasar a super_admin:
+// esos permisos nunca se sembraron y RolePermission.role (ENUM) ni siquiera
+// admite 'support', así que el rol support no podía usar su propio panel.
+const requireSupportAccess = (req, res, next) => {
+  if (!['super_admin', 'support'].includes(req.user?.role)) {
+    return res.status(403).json({ success: false, message: 'No tienes permisos para esta acción' });
+  }
+  next();
+};
+
+// Acceso restringido (middleware/platformScope.js): la bandeja y las
+// estadísticas (filtradas por empresa en los controllers); el contenido de
+// FAQ es global, así que solo se puede leer.
+router.use(restrictedRoutePolicy([
+  ['GET', /^\/(?:tickets|stats|faq\/categories)\/?$/],
+  ['GET|PUT', /^\/tickets\/[^/]+$/],
+  ['POST', /^\/tickets\/[^/]+\/(?:messages|remote-session)$/],
+  ['GET', /^\/remote-sessions\/?$/],
+  ['DELETE', /^\/remote-sessions\/[^/]+$/],
+  ['PUT', /^\/remote-sessions\/[^/]+\/end$/],
+  ['GET', new RegExp(`^/tenants/(${UUID})/users$`)],
+]));
 
 // ============================================
 // TICKETS -- bandeja del superadmin (todos los tenants)
 // ============================================
 
-router.get('/tickets', authMiddleware, checkPermission('superadmin.view_all'), ticketsController.listTickets);
-router.get('/tickets/:id', authMiddleware, checkPermission('superadmin.view_all'), ticketsController.getTicketDetail);
-router.put('/tickets/:id', authMiddleware, checkPermission('superadmin.manage_all'), ticketsController.updateTicket);
+router.get('/tickets', authMiddleware, requireSupportAccess, ticketsController.listTickets);
+router.get('/tickets/:id', authMiddleware, requireSupportAccess, ticketsController.getTicketDetail);
+router.put('/tickets/:id', authMiddleware, requireSupportAccess, ticketsController.updateTicket);
 router.post(
   '/tickets/:id/messages',
   authMiddleware,
-  checkPermission('superadmin.manage_all'),
+  requireSupportAccess,
   uploadSupport.array('attachments', 5),
   ticketsController.addMessage
 );
 
 // ============================================
+// ACCESO REMOTO -- el agente pide la sesión desde el ticket; el cliente la
+// acepta desde /api/support/remote-sessions (routes/support.routes.js).
+// ============================================
+
+router.post('/tickets/:id/remote-session', authMiddleware, requireSupportAccess, remoteSessionController.createSession);
+router.get('/remote-sessions', authMiddleware, requireSupportAccess, remoteSessionController.listSessions);
+router.delete('/remote-sessions/:id', authMiddleware, requireSupportAccess, remoteSessionController.cancelSession);
+router.put('/remote-sessions/:id/end', authMiddleware, requireSupportAccess, remoteSessionController.endSession);
+router.get('/tenants/:tenant_id/users', authMiddleware, requireSupportAccess, remoteSessionController.getTenantUsers);
+
+// ============================================
 // ESTADÍSTICAS DE SOPORTE
 // ============================================
 
-router.get('/stats', authMiddleware, checkPermission('superadmin.view_all'), statsController.getStats);
+router.get('/stats', authMiddleware, requireSupportAccess, statsController.getStats);
 
 // ============================================
 // FAQ -- administración del contenido que ven los tenants
 // ============================================
 
-router.get('/faq/categories', authMiddleware, checkPermission('superadmin.view_all'), faqController.listCategories);
-router.post('/faq/categories', authMiddleware, checkPermission('superadmin.manage_all'), faqController.createCategory);
-router.put('/faq/categories/:id', authMiddleware, checkPermission('superadmin.manage_all'), faqController.updateCategory);
-router.delete('/faq/categories/:id', authMiddleware, checkPermission('superadmin.manage_all'), faqController.deleteCategory);
+router.get('/faq/categories', authMiddleware, requireSupportAccess, faqController.listCategories);
+router.post('/faq/categories', authMiddleware, requireSupportAccess, faqController.createCategory);
+router.put('/faq/categories/:id', authMiddleware, requireSupportAccess, faqController.updateCategory);
+router.delete('/faq/categories/:id', authMiddleware, requireSupportAccess, faqController.deleteCategory);
 
-router.post('/faq/articles', authMiddleware, checkPermission('superadmin.manage_all'), faqController.createArticle);
-router.put('/faq/articles/:id', authMiddleware, checkPermission('superadmin.manage_all'), faqController.updateArticle);
-router.delete('/faq/articles/:id', authMiddleware, checkPermission('superadmin.manage_all'), faqController.deleteArticle);
+router.post('/faq/articles', authMiddleware, requireSupportAccess, faqController.createArticle);
+router.put('/faq/articles/:id', authMiddleware, requireSupportAccess, faqController.updateArticle);
+router.delete('/faq/articles/:id', authMiddleware, requireSupportAccess, faqController.deleteArticle);
 
 module.exports = router;

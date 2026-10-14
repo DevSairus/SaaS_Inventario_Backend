@@ -2,6 +2,7 @@
 const Tenant = require('../models/auth/Tenant');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const { isSessionRevoked, sessionRevokedResponse } = require('../utils/sessionRevocation');
+const { isRestrictedPlatformUser } = require('./platformScope');
 
 const tenantMiddleware = async (req, res, next) => {
   try {
@@ -10,6 +11,13 @@ const tenantMiddleware = async (req, res, next) => {
     }
 
     if (req.user.role === 'super_admin') {
+      // Sin tenant, las rutas de tenant le devuelven datos de TODAS las
+      // empresas al superadmin. Uno con acceso restringido (ver
+      // middleware/platformScope.js) entra a sus empresas solo por
+      // impersonación, así que acá no pasa.
+      if (await isRestrictedPlatformUser(req.user.id)) {
+        return res.status(403).json({ success: false, message: 'Tu usuario tiene acceso restringido a algunas empresas: ingresa a ellas desde el panel de superadmin.' });
+      }
       req.tenant_id = null;
       req.tenant = null;
       req.is_super_admin = true;

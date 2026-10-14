@@ -79,6 +79,18 @@ const User = sequelize.define('User', {
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
+  // Solo para usuarios de plataforma (tenant_id null). Ver migración
+  // 2026101401-platform-owner-and-tenant-scope.js y middleware/platformScope.js.
+  is_owner: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
+  all_tenants_access: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
+  },
   last_login: {
     type: DataTypes.DATE,
     allowNull: true

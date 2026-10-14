@@ -204,6 +204,7 @@ const superadminSupportRoutes       = require('./routes/superadmin/support.route
 
 // Blog editorial (SEO)
 const superadminBlogRoutes          = require('./routes/superadmin/blog.routes');
+const superadminPlatformUsersRoutes = require('./routes/superadmin/platformUsers.routes');
 
 // Cartera
 const accountsReceivableRoutes      = require('./routes/accounts-receivable.routes');
@@ -263,6 +264,7 @@ app.use('/api/public/pdf', publicPdfRoutes);
 app.use('/api/superadmin', authMiddleware, superadminRoutes);
 app.use('/api/superadmin/blog', authMiddleware, superadminBlogRoutes);
 app.use('/api/superadmin/support', authMiddleware, superadminSupportRoutes);
+app.use('/api/superadmin/platform-users', authMiddleware, superadminPlatformUsersRoutes);
 app.use('/api/webhooks/ncf', ncfWebhookRoutes);
 app.use('/api/webhooks/meta', metaWebhookRoutes);
 app.use('/api/webhooks/ensambladora/sync', ensambladoraSyncRoutes);

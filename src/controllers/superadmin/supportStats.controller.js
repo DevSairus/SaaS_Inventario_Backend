@@ -13,7 +13,12 @@ const getStats = async (req, res) => {
   try {
     const { start_date, end_date } = req.query;
 
+    // dateFilter se reutiliza en todas las consultas: también lleva el filtro
+    // de empresas de un usuario con acceso restringido (middleware/platformScope.js).
     const dateFilter = {};
+    if (req.platformScope?.restricted) {
+      dateFilter.tenant_id = { [Op.in]: req.platformScope.tenantIds };
+    }
     if (start_date && end_date) {
       dateFilter.created_at = { [Op.between]: [new Date(start_date), new Date(end_date)] };
     }
@@ -56,6 +61,7 @@ const getStats = async (req, res) => {
 
     // ── Tickets por mes (últimos 12 meses) ──
     const monthlyTickets = await SupportTicket.findAll({
+      where: dateFilter.tenant_id ? { tenant_id: dateFilter.tenant_id } : {},
       attributes: [
         [fn('TO_CHAR', col('created_at'), 'YYYY-MM'), 'month'],
         [fn('COUNT', col('id')), 'count'],
