@@ -4,7 +4,7 @@ const router = express.Router();
 const { authMiddleware } = require('../middleware/auth');
 const { checkPermission } = require('../middleware/checkPermission');
 const { denyImpersonation } = require('../middleware/denyImpersonation');
-const { UUID, loadPlatformScope, tenantScopeWhere, restrictedRoutePolicy } = require('../middleware/platformScope');
+const { UUID, loadPlatformScope, tenantScopeWhere, restrictedTenantGuard, grantTenantIfRestricted } = require('../middleware/platformScope');
 const { Op } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -26,24 +26,14 @@ const IMPERSONATION_EXPIRES_IN = process.env.IMPERSONATION_EXPIRES_IN || '2h';
 router.use(authMiddleware, denyImpersonation, loadPlatformScope);
 
 // Usuarios de plataforma con acceso restringido (middleware/platformScope.js):
-// solo estas rutas, y el UUID de empresa de la URL tiene que estar en su
-// alcance. Lo que no está acá (planes, migraciones, integraciones globales,
-// permisos por rol, crear/eliminar empresas...) queda solo para el owner y
-// los superadmin sin restricción. Una ruta nueva queda denegada por defecto.
-const T = `(${UUID})`;
-router.use(restrictedRoutePolicy([
-  ['GET', /^\/tenants\/?$/],
-  ['GET|PUT', new RegExp(`^/tenants/${T}/?$`)],
-  ['POST', new RegExp(`^/tenants/${T}/(?:toggle-status|remision-visibility)$`)],
-  ['GET|POST|PUT|PATCH|DELETE', new RegExp(`^/tenants/${T}/users(?:/.*)?$`)],
-  ['GET', new RegExp(`^/tenants/${T}/subscription-detail$`)],
-  ['PUT', new RegExp(`^/tenants/${T}/(?:change-plan|billing-config|change-subscription-status|set-trial-date)$`)],
-  ['POST', new RegExp(`^/tenants/${T}/extend-trial$`)],
-  ['GET|POST|DELETE', new RegExp(`^/tenants/${T}/mercadopago-config$`)],
-  // Routers montados aparte bajo /api/superadmin (server.js), con su propia
-  // política: este router los ve pasar primero y no debe bloquearlos.
-  ['GET|POST|PUT|PATCH|DELETE', /^\/(?:blog|support|platform-users)(?:\/|$)/],
-  ['GET', /^\/(?:modules-catalog|subscription-plans|all-subscriptions|dashboard|analytics\/overview|analytics\/tenants|trials-expiring|trials\/expiring|subscription-invoices|divipola)\/?$/],
+// usan todas las funciones, pero toda empresa de la URL (o del body
+// tenant_id) tiene que estar en su alcance. Los listados se filtran con
+// tenantScopeWhere en cada handler. Una ruta nueva que reciba una empresa
+// por otro lado (ej. otro nombre de parámetro) hay que agregarla acá.
+router.use(restrictedTenantGuard([
+  { re: new RegExp(`^/(?:ncf-config/|meta-config/)?tenants/(${UUID})(?:/|$)`), by: 'id' },
+  { re: new RegExp(`^/ensambladora-config/(${UUID})$`), by: 'id' },
+  { re: /^\/tenants\/([^/]+)\/(?:cutover|rollback|cleanup|reset-for-delivery)(?:\/|$)/, by: 'slug' },
 ]));
 
 const Tenant = require('../models/Tenant');
@@ -195,6 +185,7 @@ router.get(
           'id', 'slug', 'business_name', 'schema_name',
           'cutover_last_attempt_at', 'cutover_last_status', 'cutover_last_error',
         ],
+        where: tenantScopeWhere(req),
         order: [['business_name', 'ASC']],
       });
 
@@ -518,6 +509,7 @@ router.post(
         );
       }
 
+      await grantTenantIfRestricted(req, tenant.id, transaction);
       await transaction.commit();
       res.status(201).json({ tenant });
 
@@ -2145,7 +2137,7 @@ router.get(
     try {
       const Tenant = require('../models/Tenant');
       const tenants = await Tenant.findAll({
-        where: { is_active: true },
+        where: { is_active: true, ...tenantScopeWhere(req) },
         attributes: [
           'id', 'company_name', 'business_name', 'tax_id', 'email',
           'subscription_status', 'ncf_sync_enabled', 'ncf_city_code', 'ncf_ciudad', 'ncf_regimen_code',
@@ -2258,7 +2250,10 @@ router.post(
   async (req, res) => {
     try {
       const ncfSyncService = require('../services/ncf/ncfSyncService');
-      const resultados = await ncfSyncService.sincronizarTodosLosTenants({ forzar: !!req.body?.forzar });
+      const resultados = await ncfSyncService.sincronizarTodosLosTenants({
+        forzar: !!req.body?.forzar,
+        tenantIds: req.platformScope?.restricted ? req.platformScope.tenantIds : null,
+      });
 
       res.json({
         success: true,
@@ -2394,6 +2389,7 @@ router.get(
         // en BD -- defensa en profundidad: si algún día se filtra la clave
         // de cifrado, que el blob ni siquiera haya circulado por acá ayuda.
         attributes: { exclude: ['own_access_token'] },
+        where: tenantScopeWhere(req, 'tenant_id'),
         include: [{ model: Tenant, as: 'tenant', attributes: ['id', 'company_name', 'business_name'] }],
         order: [['updated_at', 'DESC']],
       });
@@ -2461,6 +2457,7 @@ router.get(
     try {
       const { EnsambladoraSyncCredential } = require('../models');
       const credenciales = await EnsambladoraSyncCredential.findAll({
+        where: tenantScopeWhere(req, 'tenant_id'),
         include: [{ model: Tenant, as: 'tenant', attributes: ['id', 'company_name', 'business_name', 'modules_enabled'] }],
         order: [['updated_at', 'DESC']],
       });
@@ -2498,6 +2495,7 @@ router.get(
   async (req, res) => {
     try {
       const tenants = await Tenant.findAll({
+        where: tenantScopeWhere(req),
         attributes: ['id', 'company_name', 'business_name'],
         order: [['company_name', 'ASC']],
       });

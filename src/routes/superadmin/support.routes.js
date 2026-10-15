@@ -15,7 +15,7 @@ const express = require('express');
 const router = express.Router();
 const { authMiddleware } = require('../../middleware/auth');
 const { denyImpersonation } = require('../../middleware/denyImpersonation');
-const { UUID, loadPlatformScope, restrictedRoutePolicy } = require('../../middleware/platformScope');
+const { UUID, loadPlatformScope, restrictedTenantGuard } = require('../../middleware/platformScope');
 const uploadSupport = require('../../middleware/uploadSupport');
 
 const ticketsController = require('../../controllers/superadmin/supportTickets.controller');
@@ -38,17 +38,11 @@ const requireSupportAccess = (req, res, next) => {
   next();
 };
 
-// Acceso restringido (middleware/platformScope.js): la bandeja y las
-// estadísticas (filtradas por empresa en los controllers); el contenido de
-// FAQ es global, así que solo se puede leer.
-router.use(restrictedRoutePolicy([
-  ['GET', /^\/(?:tickets|stats|faq\/categories)\/?$/],
-  ['GET|PUT', /^\/tickets\/[^/]+$/],
-  ['POST', /^\/tickets\/[^/]+\/(?:messages|remote-session)$/],
-  ['GET', /^\/remote-sessions\/?$/],
-  ['DELETE', /^\/remote-sessions\/[^/]+$/],
-  ['PUT', /^\/remote-sessions\/[^/]+\/end$/],
-  ['GET', new RegExp(`^/tenants/(${UUID})/users$`)],
+// Acceso restringido (middleware/platformScope.js): tickets, estadísticas y
+// sesiones remotas se filtran por empresa en los controllers; acá se valida
+// la empresa de la URL.
+router.use(restrictedTenantGuard([
+  { re: new RegExp(`^/tenants/(${UUID})/users$`), by: 'id' },
 ]));
 
 // ============================================

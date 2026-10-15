@@ -4,9 +4,12 @@
 //                  a los demás usuarios de plataforma (routes/superadmin/platformUsers).
 //   sin restricción (all_tenants_access = true, el default) -> igual que antes:
 //                  todas las empresas y todas las funciones globales.
-//   restringido (all_tenants_access = false) -> solo las empresas asignadas en
-//                  platform_user_tenants, y solo las rutas de RESTRICTED_ALLOWED
-//                  (nada global: planes, migraciones, integraciones, permisos...).
+//   restringido (all_tenants_access = false) -> mismas funciones (planes,
+//                  integraciones, migraciones, permisos...), pero solo ve y opera
+//                  las empresas asignadas en platform_user_tenants: listados
+//                  filtrados con tenantScopeWhere y rutas por empresa validadas
+//                  con restrictedTenantGuard. Las rutas de tenant (tenantMiddleware)
+//                  le quedan cerradas: ahí un superadmin ve datos de todas las empresas.
 //
 // El alcance se lee de la BD en cada request (no del JWT), así un cambio del
 // owner aplica de inmediato sin esperar a que el usuario vuelva a iniciar sesión.
@@ -14,6 +17,7 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../config/database');
 const User = require('../models/auth/User');
+const Tenant = require('../models/auth/Tenant');
 
 const PLATFORM_ROLES = ['super_admin', 'support'];
 const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
@@ -88,31 +92,49 @@ const requireOwner = (req, res, next) => {
   next();
 };
 
-const requireUnrestricted = (req, res, next) => {
-  if (req.platformScope?.restricted) return forbidden(res, 'Tu usuario tiene acceso restringido a algunas empresas y no puede usar esta función');
-  next();
-};
-
 /**
- * Política para un router: si el usuario está restringido, la ruta tiene que
- * estar en `allowed` ([método(s), RegExp]) y todo UUID capturado por la regex
- * (grupos) tiene que ser una empresa de su alcance.
+ * Para un usuario restringido, toda empresa a la que apunte la request tiene
+ * que estar en su alcance. `patterns`: [{ re, by: 'id' | 'slug' }], donde el
+ * primer grupo de la regex captura el id o el slug de la empresa (sobre
+ * req.path). También se valida req.body.tenant_id. El resto de la ruta pasa:
+ * los restringidos usan todas las funciones, solo con menos empresas.
  */
-function restrictedRoutePolicy(allowed) {
-  return (req, res, next) => {
+function restrictedTenantGuard(patterns) {
+  return async (req, res, next) => {
     const scope = req.platformScope;
     if (!scope?.restricted) return next();
-
-    for (const [methods, re] of allowed) {
-      if (!methods.split('|').includes(req.method)) continue;
-      const match = re.exec(req.path);
-      if (!match) continue;
-      const ids = match.slice(1).filter(Boolean);
+    try {
+      const ids = [];
+      for (const { re, by } of patterns) {
+        const match = re.exec(req.path);
+        if (!match?.[1]) continue;
+        if (by === 'slug') {
+          const tenant = await Tenant.findOne({ where: { slug: match[1] }, attributes: ['id'] });
+          if (!tenant) continue; // la ruta responde su propio 404
+          ids.push(tenant.id);
+        } else {
+          ids.push(match[1]);
+        }
+      }
+      if (req.body?.tenant_id) ids.push(req.body.tenant_id);
       if (ids.every((id) => scope.canSeeTenant(id))) return next();
       return forbidden(res, 'No tienes acceso a esta empresa');
+    } catch (error) {
+      console.error('Error validando alcance de empresa:', error);
+      return res.status(500).json({ success: false, message: 'Error al validar el acceso a la empresa' });
     }
-    return forbidden(res, 'Tu usuario tiene acceso restringido a algunas empresas y no puede usar esta función');
   };
+}
+
+// Da acceso a una empresa recién creada por un usuario restringido (si no,
+// la crearía y dejaría de verla).
+async function grantTenantIfRestricted(req, tenantId, transaction) {
+  if (!req.platformScope?.restricted) return;
+  await sequelize.query(
+    `INSERT INTO public.platform_user_tenants (user_id, tenant_id, created_by)
+     VALUES (:userId, :tenantId, :userId) ON CONFLICT (user_id, tenant_id) DO NOTHING`,
+    { replacements: { userId: req.user.id, tenantId }, transaction }
+  );
 }
 
 module.exports = {
@@ -120,8 +142,8 @@ module.exports = {
   loadPlatformScope,
   tenantScopeWhere,
   requireOwner,
-  requireUnrestricted,
-  restrictedRoutePolicy,
+  restrictedTenantGuard,
+  grantTenantIfRestricted,
   getAllowedTenantIds,
   isRestrictedPlatformUser,
 };

@@ -101,7 +101,9 @@ function construirPrefactura(tenant) {
  *   y el chequeo de "ya sincronizado este ciclo" -- para pruebas o para
  *   forzar un reenvío puntual desde el panel.
  */
-async function sincronizarTodosLosTenants({ forzar = false } = {}) {
+// tenantIds (opcional): limita a esas empresas -- lo usa el botón del panel
+// cuando quien sincroniza es un superadmin con acceso restringido.
+async function sincronizarTodosLosTenants({ forzar = false, tenantIds = null } = {}) {
   const config = await ncfClient.getConfig();
   if (!config?.is_active) {
     throw new Error('La conexión con el Núcleo NCF no está activa. Actívala primero en Facturación Núcleo (NCF).');
@@ -118,6 +120,7 @@ async function sincronizarTodosLosTenants({ forzar = false } = {}) {
       // los que ya se marcaron "Listo a sincronizar" (después de cargarles
       // ciudad/tarifa/fecha de cobro) -- ver panel Facturación Núcleo (NCF).
       ncf_sync_enabled: true,
+      ...(tenantIds ? { id: { [Op.in]: tenantIds } } : {}),
     },
     include: [{
       model: TenantSubscription,

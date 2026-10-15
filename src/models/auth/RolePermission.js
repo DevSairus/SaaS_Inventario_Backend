@@ -9,8 +9,11 @@ const RolePermission = sequelize.define(
       defaultValue: DataTypes.UUIDV4,
       primaryKey: true,
     },
+    // En BD es VARCHAR. El ENUM que tenía acá ('operario', 'cliente'...) era de
+    // otra versión del sistema y hacía fallar la validación al guardar
+    // permisos de roles reales (manager, seller, accountant...).
     role: {
-      type: DataTypes.ENUM('super_admin', 'admin', 'operario', 'cliente'),
+      type: DataTypes.STRING,
       allowNull: false,
       comment: 'Rol que tiene el permiso',
     },
