@@ -17,41 +17,44 @@
 // Se promueve a owner al super_admin activo más antiguo si todavía no hay
 // ninguno: hoy todos los super_admin ya ven todo, así que no amplía accesos.
 
+// Todo va calificado con public.: migrateAllTenantSchemas corre esta
+// migración también con el search_path de cada tenant (sin public).
+
 module.exports = {
   async up(queryInterface) {
     const q = (sql) => queryInterface.sequelize.query(sql);
 
-    await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT false`);
-    await q(`ALTER TABLE users ADD COLUMN IF NOT EXISTS all_tenants_access BOOLEAN NOT NULL DEFAULT true`);
+    await q(`ALTER TABLE public.users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT false`);
+    await q(`ALTER TABLE public.users ADD COLUMN IF NOT EXISTS all_tenants_access BOOLEAN NOT NULL DEFAULT true`);
 
     await q(`
-      CREATE TABLE IF NOT EXISTS platform_user_tenants (
+      CREATE TABLE IF NOT EXISTS public.platform_user_tenants (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        created_by UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+        user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+        tenant_id UUID NOT NULL REFERENCES public.tenants(id) ON DELETE CASCADE,
+        created_by UUID NULL REFERENCES public.users(id) ON DELETE SET NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         UNIQUE (user_id, tenant_id)
       )
     `);
-    await q(`CREATE INDEX IF NOT EXISTS idx_platform_user_tenants_user ON platform_user_tenants(user_id)`);
+    await q(`CREATE INDEX IF NOT EXISTS idx_platform_user_tenants_user ON public.platform_user_tenants(user_id)`);
 
     await q(`
-      UPDATE users SET is_owner = true
+      UPDATE public.users SET is_owner = true
       WHERE id = (
-        SELECT id FROM users
+        SELECT id FROM public.users
         WHERE role = 'super_admin' AND tenant_id IS NULL AND is_active = true
         ORDER BY created_at ASC
         LIMIT 1
       )
-      AND NOT EXISTS (SELECT 1 FROM users WHERE is_owner = true)
+      AND NOT EXISTS (SELECT 1 FROM public.users WHERE is_owner = true)
     `);
   },
 
   async down(queryInterface) {
     const q = (sql) => queryInterface.sequelize.query(sql);
-    await q(`DROP TABLE IF EXISTS platform_user_tenants`);
-    await q(`ALTER TABLE users DROP COLUMN IF EXISTS all_tenants_access`);
-    await q(`ALTER TABLE users DROP COLUMN IF EXISTS is_owner`);
+    await q(`DROP TABLE IF EXISTS public.platform_user_tenants`);
+    await q(`ALTER TABLE public.users DROP COLUMN IF EXISTS all_tenants_access`);
+    await q(`ALTER TABLE public.users DROP COLUMN IF EXISTS is_owner`);
   },
 };

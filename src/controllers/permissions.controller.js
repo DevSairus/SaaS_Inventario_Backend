@@ -8,7 +8,6 @@ const { Op } = require('sequelize');
 const getAllPermissions = async (req, res) => {
   try {
     const permissions = await Permission.findAll({
-      where: { is_active: true },
       order: [
         ['module', 'ASC'],
         ['name', 'ASC'],
@@ -66,7 +65,6 @@ const getRolePermissions = async (req, res) => {
 
     // Obtener todos los permisos
     const allPermissions = await Permission.findAll({
-      where: { is_active: true },
       order: [
         ['module', 'ASC'],
         ['name', 'ASC'],
@@ -80,7 +78,6 @@ const getRolePermissions = async (req, res) => {
         {
           model: Permission,
           as: 'permission',
-          where: { is_active: true },
         },
       ],
     });
@@ -310,7 +307,6 @@ const getMyPermissions = async (req, res) => {
     // Super admin tiene todos los permisos
     if (userRole === 'super_admin') {
       const allPermissions = await Permission.findAll({
-        where: { is_active: true },
       });
 
       return res.status(200).json({
@@ -330,7 +326,6 @@ const getMyPermissions = async (req, res) => {
         {
           model: Permission,
           as: 'permission',
-          where: { is_active: true },
         },
       ],
     });

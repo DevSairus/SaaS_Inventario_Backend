@@ -67,6 +67,9 @@ function pickTag(xml, re) {
   let m;
   while ((m = tagRe.exec(xml)) !== null) {
     if (re.test(m[1]) && m[2] && !m[2].includes('<')) return m[2].trim();
+    // Elemento contenedor: seguir buscando DENTRO de él (exec avanzaría
+    // hasta su cierre y se saltaría Code/Message/XmlBytesBase64).
+    tagRe.lastIndex = m.index + 1;
   }
   return '';
 }
@@ -112,7 +115,11 @@ async function getXmlByDocumentKey(config, cufe, loadP12) {
   const code = pickTag(text, /^(Code|StatusCode)$/i);
   const message = pickTag(text, /^(Message|StatusMessage|StatusDescription)$/i);
   const b64 = pickTag(text, /^(XmlBytesBase64|XmlBase64Bytes|XmlBytes|XmlBase64)$/i);
-  if (!b64) return { found: false, xml: null, code, message: message || 'La DIAN no devolvió el XML del documento' };
+  if (!b64) {
+    // Sin XML ni mensaje: devolver un fragmento de la respuesta para diagnóstico.
+    const raw = String(text || '').replace(/\s+/g, ' ').slice(0, 500);
+    return { found: false, xml: null, code, message: message || `La DIAN no devolvió el XML del documento. Respuesta: ${raw}` };
+  }
 
   const xml = Buffer.from(b64, 'base64').toString('utf8');
   return { found: true, xml, code, message };
