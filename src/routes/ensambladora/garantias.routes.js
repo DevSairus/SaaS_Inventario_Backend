@@ -17,14 +17,16 @@ const {
 // foto) -- ver crearGarantia.
 const uploadImage = require('../../middleware/uploadImage');
 
+const { requireEnsMgmt, requireEnsOperation } = require('./_roles');
+
 const router = express.Router();
 
 router.get('/todas', listarTodas);
 router.get('/', listarPorVin);
-router.post('/', uploadImage.any(), crearGarantia);
-router.post('/:id/cerrar', cerrarGarantia);
-router.post('/:id/reenviar', uploadImage.any(), reenviarGarantia);
-router.post('/:id/share-token', generarShareTokenGarantia);
+router.post('/', requireEnsOperation, uploadImage.any(), crearGarantia);
+router.post('/:id/cerrar', requireEnsMgmt, cerrarGarantia);
+router.post('/:id/reenviar', requireEnsOperation, uploadImage.any(), reenviarGarantia);
+router.post('/:id/share-token', requireEnsOperation, generarShareTokenGarantia);
 router.get('/:id/pdf', generarPdfGarantia);
 router.get('/:id', obtenerDetalle);
 

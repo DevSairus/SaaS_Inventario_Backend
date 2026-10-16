@@ -18,20 +18,22 @@ const { crearCotizacion, generarPdf: generarPdfCotizacion } = require('../../con
 // cuando hay evidenciaFile (ver ensambladoraEntregasApi.create).
 const uploadImage = require('../../middleware/uploadImage');
 
+const { requireEnsSales, requireEnsOperation } = require('./_roles');
+
 const router = express.Router();
 
-router.post('/ventas', crearVenta);
+router.post('/ventas', requireEnsSales, crearVenta);
 router.get('/alistamientos', listarAlistamientosPorVin);
-router.post('/alistamientos', crearAlistamiento);
+router.post('/alistamientos', requireEnsOperation, crearAlistamiento);
 // Sin este middleware, un POST multipart llega con req.body vacío -- por
 // eso fallaba "vin y fecha_entrega son obligatorios" aunque el front sí
 // los mandara: nunca se estaban parseando.
 router.get('/entregas', listarEntregasPorVin);
-router.post('/entregas', uploadImage.single('evidencia'), crearEntrega);
-router.post('/revisiones', crearRevision);
-router.post('/revisiones/:id/share-token', generarShareTokenRevision);
+router.post('/entregas', requireEnsOperation, uploadImage.single('evidencia'), crearEntrega);
+router.post('/revisiones', requireEnsOperation, crearRevision);
+router.post('/revisiones/:id/share-token', requireEnsOperation, generarShareTokenRevision);
 router.get('/revisiones/:id/pdf', generarPdfRevision);
-router.post('/cotizaciones', crearCotizacion);
+router.post('/cotizaciones', requireEnsOperation, crearCotizacion);
 router.get('/cotizaciones/:id/pdf', generarPdfCotizacion);
 
 module.exports = router;

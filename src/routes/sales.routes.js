@@ -22,7 +22,6 @@ router.delete('/:id', salesController.delete);
 // Acciones especiales
 router.post('/:id/confirm',       salesController.confirm);
 router.post('/:id/cancel',        salesController.cancel);
-router.post('/:id/deliver',       salesController.markAsDelivered);
 router.post('/:id/payments',      salesController.registerPayment);
 // Retenciones que practicó el cliente (abono sin caja)
 router.post('/:id/retentions',    salesController.registerRetentions);

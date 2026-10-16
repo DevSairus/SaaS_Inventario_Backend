@@ -2,10 +2,12 @@
 const express = require('express');
 const { listEvents, reintentarEvento, marcarRevisado } = require('../../controllers/ensambladora/sync.controller');
 
+const { requireEnsMgmt } = require('./_roles');
+
 const router = express.Router();
 
 router.get('/events', listEvents);
-router.post('/events/:id/reintentar', reintentarEvento);
-router.post('/events/:id/marcar-revisado', marcarRevisado);
+router.post('/events/:id/reintentar', requireEnsMgmt, reintentarEvento);
+router.post('/events/:id/marcar-revisado', requireEnsMgmt, marcarRevisado);
 
 module.exports = router;

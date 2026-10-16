@@ -1010,9 +1010,19 @@ const confirm = async (req, res) => {
       }
     }
 
-    // Validar límite de crédito
-    if (payment_method === 'credito' && sale.customer_id) {
-      const creditCustomer = await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } });
+    // Validar límite de crédito (VEN-2). Antes solo corría con
+    // payment_method === 'credito', valor que la UI nunca envía: el crédito
+    // es "lo que queda sin pagar al confirmar", con cualquier medio. Cliente
+    // sin cupo (credit_limit vacío o 0) = crédito sin tope.
+    if (sale.customer_id && finalDocType !== 'cotizacion') {
+      const settledNow = (splits
+        ? splits.reduce((sum, sp) => sum + sp.amount, 0)
+        : (paid_amount !== undefined ? parseFloat(paid_amount) || 0 : parseFloat(sale.total_amount)))
+        + (parseFloat(advance_amount) || 0);
+      const unpaid = Math.round((parseFloat(sale.total_amount) - settledNow) * 100) / 100;
+      const creditCustomer = unpaid > 0.01
+        ? await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } })
+        : null;
       if (creditCustomer && parseFloat(creditCustomer.credit_limit || 0) > 0) {
         const pendingResult = await Sale.findOne({
           where: {
@@ -1023,19 +1033,25 @@ const confirm = async (req, res) => {
           },
           attributes: [
             [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('total_amount')), 0), 'total_pending'],
-            [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('paid_amount')), 0), 'total_paid']
+            [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('paid_amount')), 0), 'total_paid'],
+            [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('returned_amount')), 0), 'total_returned']
           ],
           raw: true
         });
-        const currentDebt = parseFloat(pendingResult?.total_pending || 0) - parseFloat(pendingResult?.total_paid || 0);
-        const newDebt = currentDebt + parseFloat(sale.total_amount);
+        const currentDebt = Math.max(
+          parseFloat(pendingResult?.total_pending || 0)
+            - parseFloat(pendingResult?.total_paid || 0)
+            - parseFloat(pendingResult?.total_returned || 0),
+          0
+        );
+        const newDebt = currentDebt + unpaid;
         const limit = parseFloat(creditCustomer.credit_limit);
         if (newDebt > limit) {
           const name = creditCustomer.business_name || `${creditCustomer.first_name} ${creditCustomer.last_name}`;
           return res.status(400).json({
             success: false,
-            message: `Límite de crédito excedido para ${name}. Límite: $${limit.toLocaleString('es-CO')}, Deuda actual: $${currentDebt.toLocaleString('es-CO')}, Esta venta: $${parseFloat(sale.total_amount).toLocaleString('es-CO')}`,
-            credit_limit: limit, current_debt: currentDebt, sale_total: parseFloat(sale.total_amount)
+            message: `Límite de crédito excedido para ${name}. Cupo: $${limit.toLocaleString('es-CO')}, Deuda actual: $${currentDebt.toLocaleString('es-CO')}, Saldo de esta venta: $${unpaid.toLocaleString('es-CO')}`,
+            credit_limit: limit, current_debt: currentDebt, sale_unpaid: unpaid
           });
         }
       }
@@ -1344,7 +1360,7 @@ const cancel = async (req, res) => {
 
     const transaction = await sequelize.transaction();
     try {
-      if (sale.status === 'completed' || sale.status === 'delivered') {
+      if (sale.status === 'completed') {
         for (const item of sale.items) {
           // Ítem rechazado en cotización parcial: confirm() nunca sacó su
           // stock (ver mismo filtro ahí), así que reingresarlo aquí infla
@@ -1450,32 +1466,6 @@ const cancel = async (req, res) => {
   } catch (error) {
     logger.error('Error cancelando venta:', error);
     res.status(500).json({ success: false, message: 'Error cancelando venta' });
-  }
-};
-
-// Marcar como entregada
-const markAsDelivered = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const tenantId = req.tenant_id;
-    const { delivery_date } = req.body;
-
-    const sale = await Sale.findOne({ where: { id, tenant_id: tenantId } });
-    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
-    if (sale.status !== 'completed') {
-      return res.status(400).json({ success: false, message: 'Solo se pueden marcar como entregadas las ventas completadas' });
-    }
-
-    await sale.update({ status: 'delivered', delivery_date: delivery_date || new Date() });
-
-    const updatedSale = await Sale.findByPk(id, {
-      include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
-    });
-
-    res.json({ success: true, message: 'Venta marcada como entregada', data: updatedSale });
-  } catch (error) {
-    logger.error('Error actualizando venta:', error);
-    res.status(500).json({ success: false, message: 'Error actualizando venta' });
   }
 };
 
@@ -2435,7 +2425,6 @@ module.exports = {
   update,
   confirm,
   cancel,
-  markAsDelivered,
   registerPayment,
   registerRetentions,
   convertToInvoice,

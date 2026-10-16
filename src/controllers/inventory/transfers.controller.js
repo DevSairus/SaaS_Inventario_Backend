@@ -596,17 +596,43 @@ const cancelTransfer = async (req, res) => {
         message: 'No se puede cancelar una transferencia ya recibida'
       });
     }
+    if (transfer.status === 'cancelled') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'La transferencia ya está cancelada' });
+    }
 
-    // Si ya fue enviada, devolver stock a bodega origen
+    // Si ya fue enviada, devolver el stock a la bodega origen con un movimiento
+    // de entrada (espejo de sendTransfer). Antes solo se sumaba a
+    // product.current_stock: la bodega origen quedaba descuadrada y el kardex
+    // no mostraba la devolución.
     if (transfer.status === 'sent') {
+      const authError = await assertBranchOwnsWarehouse(req, transfer.from_warehouse_id);
+      if (authError) {
+        await transaction.rollback();
+        return res.status(authError.status).json({ success: false, message: authError.message });
+      }
+      const { createMovement } = require('./movements.controller');
       for (const item of transfer.items) {
-        const product = item.product;
-        const newStock = parseFloat(product.current_stock) + parseFloat(item.quantity_sent);
-        
-        await product.update({
-          current_stock: newStock,
-          available_stock: newStock - parseFloat(product.reserved_stock)
-        }, { transaction });
+        await createMovement({
+          tenant_id,
+          movement_type: 'entrada',
+          movement_reason: 'transfer_cancel',
+          product_id: item.product_id,
+          warehouse_id: transfer.from_warehouse_id,
+          quantity: item.quantity_sent,
+          unit_cost: item.unit_cost,
+          reference_type: 'transfer',
+          reference_id: transfer.id,
+          user_id: req.user.id,
+          notes: `Transferencia ${transfer.transfer_number} - Cancelada, stock devuelto a bodega origen`
+        }, transaction);
+
+        const updatedProduct = await Product.findByPk(item.product_id, { transaction });
+        if (updatedProduct) {
+          await updatedProduct.update({
+            available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock)
+          }, { transaction });
+        }
       }
     }
 

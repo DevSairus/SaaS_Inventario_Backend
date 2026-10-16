@@ -576,7 +576,7 @@ exports.getWorkshopKPIs = async (req, res) => {
     otsByStatus.forEach(r => { statusMap[r.status] = parseInt(r.count); });
 
     // OTs abiertas (no entregadas ni canceladas)
-    const openStatuses = ['recibido', 'diagnostico', 'en_proceso', 'listo'];
+    const openStatuses = ['recibido', 'en_proceso', 'en_espera', 'listo'];
     const openOTs = openStatuses.reduce((sum, s) => sum + (statusMap[s] || 0), 0);
 
     // Ingresos de mano de obra este mes

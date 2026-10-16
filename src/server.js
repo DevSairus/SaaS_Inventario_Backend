@@ -291,7 +291,9 @@ app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware,
 // ── Inventario ──
 app.use('/api/products',                       authMiddleware, tenantMiddleware, productsRoutes);
 app.use('/api/categories',                     authMiddleware, tenantMiddleware, categoriesRoutes);
-app.use('/api/inventory/suppliers',            authMiddleware, tenantMiddleware, suppliersRoutes);
+// requireModule seguro aquí: tesorería, contabilidad y nómina (que también usan
+// proveedores) dependen de 'inventory' en modules.catalog.js.
+app.use('/api/inventory/suppliers',            authMiddleware, tenantMiddleware, requireModule('inventory'), suppliersRoutes);
 app.use('/api/inventory/purchases',            authMiddleware, tenantMiddleware, branchMiddleware, purchasesRoutes);
 app.use('/api/inventory/movements',            authMiddleware, tenantMiddleware, branchMiddleware, movementsRoutes);
 app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware, adjustmentsRoutes);
@@ -308,8 +310,8 @@ app.use('/api/dashboard',                      authMiddleware, tenantMiddleware,
 // Estas rutas específicas ANTES de /api/sales para evitar conflicto con /:id
 app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerReturnsRoutes);
 app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), supplierReturnsRoutes);
-app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, branchMiddleware, transfersRoutes);
-app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, branchMiddleware, internalConsumptionsRoutes);
+app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, branchMiddleware, requireModule('inventory'), transfersRoutes);
+app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, branchMiddleware, requireModule('inventory'), internalConsumptionsRoutes);
 
 // ── Ventas (genéricas — después de las específicas) ──
 app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, salesRoutes);

@@ -28,15 +28,15 @@ router.get('/:id', adjustmentsController.getAdjustmentById);
 router.post('/', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.createAdjustment);
 
 // Actualizar ajuste (solo draft)
-router.put('/:id', adjustmentsController.updateAdjustment);
+router.put('/:id', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.updateAdjustment);
 
 // Confirmar ajuste (genera movimientos)
 router.patch('/:id/confirm', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.confirmAdjustment);
 
 // Cancelar ajuste
-router.patch('/:id/cancel', adjustmentsController.cancelAdjustment);
+router.patch('/:id/cancel', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.cancelAdjustment);
 
 // Eliminar ajuste (solo draft)
-router.delete('/:id', adjustmentsController.deleteAdjustment);
+router.delete('/:id', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.deleteAdjustment);
 
 module.exports = router;

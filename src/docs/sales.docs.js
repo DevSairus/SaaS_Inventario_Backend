@@ -9,7 +9,7 @@
  *     parameters:
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [draft, confirmed, delivered, cancelled] }
+ *         schema: { type: string, enum: [draft, pending, completed, cancelled] }
  *       - in: query
  *         name: customer_id
  *         schema: { type: string, format: uuid }
@@ -179,22 +179,6 @@
  *     responses:
  *       200:
  *         description: Cancelada
- */
-
-/**
- * @swagger
- * /api/sales/{id}/deliver:
- *   post:
- *     tags: [Sales]
- *     summary: Marcar venta como entregada
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema: { type: string, format: uuid }
- *     responses:
- *       200:
- *         description: Marcada como entregada
  */
 
 /**

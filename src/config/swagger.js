@@ -230,7 +230,7 @@ La mayoría de endpoints requieren un **Bearer Token JWT**.
             sale_number: { type: 'string', example: 'VTA-2026-001' },
             customer_id: { type: 'string', format: 'uuid', nullable: true },
             customer_name: { type: 'string', example: 'Juan Pérez' },
-            status: { type: 'string', enum: ['draft', 'confirmed', 'delivered', 'cancelled'] },
+            status: { type: 'string', enum: ['draft', 'pending', 'completed', 'cancelled'] },
             payment_method: { type: 'string', enum: ['cash', 'credit_card', 'debit_card', 'transfer', 'check'] },
             payment_status: { type: 'string', enum: ['paid', 'pending', 'partial'] },
             subtotal: { type: 'number' },

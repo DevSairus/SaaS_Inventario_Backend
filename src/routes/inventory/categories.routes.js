@@ -8,7 +8,10 @@ const {
   deactivateCategory,
   deleteCategoryPermanently
 } = require('../../controllers/inventory/categories.controller');
-const { authMiddleware } = require('../../middleware/auth');
+const { authMiddleware, checkRole } = require('../../middleware/auth');
+
+// INV-4: crear, editar o borrar categorías solo para gerencia y bodeguero.
+const CATEGORIES_WRITE_ROLES = ['admin', 'manager', 'warehouse_keeper', 'super_admin'];
 
 router.use(authMiddleware);
 
@@ -31,27 +34,27 @@ router.get('/:id', getCategoryById);
  * @desc    Crear una nueva categoría
  * @access  Private
  */
-router.post('/', createCategory);
+router.post('/', checkRole(...CATEGORIES_WRITE_ROLES), createCategory);
 
 /**
  * @route   PUT /api/categories/:id
  * @desc    Actualizar una categoría
  * @access  Private
  */
-router.put('/:id', updateCategory);
+router.put('/:id', checkRole(...CATEGORIES_WRITE_ROLES), updateCategory);
 
 /**
  * @route   PATCH /api/categories/:id/deactivate
  * @desc    Desactivar una categoría
  * @access  Private
  */
-router.patch('/:id/deactivate', deactivateCategory);
+router.patch('/:id/deactivate', checkRole(...CATEGORIES_WRITE_ROLES), deactivateCategory);
 
 /**
  * @route   DELETE /api/categories/:id
  * @desc    Eliminar categoría permanentemente
  * @access  Private
  */
-router.delete('/:id', deleteCategoryPermanently);
+router.delete('/:id', checkRole(...CATEGORIES_WRITE_ROLES), deleteCategoryPermanently);
 
 module.exports = router;
