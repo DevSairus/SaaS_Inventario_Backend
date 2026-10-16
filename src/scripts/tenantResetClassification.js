@@ -31,8 +31,6 @@ const ALWAYS_KEEP = [
   'ensambladora_tecnicos_asesores',
   // Config de pagos/integraciones del tenant
   'tenant_mercadopago_config',
-  // Contenido estático de soporte replicado por migración, no datos del cliente
-  'support_faq_categories', 'support_faq_articles',
   // Tablas que la app SIEMPRE resuelve contra `public` (ver PUBLIC_SCHEMA_MODELS
   // en config/registerTenantSchemaHooks.js) -- existen físicamente acá por
   // migración pero nunca se leen/escriben en el schema del tenant. No aportan

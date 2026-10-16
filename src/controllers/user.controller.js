@@ -202,6 +202,16 @@ const changePassword = async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
 
+    // Mismo mínimo que el login (auth.controller) y el restablecimiento por
+    // enlace: sin esto se podía guardar una clave más corta con la que luego
+    // no se puede iniciar sesión.
+    if (!current_password || typeof new_password !== 'string' || new_password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'La nueva contraseña debe tener al menos 8 caracteres',
+      });
+    }
+
     const user = await User.findByPk(req.user.id);
 
     if (!user) {

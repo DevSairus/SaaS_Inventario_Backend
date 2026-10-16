@@ -6,7 +6,7 @@
 // además bajo /api/superadmin/support -- duplicando rutas que ya existían en
 // /api/superadmin y dejando sin enrutar los controllers que sí fueron escritos
 // para vivir acá (controllers/superadmin/supportTickets.controller.js,
-// supportStats.controller.js, supportFaq.controller.js -- sus propios
+// supportStats.controller.js -- sus propios
 // comentarios ya documentaban las rutas exactas: GET /api/superadmin/support/tickets,
 // etc). Este archivo vuelve a su propósito original: la bandeja de soporte que
 // usa el superadmin para atender los tickets creados por los tenants
@@ -20,7 +20,6 @@ const uploadSupport = require('../../middleware/uploadSupport');
 
 const ticketsController = require('../../controllers/superadmin/supportTickets.controller');
 const statsController = require('../../controllers/superadmin/supportStats.controller');
-const faqController = require('../../controllers/superadmin/supportFaq.controller');
 const remoteSessionController = require('../../controllers/support/remoteSession.controller');
 
 // Mismo patrón que routes/superadmin.routes.js: nada de este router es
@@ -76,18 +75,5 @@ router.get('/tenants/:tenant_id/users', authMiddleware, requireSupportAccess, re
 // ============================================
 
 router.get('/stats', authMiddleware, requireSupportAccess, statsController.getStats);
-
-// ============================================
-// FAQ -- administración del contenido que ven los tenants
-// ============================================
-
-router.get('/faq/categories', authMiddleware, requireSupportAccess, faqController.listCategories);
-router.post('/faq/categories', authMiddleware, requireSupportAccess, faqController.createCategory);
-router.put('/faq/categories/:id', authMiddleware, requireSupportAccess, faqController.updateCategory);
-router.delete('/faq/categories/:id', authMiddleware, requireSupportAccess, faqController.deleteCategory);
-
-router.post('/faq/articles', authMiddleware, requireSupportAccess, faqController.createArticle);
-router.put('/faq/articles/:id', authMiddleware, requireSupportAccess, faqController.updateArticle);
-router.delete('/faq/articles/:id', authMiddleware, requireSupportAccess, faqController.deleteArticle);
 
 module.exports = router;

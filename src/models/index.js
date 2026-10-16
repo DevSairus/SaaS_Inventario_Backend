@@ -197,8 +197,6 @@ const PayrollSetting = require('./payroll/PayrollSetting');
 const PayrollPayment = require('./payroll/PayrollPayment');
 
 // ✅ NUEVO - Módulo de Soporte
-const SupportFaqCategory = require('./support/SupportFaqCategory');
-const SupportFaqArticle = require('./support/SupportFaqArticle');
 const SupportTicket = require('./support/SupportTicket');
 const SupportTicketMessage = require('./support/SupportTicketMessage');
 const SupportTicketAttachment = require('./support/SupportTicketAttachment');
@@ -891,9 +889,6 @@ AiProposal.belongsTo(User, { foreignKey: 'reviewed_by', as: 'reviewer' });
 
 // ============= RELACIONES - MÓDULO DE SOPORTE =============
 
-// SupportFaqArticle ↔ SupportFaqCategory
-SupportFaqArticle.belongsTo(SupportFaqCategory, { foreignKey: 'category_id', as: 'category' });
-SupportFaqCategory.hasMany(SupportFaqArticle, { foreignKey: 'category_id', as: 'articles' });
 
 // SupportTicket ↔ Tenant
 SupportTicket.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
@@ -1088,8 +1083,6 @@ module.exports = {
   AiConversation,
   AiMessage,
   AiProposal,
-  SupportFaqCategory,
-  SupportFaqArticle,
   SupportTicket,
   SupportTicketMessage,
   SupportTicketAttachment,

@@ -2,8 +2,6 @@ const { Op, fn, col, literal } = require('sequelize');
 const {
   SupportTicket,
   SupportTicketMessage,
-  SupportFaqArticle,
-  SupportFaqCategory,
   Tenant,
 } = require('../../models');
 const logger = require('../../config/logger');
@@ -105,15 +103,6 @@ const getStats = async (req, res) => {
       raw: true,
     });
 
-    // ── FAQ stats ──
-    const faqStats = await SupportFaqArticle.findAll({
-      where: { is_active: true },
-      attributes: ['id', 'question', 'helpful_count', 'not_helpful_count'],
-      order: [[literal('helpful_count + not_helpful_count'), 'DESC']],
-      limit: 10,
-      raw: true,
-    });
-
     // ── Resumen general ──
     const totalTickets = await SupportTicket.count({ where: dateFilter });
     const openTickets = await SupportTicket.count({
@@ -146,7 +135,6 @@ const getStats = async (req, res) => {
         by_category: categoryCounts,
         by_tenant: tenantCounts,
         monthly: monthlyTickets,
-        faq: faqStats,
       },
     });
   } catch (error) {

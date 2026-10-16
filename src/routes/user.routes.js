@@ -56,7 +56,7 @@ router.post(
     body('last_name')
       .trim().notEmpty().withMessage('El apellido es requerido'),
     body('role')
-      .isIn(['admin', 'manager', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'])
+      .isIn(['admin', 'manager', 'accountant', 'seller', 'warehouse_keeper', 'user', 'viewer', 'technician'])
       .withMessage('Selecciona un rol válido'),
     body('role')
       .if((value, { req }) => req.body.has_system_access === false)

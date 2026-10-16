@@ -2,16 +2,11 @@
 const express = require('express');
 const router = express.Router();
 const uploadSupport = require('../middleware/uploadSupport');
-const faqController = require('../controllers/support/faq.controller');
 const ticketsController = require('../controllers/support/tickets.controller');
 const remoteSessionController = require('../controllers/support/remoteSession.controller');
 
 // El middleware ya está aplicado en server.js (authMiddleware, tenantMiddleware)
 // Todos los roles del tenant pueden acceder a soporte
-
-// FAQ
-router.get('/faq', faqController.getFaq);
-router.post('/faq/:id/feedback', faqController.submitFeedback);
 
 // Tickets — todos los roles pueden crear y ver tickets
 router.post('/tickets', uploadSupport.array('attachments', 5), ticketsController.createTicket);
