@@ -371,14 +371,14 @@ const generateLibroDiarioPDF = async (res, data, tenant, filters = {}, generated
         .text(fmtDate(entry.entry_date), MARGIN + 96, ctx.y + 4, { width: 60 })
         .font('Helvetica').fillColor(gray)
         .text(SOURCE_LABELS[entry.source_type] || entry.source_type || '—', MARGIN + 160, ctx.y + 4, { width: 80 })
-        .text(entry.description || '—', MARGIN + 245, ctx.y + 4, { width: INNER_W - 250, ellipsis: true });
+        .text(`${entry.description || '—'}${entry.third_party?.name ? `  ·  ${entry.third_party.name}${entry.third_party.tax_id ? ' (' + entry.third_party.tax_id + ')' : ''}` : ''}`, MARGIN + 245, ctx.y + 4, { width: INNER_W - 250, ellipsis: true, lineBreak: false });
       ctx.y += 20;
 
       entry.lines.forEach((line) => {
         doc.font('Helvetica').fontSize(7.8).fillColor(black)
           .text(line.account_code, COLS.code + 6, ctx.y, { width: COLS.account - COLS.code - 8 })
           .text(line.account_name, COLS.account + 4, ctx.y, { width: COLS.detail - COLS.account - 8, ellipsis: true })
-          .text(line.description || '—', COLS.detail + 4, ctx.y, { width: COLS.amount - COLS.detail - 60, ellipsis: true })
+          .text([line.third_party_name, line.description].filter(Boolean).join(' · ') || '—', COLS.detail + 4, ctx.y, { width: COLS.amount - COLS.detail - 60, ellipsis: true, lineBreak: false })
           .text(line.debit ? formatCurrency(line.debit) : '—', COLS.amount, ctx.y, { width: 78, align: 'right' })
           .text(line.credit ? formatCurrency(line.credit) : '—', COLS.amount + 80, ctx.y, { width: MARGIN + INNER_W - COLS.amount - 80 - 4, align: 'right' });
         ctx.y += 13;
@@ -445,7 +445,7 @@ const generateLibroMayorPDF = async (res, data, tenant, filters = {}, generatedB
       doc.font('Helvetica-Bold').fontSize(7.5).fillColor(white)
         .text('FECHA', COLS.date + 6, ctx.y + 5)
         .text('N° ASIENTO', COLS.number + 6, ctx.y + 5)
-        .text('DETALLE', COLS.detail + 6, ctx.y + 5)
+        .text('TERCERO · DETALLE', COLS.detail + 6, ctx.y + 5)
         .text('DÉBITO', COLS.debit, ctx.y + 5, { width: COLS.credit - COLS.debit - 8, align: 'right' })
         .text('CRÉDITO', COLS.credit, ctx.y + 5, { width: COLS.balance - COLS.credit - 8, align: 'right' })
         .text('SALDO', COLS.balance, ctx.y + 5, { width: MARGIN + INNER_W - COLS.balance - 6, align: 'right' });
@@ -465,7 +465,7 @@ const generateLibroMayorPDF = async (res, data, tenant, filters = {}, generatedB
       doc.font('Helvetica').fontSize(7.8).fillColor(black)
         .text(fmtDate(m.entry_date), COLS.date + 6, ctx.y, { width: COLS.number - COLS.date - 8 })
         .text(String(m.entry_number || ''), COLS.number + 6, ctx.y, { width: COLS.detail - COLS.number - 8, ellipsis: true })
-        .text(m.description || '—', COLS.detail + 6, ctx.y, { width: COLS.debit - COLS.detail - 8, ellipsis: true })
+        .text([m.third_party_name, m.description].filter(Boolean).join(' · ') || '—', COLS.detail + 6, ctx.y, { width: COLS.debit - COLS.detail - 8, ellipsis: true, lineBreak: false })
         .text(m.debit ? formatCurrency(m.debit) : '—', COLS.debit, ctx.y, { width: COLS.credit - COLS.debit - 8, align: 'right' })
         .text(m.credit ? formatCurrency(m.credit) : '—', COLS.credit, ctx.y, { width: COLS.balance - COLS.credit - 8, align: 'right' })
         .text(formatCurrency(m.running_balance), COLS.balance, ctx.y, { width: MARGIN + INNER_W - COLS.balance - 6, align: 'right' });

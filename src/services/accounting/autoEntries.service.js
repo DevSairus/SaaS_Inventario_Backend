@@ -612,7 +612,7 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
 
       const lines = [
         { account_id: expenseAccount, debit: total, credit: 0, description: expense.description },
-        { account_id: creditAccount, debit: 0, credit: netPayable, description: isPaid ? 'Pago del gasto' : 'Gasto pendiente de pago' },
+        { account_id: creditAccount, debit: 0, credit: netPayable, description: isPaid ? 'Pago del gasto' : 'Gasto pendiente de pago', third_party_id: expense.supplier_id || null },
       ];
 
       if (retefuente > 0) {
@@ -1158,7 +1158,7 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
           const value = Math.round(Number(reversal[key] || 0) * 100) / 100;
           if (value <= 0) continue;
           const account_id = await getMappedAccountId(tenantId, event, t);
-          lines.push({ account_id, debit: value, credit: 0, description: `Reversión de ${key === 'retefuente' ? 'ReteFuente' : key === 'reteiva' ? 'ReteIVA' : 'ReteICA'} practicada (devolución a proveedor)` });
+          lines.push({ account_id, debit: value, credit: 0, description: `Reversión de ${key === 'retefuente' ? 'ReteFuente' : key === 'reteiva' ? 'ReteIVA' : 'ReteICA'} practicada (devolución a proveedor)`, third_party_id: purchase.supplier_id || null });
         }
       } else if (supplierReturn.settlement_type || purchase.paid_amount !== undefined) {
         const { purchaseReturnSplit } = require('../../utils/purchaseAmounts');
@@ -1297,7 +1297,7 @@ async function generateAdvanceApplicationEntry(application, sale, tenantId, user
       const receivableAccount = await getMappedAccountId(tenantId, 'sale_receivable', t);
 
       const lines = [
-        { account_id: liabilityAccount, debit: amount, credit: 0, description: 'Aplicación de anticipo a factura' },
+        { account_id: liabilityAccount, debit: amount, credit: 0, description: 'Aplicación de anticipo a factura', third_party_id: sale.customer_id || null },
         {
           account_id: receivableAccount, debit: 0, credit: amount,
           description: 'Reducción de cartera por anticipo aplicado',

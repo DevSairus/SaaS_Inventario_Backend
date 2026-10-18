@@ -10,6 +10,17 @@ async function generateEntryNumber(tenantId, transaction) {
   const year = new Date().getFullYear();
   const prefix = `AST-${year}-`;
 
+  // Los asientos automáticos se generan en paralelo (ej. abono + anticipo
+  // por excedente en el mismo pago): sin serializar, dos transacciones leían
+  // el mismo último número y la segunda fallaba con
+  // journal_entries_tenant_number_unique. El lock se libera al commit.
+  if (transaction) {
+    await transaction.sequelize.query(
+      'SELECT pg_advisory_xact_lock(hashtext(:key))',
+      { replacements: { key: `journal_entry_number:${tenantId}` }, transaction }
+    );
+  }
+
   const last = await JournalEntry.findOne({
     where: { tenant_id: tenantId, entry_number: { [Op.like]: `${prefix}%` } },
     order: [['entry_number', 'DESC']],

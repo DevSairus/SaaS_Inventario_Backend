@@ -1,6 +1,7 @@
 // backend/src/controllers/sales/customers.controller.js
 const { Customer, Sale, SaleItem } = require('../../models');
 const { Op } = require('sequelize');
+const { sequelize } = require('../../models');
 const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 const { economicSalesWhere } = require('../../utils/remisionVisibility');
 
@@ -39,13 +40,19 @@ const getAll = async (req, res) => {
     const where = { tenant_id: tenantId };
 
     if (search) {
-      where[Op.or] = [
-        { first_name: { [Op.iLike]: `%${search}%` } },
-        { last_name: { [Op.iLike]: `%${search}%` } },
-        { tax_id: { [Op.iLike]: `%${search}%` } },
-        { email: { [Op.iLike]: `%${search}%` } },
-        { phone: { [Op.iLike]: `%${search}%` } }
-      ];
+      // Cada palabra debe aparecer en nombre completo, razón social, NIT, email o teléfono
+      // (así "juan perez" encuentra a "Juan Carlos Pérez" en first_name + last_name).
+      const words = String(search).trim().split(/\s+/).filter(Boolean).slice(0, 5);
+      const fullName = sequelize.fn('concat_ws', ' ', sequelize.col('first_name'), sequelize.col('last_name'));
+      where[Op.and] = words.map(w => ({
+        [Op.or]: [
+          sequelize.where(fullName, { [Op.iLike]: `%${w}%` }),
+          { business_name: { [Op.iLike]: `%${w}%` } },
+          { tax_id: { [Op.iLike]: `%${w}%` } },
+          { email: { [Op.iLike]: `%${w}%` } },
+          { phone: { [Op.iLike]: `%${w}%` } }
+        ]
+      }));
     }
 
     if (type) where.customer_type = type;

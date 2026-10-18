@@ -412,6 +412,11 @@ const generateIncomeStatementExcel = async (data, tenant, filters = {}, generate
  * ordenado cronológicamente. `data.rows` viene ya aplanado y ordenado desde
  * el controller (entry_date, entry_number, line_order).
  */
+// "Nombre - NIT" del tercero de una línea (vacío si no tiene)
+const thirdPartyLabel = (line) => line.third_party_name
+  ? `${line.third_party_name}${line.third_party_tax_id ? ' - ' + line.third_party_tax_id : ''}`
+  : '';
+
 const generateLibroDiarioExcel = async (data, tenant, filters = {}, generatedByName = '') => {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = tenant?.company_name || 'Pitbox';
@@ -426,6 +431,7 @@ const generateLibroDiarioExcel = async (data, tenant, filters = {}, generatedByN
     { key: 'number', width: 14 },
     { key: 'code', width: 10 },
     { key: 'account', width: 34 },
+    { key: 'third_party', width: 30 },
     { key: 'detail', width: 30 },
     { key: 'debit', width: 16 },
     { key: 'credit', width: 16 },
@@ -436,11 +442,11 @@ const generateLibroDiarioExcel = async (data, tenant, filters = {}, generatedByN
     tenant,
     subtitle: `Periodo: ${fmtDate(filters.from)} a ${fmtDate(filters.to)}  ·  ${data.entry_count} asientos, ${data.line_count} líneas`,
     generatedByName,
-    mergeCols: 'G',
+    mergeCols: 'H',
   });
 
   const headerRow = sheet.getRow(6);
-  headerRow.values = ['Fecha', 'N° Asiento', 'Código', 'Cuenta', 'Detalle', 'Débito', 'Crédito'];
+  headerRow.values = ['Fecha', 'N° Asiento', 'Código', 'Cuenta', 'Tercero', 'Detalle', 'Débito', 'Crédito'];
   styleHeaderRow(headerRow);
 
   const rows = data.rows || [];
@@ -460,32 +466,33 @@ const generateLibroDiarioExcel = async (data, tenant, filters = {}, generatedByN
       line.entry_number,
       line.account_code,
       line.account_name,
+      thirdPartyLabel(line),
       line.line_description || line.entry_description || '',
       Number(line.debit),
       Number(line.credit),
     ];
     row.getCell(1).numFmt = 'dd/mm/yyyy';
-    row.getCell(6).numFmt = '$#,##0';
     row.getCell(7).numFmt = '$#,##0';
+    row.getCell(8).numFmt = '$#,##0';
     r += 1;
   });
 
   const lastDataRow = r - 1;
   if (rows.length === 0) {
     sheet.getCell(`A${r}`).value = 'Sin asientos contabilizados en el periodo seleccionado.';
-    sheet.mergeCells(`A${r}:G${r}`);
+    sheet.mergeCells(`A${r}:H${r}`);
     r += 1;
   } else {
-    sheet.autoFilter = { from: 'A6', to: `G${lastDataRow}` };
+    sheet.autoFilter = { from: 'A6', to: `H${lastDataRow}` };
   }
 
   const totalRow = sheet.getRow(r + 1);
-  totalRow.values = ['', '', '', '', 'Total', Number(data.totals?.debit || 0), Number(data.totals?.credit || 0)];
-  totalRow.getCell(5).font = { bold: true };
-  totalRow.getCell(6).numFmt = '$#,##0';
-  totalRow.getCell(7).numFmt = '$#,##0';
+  totalRow.values = ['', '', '', '', '', 'Total', Number(data.totals?.debit || 0), Number(data.totals?.credit || 0)];
   totalRow.getCell(6).font = { bold: true };
+  totalRow.getCell(7).numFmt = '$#,##0';
+  totalRow.getCell(8).numFmt = '$#,##0';
   totalRow.getCell(7).font = { bold: true };
+  totalRow.getCell(8).font = { bold: true };
   totalRow.eachCell((cell) => {
     cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } };
   });
@@ -515,6 +522,7 @@ const generateLibroMayorExcel = async (data, tenant, filters = {}, generatedByNa
   sheet.columns = [
     { key: 'date', width: 12 },
     { key: 'number', width: 14 },
+    { key: 'third_party', width: 32 },
     { key: 'detail', width: 40 },
     { key: 'debit', width: 16 },
     { key: 'credit', width: 16 },
@@ -526,19 +534,19 @@ const generateLibroMayorExcel = async (data, tenant, filters = {}, generatedByNa
     tenant,
     subtitle: `Cuenta: ${data.account?.code || ''} - ${data.account?.name || ''}  ·  Periodo: ${fmtDate(filters.from)} a ${fmtDate(filters.to)}`,
     generatedByName,
-    mergeCols: 'F',
+    mergeCols: 'G',
   });
 
   const openingRowNum = 6;
   const openingRow = sheet.getRow(openingRowNum);
-  openingRow.values = ['', '', 'Saldo inicial', '', '', Number(data.opening_balance || 0)];
-  openingRow.getCell(3).font = { italic: true, color: { argb: 'FF6B7280' } };
-  openingRow.getCell(6).font = { bold: true, italic: true };
-  openingRow.getCell(6).numFmt = '$#,##0';
+  openingRow.values = ['', '', '', 'Saldo inicial', '', '', Number(data.opening_balance || 0)];
+  openingRow.getCell(4).font = { italic: true, color: { argb: 'FF6B7280' } };
+  openingRow.getCell(7).font = { bold: true, italic: true };
+  openingRow.getCell(7).numFmt = '$#,##0';
 
   const headerRowNum = openingRowNum + 1;
   const headerRow = sheet.getRow(headerRowNum);
-  headerRow.values = ['Fecha', 'N° Asiento', 'Detalle', 'Débito', 'Crédito', 'Saldo'];
+  headerRow.values = ['Fecha', 'N° Asiento', 'Tercero', 'Detalle', 'Débito', 'Crédito', 'Saldo'];
   styleHeaderRow(headerRow);
 
   const movements = data.movements || [];
@@ -548,6 +556,7 @@ const generateLibroMayorExcel = async (data, tenant, filters = {}, generatedByNa
     row.values = [
       toExcelDate(m.entry_date),
       entryNumberCell(m.entry_number, m.entry_id, entryRows),
+      thirdPartyLabel(m),
       m.description,
       Number(m.debit),
       Number(m.credit),
@@ -555,30 +564,30 @@ const generateLibroMayorExcel = async (data, tenant, filters = {}, generatedByNa
     ];
     styleLinkCell(row.getCell(2));
     row.getCell(1).numFmt = 'dd/mm/yyyy';
-    row.getCell(4).numFmt = '$#,##0';
     row.getCell(5).numFmt = '$#,##0';
     row.getCell(6).numFmt = '$#,##0';
+    row.getCell(7).numFmt = '$#,##0';
     zebraStripe(row, idx);
   });
 
   const lastDataRow = firstDataRow + movements.length - 1;
   if (movements.length === 0) {
     sheet.getCell(`A${firstDataRow}`).value = 'Sin movimientos en el periodo seleccionado.';
-    sheet.mergeCells(`A${firstDataRow}:F${firstDataRow}`);
+    sheet.mergeCells(`A${firstDataRow}:G${firstDataRow}`);
   } else {
-    sheet.autoFilter = { from: `A${headerRowNum}`, to: `F${lastDataRow}` };
+    sheet.autoFilter = { from: `A${headerRowNum}`, to: `G${lastDataRow}` };
   }
 
   const totalRowNum = (movements.length === 0 ? firstDataRow : lastDataRow) + 2;
   const totalRow = sheet.getRow(totalRowNum);
-  totalRow.values = ['', '', 'Total periodo / Saldo final', Number(data.totals?.debit || 0), Number(data.totals?.credit || 0), Number(data.closing_balance || 0)];
-  totalRow.getCell(3).font = { bold: true };
-  totalRow.getCell(4).numFmt = '$#,##0';
+  totalRow.values = ['', '', '', 'Total periodo / Saldo final', Number(data.totals?.debit || 0), Number(data.totals?.credit || 0), Number(data.closing_balance || 0)];
+  totalRow.getCell(4).font = { bold: true };
   totalRow.getCell(5).numFmt = '$#,##0';
   totalRow.getCell(6).numFmt = '$#,##0';
-  totalRow.getCell(4).font = { bold: true };
+  totalRow.getCell(7).numFmt = '$#,##0';
   totalRow.getCell(5).font = { bold: true };
   totalRow.getCell(6).font = { bold: true };
+  totalRow.getCell(7).font = { bold: true };
   totalRow.eachCell((cell) => {
     cell.border = { top: { style: 'thin', color: { argb: 'FFD1D5DB' } } };
   });

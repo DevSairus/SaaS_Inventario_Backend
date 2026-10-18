@@ -45,6 +45,7 @@ router.put('/chart-of-accounts/:id', chartOfAccountsCtrl.update);
 router.delete('/chart-of-accounts/:id', chartOfAccountsCtrl.remove);
 
 // Asientos contables
+router.get('/third-parties', journalEntriesCtrl.searchThirdParties);
 router.get('/journal-entries', journalEntriesCtrl.list);
 router.get('/journal-entries/:id', journalEntriesCtrl.getById);
 router.post('/journal-entries', journalEntriesCtrl.create);

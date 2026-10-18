@@ -25,6 +25,7 @@ const { markAdvanceForAlertCheck } = require('../../middleware/autoCheckAdvanceA
 const logger = require('../../config/logger');
 const audit = require('../../utils/audit');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
+const { createCustomerAdvanceRecord, afterAdvanceCommitted } = require('../../services/finance/customerAdvance.service');
 
 // ── POST /customer-advances — recibir un anticipo ───────────────────────────
 const createAdvance = async (req, res) => {
@@ -44,12 +45,6 @@ const createAdvance = async (req, res) => {
       return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
     }
 
-    const customer = await Customer.findOne({ where: { id: customer_id, tenant_id }, transaction });
-    if (!customer) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
-    }
-
     // Recibir un anticipo mueve efectivo hoy — exige caja abierta, mismo
     // criterio que registerPayment (solo para tenants con Tesorería activa).
     let openSession = null;
@@ -61,47 +56,30 @@ const createAdvance = async (req, res) => {
       }
     }
 
-    const effectiveAmount = parseFloat(amount);
-    const selectedBankAccountId = await resolveSelectedBankAccountId(tenant_id, bank_account_id, method || 'Efectivo', transaction);
-    const advance_number = await generateAdvanceNumber(tenant_id, transaction);
-
-    const advance = await CustomerAdvance.create({
-      tenant_id,
-      branch_id,
-      customer_id,
-      advance_number,
-      amount: effectiveAmount,
-      applied_amount: 0,
-      refunded_amount: 0,
-      balance: effectiveAmount,
+    const advance = await createCustomerAdvanceRecord({
+      tenantId: tenant_id,
+      branchId: branch_id,
+      userId: user_id,
+      customerId: customer_id,
+      amount,
       method: method || 'Efectivo',
-      bank_account_id: selectedBankAccountId,
-      received_date: received_date || new Date(),
-      cash_session_id: openSession?.id || null,
-      reference_note: reference_note || null,
-      triggers_iva: !!triggers_iva,
-      status: 'active',
-      created_by: user_id,
-    }, { transaction });
+      bankAccountId: bank_account_id,
+      receivedDate: received_date,
+      referenceNote: reference_note,
+      triggersIva: triggers_iva,
+      cashSessionId: openSession?.id || null,
+    }, transaction);
 
     await transaction.commit();
 
     // Asiento contable de la recepción, no bloqueante — mismo patrón
     // fire-and-forget que el resto de generadores automáticos.
-    setImmediate(async () => {
-      try {
-        const { generateAdvanceEntry } = require('../../services/accounting/autoEntries.service');
-        await generateAdvanceEntry(advance, tenant_id, user_id);
-      } catch (err) {
-        logger.warn(`[accounting] Error generando asiento de anticipo (${advance.id}): ${err.message}`);
-      }
-    });
-    markAdvanceForAlertCheck(advance.id, tenant_id);
+    afterAdvanceCommitted(advance, tenant_id, user_id);
 
     res.status(201).json({ success: true, message: 'Anticipo registrado exitosamente', data: advance });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
-    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
+    if (error.status === 400 || error.status === 404) return res.status(error.status).json({ success: false, message: error.message });
     logger.error('Error registrando anticipo:', error);
     res.status(500).json({ success: false, message: 'Error registrando anticipo' });
   }

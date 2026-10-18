@@ -1,19 +1,37 @@
 const { JournalEntry, JournalEntryLine, ChartOfAccount } = require('../../models');
 const { createDraftEntry, updateDraftEntry, postEntry, voidEntry, reverseEntry } = require('../../services/accounting/journalEntry.service');
 const logger = require('../../config/logger');
+const { entryThirdParties, resolveThirdParties, searchThirdParties } = require('../../services/accounting/thirdParty.service');
 
-// GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=
+// GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=&third_party_id=&q=
 exports.list = async (req, res) => {
   try {
-    const { status, source_type, from, to, branch_id } = req.query;
+    const { Op } = require('sequelize');
+    const { status, source_type, from, to, branch_id, third_party_id, q } = req.query;
     const where = { tenant_id: req.tenant_id };
     if (status) where.status = status;
     if (source_type) where.source_type = source_type;
     // branch_id ausente = todas las sedes. branch_id=null (string) permite
     // filtrar explícitamente los asientos sin sede asignada (ajustes globales).
     if (branch_id) where.branch_id = branch_id === 'null' ? null : branch_id;
+    if (third_party_id) {
+      const lines = await JournalEntryLine.findAll({
+        where: { third_party_id },
+        attributes: ['entry_id'],
+        group: ['entry_id'],
+        raw: true,
+      });
+      where.id = { [Op.in]: lines.map(l => l.entry_id) };
+    }
+    if (q && String(q).trim()) {
+      const term = `%${String(q).trim()}%`;
+      const num = parseInt(String(q).replace(/\D/g, ''), 10);
+      where[Op.or] = [
+        { description: { [Op.iLike]: term } },
+        ...(Number.isFinite(num) ? [{ entry_number: num }] : []),
+      ];
+    }
     if (from || to) {
-      const { Op } = require('sequelize');
       where.entry_date = {};
       if (from) where.entry_date[Op.gte] = from;
       if (to) where.entry_date[Op.lte] = to;
@@ -25,7 +43,11 @@ exports.list = async (req, res) => {
       limit: 200,
     });
 
-    res.json({ success: true, data: entries });
+    // Tercero principal de cada asiento (cliente / proveedor / empleado)
+    const tpMap = await entryThirdParties(entries.map(e => e.id));
+    const data = entries.map(e => ({ ...e.toJSON(), third_party: tpMap.get(e.id) || null }));
+
+    res.json({ success: true, data });
   } catch (error) {
     logger.error('Error en journalEntries.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al listar asientos', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
@@ -40,7 +62,14 @@ exports.getById = async (req, res) => {
       include: [{ model: JournalEntryLine, as: 'lines', include: [{ model: ChartOfAccount, as: 'account' }] }],
     });
     if (!entry) return res.status(404).json({ success: false, message: 'Asiento no encontrado' });
-    res.json({ success: true, data: entry });
+    const json = entry.toJSON();
+    const tpMap = await resolveThirdParties((json.lines || []).map(l => l.third_party_id));
+    json.lines = (json.lines || [])
+      .sort((a, b) => (a.line_order ?? 0) - (b.line_order ?? 0))
+      .map(l => ({ ...l, third_party: l.third_party_id ? (tpMap.get(l.third_party_id) || null) : null }));
+    const entryTp = json.lines.find(l => l.third_party)?.third_party || null;
+    json.third_party = entryTp;
+    res.json({ success: true, data: json });
   } catch (error) {
     logger.error('Error en journalEntries.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al obtener asiento', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
@@ -147,5 +176,18 @@ exports.reverse = async (req, res) => {
     await t.rollback();
     logger.error('Error en journalEntries.controller.js:', error);
     res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// GET /api/accounting/third-parties?q=&types=customer,supplier,employee
+// Buscador unificado de terceros para asientos manuales y filtros.
+exports.searchThirdParties = async (req, res) => {
+  try {
+    const types = req.query.types ? String(req.query.types).split(',').filter(Boolean) : undefined;
+    const data = await searchThirdParties(req.tenant_id, req.query.q, { limit: req.query.limit, types });
+    res.json({ success: true, data });
+  } catch (error) {
+    logger.error('Error en journalEntries.controller.js (searchThirdParties):', error);
+    res.status(500).json({ success: false, message: 'Error al buscar terceros' });
   }
 };

@@ -4,6 +4,7 @@ const { QueryTypes } = require('sequelize');
 const { ChartOfAccount } = require('../../models');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { fetchEntryDetails } = require('../../services/accounting/entryDetails.service');
+const { attachThirdParties } = require('../../services/accounting/thirdParty.service');
 const {
   generateLibroMayorExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -102,6 +103,8 @@ async function fetchLibroMayor(req) {
     { replacements: { accountId: account_id, tenantId: req.tenant_id, from, to, branchId: branch_id || null }, type: QueryTypes.SELECT }
   );
 
+  await attachThirdParties(rows, { fallbackToEntry: true });
+
   let running = openingBalance;
   const movements = rows.map((r) => {
     const debit = Number(r.debit);
@@ -119,6 +122,10 @@ async function fetchLibroMayor(req) {
       credit,
       description: r.line_description || r.entry_description || '',
       third_party_id: r.third_party_id,
+      third_party_name: r.third_party_name,
+      third_party_tax_id: r.third_party_tax_id,
+      third_party_type: r.third_party_type,
+      third_party_inherited: r.third_party_inherited,
       running_balance: running,
     };
   });

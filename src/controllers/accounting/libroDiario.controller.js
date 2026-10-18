@@ -2,6 +2,7 @@
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { getCurrentSchema } = require('../../config/tenantContext');
+const { attachThirdParties } = require('../../services/accounting/thirdParty.service');
 const {
   generateLibroDiarioExcel,
 } = require('../../services/accounting/reportsExcel.service');
@@ -67,6 +68,8 @@ async function fetchLibroDiario(req) {
     { replacements: { tenantId: req.tenant_id, from, to, branchId: branch_id || null }, type: QueryTypes.SELECT }
   );
 
+  await attachThirdParties(rows);
+
   // Agrupar filas planas en asientos con sus líneas, preservando el orden.
   const entriesMap = new Map();
   for (const r of rows) {
@@ -93,7 +96,13 @@ async function fetchLibroDiario(req) {
       credit: Number(r.credit),
       description: r.line_description,
       third_party_id: r.third_party_id,
+      third_party_name: r.third_party_name,
+      third_party_tax_id: r.third_party_tax_id,
+      third_party_type: r.third_party_type,
     });
+    if (!entry.third_party && r.third_party_name) {
+      entry.third_party = { id: r.third_party_id, name: r.third_party_name, tax_id: r.third_party_tax_id, type: r.third_party_type };
+    }
     entry.total_debit += Number(r.debit);
     entry.total_credit += Number(r.credit);
   }

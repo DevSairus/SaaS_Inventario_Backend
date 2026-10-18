@@ -20,6 +20,7 @@ const { resolveUnitCost } = require('../../utils/costResolver');
 const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
 const { applyRemisionFilter } = require('../../utils/remisionVisibility');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
+const { createCustomerAdvanceRecord, afterAdvanceCommitted, splitExcess } = require('../../services/finance/customerAdvance.service');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
 // que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
@@ -932,7 +933,7 @@ const confirm = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenant_id;
     const userId = req.user_id || req.user?.id;
-    const { payment_method, paid_amount, document_type, bank_account_id, payment_splits, credit_days, advance_amount } = req.body;
+    const { payment_method, paid_amount, document_type, bank_account_id, payment_splits, credit_days, advance_amount, excess_advance_amount } = req.body;
 
     if (!payment_method) {
       return res.status(400).json({ success: false, message: 'Debe especificar el método de pago' });
@@ -967,6 +968,30 @@ const confirm = async (req, res) => {
     } catch (err) {
       if (err.status === 400) return res.status(400).json({ success: false, message: err.message });
       throw err;
+    }
+
+    // Excedente que el cliente deja como anticipo (pagó más que el total):
+    // en pago mixto se descuenta de los últimos medios; en pago simple usa el
+    // mismo medio y cuenta bancaria del pago.
+    const excessAdvanceAmount = Math.round((parseFloat(excess_advance_amount) || 0) * 100) / 100;
+    let excessAdvanceParts = [];
+    if (excessAdvanceAmount > 0) {
+      if (document_type === 'cotizacion') {
+        return res.status(400).json({ success: false, message: 'Una cotización no recibe pagos: no se puede crear un anticipo' });
+      }
+      if (splits) {
+        const result = splitExcess(splits, excessAdvanceAmount);
+        if (result.unassigned > 0.01) {
+          return res.status(400).json({ success: false, message: 'El excedente a dejar como anticipo supera lo recibido en el pago mixto' });
+        }
+        splits = result.splits;
+        excessAdvanceParts = result.advanceParts;
+        if (!splits.length) {
+          return res.status(400).json({ success: false, message: 'El pago mixto no cubre nada de la venta después de separar el anticipo' });
+        }
+      } else {
+        excessAdvanceParts = [{ method: payment_method, amount: excessAdvanceAmount, bank_account_id: selectedBankAccountId }];
+      }
     }
 
     // document_type es opcional — si se envía, debe ser uno de los tipos válidos
@@ -1254,9 +1279,40 @@ const confirm = async (req, res) => {
         updateData.payment_history = [...(sale.payment_history || []), ...initialPayments];
       }
 
+      // Excedente del pago → anticipo(s) del cliente, en la misma transacción
+      const excessAdvances = [];
+      if (excessAdvanceParts.length > 0) {
+        if (!sale.customer_id) {
+          await transaction.rollback();
+          return res.status(400).json({ success: false, message: 'La venta no tiene cliente: no se puede dejar el excedente como anticipo' });
+        }
+        if (!openSession && await isTreasuryEnabled(tenantId)) {
+          openSession = await getOpenSession(tenantId, req.branch_id, transaction);
+          if (!openSession) {
+            await transaction.rollback();
+            return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar anticipos.' });
+          }
+        }
+        for (const part of excessAdvanceParts) {
+          excessAdvances.push(await createCustomerAdvanceRecord({
+            tenantId,
+            branchId: req.branch_id,
+            userId,
+            customerId: sale.customer_id,
+            amount: part.amount,
+            method: part.method,
+            bankAccountId: part.bank_account_id,
+            receivedDate: sale.sale_date || new Date(),
+            referenceNote: `Excedente del pago de ${updateData.sale_number || sale.sale_number}`,
+            cashSessionId: openSession?.id || null,
+          }, transaction));
+        }
+      }
+
       const wasQuote = sale.document_type === 'cotizacion';
       await sale.update(updateData, { transaction });
       await transaction.commit();
+      if (excessAdvances.length) afterAdvanceCommitted(excessAdvances, tenantId, userId);
 
       // ── CRM: si la cotización tenía una Opportunity vinculada, al
       // confirmarse como factura/remisión (dejó de ser cotización) la
@@ -1585,7 +1641,7 @@ const registerPayment = async (req, res) => {
     const { id } = req.params;
     const tenantId = req.tenant_id;
     const userId = req.user.id;
-    const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
+    const { amount, payment_method, payment_date, notes, bank_account_id, excess_to_advance } = req.body;
 
     if (!amount || parseFloat(amount) <= 0) {
       await transaction.rollback();
@@ -1639,7 +1695,29 @@ const registerPayment = async (req, res) => {
     const { generateReceiptNumber } = require('../../services/finance/receiptNumber.service');
     const { Receipt } = require('../../models');
 
-    // Limitar el monto al saldo pendiente para evitar sobrepagos
+    // Limitar el monto al saldo pendiente para evitar sobrepagos. Si el
+    // cliente pagó de más y pidió dejar el excedente a favor, ese excedente
+    // se registra como anticipo con el mismo medio de pago y cuenta bancaria.
+    const excess = Math.round((parseFloat(amount) - remaining) * 100) / 100;
+    let excessAdvance = null;
+    if (excess_to_advance && excess >= 0.01) {
+      if (!sale.customer_id) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'La venta no tiene cliente: no se puede dejar el excedente como anticipo' });
+      }
+      excessAdvance = await createCustomerAdvanceRecord({
+        tenantId,
+        branchId: req.branch_id,
+        userId,
+        customerId: sale.customer_id,
+        amount: excess,
+        method: effectiveMethod,
+        bankAccountId: selectedBankAccountId,
+        receivedDate: effectiveDate,
+        referenceNote: `Excedente del pago de ${sale.sale_number}${notes ? ` — ${notes}` : ''}`,
+        cashSessionId: openSession?.id || null,
+      }, transaction);
+    }
     let toApply = Math.min(parseFloat(amount), remaining);
     const appliedPayments = [];
     for (const target of targets) {
@@ -1716,11 +1794,20 @@ const registerPayment = async (req, res) => {
       }
     });
 
+    if (excessAdvance) afterAdvanceCommitted(excessAdvance, tenantId, userId);
+
     const updatedSale = await Sale.findByPk(id, {
       include: [{ model: SaleItem, as: 'items' }, { model: Customer, as: 'customer' }]
     });
 
-    res.json({ success: true, message: 'Pago registrado exitosamente', data: updatedSale });
+    res.json({
+      success: true,
+      message: excessAdvance
+        ? `Pago registrado. Excedente de $${Number(excessAdvance.amount).toLocaleString('es-CO')} guardado como anticipo ${excessAdvance.advance_number}`
+        : 'Pago registrado exitosamente',
+      data: updatedSale,
+      advance: excessAdvance,
+    });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
     if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
