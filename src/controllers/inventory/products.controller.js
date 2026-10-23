@@ -569,6 +569,8 @@ const updateProduct = async (req, res) => {
     delete updateData.reserved_stock;
     delete updateData.available_stock;
     delete updateData.average_cost;
+    delete updateData.last_purchase_cost;
+    delete updateData.last_purchase_date;
 
     const nullableFields = ['category_id', 'warehouse_id', 'barcode', 'description', 'brand', 'max_stock'];
     nullableFields.forEach(field => {

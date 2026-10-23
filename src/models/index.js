@@ -47,6 +47,7 @@ const PhysicalCountItem = require('./inventory/PhysicalCountItem');
 const Combo = require('./inventory/Combo');
 const ComboItem = require('./inventory/ComboItem');
 const StockAlert = require('./StockAlert');
+const CostAlert = require('./inventory/CostAlert');
 const PayableAlert = require('./PayableAlert');
 
 // NUEVOS - Movimientos Avanzados
@@ -327,6 +328,11 @@ User.hasMany(StockAlert, { foreignKey: 'resolved_by', as: 'resolved_alerts' });
 
 StockAlert.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 Tenant.hasMany(StockAlert, { foreignKey: 'tenant_id', as: 'stock_alerts' });
+
+// CostAlert ↔ Product / User (variación del costo de compra y precio retenido)
+CostAlert.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Product.hasMany(CostAlert, { foreignKey: 'product_id', as: 'cost_alerts' });
+CostAlert.belongsTo(User, { foreignKey: 'resolved_by', as: 'resolver' });
 
 // PayableAlert ↔ Tenant / Purchase / User (antigüedad de cuentas por pagar)
 Tenant.hasMany(PayableAlert, { foreignKey: 'tenant_id', as: 'payable_alerts' });
@@ -1000,6 +1006,7 @@ module.exports = {
   Combo,
   ComboItem,
   StockAlert,
+  CostAlert,
   PayableAlert,
   Invoice,
   SubscriptionPlan,

@@ -3,7 +3,7 @@
 // Cadena de fallback ÚNICA para resolver el costo unitario efectivo de una
 // salida de inventario (venta, OT, devolución, ajuste). Antes cada sitio
 // tenía su propia variante (kardex: unit_cost || average_cost || unit_price;
-// OT: average_cost || purchase_price || unit_price; el asiento de venta: solo
+// OT: average_cost || last_purchase_cost || unit_price; el asiento de venta: solo
 // unit_cost, sin fallback) y podían quedar desincronizados entre sí -- el
 // kardex reconocía un costo distinto al que el asiento contable reversaba.
 //
@@ -12,13 +12,16 @@
 //                              al confirmar la venta; una devolución debe
 //                              reversar ESTE valor, no uno recalculado).
 //   2. product.average_cost -- costo promedio ponderado vigente del producto.
-//   3. product.purchase_price -- último costo de compra conocido, si el
-//                              producto nunca tuvo entradas con costo.
+//   3. product.last_purchase_cost -- último costo de compra conocido, si el
+//                              promedio quedó en 0 (p. ej. stock negativo que
+//                              se reabasteció). Antes se leía purchase_price,
+//                              columna que no existe, así que este paso nunca
+//                              aplicaba y se caía directo al precio de venta.
 //   4. item.unit_price     -- último recurso: precio de venta. Esconde el
 //                              margen (queda en 0%) pero es preferible a un
 //                              costo $0, que deja la salida sin CMV alguno.
 function resolveUnitCost(item, product) {
-  const candidates = [item?.unit_cost, product?.average_cost, product?.purchase_price, item?.unit_price];
+  const candidates = [item?.unit_cost, product?.average_cost, product?.last_purchase_cost, item?.unit_price];
   for (const candidate of candidates) {
     const value = parseFloat(candidate);
     if (Number.isFinite(value) && value > 0) return value;

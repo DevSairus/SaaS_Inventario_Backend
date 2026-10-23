@@ -10,6 +10,7 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { resolveLandedPurchaseUnitCost } = require('../../utils/costResolver');
+const { registerPurchaseCost } = require('../../services/inventory/purchaseCost.service');
 const { purchaseNetPayable, purchasePaymentStatus, round2 } = require('../../utils/purchaseAmounts');
 const { recordPurchasePaymentEntries, newPaymentRecord } = require('../../services/inventory/purchasePayments.service');
 
@@ -974,19 +975,22 @@ const receivePurchase = async (req, res) => {
       const updatedProduct = await Product.findByPk(purchaseItem.product_id, { transaction: t });
 
       // Campos adicionales que createMovement no cubre
-      const extraUpdates = {
-        available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock || 0),
-        last_purchase_cost: parseFloat(purchaseItem.unit_cost) || 0,
-        last_purchase_date: purchase.purchase_date
-      };
+      await updatedProduct.update({
+        available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock || 0)
+      }, { transaction: t });
 
-      // Si tiene margen de ganancia, recalcular precio de venta
-      if (updatedProduct.profit_margin_percentage && parseFloat(updatedProduct.profit_margin_percentage) > 0) {
-        const margin = parseFloat(updatedProduct.profit_margin_percentage);
-        extraUpdates.base_price = parseFloat(updatedProduct.average_cost) * (1 + margin / 100);
-      }
-
-      await updatedProduct.update(extraUpdates, { transaction: t });
+      // Último costo de compra + precio de venta por margen (que nunca baja
+      // solo) + alerta de variación de costo. Costo aterrizado (no el precio
+      // de lista): es el mismo que entró al kardex y al asiento.
+      await registerPurchaseCost({
+        tenant_id,
+        product: updatedProduct,
+        newCost: landedUnitCost || parseFloat(purchaseItem.unit_cost) || 0,
+        date: purchase.purchase_date,
+        sourceType: 'purchase',
+        sourceId: purchase.id,
+        sourceNumber: purchase.purchase_number
+      }, t);
 
       // ✅ Actualizar/crear relación product_suppliers para que el botón de proveedores tenga datos
       const existingLink = await ProductSupplier.findOne({

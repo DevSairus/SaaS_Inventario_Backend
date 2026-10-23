@@ -33,7 +33,12 @@ const upload = multer({
 router.get('/config', getTenantConfig);
 
 // Actualizar configuración del tenant
-router.put('/config', updateTenantConfig);
+// Editar la configuración de la empresa (datos, logo, impuestos, IVA,
+// porcentajes de negocio): solo Administrador y Gerente. Antes cualquier
+// usuario autenticado podía guardar; los demás roles la ven en solo lectura.
+const CONFIG_WRITE_ROLES = ['admin', 'manager', 'super_admin'];
+
+router.put('/config', checkRole(...CONFIG_WRITE_ROLES), updateTenantConfig);
 
 // Perfiles de impresión de etiquetas: leerlos cualquiera (para imprimir),
 // editarlos solo gestión (labelPrinting.controller.js).
@@ -41,9 +46,9 @@ router.get('/label-printing', getLabelPrinting);
 router.put('/label-printing', checkRole('admin', 'manager'), updateLabelPrinting);
 
 // Subir logo
-router.post('/logo', upload.single('logo'), uploadLogo);
+router.post('/logo', checkRole(...CONFIG_WRITE_ROLES), upload.single('logo'), uploadLogo);
 
 // Eliminar logo
-router.delete('/logo', deleteLogo);
+router.delete('/logo', checkRole(...CONFIG_WRITE_ROLES), deleteLogo);
 
 module.exports = router;

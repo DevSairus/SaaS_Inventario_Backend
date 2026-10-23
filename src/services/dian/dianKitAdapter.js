@@ -43,12 +43,15 @@ const _kitCache = new Map();
  * Cachea la instancia para evitar recargar el certificado en cada llamada.
  */
 function getKit(tenant) {
-  const cacheKey = tenant.id;
+  const cfg = tenant.dian_config || {};
+  // La clave incluye el entorno: los envíos de prueba fuerzan habilitación
+  // (ver dianAutoTestService#forceTestEnvironment) aunque el tenant ya esté
+  // en producción, y no deben reutilizar el kit de producción ni pisarlo.
+  const cacheKey = `${tenant.id}:${cfg.environment === 'production' ? 'production' : 'test'}`;
   if (_kitCache.has(cacheKey)) return _kitCache.get(cacheKey);
 
   initDeps();
 
-  const cfg = tenant.dian_config || {};
   if (!cfg.certificate_p12_base64 || cfg.certificate_p12_base64 === '[CONFIGURADO]') {
     throw new Error('Certificado digital no configurado para este tenant.');
   }
@@ -182,7 +185,8 @@ function mapFiscalResponsibility(code) {
  * Invalida la caché del kit para un tenant (cuando cambia la config).
  */
 function invalidateKit(tenantId) {
-  _kitCache.delete(tenantId);
+  _kitCache.delete(`${tenantId}:production`);
+  _kitCache.delete(`${tenantId}:test`);
 }
 
 /**

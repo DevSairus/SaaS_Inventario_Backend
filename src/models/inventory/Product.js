@@ -78,6 +78,20 @@ const Product = sequelize.define('Product', {
     allowNull: false,
     defaultValue: 0
   },
+  // Último costo unitario de compra (aterrizado: con descuento global y flete
+  // prorrateados, igual que lo capitalizado en el kardex). Lo escriben la
+  // recepción de compras y los ajustes de entrada con motivo "compra". Sin
+  // estos atributos en el modelo, Sequelize descartaba en silencio el update
+  // que ya hacía receivePurchase y la columna quedaba siempre en 0.
+  last_purchase_cost: {
+    type: DataTypes.DECIMAL(15, 4),
+    allowNull: true,
+    defaultValue: 0
+  },
+  last_purchase_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true
+  },
   min_stock: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,

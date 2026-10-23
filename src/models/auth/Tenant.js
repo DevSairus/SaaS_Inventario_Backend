@@ -157,7 +157,11 @@ const Tenant = sequelize.define('Tenant', {
       // ingreso de servicios, usado en reportes cuando la OT aún no ha sido
       // liquidada (no hay commission_percentage real todavía). Ver
       // services/workshop/laborCost.service.js.
-      default_labor_cost_percentage: 40
+      default_labor_cost_percentage: 40,
+      // % de variación del último costo de compra que genera alerta en
+      // cost_alerts (0 = sin alertas por variación). Ver
+      // services/inventory/purchaseCost.service.js.
+      cost_variation_alert_pct: 10
     }
   },
 

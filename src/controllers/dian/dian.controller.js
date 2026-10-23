@@ -1002,9 +1002,12 @@ const getHabilitacionStatus = async (req, res) => {
       },
       {
         key: 'test_invoices_sent',
-        label: `${docLabelEs[0].toUpperCase()}${docLabelEs.slice(1)} de prueba enviados (${testDocs}/1 mínimo)`,
+        // La DIAN exige un solo documento de prueba aceptado por tipo: con la
+        // factura de prueba aceptada el software queda habilitado, incluidas
+        // las notas crédito y débito. El documento soporte se habilita aparte.
+        label: `${docLabelEs[0].toUpperCase()}${docLabelEs.slice(1)} de prueba aceptado por la DIAN (${testDocs}/1)`,
         done: testDocs >= 1,
-        details: `${testDocs} documentos aceptados en set de pruebas`,
+        details: `${testDocs} documento(s) aceptado(s) en el set de pruebas. Basta con 1.`,
       },
     ];
 
@@ -1069,7 +1072,7 @@ const sendAutoTestDocuments = async (req, res) => {
       return fail(res, 'Configure la Llave Técnica (Technical Key) de la DIAN — en la configuración global o en esta resolución.');
     }
 
-    // mode='full'    → set completo (6 facturas + 2 NC + 2 ND = 10 docs)
+    // mode='full'    → 2 facturas de prueba (ver dianAutoTestService#sendFullHabilitacionSet)
     // mode='invoices' → solo facturas (1–6)
     const dianAutoTest = require('../../services/dian/dianAutoTestService');
     let results;
@@ -1114,10 +1117,9 @@ const testConnectionProd = async (req, res) => {
     }
 
     // Forzar PRODUCCIÓN independientemente del cfg.environment. Se invalida
-    // la caché del kit antes y después: getKit() cachea por tenant.id, y si
-    // no se limpia, este tenant "de prueba forzada a producción" quedaría
-    // pisando (o siendo pisado por) el kit real del tenant en llamadas
-    // posteriores.
+    // la caché del kit antes y después para que tome la config recién
+    // guardada (getKit() cachea por tenant + entorno, así que ya no pisa el
+    // kit del entorno real del tenant).
     const testTenant = { ...tenant.toJSON(), dian_config: { ...cfg, environment: 'production' } };
     dianKit.invalidateKit(req.tenant_id);
     let result;

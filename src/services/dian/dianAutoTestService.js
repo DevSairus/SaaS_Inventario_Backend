@@ -74,6 +74,17 @@ const TEST_ITEMS_SUPPORT_DOCUMENT = [
   [{ id:'1', description:'Servicio prestado por persona natural no obligada a facturar', quantity:1, unit_price:120000, subtotal:120000, tax_amount:0, tax_rate:0, total:120000, unit_code:'ZZ' }],
 ];
 
+/* ── Helper: forzar el ambiente de habilitación ───
+   Los documentos de prueba (datos ficticios) SIEMPRE van al set de pruebas de
+   la DIAN. El entorno es global por tenant: sin esto, un tenant que ya factura
+   en producción y quiere habilitar otro tipo de documento (ej. Documento
+   Soporte) enviaba el documento sintético con SendBillSync a PRODUCCIÓN. */
+function forceTestEnvironment(tenant, cfg) {
+  const plain = typeof tenant.get === 'function' ? tenant.get({ plain: true }) : { ...tenant };
+  const testCfg = { ...(cfg || plain.dian_config || {}), environment: 'test' };
+  return { tenant: { ...plain, dian_config: testCfg }, cfg: testCfg };
+}
+
 /* ── Helper: enviar y registrar evento ─── */
 async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianEvent, testSetId }) {
   logger.info(`[DIAN AutoTest] → ${docType} ${number}`);
@@ -107,6 +118,7 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
  * sendTestDocuments — envía facturas de prueba
  * ───────────────────────────────────────────────────────────── */
 async function sendTestDocuments({ tenant, cfg, resolution: resolutionParam, count = 1, documentType = 'invoice' }) {
+  ({ tenant, cfg } = forceTestEnvironment(tenant, cfg));
   const { DianEvent, DianResolution } = require('../../models');
   const results = [];
   const docCode = DIAN_DOC_TYPE_CODE[documentType] || '01';
@@ -189,6 +201,7 @@ async function sendTestDocuments({ tenant, cfg, resolution: resolutionParam, cou
  * sendFullHabilitacionSet
  * ───────────────────────────────────────────────────────────── */
 async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionParam, documentType = 'invoice' }) {
+  ({ tenant, cfg } = forceTestEnvironment(tenant, cfg));
   if (documentType !== 'invoice') {
     throw new Error('El "Set Completo de Habilitación" solo está implementado para Factura Electrónica. Use "Prueba rápida" para Documento Soporte.');
   }

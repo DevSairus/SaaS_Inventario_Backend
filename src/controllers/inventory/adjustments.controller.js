@@ -6,6 +6,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { resolveUnitCost } = require('../../utils/costResolver');
+const { registerPurchaseCost } = require('../../services/inventory/purchaseCost.service');
 
 /**
  * Obtener todos los ajustes con filtros y paginación
@@ -612,6 +613,23 @@ async function confirmAdjustmentCore({ tenant_id, user_id, adjustment_id }, tran
         movement_date: adjustment.adjustment_date,
         notes: `Ajuste ${adjustment.adjustment_number}: ${adjustment.reason}`
       }, t);
+
+      // Una entrada por compra a proveedor (p. ej. la compra rápida desde el
+      // listado de productos) también es el último costo de compra conocido,
+      // con el mismo tratamiento de precio y alertas que receivePurchase.
+      // Las demás entradas (devolución, sobrante, corrección) no son compras.
+      if (adjustment.adjustment_type === 'entrada' && adjustment.reason === 'compra' && parseFloat(item.unit_cost) > 0) {
+        const freshProduct = await Product.findOne({ where: { id: item.product_id, tenant_id }, transaction: t });
+        await registerPurchaseCost({
+          tenant_id,
+          product: freshProduct,
+          newCost: parseFloat(item.unit_cost),
+          date: adjustment.adjustment_date,
+          sourceType: 'adjustment',
+          sourceId: adjustment.id,
+          sourceNumber: adjustment.adjustment_number
+        }, t);
+      }
     }
 
     // Actualizar estado del ajuste
