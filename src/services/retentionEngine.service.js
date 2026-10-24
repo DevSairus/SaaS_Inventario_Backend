@@ -162,14 +162,23 @@ function computeRetentions({ profile, supplierProfile: sp, items, requested }) {
       });
     }
   } else if (!sp.is_exento) {
+    // Base por concepto (y el IVA de esos ítems): ReteFuente y ReteIVA solo
+    // aplican a lo que supera la base mínima en UVT del concepto.
+    const groups = new Map();
+    for (const it of items) {
+      const key = it.concept_id || 'compras';
+      const g = groups.get(key) || { base: 0, iva: 0 };
+      g.base += Number(it.subtotal || 0);
+      g.iva += Number(it.tax_amount || 0);
+      groups.set(key, g);
+    }
+    const meetsMin = (conceptId, base) => {
+      const concept = conceptById.get(conceptId);
+      return !concept || base >= Number(concept.min_base_uvt || 0) * profile.uvt_value;
+    };
     // ── ReteFuente por concepto ──
     if (allowRenta) {
-      const groups = new Map();
-      for (const it of items) {
-        const key = it.concept_id || 'compras';
-        groups.set(key, (groups.get(key) || 0) + Number(it.subtotal || 0));
-      }
-      for (const [conceptId, base] of groups) {
+      for (const [conceptId, { base }] of groups) {
         const concept = conceptById.get(conceptId);
         if (!concept) { notes.push(`Concepto "${conceptId}" no existe en el catálogo: sin ReteFuente para esos ítems.`); continue; }
         const rate = conceptRate(concept, sp);
@@ -185,9 +194,14 @@ function computeRetentions({ profile, supplierProfile: sp, items, requested }) {
         });
       }
     }
-    // ── ReteIVA ──
+    // ── ReteIVA (sobre el IVA de lo que supera la base mínima de su concepto) ──
     if (allowIva && baseIva > 0) {
-      lines.push({ code: '05', concept_id: 'reteiva', concept: 'ReteIVA', rate: profile.reteiva_rate, base: round2(baseIva), amount: round2(baseIva * profile.reteiva_rate / 100), account_id: null });
+      const ivaBase = [...groups].reduce((sum, [conceptId, g]) => sum + (meetsMin(conceptId, g.base) ? g.iva : 0), 0);
+      if (ivaBase > 0) {
+        lines.push({ code: '05', concept_id: 'reteiva', concept: 'ReteIVA', rate: profile.reteiva_rate, base: round2(ivaBase), amount: round2(ivaBase * profile.reteiva_rate / 100), account_id: null });
+      } else {
+        notes.push('ReteIVA: la compra no supera la base mínima de su concepto — no aplica.');
+      }
     }
     // ── ReteICA (tarifa municipal del proveedor) ──
     for (const ica of sp.ica.filter((r) => r.is_default !== false)) {
@@ -222,10 +236,15 @@ function computeRetentions({ profile, supplierProfile: sp, items, requested }) {
  * Cálculo completo para una compra: carga perfiles y conceptos por ítem.
  * items: [{ product_id, subtotal, tax_amount }]
  */
-async function computePurchaseRetentions({ tenantId, taxConfig, supplier, items, requested, transaction }) {
+async function computePurchaseRetentions({ tenantId, taxConfig, supplier, items, requested, transaction, discount = 0 }) {
   const profile = resolveFiscalProfile(taxConfig || {});
   const supplierProfile = resolveSupplierProfile(supplier || {});
   const conceptIds = new Set(profile.concepts.map((c) => c.id));
+  // Descuento general de la compra: baja la base de cada línea en proporción
+  // (el costo ya lo prorratea así, ver resolveLandedPurchaseUnitCost).
+  const linesSubtotal = items.reduce((sum, i) => sum + Number(i.subtotal || 0), 0);
+  const f = Number(discount) > 0 && linesSubtotal > 0 ? Math.max(linesSubtotal - Number(discount), 0) / linesSubtotal : 1;
+  if (f !== 1) items = items.map((i) => ({ ...i, subtotal: Number(i.subtotal || 0) * f }));
   const withConcepts = await resolveItemConcepts(items, { tenantId, supplierProfile, conceptIds, transaction });
   return computeRetentions({ profile, supplierProfile, items: withConcepts, requested });
 }

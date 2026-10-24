@@ -67,10 +67,12 @@ async function approvedCustomerReturns(tenantId, from, to, { customerId = null, 
       ...r,
       base,
       tax_net: netTax(r),
-      // Retenciones de la factura en proporción a lo devuelto.
-      retefuente_share: round2(Number(r.sale_retefuente || 0) * share),
-      reteica_share: round2(Number(r.sale_reteica || 0) * share),
-      reteiva_share: round2(Number(r.sale_reteiva || 0) * share),
+      // Retenciones que la devolución realmente reversó (sobre lo que el
+      // cliente retuvo y se registró -- returnSettlement.js), no la
+      // estimación de la venta en proporción.
+      retefuente_share: round2(Number(r.retention_reversal?.retefuente || 0)),
+      reteica_share: round2(Number(r.retention_reversal?.reteica || 0)),
+      reteiva_share: round2(Number(r.retention_reversal?.reteiva || 0)),
     };
   });
 }

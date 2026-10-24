@@ -261,6 +261,7 @@ const createPurchase = async (req, res) => {
     // Calcular totales
     let subtotal = 0;
     let tax_amount = 0;
+    let inc_total = 0;
 
     const itemsToCreate = [];
 
@@ -285,10 +286,16 @@ const createPurchase = async (req, res) => {
       const item_discount = (item_subtotal * discount_percentage) / 100;
       const item_subtotal_after_discount = item_subtotal - item_discount;
       const item_tax = (item_subtotal_after_discount * tax_rate) / 100;
-      const item_total = item_subtotal_after_discount + item_tax;
+      // INC (impoconsumo) de la factura del proveedor: no es descontable, es
+      // costo. Va en la línea (inc_rate/inc_amount) y suma al total, pero NO a
+      // tax_amount -- que es solo el IVA, el que puede ser descontable.
+      const inc_rate = parseFloat(item.inc_rate || 0);
+      const item_inc = (item_subtotal_after_discount * inc_rate) / 100;
+      const item_total = item_subtotal_after_discount + item_tax + item_inc;
 
       subtotal += item_subtotal_after_discount;
       tax_amount += item_tax;
+      inc_total += item_inc;
 
       itemsToCreate.push({
         product_id: item.product_id,
@@ -300,6 +307,8 @@ const createPurchase = async (req, res) => {
         unit_cost,
         tax_rate,
         tax_amount: item_tax,
+        inc_rate,
+        inc_amount: item_inc,
         discount_percentage,
         discount_amount: item_discount,
         subtotal: item_subtotal_after_discount,
@@ -308,7 +317,7 @@ const createPurchase = async (req, res) => {
       });
     }
 
-    const total_amount = subtotal + tax_amount - parseFloat(discount_amount) + parseFloat(shipping_cost);
+    const total_amount = subtotal + tax_amount + inc_total - parseFloat(discount_amount) + parseFloat(shipping_cost);
 
     // Calcular retenciones (Fase C) — el tenant, como comprador, puede
     // retener a este proveedor en ReteFuente/ReteIVA/ReteICA. No se aplica
@@ -323,6 +332,7 @@ const createPurchase = async (req, res) => {
       supplier,
       items: itemsToCreate,
       requested: applied_retentions,
+      discount: parseFloat(discount_amount) || 0,
       transaction: t,
     });
     const tax_breakdown = taxService.buildTaxBreakdown(
@@ -508,6 +518,7 @@ const updatePurchase = async (req, res) => {
 
       let subtotal = 0;
       let tax_amount = 0;
+      let inc_total = 0;
       const itemsForRetentions = [];
 
       // Crear nuevos items
@@ -529,10 +540,13 @@ const updatePurchase = async (req, res) => {
         const item_discount = (item_subtotal * discount_percentage) / 100;
         const item_subtotal_after_discount = item_subtotal - item_discount;
         const item_tax = (item_subtotal_after_discount * tax_rate) / 100;
-        const item_total = item_subtotal_after_discount + item_tax;
+        const inc_rate = parseFloat(item.inc_rate || 0); // INC: costo, no descontable (ver create)
+        const item_inc = (item_subtotal_after_discount * inc_rate) / 100;
+        const item_total = item_subtotal_after_discount + item_tax + item_inc;
 
         subtotal += item_subtotal_after_discount;
         tax_amount += item_tax;
+        inc_total += item_inc;
 
         const newItemData = {
           tenant_id,
@@ -547,6 +561,8 @@ const updatePurchase = async (req, res) => {
           unit_cost,
           tax_rate,
           tax_amount: item_tax,
+          inc_rate,
+          inc_amount: item_inc,
           discount_percentage,
           discount_amount: item_discount,
           subtotal: item_subtotal_after_discount,
@@ -558,8 +574,8 @@ const updatePurchase = async (req, res) => {
         itemsForRetentions.push(newItemData);
       }
 
-      const total_amount = subtotal + tax_amount - 
-        parseFloat(discount_amount || 0) + 
+      const total_amount = subtotal + tax_amount + inc_total -
+        parseFloat(discount_amount || 0) +
         parseFloat(shipping_cost || 0);
 
       // Retenciones (Fase C) — recalcular con el proveedor efectivo (puede
@@ -586,6 +602,7 @@ const updatePurchase = async (req, res) => {
         supplier: supplierForRetentions || {},
         items: itemsForRetentions,
         requested: requestedRetentions,
+        discount: parseFloat(discount_amount ?? purchase.discount_amount) || 0,
         transaction: t,
       });
       const tax_breakdown = taxService.buildTaxBreakdown(
@@ -636,6 +653,7 @@ const updatePurchase = async (req, res) => {
           supplier: supplierForRetentions || {},
           items: existingItems,
           requested: applied_retentions,
+          discount: parseFloat(purchase.discount_amount) || 0,
           transaction: t,
         });
         retentionFields = {
@@ -935,6 +953,7 @@ const receivePurchase = async (req, res) => {
       ? String(receipt_date).slice(0, 10)
       : (purchase.purchase_date ? new Date(purchase.purchase_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
     const receiptItems = [];
+    const ivaDeductible = await require('../../services/accounting/autoEntries.service').isIvaDeductible(tenant_id);
 
     for (const purchaseItem of purchase.items) {
       const received_quantity = receivedNow.get(purchaseItem.id);
@@ -951,7 +970,11 @@ const receivePurchase = async (req, res) => {
       // El kardex debe capitalizar lo mismo que el asiento contable acredita
       // a 143501 (subtotal - descuento global + flete, ver
       // generatePurchaseEntry), no el precio de lista de la línea.
-      const landedUnitCost = resolveLandedPurchaseUnitCost(purchaseItem, purchase);
+      // IVA al costo: no responsable de IVA, o producto que se vende excluido
+      // (asignación directa, art. 490 E.T. -- mismo criterio que generatePurchaseEntry).
+      const landedUnitCost = resolveLandedPurchaseUnitCost(purchaseItem, purchase, {
+        ivaToCost: !ivaDeductible || product.tax_config?.iva_status === 'excluido',
+      });
 
       // Crear movimiento de entrada (actualiza current_stock y average_cost automáticamente)
       await createMovement({
@@ -1321,7 +1344,7 @@ const getRetentionCatalog = async (req, res) => {
 const previewRetentions = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { supplier_id, items, expense } = req.body || {};
+    const { supplier_id, items, expense, discount_amount } = req.body || {};
     const [tenant, supplier] = await Promise.all([
       Tenant.findByPk(tenant_id, { attributes: ['tax_config'] }),
       supplier_id ? Supplier.findOne({ where: { id: supplier_id, tenant_id } }) : null,
@@ -1343,7 +1366,7 @@ const previewRetentions = async (req, res) => {
       const subtotal = quantity * unit * (1 - disc / 100);
       return { product_id: it.product_id, subtotal, tax_amount: subtotal * (Number(it.tax_rate) || 0) / 100 };
     });
-    const data = await computePurchaseRetentions({ tenantId: tenant_id, taxConfig, supplier: supplier || {}, items: lines });
+    const data = await computePurchaseRetentions({ tenantId: tenant_id, taxConfig, supplier: supplier || {}, items: lines, discount: Number(discount_amount) || 0 });
     res.json({ success: true, data });
   } catch (error) {
     console.error('Error en previewRetentions:', error);

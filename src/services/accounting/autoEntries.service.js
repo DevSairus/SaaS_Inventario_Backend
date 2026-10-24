@@ -2,6 +2,63 @@
 const { sequelize } = require('../../config/database');
 const { createDraftEntry, getMappedAccountId, safeAutoGenerate, reverseEntry } = require('./journalEntry.service');
 
+// Impuestos de un documento de venta: IVA a sale_tax_iva (240805) e INC
+// (impoconsumo) a sale_tax_inc (249505). Antes todo el impuesto, INC
+// incluido, iba a la cuenta de IVA. Si el tenant no tiene el mapeo del INC
+// (plan de cuentas atípico), se usa el de IVA como antes en vez de tumbar el
+// asiento. side: 'credit' (venta / nota débito) o 'debit' (reversiones).
+async function pushSaleTaxLines(lines, tenantId, t, { iva, inc }, side, labels) {
+  const round2 = (v) => Math.round(v * 100) / 100;
+  const push = (account_id, amount, description) => lines.push(
+    side === 'credit' ? { account_id, debit: 0, credit: amount, description } : { account_id, debit: amount, credit: 0, description }
+  );
+  if (round2(iva) > 0) push(await getMappedAccountId(tenantId, 'sale_tax_iva', t), round2(iva), labels.iva);
+  if (round2(inc) > 0) {
+    let account_id;
+    try { account_id = await getMappedAccountId(tenantId, 'sale_tax_inc', t); }
+    catch { account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t); }
+    push(account_id, round2(inc), labels.inc);
+  }
+}
+
+// ¿El IVA de compras y gastos es descontable? Solo si el tenant es
+// responsable de IVA: tax_config.fiscal_profile.is_iva_responsible o, si no
+// se ha marcado, su responsabilidad fiscal DIAN (R-99-PN = no responsable).
+// Un no responsable no descuenta IVA: el IVA pagado es mayor valor del costo
+// o del gasto. Antes siempre se llevaba a IVA descontable (240805 -> 135515).
+async function isIvaDeductible(tenantId, t) {
+  const { Tenant } = require('../../models');
+  const tenant = await Tenant.findByPk(tenantId, { attributes: ['tax_config', 'dian_config'], transaction: t });
+  const flag = tenant?.tax_config?.fiscal_profile?.is_iva_responsible;
+  if (flag === true || flag === false) return flag;
+  return tenant?.dian_config?.tax_level_code !== 'R-99-PN';
+}
+
+// Asignación directa (art. 490 E.T.): el IVA pagado en la compra de bienes
+// que el negocio vende como EXCLUIDOS no es descontable y va al costo.
+// Devuelve la fracción del IVA de la compra que corresponde a esas líneas
+// (0 si no hay ninguna); el resto sigue siendo descontable. itemIds limita
+// el cálculo a esas líneas (devolución a proveedor).
+async function purchaseExcludedIvaShare(purchaseId, t, itemIds = null) {
+  if (!purchaseId) return 0;
+  if (Array.isArray(itemIds) && itemIds.length === 0) itemIds = null;
+  const schema = require('../../config/tenantContext').getCurrentSchema() || 'public';
+  const rows = await sequelize.query(
+    `SELECT COALESCE(SUM(pi.tax_amount), 0) AS total,
+            COALESCE(SUM(pi.tax_amount) FILTER (WHERE p.tax_config->>'iva_status' = 'excluido'), 0) AS excluded
+       FROM "${schema}"."purchase_items" pi LEFT JOIN "${schema}"."products" p ON p.id = pi.product_id
+      WHERE pi.purchase_id = :purchaseId${itemIds ? ' AND pi.id IN (:itemIds)' : ''}`,
+    { replacements: { purchaseId, itemIds }, type: sequelize.QueryTypes.SELECT, transaction: t }
+  );
+  const total = Number(rows[0]?.total || 0);
+  return total > 0 ? Math.min(1, Number(rows[0].excluded || 0) / total) : 0;
+}
+
+// INC de las líneas de un documento (AIU no lleva INC aparte: su impuesto
+// es el IVA sobre la utilidad).
+const itemsInc = (doc, items) => (doc.aiu_enabled ? 0
+  : (items || []).filter((i) => i.approval_status !== 'rechazado').reduce((s, i) => s + Number(i.inc_amount || 0), 0));
+
 /**
  * Busca el (los) JournalEntry vigentes de un movimiento origen (venta, compra,
  * gasto, cierre de caja) y los reversa. "Vigente" = no voided y sin
@@ -190,10 +247,9 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
         const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
         lines.push({ account_id, debit: 0, credit: serviceRevenue, description: 'Ingreso por servicios' });
       }
-      if (totalTax > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
-        lines.push({ account_id, debit: 0, credit: totalTax, description: 'IVA generado' });
-      }
+      const saleInc = itemsInc(sale, validItems);
+      await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - saleInc, inc: saleInc }, 'credit',
+        { iva: 'IVA generado', inc: 'Impuesto nacional al consumo (INC) generado' });
 
       // Costo de venta / inventario (solo productos, requiere unit_cost en los items)
       if (productCogs > 0) {
@@ -416,8 +472,20 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
     const t = await sequelize.transaction();
     try {
       const amounts = purchaseEntryAmounts(purchase, options.portion);
-      const inventory = Number(amounts.inventory || 0);
-      const tax = Number(amounts.tax || 0);
+      let inventory = Number(amounts.inventory || 0);
+      let tax = Number(amounts.tax || 0);
+      // No responsable de IVA: el IVA pagado va al costo del inventario.
+      if (tax > 0 && !(await isIvaDeductible(tenantId, t))) {
+        inventory += tax;
+        tax = 0;
+      }
+      // Responsable: el IVA de las líneas de productos excluidos también va al costo.
+      if (tax > 0) {
+        const share = await purchaseExcludedIvaShare(purchase.id, t);
+        const toCost = Math.round(tax * share * 100) / 100;
+        inventory += toCost;
+        tax -= toCost;
+      }
 
       // Retenciones PRACTICADAS al proveedor (Fase 0 de Declaraciones
       // Periódicas / Formulario 350): cada una va a su cuenta de pasivo y
@@ -606,12 +674,19 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
       const netPayable = total - totalRetentions;
 
       const expenseAccount = await getMappedAccountId(tenantId, `expense_category:${expense.category}`, t);
+      // Responsable de IVA: el IVA del gasto es descontable (antes todo el
+      // total iba al gasto y ese IVA se perdía). No responsable: queda en el gasto.
+      const expenseTax = Number(expense.tax_amount || 0);
+      const deductibleTax = expenseTax > 0 && (await isIvaDeductible(tenantId, t)) ? expenseTax : 0;
       const creditAccount = isPaid
         ? await resolvePaymentAccount(tenantId, { method: expense.payment_method, bank_account_id: expense.bank_account_id }, t, EXPENSE_ACCOUNTS)
         : await getMappedAccountId(tenantId, 'expense_payable', t);
 
       const lines = [
-        { account_id: expenseAccount, debit: total, credit: 0, description: expense.description },
+        { account_id: expenseAccount, debit: total - deductibleTax, credit: 0, description: expense.description },
+        ...(deductibleTax > 0
+          ? [{ account_id: await getMappedAccountId(tenantId, 'purchase_iva_descontable', t), debit: deductibleTax, credit: 0, description: 'IVA descontable del gasto' }]
+          : []),
         { account_id: creditAccount, debit: 0, credit: netPayable, description: isPaid ? 'Pago del gasto' : 'Gasto pendiente de pago', third_party_id: expense.supplier_id || null },
       ];
 
@@ -842,10 +917,14 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
         const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
         lines.push({ account_id, debit: serviceRevenue, credit: 0, description: 'Reversión de ingreso por devolución de servicio' });
       }
-      if (totalTax > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
-        lines.push({ account_id, debit: totalTax, credit: 0, description: 'Reversión de IVA generado por devolución' });
-      }
+      // INC devuelto: proporción del INC de cada línea original (customerReturn.tax = IVA + INC).
+      const returnInc = sale.aiu_enabled ? 0 : (items || []).reduce((s, i) => {
+        const si = i.saleItem || i._saleItem;
+        const soldQty = Number(si?.quantity || 0);
+        return soldQty > 0 ? s + Number(si.inc_amount || 0) * Number(i.quantity || 0) / soldQty : s;
+      }, 0);
+      await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - returnInc, inc: returnInc }, 'debit',
+        { iva: 'Reversión de IVA generado por devolución', inc: 'Reversión de INC generado por devolución' });
 
       // Haber: sale efectivo/bancos (reintegro) y/o se reduce cartera
       if (moneyBackPaid > 0) {
@@ -871,6 +950,7 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
       // Retenciones que el cliente practicó sobre lo devuelto: se reversa la
       // retención a favor (1355), no se devuelve dinero que nunca entró.
       if (retentionReversal) {
+        await require('./accountingSeed.service').ensureIcaMappings(tenantId, t); // ver generateSaleRetentionEntry
         const RETENTION_EVENTS = { retefuente: 'sale_retefuente_receivable', reteiva: 'sale_reteiva_receivable', reteica: 'sale_reteica_receivable' };
         for (const [key, event] of Object.entries(RETENTION_EVENTS)) {
           const value = Math.round(Number(retentionReversal[key] || 0) * 100) / 100;
@@ -968,10 +1048,9 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
         const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
         lines.push({ account_id, debit: serviceRevenue, credit: 0, description: 'Reversión de ingreso por nota crédito' });
       }
-      if (totalTax > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
-        lines.push({ account_id, debit: totalTax, credit: 0, description: 'Reversión de IVA por nota crédito' });
-      }
+      const creditInc = itemsInc(noteSale, items);
+      await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - creditInc, inc: creditInc }, 'debit',
+        { iva: 'Reversión de IVA por nota crédito', inc: 'Reversión de INC por nota crédito' });
 
       // Haber: reintegro de caja/bancos y/o reducción de cartera
       if (paid > 0) {
@@ -1060,10 +1139,9 @@ async function generateDebitNoteEntry(noteSale, items, tenantId, userId) {
         const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
         lines.push({ account_id, debit: 0, credit: serviceRevenue, description: 'Ingreso por nota débito' });
       }
-      if (totalTax > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_tax_iva', t);
-        lines.push({ account_id, debit: 0, credit: totalTax, description: 'IVA generado por nota débito' });
-      }
+      const debitInc = itemsInc(noteSale, items);
+      await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - debitInc, inc: debitInc }, 'credit',
+        { iva: 'IVA generado por nota débito', inc: 'INC generado por nota débito' });
 
       if (lines.length === 0) return null;
 
@@ -1109,8 +1187,20 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
     const t = await sequelize.transaction();
     try {
       const totalReturned = Number(supplierReturn.total_amount || 0);
-      const taxReturned = Number(supplierReturn.tax || 0);
-      const inventoryReturned = totalReturned - taxReturned; // mismo criterio que generatePurchaseEntry: todo lo no-IVA es inventario
+      let taxReturned = Number(supplierReturn.tax || 0);
+      let inventoryReturned = totalReturned - taxReturned; // mismo criterio que generatePurchaseEntry: todo lo no-IVA es inventario
+      // No responsable de IVA: el IVA estaba en el costo, sale con el inventario.
+      if (taxReturned > 0 && !(await isIvaDeductible(tenantId, t))) {
+        inventoryReturned += taxReturned;
+        taxReturned = 0;
+      }
+      // IVA de productos excluidos: también estaba en el costo (ver generatePurchaseEntry).
+      if (taxReturned > 0) {
+        const itemIds = (items || []).map((i) => i.purchase_item_id).filter(Boolean);
+        const toCost = Math.round(taxReturned * (await purchaseExcludedIvaShare(purchase?.id, t, itemIds)) * 100) / 100;
+        inventoryReturned += toCost;
+        taxReturned -= toCost;
+      }
 
       const lines = [];
 
@@ -1402,6 +1492,11 @@ async function generateSaleRetentionEntry(payment, sale, tenantId, userId, optio
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
+      // Cuentas 135520/135517/135518 y sus mapeos: solo los creaba la
+      // configuración de ICA (o el script de reconciliación), así que en los
+      // tenants sin ICA este asiento fallaba en silencio y la contabilidad
+      // quedaba con más cartera que la real. Idempotente.
+      await require('./accountingSeed.service').ensureIcaMappings(tenantId, t);
       const r = payment.retentions || {};
       const parts = [
         { key: 'retefuente', event: 'sale_retefuente_receivable', label: 'ReteFuente practicada por el cliente' },
@@ -1854,6 +1949,7 @@ async function generateBulkInventoryEntry({ description, totalValue }, tenantId,
 }
 
 module.exports = {
+  isIvaDeductible,
   generateSaleEntry,
   salePaymentsForEntry,
   generatePaymentEntry,
@@ -1863,6 +1959,7 @@ module.exports = {
   generatePurchasePaymentEntry,
   generateExpenseEntry,
   generateExpensePaymentEntry,
+  purchaseExcludedIvaShare,
   generateCashSessionEntry,
   generateCustomerReturnEntry,
   generateCreditNoteEntry,

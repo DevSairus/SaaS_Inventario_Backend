@@ -11,6 +11,14 @@ const CATEGORIES = [
   'seguros', 'honorarios', 'comisiones_tecnicos', 'otro'
 ];
 
+// Tratamiento de IVA del gasto. Sin dato explícito se deduce de la tarifa
+// (> 0 gravado, 0 exento); con tarifa no informada queda NULL (gasto viejo).
+const normalizeIvaStatus = (ivaStatus, taxRate) => {
+  if (['gravado', 'exento', 'excluido'].includes(ivaStatus)) return ivaStatus;
+  if (taxRate === undefined || taxRate === null || taxRate === '') return null;
+  return parseFloat(taxRate) > 0 ? 'gravado' : 'exento';
+};
+
 /**
  * Generar número de gasto único (GAS-2026-00001)
  */
@@ -158,6 +166,7 @@ const createExpense = async (req, res) => {
       // discriminado), igual que hizo el backfill de la migración
       // 2026082815.
       requires_support_document, subtotal, tax_rate, tax_amount,
+      inc_rate, inc_amount, iva_status,
       retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount,
       reteica_rate, reteica_amount,
     } = req.body;
@@ -183,8 +192,11 @@ const createExpense = async (req, res) => {
     // se recalcula acá, no se toma directo del body, para que nunca queden
     // desincronizados (ver LEEME de Fase 1).
     const resolvedSubtotal = subtotal !== undefined ? parseFloat(subtotal) : parseFloat(total_amount);
-    const resolvedTaxAmount = tax_amount !== undefined ? parseFloat(tax_amount) : 0;
-    const resolvedTotal = subtotal !== undefined ? resolvedSubtotal + resolvedTaxAmount : parseFloat(total_amount);
+    const ivaStatus = normalizeIvaStatus(iva_status, tax_rate);
+    // Excluido: no causa IVA aunque llegue un monto.
+    const resolvedTaxAmount = ivaStatus === 'excluido' ? 0 : (tax_amount !== undefined ? parseFloat(tax_amount) : 0);
+    const resolvedIncAmount = inc_amount !== undefined ? parseFloat(inc_amount) || 0 : 0;
+    const resolvedTotal = subtotal !== undefined ? resolvedSubtotal + resolvedTaxAmount + resolvedIncAmount : parseFloat(total_amount);
     const resolvedRetefuenteAmount = retefuente_amount !== undefined ? parseFloat(retefuente_amount) : 0;
     const resolvedReteivaAmount = reteiva_amount !== undefined ? parseFloat(reteiva_amount) : 0;
     const resolvedReteicaAmount = reteica_amount !== undefined ? parseFloat(reteica_amount) : 0;
@@ -221,8 +233,11 @@ const createExpense = async (req, res) => {
       // Documento Soporte DIAN
       requires_support_document: !!requires_support_document,
       subtotal: resolvedSubtotal,
-      tax_rate: tax_rate !== undefined ? parseFloat(tax_rate) : 0,
+      tax_rate: ivaStatus === 'excluido' ? 0 : (tax_rate !== undefined ? parseFloat(tax_rate) : 0),
       tax_amount: resolvedTaxAmount,
+      inc_rate: inc_rate !== undefined ? parseFloat(inc_rate) || 0 : 0,
+      inc_amount: resolvedIncAmount,
+      iva_status: ivaStatus,
       retefuente_rate: retefuente_rate !== undefined ? parseFloat(retefuente_rate) : 0,
       retefuente_amount: resolvedRetefuenteAmount,
       reteiva_rate: reteiva_rate !== undefined ? parseFloat(reteiva_rate) : 0,
@@ -269,6 +284,7 @@ const updateExpense = async (req, res) => {
       category, description, supplier_id, expense_date, due_date,
       total_amount, is_recurring, receipt_url, notes, branch_id,
       requires_support_document, subtotal, tax_rate, tax_amount,
+      inc_rate, inc_amount, iva_status,
       retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount,
       reteica_rate, reteica_amount,
     } = req.body;
@@ -281,9 +297,13 @@ const updateExpense = async (req, res) => {
     // total_amount se recalcula; si no, se respeta total_amount tal cual
     // (edición que no toca el desglose de IVA).
     const resolvedSubtotal = subtotal !== undefined ? parseFloat(subtotal) : expense.subtotal;
-    const resolvedTaxAmount = tax_amount !== undefined ? parseFloat(tax_amount) : expense.tax_amount;
+    const ivaStatus = iva_status !== undefined || tax_rate !== undefined
+      ? normalizeIvaStatus(iva_status, tax_rate ?? expense.tax_rate)
+      : expense.iva_status;
+    const resolvedTaxAmount = ivaStatus === 'excluido' ? 0 : (tax_amount !== undefined ? parseFloat(tax_amount) : parseFloat(expense.tax_amount || 0));
+    const resolvedIncAmount = inc_amount !== undefined ? parseFloat(inc_amount) || 0 : parseFloat(expense.inc_amount || 0);
     const resolvedTotal = subtotal !== undefined
-      ? resolvedSubtotal + resolvedTaxAmount
+      ? parseFloat(resolvedSubtotal) + resolvedTaxAmount + resolvedIncAmount
       : (total_amount !== undefined ? parseFloat(total_amount) : expense.total_amount);
 
     const resolvedRetefuenteAmount = retefuente_amount !== undefined ? parseFloat(retefuente_amount) : expense.retefuente_amount;
@@ -311,8 +331,11 @@ const updateExpense = async (req, res) => {
       // Documento Soporte DIAN
       requires_support_document: requires_support_document !== undefined ? !!requires_support_document : expense.requires_support_document,
       subtotal: resolvedSubtotal,
-      tax_rate: tax_rate !== undefined ? parseFloat(tax_rate) : expense.tax_rate,
+      tax_rate: ivaStatus === 'excluido' ? 0 : (tax_rate !== undefined ? parseFloat(tax_rate) : expense.tax_rate),
       tax_amount: resolvedTaxAmount,
+      inc_rate: inc_rate !== undefined ? parseFloat(inc_rate) || 0 : expense.inc_rate,
+      inc_amount: resolvedIncAmount,
+      iva_status: ivaStatus,
       retefuente_rate: retefuente_rate !== undefined ? parseFloat(retefuente_rate) : expense.retefuente_rate,
       retefuente_amount: resolvedRetefuenteAmount,
       reteiva_rate: reteiva_rate !== undefined ? parseFloat(reteiva_rate) : expense.reteiva_rate,

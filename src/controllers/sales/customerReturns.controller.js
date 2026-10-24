@@ -285,7 +285,8 @@ const createCustomerReturn = async (req, res) => {
       // precio unitario y la devolución ignoraba el descuento de la línea.
       const ratio = parseFloat(item.quantity) / parseFloat(saleItem.quantity);
       const itemSubtotal = parseFloat(saleItem.subtotal || 0) * ratio;
-      const itemTax = parseFloat(saleItem.tax_amount || 0) * ratio;
+      // IVA + INC (impoconsumo) de la línea: antes solo se devolvía el IVA.
+      const itemTax = (parseFloat(saleItem.tax_amount || 0) + parseFloat(saleItem.inc_amount || 0)) * ratio;
 
       subtotal += itemSubtotal;
       tax += itemTax;
@@ -710,7 +711,8 @@ const approveCustomerReturn = async (req, res) => {
           as: 'items',
           include: [
             { model: Product, as: 'product' },
-            { model: SaleItem, as: 'saleItem', attributes: ['id', 'item_type'] },
+            // quantity/inc_amount: el asiento separa el INC devuelto del IVA.
+            { model: SaleItem, as: 'saleItem', attributes: ['id', 'item_type', 'quantity', 'inc_amount'] },
           ]
         },
         {

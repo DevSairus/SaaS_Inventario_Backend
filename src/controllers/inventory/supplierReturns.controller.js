@@ -527,6 +527,9 @@ const createSupplierReturn = async (req, res) => {
       // (ver resolveLandedPurchaseUnitCost) -- usar el precio de lista bruto
       // acá dejaba el 143501 reversado por menos de lo que realmente salió
       // de inventario.
+      // Sin IVA en el costo: aquí el IVA se calcula aparte (itemTax) y el
+      // asiento de la devolución lo lleva al inventario si el tenant no es
+      // responsable de IVA (autoEntries.generateSupplierReturnEntry).
       const landedUnitCost = resolveLandedPurchaseUnitCost(purchaseItem, purchase);
       const itemSubtotal = parseFloat(item.quantity) * landedUnitCost;
       const itemTax = itemSubtotal * (parseFloat(purchaseItem.tax_rate || 0) / 100);

@@ -37,6 +37,100 @@ function resolveGlobalDiscount(type, value, preDiscountTotal) {
   return Math.min(v, preDiscountTotal);
 }
 
+// Una cotización no es venta: queda fuera de listados y totales de Ventas.
+// document_type NULL (borrador de venta) se incluye explícito porque
+// `<> 'cotizacion'` en SQL descarta los NULL.
+const NOT_QUOTE_WHERE = { [Op.or]: [{ document_type: null }, { document_type: { [Op.ne]: 'cotizacion' } }] };
+
+// Vigencia por defecto de una cotización (pdf_config.quote_validity_days del
+// tenant, 15 días si no está configurada).
+const DEFAULT_QUOTE_VALIDITY_DAYS = 15;
+function defaultQuoteValidUntil(tenant, baseDate) {
+  const days = parseInt(tenant?.pdf_config?.quote_validity_days) || DEFAULT_QUOTE_VALIDITY_DAYS;
+  const d = baseDate ? new Date(baseDate) : new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().split('T')[0];
+}
+
+// Vencida = la fecha de vigencia ya pasó (se compara por día, en Colombia).
+function isQuoteExpired(sale) {
+  if (!sale.quote_valid_until) return false;
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  return String(sale.quote_valid_until).slice(0, 10) < today;
+}
+
+// Desglose de impuestos solo sobre lo que el cliente aprobó: al rechazar
+// ítems se recalculaban subtotal/IVA/total pero tax_breakdown quedaba con el
+// valor original (PDF, link público y luego la remisión/factura mostraban el
+// IVA de toda la cotización). Las retenciones se conservan; AIU no se toca
+// (su IVA depende de la utilidad, no de las líneas).
+function approvedTaxBreakdown(sale, billableItems) {
+  if (sale.aiu_enabled) return sale.tax_breakdown;
+  const taxes = taxService.taxLinesFromItems(billableItems);
+  return [...taxes, ...(sale.tax_breakdown || []).filter(t => t.type !== 'tax')];
+}
+
+// Retenciones estimadas (las que el cliente practicará al pagar). Se
+// calculan sobre la base y el IVA de las líneas; el descuento global, que se
+// resta después de impuestos, reduce esa base y ese IVA en la misma
+// proporción -- antes se ignoraba y la retención salía sobre el valor sin
+// descuento.
+const ZERO_RETENTIONS = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+const scaleRetentions = taxService.scaleRetentions; // ver services/taxService.js
+function retentionFields(ret) {
+  return {
+    retefuente_rate: ret.retefuente.rate, retefuente_amount: ret.retefuente.amount,
+    reteiva_rate: ret.reteiva.rate, reteiva_amount: ret.reteiva.amount,
+    reteica_rate: ret.reteica.rate, reteica_amount: ret.reteica.amount,
+    total_retentions: ret.total,
+  };
+}
+// Desglose guardado: impuestos de las líneas + líneas de retención.
+function breakdownWithRetentions(taxItems, ret) {
+  return [
+    ...taxService.buildTaxBreakdown(taxItems, null),
+    ...taxService.buildTaxBreakdown([], ret),
+  ];
+}
+
+// Retenciones de una cotización tras la respuesta del cliente (sobre lo
+// aprobado y con el descuento global vigente). Antes quedaban las de la
+// cotización completa. AIU conserva las suyas (no admite descuento global y
+// su base es propia).
+async function quoteRetentionFields(sale, billable, totals, transaction) {
+  if (sale.aiu_enabled || !sale.customer_id) return {};
+  const [customer, tenant] = await Promise.all([
+    Customer.findOne({ where: { id: sale.customer_id, tenant_id: sale.tenant_id }, attributes: ['retention_config', 'document_type'], transaction }),
+    Tenant.findByPk(sale.tenant_id, { attributes: ['tax_config'], transaction }),
+  ]);
+  if (!customer) return {};
+  const plain = billable.map(i => (i.toJSON ? i.toJSON() : i));
+  const ret = scaleRetentions(
+    taxService.calculateRetentions(plain, tenant?.tax_config || {}, taxService.customerRetentionConfig(customer)),
+    totals.total_amount + totals.global_discount_amount, totals.global_discount_amount
+  );
+  return { ...retentionFields(ret), tax_breakdown: [...totals.tax_breakdown.filter(t => t.type === 'tax'), ...taxService.buildTaxBreakdown([], ret)] };
+}
+
+// Totales de una cotización sobre lo que el cliente aprobó (link público y
+// "Registrar aprobación"). La base de cada línea se toma como total - IVA - INC
+// (sirve también para líneas libres viejas, que guardaban el subtotal bruto);
+// tax_amount del documento = IVA + INC, igual que en create(); y el descuento
+// global se vuelve a aplicar (antes se perdía al aprobar).
+function approvedQuoteTotals(sale, billable) {
+  const net = (i) => parseFloat(i.total || 0) - parseFloat(i.tax_amount || 0) - parseFloat(i.inc_amount || 0);
+  const preDiscountTotal = billable.reduce((s, i) => s + parseFloat(i.total || 0), 0);
+  const global_discount_amount = resolveGlobalDiscount(sale.global_discount_type, sale.global_discount_value, preDiscountTotal);
+  return {
+    subtotal:        billable.reduce((s, i) => s + net(i), 0),
+    discount_amount: billable.reduce((s, i) => s + parseFloat(i.discount_amount || 0), 0),
+    tax_amount:      billable.reduce((s, i) => s + parseFloat(i.tax_amount || 0) + parseFloat(i.inc_amount || 0), 0),
+    global_discount_amount,
+    total_amount:    preDiscountTotal - global_discount_amount,
+    tax_breakdown:   approvedTaxBreakdown(sale, billable),
+  };
+}
+
 // Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
@@ -55,21 +149,32 @@ const getAll = async (req, res) => {
     const branch_id = resolveBranchFilter(req);
     if (branch_id) where.branch_id = branch_id;
 
-    // Una venta nace en 'draft' con document_type=null (ver create() — el
-    // tipo de documento se elige recién al confirmar). Hasta ese momento es,
-    // en la práctica, una cotización: QuotesPage la necesita listada aunque
-    // nunca haya tenido document_type='cotizacion' explícito. `quote_view`
-    // trae borradores + cualquier venta ya tipada como cotización; el listado
-    // normal de Ventas, en cambio, no debe mostrar borradores (son
-    // cotizaciones, no ventas confirmadas) salvo que se pida un status puntual.
+    // Cotizaciones y ventas son listados separados: una cotización
+    // (document_type='cotizacion') no es venta hasta que el cliente la
+    // aprueba y se convierte en remisión/factura. `quote_view` trae las
+    // cotizaciones + las ya convertidas (quote_number, para ver su traza);
+    // el listado de Ventas trae todo lo demás, incluidos los borradores de
+    // venta (document_type=null, se tipan al confirmar).
     if (quote_view === 'true') {
-      where[Op.or] = [{ status: 'draft' }, { document_type: 'cotizacion' }];
+      where[Op.and] = [
+        ...(where[Op.and] || []),
+        { [Op.or]: [{ document_type: 'cotizacion' }, { quote_number: { [Op.ne]: null } }] },
+      ];
+      if (status) where.status = status;
     } else {
       if (status) where.status = status;
-      else where.status = { [Op.ne]: 'draft' };
       if (document_type) where.document_type = document_type;
+      else where[Op.and] = [...(where[Op.and] || []), NOT_QUOTE_WHERE];
     }
-    if (quote_status) where.quote_status = quote_status;
+    // En Cotizaciones, 'convertida' = ya pasó a remisión/factura; cualquier
+    // otro estado se refiere a cotizaciones todavía sin convertir.
+    if (quote_view === 'true' && quote_status === 'convertida') {
+      where.quote_number = { [Op.ne]: null };
+      where[Op.and].push(NOT_QUOTE_WHERE);
+    } else if (quote_status) {
+      where.quote_status = quote_status;
+      if (quote_view === 'true') where.document_type = 'cotizacion';
+    }
     if (customer_id) where.customer_id = customer_id;
     if (dian_status) where.dian_status = dian_status;
     // Remisiones ocultas a no-admin si el tenant lo configuró
@@ -238,6 +343,7 @@ const create = async (req, res) => {
       opportunity_id = null,
       global_discount_type = 'fixed',
       global_discount_value = 0,
+      quote_valid_until,
     } = req.body;
 
     if (!['fixed', 'percentage'].includes(global_discount_type)) {
@@ -340,14 +446,17 @@ const create = async (req, res) => {
           ftax    = ftb * ftaxpct / 100;
           ftotal  = ftb + ftax;
         }
-        subtotal += fs; discount_amount += fd; tax_amount += ftax;
+        // subtotal = base neta (después del descuento), igual que las líneas de
+        // producto (taxService.base): la DIAN la usa como LineExtensionAmount y
+        // contabilidad como ingreso. Antes iba el valor bruto.
+        subtotal += ftb; discount_amount += fd; tax_amount += ftax;
         saleItems.push({
           tenant_id: tenantId, item_type: 'free_line', product_id: null,
           product_name: item.product_name, product_sku: null,
           quantity: item.quantity, unit_price: item.unit_price,
           discount_percentage: item.discount_percentage || 0, discount_amount: fd,
-          tax_percentage: ftaxpct, tax_amount: ftax,
-          subtotal: fs, total: ftotal, unit_cost: 0,
+          tax_percentage: ftaxpct, tax_amount: ftax, iva_status: ftaxpct > 0 ? 'gravado' : null,
+          subtotal: ftb, total: ftotal, unit_cost: 0,
           technician_id: item.technician_id || null,
           ...pickComboFields(item),
         });
@@ -376,6 +485,7 @@ const create = async (req, res) => {
         discount_amount: taxes.discount,
         tax_percentage: taxes.iva.rate,
         tax_amount: taxes.iva.amount,
+        iva_status: taxes.iva.status,
         inc_rate: taxes.inc.rate,
         inc_amount: taxes.inc.amount,
         ica_rate: taxes.ica.rate,
@@ -425,13 +535,14 @@ const create = async (req, res) => {
     }
 
     // Calcular retenciones si hay cliente configurado
-    let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+    let retentions = ZERO_RETENTIONS;
     if (finalCustomerId) {
       const customer = await Customer.findByPk(finalCustomerId, { transaction });
       if (customer) {
         retentions = aiuResult
-          ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, customer.retention_config || {}, 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
-          : taxService.calculateRetentions(saleItems, tenantTaxConfig, customer.retention_config || {});
+          ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, taxService.customerRetentionConfig(customer), 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
+          : taxService.calculateRetentions(saleItems, tenantTaxConfig, taxService.customerRetentionConfig(customer));
+        retentions = scaleRetentions(retentions, preDiscountTotal, global_discount_amount);
       }
     }
 
@@ -525,6 +636,17 @@ const create = async (req, res) => {
       }
     }
 
+    // Cotización: nace con su propio tipo y consecutivo COT- (no es un
+    // borrador de venta) -- el resto de documentos se tipan al confirmar.
+    if (document_type === 'cotizacion') {
+      saleData.document_type = 'cotizacion';
+      saleData.sale_number = await generateSaleNumber(tenantId, 'cotizacion', transaction);
+      saleData.quote_status = 'borrador';
+      saleData.quote_valid_until = quote_valid_until || defaultQuoteValidUntil(
+        await Tenant.findByPk(tenantId, { attributes: ['pdf_config'] }), saleData.sale_date
+      );
+    }
+
     const sale = await Sale.create(saleData, { transaction });
 
     // bulkCreate en vez de un .create() por ítem (elimina N+1 — ventas con
@@ -543,6 +665,7 @@ const create = async (req, res) => {
         discount_amount: item.discount_amount,
         tax_percentage: item.tax_percentage,
         tax_amount: item.tax_amount,
+        iva_status: item.iva_status || null,
         inc_rate: item.inc_rate,
         inc_amount: item.inc_amount,
         ica_rate: item.ica_rate,
@@ -682,6 +805,19 @@ const update = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Para cambiar la configuración AIU envíe también los ítems de la venta' });
     }
     const updateData = { ...rest };
+    // Numeración y ciclo de la cotización los maneja el servidor; una
+    // cotización no pasa a borrador de venta (ni al revés) editándola: se
+    // convierte al confirmarla, ya aprobada.
+    for (const key of ['sale_number', 'quote_number', 'quote_status', 'quote_approved_by_name', 'quote_approved_by_document', 'quote_approved_ip', 'quote_responded_at', 'share_token']) {
+      delete updateData[key];
+    }
+    if ('document_type' in updateData
+      && (sale.document_type === 'cotizacion' || updateData.document_type === 'cotizacion')
+      && updateData.document_type !== sale.document_type) {
+      delete updateData.document_type;
+    }
+    if ('quote_valid_until' in updateData && sale.document_type !== 'cotizacion') delete updateData.quote_valid_until;
+    if (updateData.quote_valid_until === '') updateData.quote_valid_until = null;
 
     if ('global_discount_type' in updateData && !['fixed', 'percentage'].includes(updateData.global_discount_type)) {
       await transaction.rollback();
@@ -753,10 +889,24 @@ const update = async (req, res) => {
     }
 
     let lineItemsTotal; // total pre-descuento-global -- solo se resuelve si cambian ítems o el descuento
+    let pendingRetentions = null; // retenciones recalculadas con ítems nuevos (antes del descuento global)
+    let retentionTaxItems = null;
     let stockWarnings = [];
 
     if (items && Array.isArray(items) && items.length > 0) {
       await SaleItem.destroy({ where: { sale_id: id }, transaction });
+
+      // Ítems nuevos = la respuesta del cliente ya no aplica: si la
+      // cotización ya se había enviado, vuelve a quedar pendiente de aprobar.
+      if (sale.document_type === 'cotizacion' && sale.quote_status && sale.quote_status !== 'borrador') {
+        Object.assign(updateData, {
+          quote_status: 'enviada',
+          quote_approved_by_name: null,
+          quote_approved_by_document: null,
+          quote_approved_ip: null,
+          quote_responded_at: null,
+        });
+      }
 
       let subtotal = 0, tax_amount = 0, discount_amount = 0;
       const newItems = [];
@@ -785,13 +935,13 @@ const update = async (req, res) => {
           const ftb = fs - fd;
           let ftax = 0, ftaxpct = 0, ftotal = ftb;
           if (item.tax_percentage > 0) { ftaxpct = item.tax_percentage; ftax = ftb * ftaxpct / 100; ftotal = ftb + ftax; }
-          subtotal += fs; discount_amount += fd; tax_amount += ftax;
+          subtotal += ftb; discount_amount += fd; tax_amount += ftax; // base neta, ver create()
           newItems.push({
             sale_id: id, tenant_id: tenantId, item_type: 'free_line',
             product_id: null, product_name: item.product_name, product_sku: null,
             quantity: item.quantity, unit_price: item.unit_price,
             discount_percentage: item.discount_percentage || 0, discount_amount: fd,
-            tax_percentage: ftaxpct, tax_amount: ftax, subtotal: fs, total: ftotal, unit_cost: 0,
+            tax_percentage: ftaxpct, tax_amount: ftax, iva_status: ftaxpct > 0 ? 'gravado' : null, subtotal: ftb, total: ftotal, unit_cost: 0,
             technician_id: item.technician_id || null,
             ...pickComboFields(item),
           });
@@ -813,7 +963,7 @@ const update = async (req, res) => {
           product_id: product.id, product_name: product.name, product_sku: product.sku,
           quantity: item.quantity, unit_price: item.unit_price,
           discount_percentage: item.discount_percentage || 0, discount_amount: taxes.discount,
-          tax_percentage: taxes.iva.rate, tax_amount: taxes.iva.amount,
+          tax_percentage: taxes.iva.rate, tax_amount: taxes.iva.amount, iva_status: taxes.iva.status,
           inc_rate: taxes.inc.rate, inc_amount: taxes.inc.amount,
           ica_rate: taxes.ica.rate, ica_amount: taxes.ica.amount,
           subtotal: taxes.base, total: taxes.total_line,
@@ -854,22 +1004,18 @@ const update = async (req, res) => {
       // Retenciones y desglose de impuestos se recalculan con los ítems
       // nuevos (antes quedaban con los valores de la creación).
       const effCustomerId = 'customer_id' in updateData ? updateData.customer_id : sale.customer_id;
-      let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+      let retentions = ZERO_RETENTIONS;
       if (effCustomerId) {
-        const retCustomer = await Customer.findOne({ where: { id: effCustomerId, tenant_id: tenantId }, attributes: ['retention_config'], transaction });
+        const retCustomer = await Customer.findOne({ where: { id: effCustomerId, tenant_id: tenantId }, attributes: ['retention_config', 'document_type'], transaction });
         if (retCustomer) {
           retentions = aiuResult
-            ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, retCustomer.retention_config || {}, 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
-            : taxService.calculateRetentions(newItems, tenantTaxConfig, retCustomer.retention_config || {});
+            ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, taxService.customerRetentionConfig(retCustomer), 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
+            : taxService.calculateRetentions(newItems, tenantTaxConfig, taxService.customerRetentionConfig(retCustomer));
         }
       }
-      Object.assign(updateData, {
-        retefuente_rate: retentions.retefuente.rate, retefuente_amount: retentions.retefuente.amount,
-        reteiva_rate: retentions.reteiva.rate, reteiva_amount: retentions.reteiva.amount,
-        reteica_rate: retentions.reteica.rate, reteica_amount: retentions.reteica.amount,
-        total_retentions: retentions.total,
-        tax_breakdown: taxService.buildTaxBreakdown(aiuResult ? [...newItems, ...aiuService.aiuTaxLines(aiuResult, aiu)] : newItems, retentions),
-      });
+      // Se guardan después de resolver el descuento global (más abajo).
+      pendingRetentions = retentions;
+      retentionTaxItems = aiuResult ? [...newItems, ...aiuService.aiuTaxLines(aiuResult, aiu)] : newItems;
 
       // Advertencia (NO bloqueante) de "cantidad en trámite" — excluye esta
       // misma venta (excludeSaleId) para que sus propios ítems recién
@@ -904,6 +1050,31 @@ const update = async (req, res) => {
       const effValue = updateData.global_discount_value  !== undefined ? updateData.global_discount_value : sale.global_discount_value;
       updateData.global_discount_amount = resolveGlobalDiscount(effType, effValue, lineItemsTotal);
       updateData.total_amount = lineItemsTotal - updateData.global_discount_amount;
+    }
+
+    // Retenciones: con ítems nuevos, con otro descuento global o con otro
+    // cliente cambian -- antes solo se recalculaban cuando cambiaban los ítems.
+    const customerChanged = 'customer_id' in updateData && updateData.customer_id !== sale.customer_id;
+    if (pendingRetentions || ((discountFieldsChanged || customerChanged) && !sale.aiu_enabled)) {
+      let ret = pendingRetentions;
+      let taxItems = retentionTaxItems;
+      if (!ret) {
+        taxItems = (await SaleItem.findAll({ where: { sale_id: id }, transaction }))
+          .map(i => i.toJSON()).filter(i => i.approval_status !== 'rechazado');
+        ret = ZERO_RETENTIONS;
+        const effCustomerId = 'customer_id' in updateData ? updateData.customer_id : sale.customer_id;
+        if (effCustomerId) {
+          const [retCustomer, tenantRow] = await Promise.all([
+            Customer.findOne({ where: { id: effCustomerId, tenant_id: tenantId }, attributes: ['retention_config', 'document_type'], transaction }),
+            Tenant.findByPk(tenantId, { attributes: ['tax_config'], transaction }),
+          ]);
+          if (retCustomer) ret = taxService.calculateRetentions(taxItems, tenantRow?.tax_config || {}, taxService.customerRetentionConfig(retCustomer));
+        }
+      }
+      const pre = lineItemsTotal !== undefined ? lineItemsTotal : parseFloat(sale.total_amount) + (parseFloat(sale.global_discount_amount) || 0);
+      const gd = updateData.global_discount_amount !== undefined ? updateData.global_discount_amount : sale.global_discount_amount;
+      ret = scaleRetentions(ret, pre, gd);
+      Object.assign(updateData, retentionFields(ret), { tax_breakdown: breakdownWithRetentions(taxItems, ret) });
     }
 
     await sale.update(updateData, { transaction });
@@ -1011,7 +1182,18 @@ const confirm = async (req, res) => {
 
     // Tipo de documento final -- se calcula acá para poder validar antes de
     // abrir la transacción; se reutiliza más abajo en vez de recalcularlo.
-    const finalDocType = document_type || (sale.document_type !== null ? sale.document_type : 'remision');
+    const finalDocType = document_type || (sale.document_type !== null && sale.document_type !== 'cotizacion' ? sale.document_type : 'remision');
+
+    // Confirmar = volverlo venta (mueve inventario, caja, contabilidad). Una
+    // cotización nunca se "confirma como cotización"; se convierte en
+    // remisión/factura solo cuando el cliente la aprobó (link público o
+    // aprobación registrada en Pitbox).
+    if (finalDocType === 'cotizacion') {
+      return res.status(400).json({ success: false, message: 'Una cotización no se confirma como venta. Compártela con el cliente y, cuando la apruebe, conviértela en remisión o factura.' });
+    }
+    if (sale.document_type === 'cotizacion' && !['aprobada', 'parcial'].includes(sale.quote_status)) {
+      return res.status(409).json({ success: false, message: 'La cotización debe estar aprobada por el cliente antes de convertirla en venta.' });
+    }
 
     // Requisitos de factura electrónica (compartidos con la facturación de
     // remisiones, ver services/sales/remisionInvoicing.service.js):
@@ -1235,6 +1417,8 @@ const confirm = async (req, res) => {
         updateData.dian_status   = finalDocType === 'factura' ? 'pending' : 'not_applicable';
         const newNumber = await generateSaleNumber(tenantId, finalDocType, transaction, sale.id, sale.branch_id);
         updateData.sale_number = newNumber;
+        // Traza de la cotización de origen (sigue visible en Cotizaciones).
+        if (sale.document_type === 'cotizacion') updateData.quote_number = sale.sale_number;
       } else if (document_type) {
         updateData.dian_status = document_type === 'factura' ? 'pending' : 'not_applicable';
 
@@ -1839,9 +2023,9 @@ const getStats = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
     const { from_date, to_date } = req.query;
-    // Los borradores son cotizaciones, no ventas confirmadas — no deben
-    // sumar en los totales de Ventas (mismo criterio que getAll/quote_view).
-    const where = { tenant_id: tenantId, status: { [Op.ne]: 'draft' } };
+    // Ni los borradores ni las cotizaciones son ventas confirmadas — no
+    // deben sumar en los totales de Ventas.
+    const where = { tenant_id: tenantId, status: { [Op.ne]: 'draft' }, [Op.and]: [NOT_QUOTE_WHERE] };
     const branch_id = resolveBranchFilter(req);
     if (branch_id) where.branch_id = branch_id;
     if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
@@ -1874,6 +2058,22 @@ const getStats = async (req, res) => {
   }
 };
 
+// Link público que ve el cliente (QuotePublicPage). /public/quote/:token
+// sigue resolviendo en el frontend para los enlaces ya enviados.
+function publicDocumentUrl(frontendUrl, isQuote, token) {
+  return `${frontendUrl}/${isQuote ? 'cotizacion' : 'documento'}/${token}`;
+}
+
+// PDF de una venta: la cotización tiene su propio formato
+// (services/sales/quotePdfService.js), el resto usa el de venta.
+function buildSalePdfBuffer(sale, tenant) {
+  if (sale.document_type === 'cotizacion') {
+    const { generateQuotePDFBuffer } = require('../../services/sales/quotePdfService');
+    return generateQuotePDFBuffer(sale, tenant);
+  }
+  return generateSalePDFBuffer(sale, tenant);
+}
+
 // Generar PDF
 const generatePDF = async (req, res) => {
   try {
@@ -1895,7 +2095,7 @@ const generatePDF = async (req, res) => {
     const TYPES = { factura: 'Factura', remision: 'Remision', cotizacion: 'Cotizacion' };
     const docLabel = TYPES[sale.document_type] || 'Documento';
     const filename = `${docLabel}-${sale.sale_number}.pdf`;
-    const pdfBuffer = await generateSalePDFBuffer(sale, tenant);
+    const pdfBuffer = await buildSalePdfBuffer(sale, tenant);
     res.set({
       'Content-Type':        'application/pdf',
       'Content-Disposition': `inline; filename="${filename}"`,
@@ -2011,16 +2211,16 @@ async function generateSaleNumber(tenant_id, document_type, transaction, exclude
       sequence = parseInt(lastNumber) + 1;
     }
     // Una remisión convertida a factura guarda su REM-XXXX en
-    // remision_number: ese número ya se usó y no se puede volver a emitir.
-    if (prefix === 'REM') {
-      const lastConverted = await Sale.findOne({
-        where: { tenant_id, remision_number: { [Op.like]: `${prefix}-${year}-%` } },
-        order: [['remision_number', 'DESC']],
-        transaction,
-      });
-      if (lastConverted) {
-        sequence = Math.max(sequence, parseInt(lastConverted.remision_number.split('-').pop()) + 1);
-      }
+    // remision_number (y una cotización convertida en venta, su COT-XXXX en
+    // quote_number): ese número ya se usó y no se puede volver a emitir.
+    const convertedColumn = prefix === 'REM' ? 'remision_number' : 'quote_number';
+    const lastConverted = await Sale.findOne({
+      where: { tenant_id, [convertedColumn]: { [Op.like]: `${prefix}-${year}-%` } },
+      order: [[convertedColumn, 'DESC']],
+      transaction,
+    });
+    if (lastConverted) {
+      sequence = Math.max(sequence, parseInt(lastConverted[convertedColumn].split('-').pop()) + 1);
     }
     return `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
   }
@@ -2072,9 +2272,9 @@ const generateShareLink = async (req, res) => {
       token = require('crypto').randomUUID();
       updates.share_token = token;
     }
-    // Mismo criterio que el frontend (SaleDetailPage#isQuote): ventas antiguas
-    // sin document_type asignado se tratan como cotización.
-    const isQuote = !sale.document_type || sale.document_type === 'cotizacion';
+    // Solo una cotización tiene flujo de aprobación -- un borrador de venta
+    // (document_type null) se comparte como documento, no como cotización.
+    const isQuote = sale.document_type === 'cotizacion';
     if (isQuote && (!sale.quote_status || sale.quote_status === 'borrador')) {
       updates.quote_status = 'enviada';
     }
@@ -2091,8 +2291,9 @@ const generateShareLink = async (req, res) => {
     // consulta la API por dentro) -- antes, para factura/remisión, `url`
     // terminaba siendo `pdfUrl` (directo al backend) y al abrirla el
     // navegador mostraba el JSON crudo del endpoint, no una página. La
-    // página pública (QuotePublicPage) ya es genérica por document_type.
-    const documentUrl = `${frontendUrl}/public/quote/${token}`;
+    // página pública (QuotePublicPage) es genérica por document_type, pero
+    // la URL distingue la cotización (/cotizacion) del resto (/documento).
+    const documentUrl = publicDocumentUrl(frontendUrl, isQuote, token);
 
     res.json({
       success: true,
@@ -2132,9 +2333,8 @@ const sendWhatsApp = async (req, res) => {
 
     const TYPES = { factura: 'Factura', remision: 'Remisión', cotizacion: 'Cotización' };
     const docLabel = TYPES[sale.document_type] || 'Cotización';
-    // Mismo criterio que generateShareLink/frontend: ventas antiguas sin
-    // document_type asignado se tratan como cotización.
-    const isQuote = !sale.document_type || sale.document_type === 'cotizacion';
+    // Mismo criterio que generateShareLink.
+    const isQuote = sale.document_type === 'cotizacion';
 
     // Token persistente — se genera una sola vez y se reutiliza siempre
     // (mismo patrón que WorkOrder.share_token / generateShareToken).
@@ -2160,7 +2360,7 @@ const sendWhatsApp = async (req, res) => {
     // Igual que en generateShareLink: el link compartido por WhatsApp debe
     // apuntar siempre al frontend, no al endpoint del backend que sirve el
     // PDF crudo (ver comentario ahí).
-    const documentUrl = `${frontendUrl}/public/quote/${token}`;
+    const documentUrl = publicDocumentUrl(frontendUrl, isQuote, token);
 
     let caption;
     if (isQuote) {
@@ -2266,7 +2466,13 @@ function publicQuoteItems(items) {
     quantity: i.quantity,
     unit_price: i.unit_price,
     subtotal: i.subtotal,
+    discount_percentage: i.discount_percentage,
+    discount_amount: i.discount_amount,
+    tax_percentage: i.tax_percentage,
     tax_amount: i.tax_amount,
+    iva_status: i.iva_status,
+    inc_rate: i.inc_rate,
+    inc_amount: i.inc_amount,
     total: i.total,
     approval_status: i.approval_status,
   }));
@@ -2284,24 +2490,51 @@ async function getPublicSaleBody(saleId, res) {
 
   const backendUrl = (process.env.BACKEND_URL || '').replace(/\/$/, '');
 
+  // Una cotización enviada cuya vigencia ya pasó se marca vencida al
+  // consultarla (no hay job que lo haga): el cliente ya no puede aprobarla.
+  if (sale.document_type === 'cotizacion' && sale.quote_status === 'enviada' && isQuoteExpired(sale)) {
+    await sale.update({ quote_status: 'vencida' });
+  }
+
   res.json({
     success: true,
     data: {
       sale_number: sale.sale_number,
       document_type: sale.document_type,
+      status: sale.status,
       quote_status: sale.quote_status,
+      quote_valid_until: sale.quote_valid_until,
       pdf_url: `${backendUrl}/api/public/pdf/${sale.share_token}`,
       customer_name: sale.customer_name,
+      customer_tax_id: sale.customer_tax_id,
       sale_date: sale.sale_date,
+      vehicle_plate: sale.vehicle_plate,
+      vehicle_brand: sale.vehicle_brand,
+      vehicle_model: sale.vehicle_model,
+      vehicle_year: sale.vehicle_year,
       subtotal: sale.subtotal,
       tax_amount: sale.tax_amount,
+      // Desde las líneas (misma fuente que el total); AIU conserva el suyo.
+      tax_breakdown: sale.aiu_enabled
+        ? (sale.tax_breakdown || []).filter(t => t.type === 'tax')
+        : taxService.taxLinesFromItems(sale.items || []),
       discount_amount: sale.discount_amount,
+      global_discount_amount: sale.global_discount_amount,
       total_amount: sale.total_amount,
       notes: sale.notes,
       items: publicQuoteItems(sale.items || []),
       quote_approved_by_name: sale.quote_approved_by_name,
       quote_responded_at: sale.quote_responded_at,
-      tenant: { company_name: tenant.company_name },
+      tenant: {
+        company_name: tenant.company_name,
+        tax_id: tenant.tax_id,
+        logo_url: tenant.logo_url,
+        primary_color: tenant.primary_color,
+        phone: tenant.phone,
+        email: tenant.email,
+        address: tenant.address,
+        quote_terms: tenant.pdf_config?.quote_terms || null,
+      },
     },
   });
 }
@@ -2358,6 +2591,11 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
       await transaction.rollback();
       return res.status(409).json({ success: false, message: 'Esta cotización ya fue respondida anteriormente' });
     }
+    if (isQuoteExpired(sale)) {
+      await sale.update({ quote_status: 'vencida' }, { transaction });
+      await transaction.commit();
+      return res.status(409).json({ success: false, message: 'Esta cotización ya venció. Comunícate con nosotros para actualizarla.' });
+    }
 
     // Un combo aprobado/rechazado como una sola línea aplica a todos sus componentes.
     const expandedApprovals = expandComboApprovals(approvals, sale.items);
@@ -2383,10 +2621,8 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
     // cliente no se factura, así que no debe inflar lo que se cobra.
     const refreshedItems = await SaleItem.findAll({ where: { sale_id: sale.id }, transaction });
     const billable = refreshedItems.filter(i => i.approval_status === 'aprobado');
-    const subtotal        = billable.reduce((s, i) => s + parseFloat(i.subtotal || 0), 0);
-    const discount_amount = billable.reduce((s, i) => s + parseFloat(i.discount_amount || 0), 0);
-    const tax_amount      = billable.reduce((s, i) => s + parseFloat(i.tax_amount || 0), 0);
-    const total_amount    = billable.reduce((s, i) => s + parseFloat(i.total || 0), 0);
+    const totals = approvedQuoteTotals(sale, billable);
+    Object.assign(totals, await quoteRetentionFields(sale, billable, totals, transaction));
 
     const anyApproved = refreshedItems.some(i => i.approval_status === 'aprobado');
     const anyRejected = refreshedItems.some(i => i.approval_status === 'rechazado');
@@ -2394,7 +2630,7 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
 
     await sale.update({
       quote_status,
-      subtotal, discount_amount, tax_amount, total_amount,
+      ...totals,
       quote_approved_by_name: approved_by_name,
       quote_approved_by_document: approved_by_document,
       quote_approved_ip: req.ip,
@@ -2409,6 +2645,77 @@ async function respondPublicQuoteBody({ saleId, approvals, approved_by_name, app
     res.status(500).json({ success: false, message: 'Error al procesar la respuesta' });
   }
 }
+
+// POST /sales/:id/quote-status { status: 'aprobada' | 'rechazada', approved_by_name?, approved_by_document? }
+// El asesor registra la respuesta que el cliente dio fuera del link público.
+// Aprobar así aprueba todos los ítems que sigan pendientes (los que el
+// cliente ya rechazó por el link se respetan).
+const setQuoteStatus = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  try {
+    const { status, approved_by_name, approved_by_document } = req.body;
+    if (!['aprobada', 'rechazada'].includes(status)) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: "status debe ser 'aprobada' o 'rechazada'" });
+    }
+    const sale = await Sale.findOne({
+      where: { id: req.params.id, tenant_id: req.tenant_id },
+      include: [{ model: SaleItem, as: 'items' }],
+      transaction,
+    });
+    if (!sale) {
+      await transaction.rollback();
+      return res.status(404).json({ success: false, message: 'Cotización no encontrada' });
+    }
+    if (sale.document_type !== 'cotizacion' || sale.status !== 'draft') {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'Solo se puede responder una cotización vigente' });
+    }
+
+    const user = req.user || {};
+    const userName = [user.first_name, user.last_name].filter(Boolean).join(' ') || user.email || 'Asesor';
+    const updateData = {
+      quote_approved_by_name: approved_by_name?.trim() || `${sale.customer_name || 'Cliente'} (registrada por ${userName})`,
+      quote_approved_by_document: approved_by_document?.trim() || sale.customer_tax_id || null,
+      quote_approved_ip: req.ip,
+      quote_responded_at: new Date(),
+    };
+
+    if (status === 'aprobada') {
+      await SaleItem.update(
+        { approval_status: 'aprobado' },
+        { where: { sale_id: sale.id, approval_status: { [Op.ne]: 'rechazado' } }, transaction }
+      );
+      const items = await SaleItem.findAll({ where: { sale_id: sale.id }, transaction });
+      const billable = items.filter(i => i.approval_status === 'aprobado');
+      if (!billable.length) {
+        await transaction.rollback();
+        return res.status(400).json({ success: false, message: 'Todos los ítems fueron rechazados: no hay nada que aprobar' });
+      }
+      const anyRejected = items.some(i => i.approval_status === 'rechazado');
+      updateData.quote_status = anyRejected ? 'parcial' : 'aprobada';
+      // Mismo recálculo que respondPublicQuoteBody: lo rechazado no se cobra.
+      if (anyRejected) {
+        const totals = approvedQuoteTotals(sale, billable);
+        Object.assign(updateData, totals, await quoteRetentionFields(sale, billable, totals, transaction));
+      }
+    } else {
+      updateData.quote_status = 'rechazada';
+    }
+
+    await sale.update(updateData, { transaction });
+    await transaction.commit();
+    await audit({
+      tenant_id: req.tenant_id, user_id: req.user?.id, action: 'SET_QUOTE_STATUS',
+      entity: 'sale', entity_id: sale.id, changes: { quote_status: updateData.quote_status }, req,
+    });
+    res.json({ success: true, message: updateData.quote_status === 'rechazada' ? 'Cotización marcada como rechazada' : 'Cotización aprobada', data: { quote_status: updateData.quote_status } });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    logger.error('Error registrando respuesta de cotización:', error);
+    res.status(500).json({ success: false, message: 'Error registrando la respuesta de la cotización' });
+  }
+};
 
 // ── Facturación de remisiones (services/sales/remisionInvoicing.service.js) ──
 function invoicingErrorResponse(res, error, fallbackMessage) {
@@ -2527,4 +2834,5 @@ module.exports = {
   resolveSaleSchemaByToken,
   getPublicSale,
   respondPublicQuote,
+  setQuoteStatus,
 };

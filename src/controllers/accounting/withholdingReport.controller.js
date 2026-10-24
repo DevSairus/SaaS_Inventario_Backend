@@ -40,17 +40,23 @@ async function fetchWithholding(req) {
   // Sin calificar schema, esto siempre leía "public" -- para un tenant ya
   // cortado a su propio schema el reporte salía vacío sin error visible.
   const schema = getCurrentSchema() || 'public';
+  // Retenciones REGISTRADAS (las que el cliente practicó y se contabilizaron),
+  // no la estimación guardada al crear la venta -- ver
+  // services/sales/registeredRetentions.js. Ventas confirmadas: 'pending'
+  // (generadas desde OT, aún no entregadas) también cuentan.
+  const { registeredRetentionsLateral } = require('../../services/sales/registeredRetentions');
   const rows = await sequelize.query(
     `SELECT s.id, s.sale_number, s.sale_date, s.subtotal, s.tax_amount, s.total_amount,
-            s.retefuente_rate, s.retefuente_amount, s.reteica_rate, s.reteica_amount,
+            r.retefuente AS retefuente_amount, r.reteica AS reteica_amount,
             c.id AS customer_id, c.business_name, c.first_name, c.last_name, c.tax_id AS customer_tax_id
      FROM "${schema}"."sales" s
      JOIN "${schema}"."customers" c ON c.id = s.customer_id
+     CROSS JOIN LATERAL ${registeredRetentionsLateral('s')} r
      WHERE s.tenant_id = :tenantId
-       AND s.status = 'completed'
+       AND s.status IN ('pending', 'completed')
        AND s.is_consolidated_invoice IS NOT TRUE
        AND s.sale_date BETWEEN :from AND :to
-       AND (s.retefuente_amount > 0 OR s.reteica_amount > 0)
+       AND (r.retefuente > 0 OR r.reteica > 0)
        AND (:branchId::uuid IS NULL OR s.branch_id = :branchId::uuid)
        AND (:customerId::uuid IS NULL OR s.customer_id = :customerId::uuid)
      ORDER BY c.business_name ASC NULLS LAST, s.sale_date ASC`,
@@ -72,9 +78,10 @@ async function fetchWithholding(req) {
     subtotal: Number(r.subtotal),
     tax_amount: Number(r.tax_amount),
     total_amount: Number(r.total_amount),
-    retefuente_rate: Number(r.retefuente_rate),
+    // Tarifa efectiva de lo registrado sobre la base de la venta.
+    retefuente_rate: Number(r.subtotal) > 0 ? Math.round(Number(r.retefuente_amount) / Number(r.subtotal) * 10000) / 100 : 0,
     retefuente_amount: Number(r.retefuente_amount),
-    reteica_rate: Number(r.reteica_rate),
+    reteica_rate: Number(r.subtotal) > 0 ? Math.round(Number(r.reteica_amount) / Number(r.subtotal) * 100000) / 100 : 0,
     reteica_amount: Number(r.reteica_amount),
   }));
 
@@ -85,7 +92,7 @@ async function fetchWithholding(req) {
   const { approvedCustomerReturns } = require('../../services/returns/returnFiscalData');
   const returns = await approvedCustomerReturns(req.tenant_id, from, to, { customerId: customer_id || null, branchId: branch_id || null });
   for (const r of returns) {
-    if (!r.customer_id || !(Number(r.sale_retefuente) > 0 || Number(r.sale_reteica) > 0)) continue;
+    if (!r.customer_id || !(r.retefuente_share > 0 || r.reteica_share > 0)) continue;
     sales.push({
       id: r.id,
       sale_number: `${r.return_number} (devolución de ${r.sale_number})`,

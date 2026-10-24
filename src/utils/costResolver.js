@@ -37,21 +37,26 @@ function resolveUnitCost(item, product) {
 // lista de la línea -- mientras generatePurchaseEntry acreditaba a 143501
 // subtotal - discount_amount + shipping_cost (que sí incluye ambos), dejando
 // el inventario valorado por debajo de lo contabilizado.
-function resolveLandedPurchaseUnitCost(purchaseItem, purchase) {
+// Impuestos que son costo: el INC de la línea siempre (no es descontable) y
+// el IVA cuando el negocio no es responsable de IVA (ivaToCost) -- mismo
+// criterio que el asiento de la compra (autoEntries.isIvaDeductible).
+function resolveLandedPurchaseUnitCost(purchaseItem, purchase, { ivaToCost = false } = {}) {
   const quantity = parseFloat(purchaseItem?.quantity) || 0;
   if (quantity <= 0) return parseFloat(purchaseItem?.unit_cost) || 0;
 
+  const taxesInCost = (parseFloat(purchaseItem?.inc_amount) || 0)
+    + (ivaToCost ? parseFloat(purchaseItem?.tax_amount) || 0 : 0);
   const lineSubtotal = parseFloat(purchaseItem?.subtotal) || 0;
   const purchaseSubtotal = parseFloat(purchase?.subtotal) || 0;
   const globalDiscount = parseFloat(purchase?.discount_amount) || 0;
   const shippingCost = parseFloat(purchase?.shipping_cost) || 0;
 
   if (purchaseSubtotal <= 0 || (globalDiscount === 0 && shippingCost === 0)) {
-    return lineSubtotal / quantity;
+    return (lineSubtotal + taxesInCost) / quantity;
   }
 
   const share = lineSubtotal / purchaseSubtotal;
-  const landedLineTotal = lineSubtotal - (globalDiscount * share) + (shippingCost * share);
+  const landedLineTotal = lineSubtotal + taxesInCost - (globalDiscount * share) + (shippingCost * share);
   return landedLineTotal / quantity;
 }
 

@@ -942,6 +942,8 @@ async function sendSupportDocumentForExpense(expenseId, tenant, userId, adHocSel
     subtotal: Number(expense.subtotal || 0),
     tax_amount: Number(expense.tax_amount || 0),
     tax_rate: Number(expense.tax_rate || 0),
+    // Excluido: sin TaxTotal de IVA (ver dianKitAdapter.buildTaxTotalsForLine).
+    iva_status: expense.iva_status || undefined,
   }];
 
   return sendSupportDocumentToDian({

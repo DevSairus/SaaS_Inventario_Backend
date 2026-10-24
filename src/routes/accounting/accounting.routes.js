@@ -26,6 +26,7 @@ const bankReconciliationCtrl = require('../../controllers/accounting/bankReconci
 const exogenaCtrl = require('../../controllers/accounting/exogena.controller');
 const accountMigrationsCtrl = require('../../controllers/accounting/accountMigrations.controller');
 const icaCtrl = require('../../controllers/accounting/ica.controller');
+const ivaProrrateoCtrl = require('../../controllers/accounting/ivaProrrateo.controller');
 const { checkRole } = require('../../middleware/auth');
 
 // Operaciones reservadas al personal de contabilidad (el router ya admite
@@ -69,6 +70,10 @@ router.put('/ica/branches', accountingStaff, icaCtrl.assignBranches);
 router.get('/ica/report', icaCtrl.report);
 router.get('/ica/settlements', icaCtrl.listSettlements);
 router.post('/ica/settlements', accountingStaff, icaCtrl.createSettlement);
+
+// Prorrateo del IVA descontable (art. 490 E.T.): cálculo y ajuste en borrador
+router.get('/iva-prorrateo', ivaProrrateoCtrl.report);
+router.post('/iva-prorrateo', accountingStaff, ivaProrrateoCtrl.createEntry);
 router.patch('/ica/settlements/:id/void', accountingStaff, icaCtrl.voidSettlement);
 
 // Mapeo de eventos -> cuentas

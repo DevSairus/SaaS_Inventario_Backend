@@ -67,6 +67,13 @@ const SaleItem = sequelize.define('SaleItem', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0,
   },
+  // 'gravado' | 'exento' (0 %, sí es IVA) | 'excluido' (no causa IVA); NULL =
+  // línea anterior al campo (0 % se trata como exento). Ver migración 2026102402.
+  iva_status: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    validate: { isIn: [['gravado', 'exento', 'excluido']] },
+  },
   // ── Impuestos adicionales ─────────────────────────────────
   inc_rate:   { type: DataTypes.DECIMAL(5, 2), defaultValue: 0, comment: 'Tasa INC (%)' },
   inc_amount: { type: DataTypes.DECIMAL(15, 2), defaultValue: 0, comment: 'Monto INC' },

@@ -89,6 +89,16 @@ const Expense = sequelize.define('Expense', {
     allowNull: false,
     defaultValue: 0
   },
+  // INC (impoconsumo): no es descontable, queda en el gasto. total_amount
+  // = subtotal + tax_amount + inc_amount.
+  inc_rate: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
+  inc_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+  // 'gravado' | 'exento' (IVA 0 %) | 'excluido' (no causa IVA). NULL = gastos anteriores.
+  iva_status: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    validate: { isIn: [['gravado', 'exento', 'excluido']] }
+  },
   // ── Retenciones — mismo set que ya existe en Purchase desde Fase C
   // (2026070302-add-multi-tax-system.js). Un gasto a un independiente
   // (honorarios, arriendo) puede generar autorretención igual que una

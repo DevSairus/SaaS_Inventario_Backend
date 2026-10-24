@@ -169,10 +169,17 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
       }))
       .filter((_, idx) => !removed_items.includes(idx));
 
-    // Recalcular tax_amount con el porcentaje posiblemente editado
+    // El IVA del XML se respeta tal cual; solo se recalcula si el usuario
+    // cambió el porcentaje en el modal. Antes se recalculaba SIEMPRE con el %
+    // leído, y una línea excluida (sin IVA en el XML) entraba con 19 %. El INC
+    // del XML (no descontable) se conserva y suma al total.
     filteredItems.forEach(item => {
-      item.tax_amount = Math.round(item.subtotal * (item.tax_percentage / 100));
-      item.total = item.subtotal + item.tax_amount;
+      const overridden = items_tax_overrides[item.original_index] !== undefined;
+      if (overridden) {
+        item.tax_amount = Math.round(item.subtotal * (item.tax_percentage / 100));
+        item.iva_status = item.tax_percentage > 0 ? 'gravado' : (item.iva_status === 'excluido' ? 'excluido' : 'exento');
+      }
+      item.total = item.subtotal + (Number(item.tax_amount) || 0) + (Number(item.inc_amount) || 0);
     });
 
     const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, margin_multiplier, manual_links, new_product_data);
@@ -583,7 +590,15 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
           track_inventory: true,
           is_active: true,
           has_tax: item.tax_percentage > 0,
-          tax_percentage: item.tax_percentage || 19,
+          tax_percentage: item.tax_percentage || 0,
+          // Excluido (sin IVA en la factura) o exento (IVA 0 %): así queda el
+          // producto para sus ventas, en vez de un 19 % por defecto.
+          tax_config: {
+            iva_status: item.iva_status || (item.tax_percentage > 0 ? 'gravado' : 'exento'),
+            iva: { enabled: item.tax_percentage > 0, rate: item.tax_percentage || 0 },
+            inc: { enabled: false, rate: 0 },
+            ica: { enabled: false, rate: 0 },
+          },
           price_includes_tax: !!overrides.price_includes_tax
         }, { transaction: t }));
 
@@ -620,6 +635,8 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
       unit_cost: item.unit_price,
       tax_percentage: item.tax_percentage,
       tax_amount: item.tax_amount,
+      inc_rate: Number(item.inc_rate) || 0,
+      inc_amount: Number(item.inc_amount) || 0,
       subtotal: item.subtotal,
       total: item.total,
       isNew: isNew,
@@ -677,7 +694,9 @@ async function generateUniqueSku(productName, tenant_id, transaction) {
 async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id, user_id, transaction, shipping_cost = 0, discount_amount = 0, branch_id = null) {
   const subtotal     = items.reduce((sum, item) => sum + parseFloat(item.subtotal), 0);
   const tax_amount   = items.reduce((sum, item) => sum + parseFloat(item.tax_amount), 0);
-  const total_amount = subtotal + tax_amount + shipping_cost - discount_amount;
+  // INC y otros tributos no descontables: suman al total y al costo, no a tax_amount (IVA).
+  const inc_total    = items.reduce((sum, item) => sum + (parseFloat(item.inc_amount) || 0), 0);
+  const total_amount = subtotal + tax_amount + inc_total + shipping_cost - discount_amount;
 
   // Plazo/fecha de pago, en orden de prioridad:
   //  0. Forma de pago CONTADO (PaymentMeans/ID=1 en el XML o, si el XML no la
@@ -725,10 +744,11 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
     taxConfig: tenantForRetentions?.tax_config || {},
     supplier,
     items: items.map(i => ({ product_id: i.product_id, subtotal: i.subtotal, tax_amount: i.tax_amount })),
+    discount: Number(discount_amount) || 0, // el descuento general baja la base
     transaction,
   });
   const tax_breakdown = taxService.buildTaxBreakdown(
-    items.map(i => ({ subtotal: i.subtotal, tax_amount: i.tax_amount, tax_percentage: i.tax_percentage })),
+    items.map(i => ({ subtotal: i.subtotal, tax_amount: i.tax_amount, tax_percentage: i.tax_percentage, inc_rate: i.inc_rate, inc_amount: i.inc_amount })),
     retentions
   );
 
@@ -812,6 +832,8 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
       unit_cost: item.unit_cost,
       tax_rate: item.tax_percentage,
       tax_amount: item.tax_amount,
+      inc_rate: item.inc_rate || 0,
+      inc_amount: item.inc_amount || 0,
       subtotal: item.subtotal,
       total: item.total
     }, { transaction });

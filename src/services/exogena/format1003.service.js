@@ -5,7 +5,7 @@
 // Anexo técnico: T3.19 (F1003 v7, Resolución 000227/2025).
 //
 // Agrega Sale por cliente: valor acumulado sujeto a retención (subtotal) y
-// retención en la fuente que el cliente practicó (retefuente_amount). Nota:
+// retención en la fuente que el cliente practicó y se registró (payment_history source retention). Nota:
 // el XSD real de este anexo NO incluye el atributo "cpt" (aunque la tabla de
 // prosa del PDF sí lo menciona) -- se sigue el XSD, que es lo que valida la
 // DIAN. Por eso este formato no necesita ExogenaConceptMapping.
@@ -23,15 +23,20 @@ async function buildRecords(tenantId, year, _conceptBySourceKey, options = {}) {
   const from = `${year}-01-01`;
   const to = `${year}-12-31`;
 
+  // Retención REGISTRADA (lo que el cliente practicó, según sus certificados
+  // y la contabilidad), no la estimación de la venta -- ver
+  // services/sales/registeredRetentions.js.
+  const { registeredRetentionsLateral } = require('../sales/registeredRetentions');
   const rows = await sequelize.query(
     `SELECT s.customer_id, s.customer_tax_id AS tax_id, s.customer_document_type AS document_type,
             c.first_name, c.last_name, c.business_name, s.customer_city_code AS city_code, s.customer_address AS address,
-            SUM(s.subtotal) AS valor, SUM(s.retefuente_amount) AS ret
+            SUM(s.subtotal) AS valor, SUM(r.retefuente) AS ret
      FROM "${schema}"."sales" s
      LEFT JOIN "${schema}"."customers" c ON c.id = s.customer_id
-     WHERE s.tenant_id = :tenantId AND s.status = 'completed'
+     CROSS JOIN LATERAL ${registeredRetentionsLateral('s')} r
+     WHERE s.tenant_id = :tenantId AND s.status IN ('pending', 'completed')
        AND s.is_consolidated_invoice IS NOT TRUE -- su ingreso está en las remisiones agrupadas
-       AND s.retefuente_amount > 0
+       AND r.retefuente > 0
        AND s.sale_date BETWEEN :from AND :to
      GROUP BY s.customer_id, s.customer_tax_id, s.customer_document_type, c.first_name, c.last_name, c.business_name, s.customer_city_code, s.customer_address`,
     { replacements: { tenantId, from, to }, type: QueryTypes.SELECT }
@@ -48,7 +53,7 @@ async function buildRecords(tenantId, year, _conceptBySourceKey, options = {}) {
   const keyOf = (r) => r.customer_id || `nit:${r.tax_id}`;
   const byCustomer = new Map(rows.map((r) => [keyOf(r), { ...r, valor: Number(r.valor || 0), ret: Number(r.ret || 0) }]));
   for (const ret of await approvedCustomerReturns(tenantId, from, to)) {
-    if (!(Number(ret.sale_retefuente) > 0)) continue;
+    if (!(ret.retefuente_share > 0)) continue;
     if (isPriorYearDocument(ret.sale_date, year) && !subtractPriorYear) continue;
     const key = keyOf(ret);
     if (!byCustomer.has(key)) {

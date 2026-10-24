@@ -210,13 +210,16 @@ function buildTaxTotalsForLine(item) {
   const taxableAmount = Number(item.subtotal || item.lineExtensionAmount || 0);
   const totals = [];
 
-  // IVA (01)
-  const ivaAmount = Number(item.tax_amount || 0);
-  const ivaRate = Number(item.tax_rate || item.tax_percentage || 0);
-  totals.push({
-    taxAmount: ivaAmount,
-    subtotals: [{ taxableAmount, taxAmount: ivaAmount, percent: ivaRate, taxScheme: { code: '01' } }],
-  });
+  // IVA (01). Un ítem EXCLUIDO no causa IVA: no lleva TaxTotal de IVA (un
+  // exento sí, con tarifa 0 %). Antes todo lo de 0 % se informaba como exento.
+  if (item.iva_status !== 'excluido') {
+    const ivaAmount = Number(item.tax_amount || 0);
+    const ivaRate = Number(item.tax_rate || item.tax_percentage || 0);
+    totals.push({
+      taxAmount: ivaAmount,
+      subtotals: [{ taxableAmount, taxAmount: ivaAmount, percent: ivaRate, taxScheme: { code: '01' } }],
+    });
+  }
 
   // INC (04) — impoconsumo
   const incAmount = Number(item.inc_amount || 0);
@@ -246,23 +249,27 @@ function buildTaxTotalsForLine(item) {
  */
 function buildDocumentTaxTotals(items) {
   const ivaGroups = {};
-  let totalInc = 0, totalIncBase = 0;
+  const incGroups = {}; // por tarifa: 4 %, 8 %, 16 %... (un TaxSubtotal por tarifa)
   let totalIca = 0, totalIcaBase = 0;
 
   for (const item of items) {
     const base = Number(item.subtotal || item.lineExtensionAmount || 0);
 
-    // IVA
-    const ivaPct = Number(item.tax_rate || item.tax_percentage || 0);
-    const ivaKey = `01_${ivaPct}`;
-    if (!ivaGroups[ivaKey]) ivaGroups[ivaKey] = { pct: ivaPct, taxableAmount: 0, taxAmount: 0 };
-    ivaGroups[ivaKey].taxableAmount += base;
-    ivaGroups[ivaKey].taxAmount += Number(item.tax_amount || 0);
+    // IVA (los excluidos no hacen parte de ningún grupo de IVA)
+    if (item.iva_status !== 'excluido') {
+      const ivaPct = Number(item.tax_rate || item.tax_percentage || 0);
+      const ivaKey = `01_${ivaPct}`;
+      if (!ivaGroups[ivaKey]) ivaGroups[ivaKey] = { pct: ivaPct, taxableAmount: 0, taxAmount: 0 };
+      ivaGroups[ivaKey].taxableAmount += base;
+      ivaGroups[ivaKey].taxAmount += Number(item.tax_amount || 0);
+    }
 
     // INC
     if (Number(item.inc_amount || 0) > 0) {
-      totalInc += Number(item.inc_amount);
-      totalIncBase += base;
+      const incPct = Number(item.inc_rate || 0);
+      if (!incGroups[incPct]) incGroups[incPct] = { pct: incPct, taxableAmount: 0, taxAmount: 0 };
+      incGroups[incPct].taxableAmount += base;
+      incGroups[incPct].taxAmount += Number(item.inc_amount);
     }
 
     // ICA
@@ -277,11 +284,14 @@ function buildDocumentTaxTotals(items) {
     subtotals: [{ taxableAmount: g.taxableAmount, taxAmount: g.taxAmount, percent: g.pct, taxScheme: { code: '01' } }],
   }));
 
-  // INC (04)
-  if (totalInc > 0) {
+  // INC (04): un solo tributo con un subtotal por tarifa. Antes iba un único
+  // subtotal con el porcentaje promedio (8 % + 4 % mezclados daban un 6,x %
+  // que no es tarifa válida para la DIAN).
+  const incList = Object.values(incGroups);
+  if (incList.length) {
     result.push({
-      taxAmount: totalInc,
-      subtotals: [{ taxableAmount: totalIncBase, taxAmount: totalInc, percent: totalInc / totalIncBase * 100, taxScheme: { code: '04' } }],
+      taxAmount: incList.reduce((s, g) => s + g.taxAmount, 0),
+      subtotals: incList.map(g => ({ taxableAmount: g.taxableAmount, taxAmount: g.taxAmount, percent: g.pct, taxScheme: { code: '04' } })),
     });
   }
 
@@ -458,12 +468,17 @@ function simplifyCustomerParty(xml) {
 
 function buildLegalMonetaryTotal(items) {
   const subtotal = items.reduce((s, it) => s + Number(it.subtotal || it.lineExtensionAmount || 0), 0);
+  // TaxExclusiveAmount = base de las líneas que llevan algún impuesto: un
+  // excluido sin INC no tiene TaxTotal y su valor no entra en la base gravada.
+  const taxableBase = items
+    .filter((it) => it.iva_status !== 'excluido' || Number(it.inc_amount || 0) > 0)
+    .reduce((s, it) => s + Number(it.subtotal || it.lineExtensionAmount || 0), 0);
   // IVA + INC (el INC ya iba en los TaxTotal pero no en el total del documento).
   const taxAmount = items.reduce((s, it) => s + Number(it.tax_amount || 0) + Number(it.inc_amount || 0), 0);
   const total = subtotal + taxAmount;
   return {
     lineExtensionAmount: subtotal,
-    taxExclusiveAmount: subtotal,
+    taxExclusiveAmount: taxableBase,
     taxInclusiveAmount: total,
     allowanceTotalAmount: 0,
     chargeTotalAmount: 0,

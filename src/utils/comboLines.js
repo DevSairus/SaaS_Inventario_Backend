@@ -78,11 +78,14 @@ function collapseComboLinesForDian(items) {
 
     const buckets = new Map();
     for (const item of entry.items) {
-      const key = [Number(item.tax_percentage) || 0, Number(item.inc_rate) || 0, Number(item.ica_rate) || 0].join('|');
+      // iva_status en la llave: un componente excluido de IVA no se puede
+      // fundir con uno exento (para la DIAN son tratamientos distintos).
+      const key = [Number(item.tax_percentage) || 0, item.iva_status || '', Number(item.inc_rate) || 0, Number(item.ica_rate) || 0].join('|');
       let b = buckets.get(key);
       if (!b) {
         b = {
           tax_percentage: Number(item.tax_percentage) || 0,
+          iva_status: item.iva_status || null,
           inc_rate: Number(item.inc_rate) || 0,
           ica_rate: Number(item.ica_rate) || 0,
           subtotal: 0, tax_amount: 0, inc_amount: 0, ica_amount: 0, total: 0,
@@ -114,6 +117,7 @@ function collapseComboLinesForDian(items) {
         unit_price: unitPrice,
         subtotal,
         tax_percentage: b.tax_percentage,
+        iva_status: b.iva_status,
         tax_amount: round2(b.tax_amount),
         inc_rate: b.inc_rate,
         inc_amount: round2(b.inc_amount),
@@ -151,6 +155,7 @@ function presentComboLines(items, mapItem) {
         unit_price: round2(entry.subtotal / (entry.quantity || 1)),
         subtotal: round2(entry.subtotal),
         tax_amount: round2(entry.taxAmount),
+        inc_amount: round2(entry.items.reduce((s, i) => s + Number(i.inc_amount || 0), 0)),
         total: round2(entry.total),
         approval_status: statuses.size === 1 ? [...statuses][0] : 'pendiente',
       });

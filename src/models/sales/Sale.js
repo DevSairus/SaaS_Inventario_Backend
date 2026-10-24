@@ -218,12 +218,17 @@ const Sale = sequelize.define('Sale', {
     type: DataTypes.ENUM('borrador', 'enviada', 'aprobada', 'parcial', 'rechazada', 'vencida'),
     allowNull: true,
     defaultValue: null,
-    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza (total o por ítem) desde /public/quote/:token. "parcial" = aprobó algunos ítems y rechazó otros.',
+    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza (total o por ítem) desde /cotizacion/:token. "parcial" = aprobó algunos ítems y rechazó otros.',
   },
   quote_approved_by_name:     { type: DataTypes.STRING, allowNull: true },
   quote_approved_by_document: { type: DataTypes.STRING, allowNull: true },
   quote_approved_ip:          { type: DataTypes.STRING, allowNull: true },
   quote_responded_at:         { type: DataTypes.DATE, allowNull: true },
+  // Vigencia: vencida, el cliente ya no puede aprobarla desde el link público.
+  quote_valid_until:          { type: DataTypes.DATEONLY, allowNull: true },
+  // Número COT- que tenía antes de convertirse en remisión/factura (mismo
+  // patrón que remision_number).
+  quote_number:               { type: DataTypes.STRING(50), allowNull: true },
   // ── Técnico asignado (venta directa, sin orden de trabajo) ───────────
   technician_id: {
     type: DataTypes.UUID,

@@ -28,7 +28,26 @@ function prepareCustomerData(body) {
   // Eliminar campos que no existen en la tabla
   delete data.discount_percentage;
   delete data.sales_representative_id;
+  if (data.retention_config && typeof data.retention_config === 'object') {
+    data.retention_config = sanitizeCustomerRetentionConfig(data.retention_config);
+  }
   return data;
+}
+
+// Retenciones que este cliente le practica al negocio (taxService.calculateSaleRetentions):
+// - withholding_agent: true / false; sin el campo = automático según el
+//   documento (NIT sí, cédula no).
+// - tarifas propias opcionales; vacías = las por defecto de Ajustes.
+function sanitizeCustomerRetentionConfig(cfg) {
+  const out = { is_exento: cfg.is_exento === true };
+  if (cfg.withholding_agent === true || cfg.withholding_agent === false) out.withholding_agent = cfg.withholding_agent;
+  for (const key of ['retefuente_rate', 'retefuente_service_rate', 'reteiva_rate', 'reteica_rate']) {
+    const raw = cfg[key];
+    if (raw === null || raw === undefined || raw === '') continue;
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) out[key] = n;
+  }
+  return out;
 }
 
 // Obtener todos los clientes

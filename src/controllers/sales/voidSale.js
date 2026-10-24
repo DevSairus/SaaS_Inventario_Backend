@@ -159,7 +159,11 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, branch_id = null, ite
 
       const ratio      = qtyReq / parseFloat(saleItem.quantity);
       const itemSubtot = parseFloat(saleItem.subtotal || 0) * ratio;
-      const itemTax    = parseFloat(saleItem.tax_amount || 0) * ratio;
+      const itemIva    = parseFloat(saleItem.tax_amount || 0) * ratio;
+      // El INC (impoconsumo) también se reintegra: antes la devolución solo
+      // devolvía el IVA y quedaba por debajo de lo que el cliente pagó.
+      const itemInc    = parseFloat(saleItem.inc_amount || 0) * ratio;
+      const itemTax    = itemIva + itemInc;
 
       subtotal += itemSubtot;
       tax      += itemTax;
@@ -183,6 +187,8 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, branch_id = null, ite
         subtotal:     itemSubtot,
         tax:          itemTax,
         total:        itemSubtot + itemTax,
+        _iva:         itemIva,
+        _inc:         itemInc,
         _saleItem:    saleItem,
         _product:     saleItem.product,
       });
@@ -390,7 +396,10 @@ async function voidSaleCore({ sale_id, tenant_id, user_id, branch_id = null, ite
               discount_amount:     0,
               discount_percentage: 0,
               tax_percentage:      item._saleItem.tax_percentage || 0,
-              tax_amount:          item.tax,
+              iva_status:          item._saleItem.iva_status || null,
+              tax_amount:          item._iva,
+              inc_rate:            item._saleItem.inc_rate || 0,
+              inc_amount:          item._inc,
               subtotal:            item.subtotal,
               total:               item.total,
             })),

@@ -40,6 +40,9 @@ router.post('/:id/annul-consolidated', salesController.annulConsolidated);
 router.get( '/:id/pdf',            salesController.generatePDF);
 router.post('/:id/send-whatsapp',  salesController.sendWhatsApp);
 router.post('/:id/share-link',     salesController.generateShareLink);
+// Aprobación/rechazo de una cotización registrada por el asesor (el cliente
+// respondió por teléfono, en persona...) -- la del cliente va por /public.
+router.post('/:id/quote-status',   salesController.setQuoteStatus);
 router.get( '/:id/payment-receipt', salesController.generatePaymentReceipt);
 
 module.exports = router;

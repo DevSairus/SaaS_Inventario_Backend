@@ -89,6 +89,26 @@ const generateSalePDF = async (res, sale, tenant) => {
   const bufferMode = !res;
   let bufferPromise = null;
 
+  // Factura y remisión confirmadas tienen su propio formato
+  // (services/sales/salePremiumPdfService.js). Aquí quedan los borradores y
+  // las notas crédito/débito.
+  if (['factura', 'remision'].includes(sale.document_type) && (sale.status || 'draft') !== 'draft') {
+    const { generatePremiumSalePDFBuffer } = require('./sales/salePremiumPdfService');
+    try {
+      const buffer = await generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawDiagnosisSection });
+      if (bufferMode) return buffer;
+      const label = sale.document_type === 'factura' ? 'FACTURA' : 'REMISIÓN';
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${label}-${sale.sale_number}.pdf"`);
+      return res.send(buffer);
+    } catch (error) {
+      console.error(error);
+      if (bufferMode) throw error;
+      if (!res.headersSent) return res.status(500).json({ message: 'Error generando PDF' });
+      return;
+    }
+  }
+
   try {
     const docType  = DOCUMENT_TYPES[sale.document_type] || DOCUMENT_TYPES.factura;
     // Un borrador todavía no tiene document_type asignado (se elige recién al
@@ -496,7 +516,14 @@ const generateSalePDF = async (res, sale, tenant) => {
     const legalNote    = pdfConfig.legal_note?.trim();
 
     // Calcular alto del bloque (basado en filas de totales)
-    const taxBreakdown = sale.tax_breakdown || [];
+    // Impuestos desde las líneas (misma fuente que el total; el desglose
+    // guardado puede estar desfasado). AIU conserva el suyo: su IVA va solo
+    // sobre la utilidad.
+    const taxBreakdown = sale.aiu_enabled
+      ? (sale.tax_breakdown || [])
+      : require('./taxService').taxLinesFromItems(items);
+    const lineDiscounts = items.reduce((s, i) => s + (parseFloat(i.discount_amount) || 0), 0);
+    const lineNetBase = items.reduce((s, i) => s + (parseFloat(i.total) || 0) - (parseFloat(i.tax_amount) || 0) - (parseFloat(i.inc_amount) || 0), 0);
     const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
     let totRows = isRemision ? 1 : 1 + (allTaxes.length || 1); // subtotal + impuestos (o IVA fallback)
     const isAiu = !isRemision && sale.aiu_enabled;
@@ -549,17 +576,18 @@ const generateSalePDF = async (res, sale, tenant) => {
         drawRow(`Imprevistos ${Number(sale.aiu_unforeseen_pct)}%`, formatCurrency(sale.aiu_unforeseen_amount));
         drawRow(`Utilidad ${Number(sale.aiu_profit_pct)}%`, formatCurrency(sale.aiu_profit_amount));
       }
-      drawRow('Subtotal', formatCurrency(sale.subtotal));
-      // Mostrar todos los impuestos desde tax_breakdown
+      // Subtotal antes de descuentos de línea y luego el descuento: el
+      // subtotal guardado ya es neto y, mostrado antes de "Descuento", lo
+      // restaba dos veces a la vista.
+      if (isAiu) drawRow('Subtotal', formatCurrency(sale.subtotal));
+      else {
+        drawRow('Subtotal', formatCurrency(lineNetBase + lineDiscounts));
+        if (lineDiscounts > 0) drawRow('Descuento', `- ${formatCurrency(lineDiscounts)}`);
+      }
       const allTaxes = taxBreakdown.filter(t => t.type === 'tax');
       for (const tax of allTaxes) {
-        drawRow(isAiu && tax.code === '01' ? 'IVA s/ Utilidad' : tax.name, formatCurrency(tax.amount));
+        drawRow(isAiu && tax.code === '01' ? 'IVA s/ Utilidad' : `${tax.code === '04' ? 'INC' : tax.name} ${Number(tax.rate)}%`, formatCurrency(tax.amount));
       }
-      if (allTaxes.length === 0) {
-        // Fallback: si no hay breakdown, usar tax_amount como IVA
-        drawRow('IVA', formatCurrency(sale.tax_amount));
-      }
-      if ((sale.discount_amount || 0) > 0) drawRow('Descuento', `- ${formatCurrency(sale.discount_amount)}`);
     }
     // Descuento global -- independiente de discount_amount (suma de
     // descuentos por línea); se resta después de impuestos, en ambos
@@ -646,81 +674,7 @@ const generateSalePDF = async (res, sale, tenant) => {
        cotizaciones con diagnóstico marcado también lo muestren en su PDF
        y en la vista pública (que sirve este mismo PDF).
        ══════════════════════════════════════════════════════════ */
-    const diagMarks = sale.diagnosis_marks || [];
-    if (diagMarks.length > 0) {
-      const { renderDiagramToPng, SEVERITY_COLORS } = require('./workshopPdfService');
-
-      const diagramMap = {};
-      diagMarks.forEach(m => {
-        const tpl = m.diagram_template;
-        if (!tpl) return;
-        if (!diagramMap[tpl.id]) diagramMap[tpl.id] = { template: tpl, marks: [] };
-        diagramMap[tpl.id].marks.push(m);
-      });
-
-      y += 20;
-      if (y > 600) { doc.addPage(); y = 40; }
-      doc.font('Helvetica-Bold').fontSize(8.5).fillColor(gray).text('DIAGNÓSTICO / DIAGRAMA DE INTERVENCIÓN', MARGIN, y);
-      y += 16;
-
-      for (const [, { template: tpl, marks: dMarks }] of Object.entries(diagramMap)) {
-        const imgW = 230;
-        const imgH = imgW * 0.667;
-        const titleH = 14;
-
-        const tableX = MARGIN + imgW + 16;
-        const tableW = INNER_W - imgW - 16;
-        const colW = [18, 68, 34, 48, tableW - 18 - 68 - 34 - 48];
-        const headers = ['#', 'Parte', 'Lado', 'Sev.', 'Observación'];
-
-        doc.font('Helvetica').fontSize(6.5);
-        const rowHeights = dMarks.map(m =>
-          Math.max(11, doc.heightOfString(m.observation || '', { width: colW[4] - 4 }) + 2)
-        );
-        const tableH = 13 + rowHeights.reduce((a, b) => a + b, 0);
-        const blockH = titleH + Math.max(imgH, tableH) + 10;
-
-        if (y + blockH > doc.page.height - 100) { doc.addPage(); y = 40; }
-
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(black)
-          .text(`DIAGNÓSTICO — ${tpl.name}`, MARGIN, y);
-        y += titleH;
-        const blockTop = y;
-
-        try {
-          const pngBuf = await renderDiagramToPng(tpl.image_path, tpl.view_box, tpl.points, dMarks);
-          doc.image(pngBuf, MARGIN, blockTop, { fit: [imgW, imgH] });
-        } catch (e) {
-          doc.font('Helvetica-Oblique').fontSize(8).fillColor(gray)
-            .text('(Error al renderizar diagrama)', MARGIN, blockTop, { width: imgW });
-        }
-
-        let ty = blockTop;
-        doc.font('Helvetica-Bold').fontSize(6.5).fillColor(black);
-        headers.forEach((h, i) => {
-          const hx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
-          doc.text(h, hx, ty, { width: colW[i], align: i === 0 ? 'center' : 'left' });
-        });
-        ty += 10;
-        doc.moveTo(tableX, ty).lineTo(tableX + tableW, ty).strokeColor(border).lineWidth(0.3).stroke();
-        ty += 3;
-
-        doc.font('Helvetica').fontSize(6.5).fillColor(gray);
-        dMarks.forEach((m, idx) => {
-          const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
-          const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
-          const vals = [String(m.point_number), pt?.part_name || '—', m.side || '—', sevLabel, m.observation || ''];
-          vals.forEach((v, i) => {
-            const cx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
-            doc.fillColor(i === 3 ? (SEVERITY_COLORS[m.severity] || gray) : gray)
-              .text(v, cx + 2, ty, { width: colW[i] - 4, align: i === 0 ? 'center' : 'left' });
-          });
-          ty += rowHeights[idx];
-        });
-
-        y = blockTop + Math.max(imgH, tableH) + 10;
-      }
-    }
+    y = await drawDiagnosisSection(doc, sale, y, { MARGIN, INNER_W, gray, black, border });
 
     /* ══════════════════════════════════════════════════════════
        CUFE + QR — obligatorio en la representación gráfica de toda
@@ -769,6 +723,88 @@ const generateSalePDF = async (res, sale, tenant) => {
 
 // Wrapper que devuelve Buffer — usado por sendWhatsApp
 const generateSalePDFBuffer = (sale, tenant) => generateSalePDF(null, sale, tenant);
+
+/* ── DIAGRAMA DE INTERVENCIÓN ────────────────────────────────
+   Compartido entre el PDF de venta y el de cotización
+   (services/sales/quotePdfService.js). Devuelve la nueva `y`. */
+async function drawDiagnosisSection(doc, sale, y, { MARGIN, INNER_W, gray, black, border }) {
+  const diagMarks = sale.diagnosis_marks || [];
+  if (diagMarks.length > 0) {
+    const { renderDiagramToPng, SEVERITY_COLORS } = require('./workshopPdfService');
+
+    const diagramMap = {};
+    diagMarks.forEach(m => {
+      const tpl = m.diagram_template;
+      if (!tpl) return;
+      if (!diagramMap[tpl.id]) diagramMap[tpl.id] = { template: tpl, marks: [] };
+      diagramMap[tpl.id].marks.push(m);
+    });
+
+    y += 20;
+    if (y > 600) { doc.addPage(); y = 40; }
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(gray).text('DIAGNÓSTICO / DIAGRAMA DE INTERVENCIÓN', MARGIN, y);
+    y += 16;
+
+    for (const [, { template: tpl, marks: dMarks }] of Object.entries(diagramMap)) {
+      const imgW = 230;
+      const imgH = imgW * 0.667;
+      const titleH = 14;
+
+      const tableX = MARGIN + imgW + 16;
+      const tableW = INNER_W - imgW - 16;
+      const colW = [18, 68, 34, 48, tableW - 18 - 68 - 34 - 48];
+      const headers = ['#', 'Parte', 'Lado', 'Sev.', 'Observación'];
+
+      doc.font('Helvetica').fontSize(6.5);
+      const rowHeights = dMarks.map(m =>
+        Math.max(11, doc.heightOfString(m.observation || '', { width: colW[4] - 4 }) + 2)
+      );
+      const tableH = 13 + rowHeights.reduce((a, b) => a + b, 0);
+      const blockH = titleH + Math.max(imgH, tableH) + 10;
+
+      if (y + blockH > doc.page.height - 100) { doc.addPage(); y = 40; }
+
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(black)
+        .text(`DIAGNÓSTICO — ${tpl.name}`, MARGIN, y);
+      y += titleH;
+      const blockTop = y;
+
+      try {
+        const pngBuf = await renderDiagramToPng(tpl.image_path, tpl.view_box, tpl.points, dMarks);
+        doc.image(pngBuf, MARGIN, blockTop, { fit: [imgW, imgH] });
+      } catch (e) {
+        doc.font('Helvetica-Oblique').fontSize(8).fillColor(gray)
+          .text('(Error al renderizar diagrama)', MARGIN, blockTop, { width: imgW });
+      }
+
+      let ty = blockTop;
+      doc.font('Helvetica-Bold').fontSize(6.5).fillColor(black);
+      headers.forEach((h, i) => {
+        const hx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+        doc.text(h, hx, ty, { width: colW[i], align: i === 0 ? 'center' : 'left' });
+      });
+      ty += 10;
+      doc.moveTo(tableX, ty).lineTo(tableX + tableW, ty).strokeColor(border).lineWidth(0.3).stroke();
+      ty += 3;
+
+      doc.font('Helvetica').fontSize(6.5).fillColor(gray);
+      dMarks.forEach((m, idx) => {
+        const pt = (tpl.points || []).find(p => p.point_number === m.point_number);
+        const sevLabel = { revisar: 'Revisar', cambiar_pronto: 'Cambiar pronto', urgente: 'Urgente' }[m.severity] || m.severity;
+        const vals = [String(m.point_number), pt?.part_name || '—', m.side || '—', sevLabel, m.observation || ''];
+        vals.forEach((v, i) => {
+          const cx = tableX + colW.slice(0, i).reduce((a, b) => a + b, 0);
+          doc.fillColor(i === 3 ? (SEVERITY_COLORS[m.severity] || gray) : gray)
+            .text(v, cx + 2, ty, { width: colW[i] - 4, align: i === 0 ? 'center' : 'left' });
+        });
+        ty += rowHeights[idx];
+      });
+
+      y = blockTop + Math.max(imgH, tableH) + 10;
+    }
+  }
+  return y;
+}
 
 /* ── HELPERS ────────────────────────────────────────────────── */
 function formatDate(date) {
@@ -1136,4 +1172,4 @@ const generateCashFlowPDF = async (res, cashFlow, tenant, filters = {}, generate
   }
 };
 
-module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer, generateCashFlowPDF, downloadImageWithTimeout, toJpgUrl };
+module.exports = { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer, generateCashFlowPDF, downloadImage, downloadImageWithTimeout, toJpgUrl, drawDiagnosisSection, formatDate, formatCurrency };

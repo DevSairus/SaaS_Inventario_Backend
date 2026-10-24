@@ -2537,6 +2537,9 @@ const generateSale = async (req, res) => {
     // Utilidad se calculan aparte -- ver services/sales/aiu.service.js.
     const saleLines = billableItems.map((item) => ({
       item,
+      // Tipo de venta (bienes / servicios): las retenciones estimadas tienen
+      // base mínima y tarifa distintas para cada uno.
+      item_type: item.item_type === 'servicio' ? 'service' : item.item_type === 'free_line' ? 'free_line' : 'product',
       tax_percentage: item.tax_percentage,
       tax_amount: item.tax_amount,
       subtotal: item.subtotal,
@@ -2569,9 +2572,11 @@ const generateSale = async (req, res) => {
     let retentions = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
     if (order.customer) {
       retentions = aiuResult
-        ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, order.customer.retention_config || {}, 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
-        : taxService.calculateRetentions(saleLines, tenantTaxConfig, order.customer.retention_config || {});
+        ? taxService.calculateRetentions(aiuService.aiuTaxLines(aiuResult, aiu), tenantTaxConfig, taxService.customerRetentionConfig(order.customer), 'sale', aiuService.aiuRetentionBases(aiuResult, aiu))
+        : taxService.calculateRetentions(saleLines, tenantTaxConfig, taxService.customerRetentionConfig(order.customer));
     }
+    // El descuento de la OT se resta después de impuestos: baja la base de las retenciones.
+    retentions = taxService.scaleRetentions(retentions, saleSubtotal + saleTaxAmount, saleTotalAmount < saleSubtotal + saleTaxAmount ? saleSubtotal + saleTaxAmount - saleTotalAmount : 0);
     const tax_breakdown = taxService.buildTaxBreakdown(aiuResult ? [...saleLines, ...aiuService.aiuTaxLines(aiuResult, aiu)] : saleLines, retentions);
 
     // Abonos cobrados en la OT: pasan a la venta como pagos ya recibidos

@@ -79,9 +79,12 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
         const ratio = qtyReq / parseFloat(saleItem.quantity);
         const itemSubtot = parseFloat(saleItem.subtotal || 0) * ratio;
         const itemTax = parseFloat(saleItem.tax_amount || 0) * ratio;
+        // El INC (impoconsumo) de la línea también se acredita en proporción:
+        // antes la nota solo devolvía el IVA y quedaba por debajo de lo facturado.
+        const itemInc = parseFloat(saleItem.inc_amount || 0) * ratio;
 
         noteSubtotal += itemSubtot;
-        noteTax += itemTax;
+        noteTax += itemTax + itemInc; // tax_amount del documento = IVA + INC, como en la venta
         noteItems.push({
           item_type: saleItem.item_type || 'product',
           product_name: saleItem.product_name,
@@ -92,9 +95,12 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
           discount_amount: 0,
           discount_percentage: 0,
           tax_percentage: parseFloat(saleItem.tax_percentage || 0),
+          iva_status: saleItem.iva_status || null,
           tax_amount: itemTax,
+          inc_rate: parseFloat(saleItem.inc_rate || 0),
+          inc_amount: itemInc,
           subtotal: itemSubtot,
-          total: itemSubtot + itemTax,
+          total: itemSubtot + itemTax + itemInc,
           ...pickComboFields(saleItem),
           _source_item_id: saleItem.id,
           _full_quantity: qtyReq === parseFloat(saleItem.quantity),
@@ -117,10 +123,11 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
       for (const si of original.items) {
         const itemSubtot = parseFloat(si.subtotal || 0) * totalRatio;
         const itemTax = parseFloat(si.tax_amount || 0) * totalRatio;
+        const itemInc = parseFloat(si.inc_amount || 0) * totalRatio;
         const qty = parseFloat(si.quantity) * totalRatio;
 
         noteSubtotal += itemSubtot;
-        noteTax += itemTax;
+        noteTax += itemTax + itemInc;
         noteItems.push({
           item_type: si.item_type || 'product',
           product_name: si.product_name,
@@ -131,9 +138,12 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
           discount_amount: 0,
           discount_percentage: 0,
           tax_percentage: parseFloat(si.tax_percentage || 0),
+          iva_status: si.iva_status || null,
           tax_amount: itemTax,
+          inc_rate: parseFloat(si.inc_rate || 0),
+          inc_amount: itemInc,
           subtotal: itemSubtot,
-          total: itemSubtot + itemTax,
+          total: itemSubtot + itemTax + itemInc,
           ...pickComboFields(si),
         });
       }
@@ -142,9 +152,10 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
       for (const si of original.items) {
         const itemSubtot = parseFloat(si.subtotal || 0);
         const itemTax = parseFloat(si.tax_amount || 0);
+        const itemInc = parseFloat(si.inc_amount || 0);
 
         noteSubtotal += itemSubtot;
-        noteTax += itemTax;
+        noteTax += itemTax + itemInc;
         noteItems.push({
           item_type: si.item_type || 'product',
           product_name: si.product_name,
@@ -155,9 +166,12 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
           discount_amount: 0,
           discount_percentage: 0,
           tax_percentage: parseFloat(si.tax_percentage || 0),
+          iva_status: si.iva_status || null,
           tax_amount: itemTax,
+          inc_rate: parseFloat(si.inc_rate || 0),
+          inc_amount: itemInc,
           subtotal: itemSubtot,
-          total: itemSubtot + itemTax,
+          total: itemSubtot + itemTax + itemInc,
           ...pickComboFields(si),
         });
       }
@@ -233,6 +247,9 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
         discount_amount: 0,
         tax_percentage: item.tax_percentage,
         tax_amount: item.tax_amount,
+        iva_status: item.iva_status || null,
+        inc_rate: item.inc_rate || 0,
+        inc_amount: item.inc_amount || 0,
         subtotal: item.subtotal,
         total: item.total,
         unit_cost: 0,

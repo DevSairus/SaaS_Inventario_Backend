@@ -66,6 +66,7 @@ const PUC_COLOMBIA_STANDARD = [
 
   { code: '24', name: 'Impuestos, Gravámenes y Tasas', type: 'pasivo', parent_code: '2', accepts_entries: false },
   { code: '240805', name: 'IVA por Pagar (Generado)', type: 'pasivo', parent_code: '24', accepts_entries: true },
+  { code: '249505', name: 'Impuesto Nacional al Consumo por Pagar', type: 'pasivo', parent_code: '24', accepts_entries: true },
   { code: '240405', name: 'Impuesto de Renta y Complementarios', type: 'pasivo', parent_code: '24', accepts_entries: true },
   { code: '241205', name: 'Impuesto de Industria y Comercio por Pagar', type: 'pasivo', parent_code: '24', accepts_entries: true },
 
@@ -158,6 +159,7 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   sale_revenue_product: '413501',       // ingreso por venta de mercancía
   sale_revenue_service: '415595',       // ingreso por servicios de taller
   sale_tax_iva: '240805',               // IVA generado en la venta
+  sale_tax_inc: '249505',               // INC (impoconsumo) generado en la venta
   sale_cogs_product: '613501',          // costo de la mercancía vendida
   sale_cogs_service: '615595',          // costo de servicios de taller
 

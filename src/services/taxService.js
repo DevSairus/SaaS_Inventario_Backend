@@ -29,27 +29,30 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
   const discount = discAmt > 0 ? discAmt : grossBase * discPct / 100;
   let base = grossBase - discount;
 
-  // ── IVA (01) ──
-  let ivaRate = 0;
-  let ivaAmount = 0;
-  const hasTax = product?.has_tax !== false;
-  if (hasTax) {
-    ivaRate = Number(item.tax_percentage ?? product?.tax_percentage ?? (context === 'sale' ? 19 : 0));
-    const priceIncludesTax = product?.price_includes_tax || false;
-    if (priceIncludesTax) {
-      // El precio ya trae el IVA: se extrae y la base queda neta. Antes la
-      // base no se reducía y total_line = base + IVA cobraba el IVA dos veces
-      // (el formulario de venta sí mostraba el total correcto).
-      ivaAmount = base * ivaRate / (100 + ivaRate);
-      base -= ivaAmount;
-    } else {
-      ivaAmount = base * ivaRate / 100;
-    }
-  }
-
-  // ── INC / Impoconsumo (04) — sobre base SIN IVA ──
+  // ── INC / Impoconsumo (04) — tarifa del producto; se liquida sobre la
+  // misma base sin IVA (no es impuesto sobre impuesto).
   const incConfig = product?.tax_config?.inc;
   const incRate = (incConfig?.enabled && incConfig?.rate > 0) ? Number(incConfig.rate) : 0;
+
+  // ── IVA (01) ──
+  // Tratamiento del producto (tax_config.iva_status): 'gravado' (19 % / 5 %),
+  // 'exento' (tarifa 0 %, sí es IVA) o 'excluido' (no causa IVA: la DIAN no
+  // lo informa como impuesto). Sin marcar = como siempre: con tarifa >0
+  // gravado y en 0 % exento.
+  let ivaRate = 0;
+  const declaredStatus = product?.tax_config?.iva_status;
+  const hasTax = product?.has_tax !== false && declaredStatus !== 'excluido';
+  if (hasTax && declaredStatus !== 'exento') {
+    ivaRate = Number(item.tax_percentage ?? product?.tax_percentage ?? (context === 'sale' ? 19 : 0));
+  }
+  const ivaStatus = declaredStatus === 'excluido' ? 'excluido' : ivaRate > 0 ? 'gravado' : 'exento';
+  // Precio con impuestos incluidos: se extraen IVA e INC juntos para que la
+  // base quede neta y base + IVA + INC = precio. Antes solo se extraía el IVA
+  // y el INC se sumaba encima del precio "con impuestos incluidos".
+  if (hasTax && product?.price_includes_tax) {
+    base = base / (1 + (ivaRate + incRate) / 100);
+  }
+  const ivaAmount = base * ivaRate / 100;
   const incAmount = base * incRate / 100;
 
   // ── ICA (03) ──
@@ -63,7 +66,7 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
   return {
     base: round(base),
     discount: round(discount),
-    iva: { rate: round(ivaRate), amount: round(ivaAmount) },
+    iva: { rate: round(ivaRate), amount: round(ivaAmount), status: ivaStatus },
     inc: { rate: round(incRate), amount: round(incAmount) },
     ica: { rate: round(icaRate), amount: round(icaAmount) },
     total_taxes: round(ivaAmount + incAmount + icaAmount),
@@ -96,6 +99,7 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
  * ────────────────────────────────────────────────────────── */
 function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale', baseOverrides = {}) {
   const zero = { retefuente: { rate: 0, amount: 0 }, reteiva: { rate: 0, amount: 0 }, reteica: { rate: 0, amount: 0 }, total: 0 };
+  if (context === 'sale') return calculateSaleRetentions(items, tenantConfig || {}, entityConfig || {}, baseOverrides, zero);
 
   // No aplicar si la contraparte (cliente en venta, proveedor en compra) está exenta
   if (entityConfig?.is_exento) return zero;
@@ -119,18 +123,24 @@ function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale'
   // Total IVA facturado
   const totalIVA = items.reduce((s, i) => s + Number(i.tax_amount || i.iva?.amount || 0), 0);
 
+  // Tarifas por defecto del tenant (Ajustes → Impuestos): solo cuentan las
+  // ACTIVADAS. Antes se usaba la tarifa aunque el interruptor estuviera
+  // apagado, y la pantalla guarda 2,5 % / 15 % / 4 ‰ apagadas por defecto.
+  // Sin el campo enabled (configuración vieja) se toma como activa.
+  const tenantDefault = (code) => tenantConfig?.retentions?.find(r => r.code === code && r.enabled !== false);
+
   // ── ReteFuente (07) — sobre base gravable ──
-  const tenantReteFuente = tenantConfig?.retentions?.find(r => r.code === '07');
+  const tenantReteFuente = tenantDefault('07');
   const retefuenteRate = Number(entityConfig?.retefuente_rate ?? tenantReteFuente?.rate ?? 0);
   const retefuente = retefuenteBase * retefuenteRate / 100;
 
   // ── ReteIVA (05) — sobre el IVA facturado ──
-  const tenantReteIVA = tenantConfig?.retentions?.find(r => r.code === '05');
+  const tenantReteIVA = tenantDefault('05');
   const reteivaRate = Number(entityConfig?.reteiva_rate ?? tenantReteIVA?.rate ?? 0);
   const reteiva = totalIVA * reteivaRate / 100;
 
   // ── ReteICA (06) — sobre base gravable, en ‰ ──
-  const tenantReteICA = tenantConfig?.retentions?.find(r => r.code === '06');
+  const tenantReteICA = tenantDefault('06');
   const reteicaRate = Number(entityConfig?.reteica_rate ?? tenantReteICA?.rate ?? 0);
   const reteica = reteicaBase * reteicaRate / 1000;
 
@@ -138,6 +148,118 @@ function calculateRetentions(items, tenantConfig, entityConfig, context = 'sale'
     retefuente: { rate: round(retefuenteRate), amount: round(retefuente) },
     reteiva:    { rate: round(reteivaRate),    amount: round(reteiva) },
     reteica:    { rate: round(reteicaRate),    amount: round(reteica) },
+    total: round(retefuente + reteiva + reteica),
+  };
+}
+
+/* ──────────────────────────────────────────────────────────
+ * Retenciones que el CLIENTE le practicará al tenant (estimación de venta).
+ *
+ * - Solo si el cliente es agente de retención: retention_config.withholding_agent
+ *   (sí/no explícito en su ficha) o, si no se ha indicado, según su documento:
+ *   NIT (31) = sí, cédula u otros = no. Antes se le estimaban a TODOS los
+ *   clientes no exentos, incluidos consumidores finales que nunca retienen.
+ * - Tarifas: las propias del cliente o, si no tiene, las por defecto ACTIVAS
+ *   del tenant (Ajustes → Impuestos). ReteFuente separa bienes (rate) y
+ *   servicios (service_rate).
+ * - Base mínima: ReteFuente y ReteIVA solo aplican si la base de bienes o de
+ *   servicios llega al mínimo en UVT de los conceptos "Compras generales" y
+ *   "Servicios generales" (mismo catálogo de compras, tax_config.retention_concepts,
+ *   y el valor UVT de fiscal_profile). ReteICA: tarifa municipal sin mínimo.
+ * ────────────────────────────────────────────────────────── */
+const SERVICE_ITEM_TYPES = new Set(['service', 'free_line']);
+
+// El descuento global de una venta/OT se resta después de impuestos: reduce
+// la base y el IVA sujetos a retención en la misma proporción.
+function scaleRetentions(ret, preDiscountTotal, globalDiscount) {
+  const pre = parseFloat(preDiscountTotal) || 0;
+  const gd = parseFloat(globalDiscount) || 0;
+  if (pre <= 0 || gd <= 0) return ret;
+  const f = Math.max(pre - gd, 0) / pre;
+  const r2 = (v) => Math.round(v * f * 100) / 100;
+  const out = {
+    retefuente: { ...ret.retefuente, amount: r2(ret.retefuente.amount) },
+    reteiva:    { ...ret.reteiva,    amount: r2(ret.reteiva.amount) },
+    reteica:    { ...ret.reteica,    amount: r2(ret.reteica.amount) },
+  };
+  out.total = Math.round((out.retefuente.amount + out.reteiva.amount + out.reteica.amount) * 100) / 100;
+  return out;
+}
+function isWithholdingAgent(cfg) {
+  if (cfg.withholding_agent === true || cfg.withholding_agent === false) return cfg.withholding_agent;
+  return String(cfg.document_type || '') === '31';
+}
+
+// Ficha del cliente -> config de retención con su tipo de documento (para el
+// valor por defecto de "agente de retención").
+function customerRetentionConfig(customer) {
+  if (!customer) return {};
+  const json = customer.toJSON ? customer.toJSON() : customer;
+  return { ...(json.retention_config || {}), document_type: json.document_type };
+}
+
+function saleRetentionThresholds(tenantConfig) {
+  const { DEFAULT_RETENTION_CONCEPTS, DEFAULT_UVT_VALUE } = require('../data/retention-concepts-default');
+  const concepts = Array.isArray(tenantConfig.retention_concepts) && tenantConfig.retention_concepts.length
+    ? tenantConfig.retention_concepts : DEFAULT_RETENTION_CONCEPTS;
+  const uvt = Number(tenantConfig.fiscal_profile?.uvt_value) > 0 ? Number(tenantConfig.fiscal_profile.uvt_value) : DEFAULT_UVT_VALUE;
+  const minOf = (id) => Number((concepts.find(c => c.id === id) || DEFAULT_RETENTION_CONCEPTS.find(c => c.id === id))?.min_base_uvt || 0) * uvt;
+  return { goods: minOf('compras'), services: minOf('servicios'), uvt };
+}
+
+function calculateSaleRetentions(items, tenantConfig, cfg, baseOverrides, zero) {
+  if (cfg.is_exento) return zero;
+  if (tenantConfig.is_autoretenedor) return zero;
+  if (!isWithholdingAgent(cfg)) return zero;
+
+  const tenantDefault = (code) => tenantConfig.retentions?.find(r => r.code === code && r.enabled !== false);
+  const own = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+  const rfDefault = tenantDefault('07');
+  const rfGoodsRate = own(cfg.retefuente_rate) ?? Number(rfDefault?.rate ?? 0);
+  // Sin tarifa de servicios guardada: 4 % (Servicios generales), lo mismo que
+  // muestra Ajustes → Impuestos por defecto.
+  const rfServicesRate = own(cfg.retefuente_service_rate) ?? own(cfg.retefuente_rate)
+    ?? Number(rfDefault ? (rfDefault.service_rate ?? 4) : 0);
+  const reteivaRate = own(cfg.reteiva_rate) ?? Number(tenantDefault('05')?.rate ?? 0);
+  const reteicaRate = own(cfg.reteica_rate) ?? Number(tenantDefault('06')?.rate ?? 0);
+
+  const min = saleRetentionThresholds(tenantConfig);
+  const lines = items || [];
+  const isService = (i) => SERVICE_ITEM_TYPES.has(i.item_type);
+  const sum = (arr, f) => arr.reduce((s, i) => s + Number(f(i) || 0), 0);
+  const goods = lines.filter(i => !isService(i));
+  const services = lines.filter(isService);
+
+  let retefuente = 0;
+  let reteivaBase = 0;
+  let reteicaBase;
+  let rfBase = 0;
+  if (baseOverrides.retefuente !== undefined) {
+    // Factura AIU: base propia; es un contrato de servicios.
+    const base = Number(baseOverrides.retefuente) || 0;
+    if (base >= min.services) { retefuente = base * rfServicesRate / 100; rfBase = base; reteivaBase = sum(lines, i => i.tax_amount); }
+    reteicaBase = baseOverrides.reteica ?? base;
+  } else {
+    const goodsBase = sum(goods, i => i.subtotal ?? i.base);
+    const servicesBase = sum(services, i => i.subtotal ?? i.base);
+    if (goodsBase > 0 && goodsBase >= min.goods) {
+      retefuente += goodsBase * rfGoodsRate / 100; rfBase += goodsBase; reteivaBase += sum(goods, i => i.tax_amount);
+    }
+    if (servicesBase > 0 && servicesBase >= min.services) {
+      retefuente += servicesBase * rfServicesRate / 100; rfBase += servicesBase; reteivaBase += sum(services, i => i.tax_amount);
+    }
+    reteicaBase = goodsBase + servicesBase;
+  }
+  // ReteIVA sobre el IVA de lo que sí supera el mínimo (el INC no es IVA).
+  const reteiva = reteivaBase * reteivaRate / 100;
+  const reteica = Number(reteicaBase || 0) * reteicaRate / 1000;
+  // Tarifa efectiva de ReteFuente (bienes y servicios pueden ir a tarifas distintas).
+  const rfRate = rfBase > 0 ? retefuente / rfBase * 100 : 0;
+
+  return {
+    retefuente: { rate: round(rfRate), amount: round(retefuente) },
+    reteiva:    { rate: round(reteiva > 0 ? reteivaRate : 0), amount: round(reteiva) },
+    reteica:    { rate: round(reteica > 0 ? reteicaRate : 0), amount: round(reteica) },
     total: round(retefuente + reteiva + reteica),
   };
 }
@@ -355,7 +477,32 @@ function buildTaxBreakdown(items, retentions) {
   return breakdown;
 }
 
+/* ──────────────────────────────────────────────────────────
+ * Impuestos de un documento de venta calculados desde sus líneas -- la misma
+ * fuente que el total (suma de los totales de línea). Para mostrar en PDF,
+ * link público y detalle: el tax_breakdown guardado puede quedar desfasado
+ * (cotizaciones editadas con versiones anteriores, aprobaciones parciales).
+ * La base de cada línea es total - IVA - INC: sirve también para líneas
+ * libres viejas, que guardaban el subtotal bruto (antes del descuento).
+ * Ignora líneas rechazadas por el cliente. Solo impuestos (type 'tax').
+ * ────────────────────────────────────────────────────────── */
+function taxLinesFromItems(items) {
+  const lines = (items || [])
+    .map(i => (i && i.toJSON ? i.toJSON() : i))
+    .filter(i => i && i.approval_status !== 'rechazado')
+    .map(i => ({
+      ...i,
+      subtotal: Number(i.total || 0) - Number(i.tax_amount || 0) - Number(i.inc_amount || 0),
+    }));
+  return buildTaxBreakdown(lines, null).filter(t => t.type === 'tax');
+}
+
 module.exports = {
+  taxLinesFromItems,
+  scaleRetentions,
+  customerRetentionConfig,
+  isWithholdingAgent,
+  saleRetentionThresholds,
   calculateItemTaxes,
   calculateRetentions,
   calculatePurchaseRetentions,

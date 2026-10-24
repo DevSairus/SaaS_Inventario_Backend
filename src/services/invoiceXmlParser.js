@@ -315,6 +315,43 @@ function parseGenericFormat(xml) {
 /**
  * Parsear items de la factura (formato DIAN)
  */
+// Impuestos de una línea UBL por tributo: cada cac:TaxTotal trae uno o más
+// cac:TaxSubtotal con su TaxCategory/TaxScheme/ID ('01' IVA, '04' INC, otros
+// como bolsas o ICUI). Con explicitArray:false, varios TaxTotal llegan como
+// lista -- antes se leía solo como objeto: una línea con IVA e INC quedaba
+// con IVA $0 y 19 % por defecto, y el INC se perdía. Sin tributo 01 la línea
+// es EXCLUIDA (no 19 %); con IVA 0 % es EXENTA.
+function extractLineTaxes(taxTotals, getField) {
+  const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+  const out = { iva: null, inc: null, other_amount: 0 };
+  const add = (key, amount, percent, base) => {
+    if (!out[key]) out[key] = { amount: 0, percent, base: 0 };
+    out[key].amount += amount;
+    out[key].base += base;
+    if (!out[key].percent && percent) out[key].percent = percent;
+  };
+  for (const tt of asList(taxTotals)) {
+    const subs = asList(getField(tt, 'taxsubtotal'));
+    for (const st of subs) {
+      const amount = num(extractText(getField(st, 'taxamount')));
+      const base = num(extractText(getField(st, 'taxableamount')));
+      const cat = getField(st, 'taxcategory');
+      const percent = num(extractText(getField(cat, 'percent')) ?? extractText(getField(st, 'percent')));
+      const code = String(extractText(getField(getField(cat, 'taxscheme'), 'id')) || '').trim();
+      if (code === '01' || code === '') add('iva', amount, percent, base);
+      else if (code === '04') add('inc', amount, percent, base);
+      else out.other_amount += amount;
+    }
+    if (!subs.length) {
+      // Sin TaxSubtotal: solo el monto total, se asume IVA.
+      const amount = num(extractText(getField(tt, 'taxamount')));
+      if (amount) add('iva', amount, 0, 0);
+    }
+  }
+  return out;
+}
+
 function parseItems(invoiceLines, getField) {
   if (!invoiceLines) {
     console.log('⚠️  No se encontraron invoiceLines');
@@ -386,39 +423,22 @@ function parseItems(invoiceLines, getField) {
     const lineExtensionAmount = parseFloat(extractText(getField(line, 'lineextensionamount', 'subtotal')) || 0);
     console.log('Line extension amount:', lineExtensionAmount);
     
-    // IVA/Tax
-    const taxTotalObj = getField(line, 'taxtotal', 'impuesto');
-    let taxAmount = 0;
-    let taxPercentage = 19; // Default IVA Colombia
-    
-    if (taxTotalObj) {
-      taxAmount = parseFloat(extractText(getField(taxTotalObj, 'taxamount', 'valor', 'amount')) || 0);
-      
-      // Buscar el porcentaje en TaxSubtotal
-      const taxSubtotal = getField(taxTotalObj, 'taxsubtotal');
-      if (taxSubtotal) {
-        const taxCategory = getField(taxSubtotal, 'taxcategory');
-        if (taxCategory) {
-          const percent = extractText(getField(taxCategory, 'percent', 'porcentaje'));
-          if (percent) {
-            taxPercentage = parseFloat(percent);
-          }
-        }
-        
-        // Si no se encontró en category, buscar directamente en subtotal
-        if (!taxPercentage || taxPercentage === 19) {
-          const percent = extractText(getField(taxSubtotal, 'percent', 'porcentaje'));
-          if (percent) {
-            taxPercentage = parseFloat(percent);
-          }
-        }
-      }
-    }
-    console.log('Tax amount:', taxAmount, 'Tax %:', taxPercentage);
-    
-    // Calcular subtotal si no está disponible
+    // Impuestos por tributo (IVA / INC / otros), ver extractLineTaxes.
+    const taxes = extractLineTaxes(getField(line, 'taxtotal', 'impuesto'), getField);
     const subtotal = lineExtensionAmount || (unitPrice * quantity);
-    const total = subtotal + taxAmount;
+    const taxAmount = taxes.iva ? taxes.iva.amount : 0;
+    const taxPercentage = taxes.iva
+      ? (taxes.iva.percent || (subtotal > 0 ? Math.round(taxAmount / subtotal * 10000) / 100 : 0))
+      : 0;
+    // INC y otros tributos no descontables (bolsas, ICUI...): van al costo.
+    const incAmount = (taxes.inc ? taxes.inc.amount : 0) + taxes.other_amount;
+    const incRate = taxes.inc
+      ? (taxes.inc.percent || (subtotal > 0 ? Math.round(taxes.inc.amount / subtotal * 10000) / 100 : 0))
+      : (incAmount > 0 && subtotal > 0 ? Math.round(incAmount / subtotal * 10000) / 100 : 0);
+    const ivaStatus = !taxes.iva ? 'excluido' : taxPercentage > 0 ? 'gravado' : 'exento';
+    console.log('IVA:', taxAmount, `(${taxPercentage}%, ${ivaStatus})`, 'INC/otros:', incAmount);
+
+    const total = subtotal + taxAmount + incAmount;
     
     console.log('Subtotal:', subtotal, 'Total:', total);
     
@@ -430,6 +450,9 @@ function parseItems(invoiceLines, getField) {
       unit_price: unitPrice,
       tax_percentage: taxPercentage,
       tax_amount: taxAmount,
+      iva_status: ivaStatus,
+      inc_rate: incRate,
+      inc_amount: incAmount,
       subtotal: subtotal,
       total: total,
       raw: line
@@ -773,7 +796,9 @@ function parseFlexibleItems(invoiceLines) {
       sku: sku,
       quantity: quantity,
       unit_price: unitPrice,
-      tax_percentage: taxPercentage || 19,
+      // Sin porcentaje en el XML: se deduce del monto (0 si no trae impuesto),
+      // nunca un 19 % inventado.
+      tax_percentage: taxPercentage || (taxAmount > 0 && lineTotal > 0 ? Math.round(taxAmount / lineTotal * 10000) / 100 : 0),
       tax_amount: taxAmount,
       subtotal: lineTotal,
       total: lineTotal + taxAmount,

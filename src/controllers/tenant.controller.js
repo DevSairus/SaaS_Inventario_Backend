@@ -127,9 +127,19 @@ const updateTenantConfig = async (req, res) => {
     if (phone !== undefined) updates.phone = phone;
     if (address !== undefined) updates.address = address;
     if (website !== undefined) updates.website = website;
-    if (primary_color !== undefined) updates.primary_color = primary_color;
+    // Color de marca (PDF y páginas públicas): solo hex #rrggbb; otro valor se ignora.
+    if (primary_color !== undefined && /^#[0-9a-f]{6}$/i.test(String(primary_color))) updates.primary_color = primary_color;
     if (secondary_color !== undefined) updates.secondary_color = secondary_color;
-    if (pdf_config !== undefined) updates.pdf_config = pdf_config;
+    if (pdf_config !== undefined) {
+      updates.pdf_config = { ...(pdf_config || {}) };
+      // Vigencia por defecto de las cotizaciones (sales.controller.js#defaultQuoteValidUntil):
+      // entero 1–365; vacío o inválido = se usa el default de 15 días.
+      if ('quote_validity_days' in updates.pdf_config) {
+        const days = parseInt(updates.pdf_config.quote_validity_days, 10);
+        if (Number.isFinite(days) && days >= 1 && days <= 365) updates.pdf_config.quote_validity_days = days;
+        else delete updates.pdf_config.quote_validity_days;
+      }
+    }
     if (business_config !== undefined) updates.business_config = { ...(tenant.business_config || {}), ...business_config };
     if (features !== undefined) {
       // Ocultar remisiones (ver utils/remisionVisibility.js):

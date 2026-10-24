@@ -63,7 +63,10 @@ async function servePdfBody(saleId, res) {
   const docLabel = TYPES[sale.document_type] || 'Documento';
   const filename = `${docLabel}-${sale.sale_number}.pdf`;
 
-  const pdfBuffer = await generateSalePDFBuffer(sale, tenant);
+  // La cotización tiene su propio formato (services/sales/quotePdfService.js).
+  const pdfBuffer = sale.document_type === 'cotizacion'
+    ? await require('../services/sales/quotePdfService').generateQuotePDFBuffer(sale, tenant)
+    : await generateSalePDFBuffer(sale, tenant);
 
   res.set({
     'Content-Type':        'application/pdf',
