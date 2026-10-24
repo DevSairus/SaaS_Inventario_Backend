@@ -79,6 +79,11 @@ const Opportunity = sequelize.define('Opportunity', {
     type: DataTypes.DATEONLY,
     allowNull: true,
   },
+  priority_pinned: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+  },
 }, {
   tableName: 'opportunities',
   timestamps: true,
