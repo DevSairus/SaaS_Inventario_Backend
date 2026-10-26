@@ -63,7 +63,8 @@ const createInteraction = async (req, res) => {
     });
 
     // Desnormalizado para poder ordenar/filtrar listados de clientes sin JOIN.
-    await customer.update({ last_interaction_at: interaction.created_at });
+    // underscored: el atributo es createdAt (interaction.created_at era undefined).
+    await customer.update({ last_interaction_at: interaction.createdAt });
 
     res.status(201).json({ success: true, message: 'Interacción registrada', data: interaction });
   } catch (error) {

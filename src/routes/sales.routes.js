@@ -23,6 +23,7 @@ router.delete('/:id', salesController.delete);
 router.post('/:id/confirm',       salesController.confirm);
 router.post('/:id/cancel',        salesController.cancel);
 router.post('/:id/payments',      salesController.registerPayment);
+router.post('/:id/payment-reminders', salesController.registerPaymentReminder);
 // Retenciones que practicó el cliente (abono sin caja)
 router.post('/:id/retentions',    salesController.registerRetentions);
 router.post('/:id/apply-advance', applyAdvanceToSale);

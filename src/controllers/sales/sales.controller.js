@@ -1,6 +1,6 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate, CustomerInteraction } = require('../../models');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -20,6 +20,7 @@ const { resolveUnitCost } = require('../../utils/costResolver');
 const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
 const { applyRemisionFilter } = require('../../utils/remisionVisibility');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
+const { daysOverdueOf, pendingReceivableWhere, draftSaleWhere, effectiveDueDateSql } = require('../../utils/receivables');
 const { createCustomerAdvanceRecord, afterAdvanceCommitted, splitExcess } = require('../../services/finance/customerAdvance.service');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
@@ -131,11 +132,16 @@ function approvedQuoteTotals(sale, billable) {
   };
 }
 
+// Marca (channel_ref) de las interacciones que son recordatorios de pago
+// enviados desde "Por cobrar" -- channel_ref guarda la referencia del canal
+// de origen (p.ej. el leadgen_id de Meta).
+const PAYMENT_REMINDER_REF = 'payment_reminder';
+
 // Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, limit = 50, offset = 0 } = req.query;
+    const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, payment_view, aging, limit = 50, offset = 0 } = req.query;
     // Cap de seguridad — evita requests que traigan miles de ventas en memoria
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
     const safeOffset = Math.max(0, parseInt(offset) || 0);
@@ -183,6 +189,22 @@ const getAll = async (req, res) => {
     // Facturas consolidadas sí se listan: son documentos (no se suman, ver getStats).
     applyRemisionFilter(req, where, { includeConsolidated: true });
 
+    // "Por cobrar": mismos documentos que Cuentas por Cobrar (facturas y
+    // remisiones confirmadas con saldo) más los borradores de venta, que
+    // todavía no son cartera pero sí plata por recibir. `aging` acota a
+    // vencidas / por vencer (solo confirmadas) o solo borradores. Va en
+    // Op.and para combinarse con el filtro de tipo de documento sin pisarlo.
+    const pendingView = payment_view === 'pending' && quote_view !== 'true';
+    if (pendingView) {
+      const dueVsToday = (op) => sequelize.where(sequelize.literal(effectiveDueDateSql()), op, sequelize.literal('CURRENT_DATE'));
+      let pendingCondition;
+      if (aging === 'overdue') pendingCondition = { [Op.and]: [pendingReceivableWhere(req), dueVsToday(Op.lt)] };
+      else if (aging === 'upcoming') pendingCondition = { [Op.and]: [pendingReceivableWhere(req), dueVsToday(Op.gte)] };
+      else if (aging === 'draft') pendingCondition = draftSaleWhere();
+      else pendingCondition = { [Op.or]: [pendingReceivableWhere(req), draftSaleWhere()] };
+      where[Op.and] = [...(where[Op.and] || []), pendingCondition];
+    }
+
     if (customer_name) {
       where.customer_name = { [Op.iLike]: `%${customer_name}%` };
     }
@@ -217,7 +239,7 @@ const getAll = async (req, res) => {
         {
           model: Customer,
           as: 'customer',
-          attributes: ['id', 'first_name', 'last_name', 'tax_id', 'email', 'phone']
+          attributes: ['id', 'first_name', 'last_name', 'tax_id', 'email', 'phone', 'mobile', 'mobile_country_code']
         },
         {
           model: Branch,
@@ -230,16 +252,53 @@ const getAll = async (req, res) => {
           include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }]
         }
       ],
-      order: [['sale_date', 'DESC'], ['created_at', 'DESC']],
+      // Para cobrar, primero lo que vence antes (sin plazo = 30 días, igual
+      // que daysOverdueOf); los borradores al final.
+      order: pendingView
+        ? [[sequelize.literal(`("Sale"."status" = 'draft')`), 'ASC'], [sequelize.literal(effectiveDueDateSql()), 'ASC'], ['created_at', 'ASC'], ['id', 'ASC']]
+        : [['sale_date', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
       limit: safeLimit,
       offset: safeOffset,
     });
 
     const total = await Sale.count({ where });
 
+    // Saldo (neto de devoluciones) y días vencidos, para mostrar la cartera
+    // directamente en el listado.
+    const today = new Date();
+    const data = sales.map((sale) => {
+      const row = sale.toJSON();
+      row.balance = saleBalance(row);
+      const isReceivable = ['factura', 'remision'].includes(row.document_type)
+        && ['pending', 'completed'].includes(row.status) && row.balance > 0;
+      row.days_overdue = isReceivable ? daysOverdueOf(row, today) : null;
+      return row;
+    });
+
+    // Recordatorios de pago enviados (POST /:id/payment-reminders), para no
+    // insistirle dos veces el mismo día al mismo cliente.
+    if (pendingView && data.length) {
+      const reminders = await CustomerInteraction.findAll({
+        where: { tenant_id: tenantId, related_sale_id: data.map(r => r.id), channel_ref: PAYMENT_REMINDER_REF },
+        attributes: [
+          'related_sale_id',
+          [sequelize.fn('MAX', sequelize.col('created_at')), 'last_reminder_at'],
+          [sequelize.fn('COUNT', sequelize.col('id')), 'reminder_count'],
+        ],
+        group: ['related_sale_id'],
+        raw: true,
+      });
+      const bySale = new Map(reminders.map(r => [r.related_sale_id, r]));
+      data.forEach((row) => {
+        const r = bySale.get(row.id);
+        row.last_reminder_at = r?.last_reminder_at || null;
+        row.reminder_count = parseInt(r?.reminder_count, 10) || 0;
+      });
+    }
+
     res.json({
       success: true,
-      data: sales,
+      data,
       pagination: {
         total,
         limit: safeLimit,
@@ -2038,7 +2097,38 @@ const getStats = async (req, res) => {
       attributes: [
         [sequelize.fn('COUNT', sequelize.col('id')), 'total_sales'],
         [sequelize.fn('SUM', sequelize.col('total_amount')), 'total_amount'],
-        [sequelize.fn('SUM', sequelize.literal("CASE WHEN payment_status = 'pending' THEN total_amount ELSE 0 END")), 'pending_amount'],
+      ],
+      raw: true
+    });
+
+    // Por cobrar = saldo real (total - pagado - devuelto) de los mismos
+    // documentos que Cuentas por Cobrar. Antes sumaba el total de las ventas
+    // 'pending' e ignoraba los pagos parciales.
+    const pendingWhere = { tenant_id: tenantId, ...pendingReceivableWhere(req) };
+    if (branch_id) pendingWhere.branch_id = branch_id;
+    if (where.sale_date) pendingWhere.sale_date = where.sale_date;
+    const balanceSql = 'GREATEST(total_amount - COALESCE(returned_amount, 0) - COALESCE(paid_amount, 0), 0)';
+    const [pending] = await Sale.findAll({
+      where: pendingWhere,
+      attributes: [
+        [sequelize.fn('COUNT', sequelize.col('id')), 'pending_count'],
+        [sequelize.fn('SUM', sequelize.literal(balanceSql)), 'pending_amount'],
+        [sequelize.fn('SUM', sequelize.literal(`CASE WHEN ${effectiveDueDateSql()} < CURRENT_DATE THEN ${balanceSql} ELSE 0 END`)), 'overdue_amount'],
+        [sequelize.fn('SUM', sequelize.literal(`CASE WHEN ${effectiveDueDateSql()} < CURRENT_DATE THEN 1 ELSE 0 END`)), 'overdue_count'],
+      ],
+      raw: true
+    });
+
+    // Borradores de venta: plata por recibir que aún no es cartera (se
+    // muestran aparte en "Por cobrar", ver getAll).
+    const draftWhere = { tenant_id: tenantId, ...draftSaleWhere() };
+    if (branch_id) draftWhere.branch_id = branch_id;
+    if (where.sale_date) draftWhere.sale_date = where.sale_date;
+    const [drafts] = await Sale.findAll({
+      where: draftWhere,
+      attributes: [
+        [sequelize.fn('COUNT', sequelize.col('id')), 'draft_count'],
+        [sequelize.fn('SUM', sequelize.col('total_amount')), 'draft_amount'],
       ],
       raw: true
     });
@@ -2048,13 +2138,58 @@ const getStats = async (req, res) => {
       data: {
         total_sales:    parseInt(stats[0].total_sales)    || 0,
         total_amount:   parseFloat(stats[0].total_amount) || 0,
-        pending_amount: parseFloat(stats[0].pending_amount) || 0,
+        pending_amount: parseFloat(pending.pending_amount) || 0,
+        pending_count:  parseInt(pending.pending_count)    || 0,
+        overdue_amount: parseFloat(pending.overdue_amount) || 0,
+        overdue_count:  parseInt(pending.overdue_count)    || 0,
+        draft_count:    parseInt(drafts.draft_count)       || 0,
+        draft_amount:   parseFloat(drafts.draft_amount)    || 0,
         sales_count:    parseInt(stats[0].total_sales)    || 0
       }
     });
   } catch (error) {
     logger.error('Error obteniendo estadísticas:', error);
     res.status(500).json({ success: false, message: 'Error obteniendo estadísticas' });
+  }
+};
+
+// Recordatorio de pago enviado por WhatsApp desde "Por cobrar". Se registra
+// como interacción del cliente (la ve el CRM en la vista 360°) aunque el
+// tenant no tenga el módulo CRM. Solo se sabe que se abrió el enlace wa.me,
+// no si se entregó: outcome 'sin_respuesta'.
+const registerPaymentReminder = async (req, res) => {
+  try {
+    const tenantId = req.tenant_id;
+    const sale = await Sale.findOne({
+      where: { id: req.params.id, tenant_id: tenantId },
+      attributes: ['id', 'customer_id', 'sale_number', 'branch_id', 'total_amount', 'paid_amount', 'returned_amount'],
+    });
+    if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
+    if (!sale.customer_id) {
+      return res.status(400).json({ success: false, message: 'La venta no tiene cliente registrado: el recordatorio no queda en su historial' });
+    }
+
+    const message = String(req.body?.message || '').trim();
+    const summary = `Recordatorio de pago por WhatsApp (${sale.sale_number}, saldo ${saleBalance(sale).toLocaleString('es-CO')})`
+      + (message ? `: "${message.length > 300 ? `${message.slice(0, 300)}…` : message}"` : '');
+    const interaction = await CustomerInteraction.create({
+      tenant_id: tenantId,
+      branch_id: sale.branch_id || req.branch_id || null,
+      customer_id: sale.customer_id,
+      user_id: req.user.id,
+      type: 'whatsapp',
+      summary,
+      outcome: 'sin_respuesta',
+      channel_ref: PAYMENT_REMINDER_REF,
+      related_sale_id: sale.id,
+    });
+    // underscored: el atributo es createdAt (la columna, created_at).
+    await Customer.update({ last_interaction_at: interaction.createdAt }, { where: { id: sale.customer_id, tenant_id: tenantId } });
+
+    res.status(201).json({ success: true, data: { id: interaction.id, created_at: interaction.createdAt } });
+  } catch (error) {
+    logger.error('Error registrando recordatorio de pago:', error);
+    res.status(500).json({ success: false, message: 'Error registrando el recordatorio' });
   }
 };
 
@@ -2827,6 +2962,7 @@ module.exports = {
   annulConsolidated,
   delete: deleteById,
   getStats,
+  registerPaymentReminder,
   generatePDF,
   sendWhatsApp,
   generateShareLink,

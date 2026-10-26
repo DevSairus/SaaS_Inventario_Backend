@@ -1,20 +1,9 @@
 // backend/src/controllers/sales/accounts-receivable.controller.js
 const { Sale, SaleItem, Customer, User, OpeningBalance } = require('../../models');
 const { Op } = require('sequelize');
-const { shouldHideRemisiones, consolidatedExclusionWhere } = require('../../utils/remisionVisibility');
+const { daysOverdueOf, receivableWhere } = require('../../utils/receivables');
 const { saleBalance } = require('../../utils/saleAmounts');
 const { normalizeOpeningBalanceAsSaleRow } = require('../../services/accounting/openingBalanceMerge.helper');
-
-const MS_PER_DAY = 1000 * 60 * 60 * 24;
-
-// Días vencidos (negativo = aún no vence). Con due_date se vence al día
-// siguiente; sin due_date (ventas históricas sin plazo) se asumen 30 días
-// desde la venta.
-const daysOverdueOf = (invoice, today) => {
-  const referenceDate = new Date(invoice.due_date || invoice.sale_date);
-  const days = Math.floor((today - referenceDate) / MS_PER_DAY);
-  return invoice.due_date ? days : days - 30;
-};
 
 // Saldos iniciales de cartera (OpeningBalance 'receivable', registrados en
 // Contabilidad → Saldos Iniciales) con el mismo shape que una venta. Antes
@@ -39,20 +28,6 @@ const pendingOpeningReceivables = async (tenantId, { customer_id, from_date, to_
   });
   return rows.map(normalizeOpeningBalanceAsSaleRow);
 };
-
-// Cartera = facturas y remisiones con saldo. Si el tenant oculta las
-// remisiones a no-admin (utils/remisionVisibility.js), esos usuarios solo
-// ven las facturas.
-const receivableDocumentTypes = (req) => (shouldHideRemisiones(req) ? ['factura'] : ['factura', 'remision']);
-
-// Con remisiones visibles, el saldo de una factura consolidada ya está en
-// sus remisiones agrupadas -- se excluye para no cobrarlo dos veces. Con
-// remisiones ocultas es al revés: la factura consolidada es la que se ve
-// (su paid_amount se sincroniza desde las remisiones).
-const receivableWhere = (req) => ({
-  document_type: { [Op.in]: receivableDocumentTypes(req) }, // facturas y remisiones (ver receivableDocumentTypes)
-  ...(shouldHideRemisiones(req) ? {} : consolidatedExclusionWhere()),
-});
 
 // Obtener resumen de cartera
 const getAccountsReceivableSummary = async (req, res) => {
