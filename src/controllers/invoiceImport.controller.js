@@ -6,6 +6,7 @@ const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const taxService = require('../services/taxService');
+const { suggestedSalePrice, isValidMargin } = require('../utils/salePricing');
 
 /**
  * Importar factura electrónica desde archivo ZIP
@@ -98,7 +99,9 @@ function paymentFormFromText(text) {
  */
 async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id }, opts = {}) {
   const profit_margin = parseFloat(opts.profit_margin) || 30;
-  const margin_multiplier = 1 + (profit_margin / 100);
+  if (!isValidMargin(profit_margin)) {
+    throw new InvoiceImportError('El margen de ganancia es sobre la venta y debe ser menor a 100 %', 400);
+  }
   const supplier_name_override = opts.supplier_name?.trim() || null;
   const removed_items = opts.removed_items || [];
   const shipping_cost = parseFloat(opts.shipping_cost) || 0;
@@ -182,7 +185,7 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
       item.total = item.subtotal + (Number(item.tax_amount) || 0) + (Number(item.inc_amount) || 0);
     });
 
-    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, margin_multiplier, manual_links, new_product_data);
+    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, manual_links, new_product_data);
     const purchase = await createPurchaseFromInvoice(
       { ...invoiceData, xmlContent: invoiceData.xmlContent || xmlContent },
       supplier,
@@ -499,7 +502,7 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
   return supplier;
 }
 
-async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = 30, margin_multiplier = 1.3, manualLinks = {}, newProductData = {}) {
+async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = 30, manualLinks = {}, newProductData = {}) {
   const processedItems = [];
 
   for (const item of items) {
@@ -583,7 +586,12 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
           brand: overrides.brand?.trim() || null,
           unit_of_measure: overrides.unit_of_measure || 'unit',
           average_cost: item.unit_price,
-          base_price: Math.round(item.unit_price * margin_multiplier),
+          base_price: suggestedSalePrice(item.unit_price, profit_margin, {
+            price_includes_tax: !!overrides.price_includes_tax,
+            has_tax: item.tax_percentage > 0,
+            tax_percentage: item.tax_percentage || 0,
+            tax_config: { iva_status: item.iva_status },
+          }) ?? 0,
           profit_margin_percentage: profit_margin,
           current_stock: 0,
           min_stock: 1,

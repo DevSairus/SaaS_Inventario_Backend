@@ -10,6 +10,7 @@
 
 const { Product } = require('../models');
 const { Op } = require('sequelize');
+const { suggestedSalePrice } = require('../utils/salePricing');
 
 
 async function fixProductPrices() {
@@ -35,7 +36,7 @@ async function fixProductPrices() {
       for (const product of productsWithoutMargin) {
         const defaultMargin = 30;
         const averageCost = parseFloat(product.average_cost || 0);
-        const newBasePrice = averageCost > 0 ? averageCost * (1 + defaultMargin / 100) : 0;
+        const newBasePrice = suggestedSalePrice(averageCost, defaultMargin, product) ?? 0;
 
         await product.update({
           profit_margin_percentage: defaultMargin,
@@ -67,7 +68,7 @@ async function fixProductPrices() {
       for (const product of productsWithCostButNoPrice) {
         const margin = parseFloat(product.profit_margin_percentage);
         const averageCost = parseFloat(product.average_cost);
-        const newBasePrice = averageCost * (1 + margin / 100);
+        const newBasePrice = suggestedSalePrice(averageCost, margin, product) ?? 0;
 
         await product.update({
           base_price: newBasePrice

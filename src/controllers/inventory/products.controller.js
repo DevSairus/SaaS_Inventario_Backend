@@ -6,6 +6,7 @@ const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
 const { createMovement } = require('./movements.controller');
+const { isValidMargin } = require('../../utils/salePricing');
 
 // Debe reflejar exactamente el CHECK constraint de la tabla products
 // (ver 20260101000000-baseline-core-inventory-tables.js) -- si diverge,
@@ -340,6 +341,10 @@ const createProduct = async (req, res) => {
       tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false
     } = req.body;
 
+    if (profit_margin_percentage != null && profit_margin_percentage !== '' && !isValidMargin(profit_margin_percentage)) {
+      return res.status(400).json({ success: false, message: 'El margen de ganancia es sobre el precio de venta: debe estar entre 0 y 99,99 %' });
+    }
+
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
     const safeProductType = VALID_PRODUCT_TYPES.includes(product_type) ? product_type : 'simple';
 
@@ -535,6 +540,11 @@ const updateProduct = async (req, res) => {
 
     const product = await Product.findOne({ where: whereClause });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    const marginIn = updateData.profit_margin_percentage;
+    if (marginIn != null && marginIn !== '' && !isValidMargin(marginIn)) {
+      return res.status(400).json({ success: false, message: 'El margen de ganancia es sobre el precio de venta: debe estar entre 0 y 99,99 %' });
+    }
 
     const tenantId = req.user.role === 'super_admin' ? product.tenant_id : req.user.tenant_id;
 

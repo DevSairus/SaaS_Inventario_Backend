@@ -4,6 +4,7 @@ const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember, Invento
 const { sequelize } = require('../../config/database');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { cellToText } = require('../../utils/excelCell');
+const { suggestedSalePrice, isValidMargin } = require('../../utils/salePricing');
 
 const REQUIRED_COLUMNS = ['Código*', 'Nombre*'];
 const MAX_REPORTED_ERRORS = 300;
@@ -101,13 +102,15 @@ function parseRow(rowNumber, data) {
 
   const marginRaw = parseFloat(data['Margen Utilidad (%)']);
   const profit_margin_percentage = !isNaN(marginRaw) && marginRaw >= 0 ? marginRaw : 30;
+  if (!isValidMargin(profit_margin_percentage)) errors.push(`El margen sobre la venta debe ser menor a 100 % (llegó ${profit_margin_percentage})`);
 
   const priceRaw = parseFloat(data['Precio Venta']);
   let base_price;
   if (!isNaN(priceRaw) && priceRaw >= 0) {
     base_price = priceRaw;
   } else if (average_cost > 0) {
-    base_price = average_cost * (1 + profit_margin_percentage / 100);
+    // Los productos importados se crean con price_includes_tax: false.
+    base_price = suggestedSalePrice(average_cost, profit_margin_percentage) ?? 0;
   } else {
     base_price = 0;
   }

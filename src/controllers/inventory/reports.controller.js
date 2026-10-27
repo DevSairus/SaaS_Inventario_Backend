@@ -327,9 +327,10 @@ exports.getProfitReport = async (req, res) => {
         COALESCE(SUM((si.subtotal - COALESCE(ret.returned_subtotal, 0)) - (si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END), 0)::numeric as profit,
         ROUND(
           CASE
-            WHEN SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) > 0 THEN
+            -- Margen sobre la venta: ganancia / ingreso (mismo criterio que el precio sugerido).
+            WHEN SUM(si.subtotal - COALESCE(ret.returned_subtotal, 0)) > 0 THEN
               SUM((si.subtotal - COALESCE(ret.returned_subtotal, 0)) - (si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END)
-              / SUM((si.quantity - COALESCE(ret.returned_qty, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE COALESCE(p.average_cost, 0) END) * 100
+              / SUM(si.subtotal - COALESCE(ret.returned_subtotal, 0)) * 100
             ELSE 0
           END,
           2
@@ -483,7 +484,7 @@ exports.getProfitReport = async (req, res) => {
         total_revenue: g.total_revenue,
         total_cost: g.total_cost,
         profit,
-        margin_percentage: g.total_cost > 0 ? (profit / g.total_cost) * 100 : 0,
+        margin_percentage: g.total_revenue > 0 ? (profit / g.total_revenue) * 100 : 0,
         cost_source: g.has_real && g.has_estimated ? 'mixto' : (g.has_real ? 'real' : 'estimado'),
       };
     }).sort((a, b) => b.profit - a.profit);
@@ -508,8 +509,8 @@ exports.getProfitReport = async (req, res) => {
       pct_estimated: laborCostTotal > 0 ? (laborCostEstimated / laborCostTotal) * 100 : 0,
       default_labor_cost_percentage: pct,
     };
-    if (totals.total_cost > 0) {
-      totals.margin_percentage = (totals.total_profit / totals.total_cost) * 100;
+    if (totals.total_revenue > 0) {
+      totals.margin_percentage = (totals.total_profit / totals.total_revenue) * 100;
     }
 
     res.json({

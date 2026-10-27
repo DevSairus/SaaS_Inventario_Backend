@@ -5,7 +5,8 @@
 // con motivo "compra" (adjustments.controller.js, p. ej. la compra rápida).
 //
 //   1. Actualiza last_purchase_cost / last_purchase_date.
-//   2. Si el producto tiene margen, recalcula base_price sobre ese costo,
+//   2. Si el producto tiene margen, recalcula base_price sobre ese costo
+//      (margen sobre la venta, con IVA si el precio lo incluye: utils/salePricing),
 //      pero el precio NUNCA baja solo: si el sugerido queda por debajo del
 //      actual se conserva el actual y la baja queda en cost_alerts
 //      (price_held) para que alguien la revise y la aplique a mano.
@@ -18,6 +19,7 @@
 
 const CostAlert = require('../../models/inventory/CostAlert');
 const Tenant = require('../../models/auth/Tenant');
+const { suggestedSalePrice } = require('../../utils/salePricing');
 
 const DEFAULT_VARIATION_THRESHOLD = 10;
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -49,8 +51,8 @@ async function registerPurchaseCost({ tenant_id, product, newCost, date, sourceT
 
   let suggestedPrice = null;
   let priceHeld = false;
-  if (margin > 0) {
-    suggestedPrice = round2(cost * (1 + margin / 100));
+  if (margin > 0) suggestedPrice = suggestedSalePrice(cost, margin, product);
+  if (suggestedPrice !== null) {
     if (currentPrice > 0 && suggestedPrice < currentPrice - 0.005) {
       priceHeld = true;
     } else {
