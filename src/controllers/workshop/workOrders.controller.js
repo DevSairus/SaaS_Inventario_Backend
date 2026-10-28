@@ -439,7 +439,22 @@ const create = async (req, res) => {
       ],
     });
 
-    res.status(201).json({ success: true, message: 'Orden de trabajo creada', data: full });
+    // Aviso de recepción al cliente (seguimiento + acta de ingreso si está
+    // activa) -- ver consent.service.js#notifyVehicleReception. Nunca tumba
+    // la creación: si algo falla, la OT ya quedó creada.
+    let reception_notice = null;
+    try {
+      const consentSvc = require('../../services/legal/consent.service');
+      const tenant = await Tenant.findByPk(tenant_id);
+      const settings = consentSvc.getConsentSettings(tenant);
+      if (settings.vehicle_intake.notify_on_reception) {
+        reception_notice = await consentSvc.notifyVehicleReception({ tenant, order: full, userId: req.user.id });
+      }
+    } catch (noticeErr) {
+      logger.warn(`[OT] Aviso de recepción ${order.order_number} falló: ${noticeErr.message}`);
+    }
+
+    res.status(201).json({ success: true, message: 'Orden de trabajo creada', data: full, reception_notice });
   } catch (error) {
     await transaction.rollback();
     logger.error('Error creando OT:', error);
@@ -3254,13 +3269,13 @@ async function getOrderWithTenant(id, tenant_id) {
     const data = order.toJSON();
     data.checklist_in = rows[0]?.checklist_in || {};
     const tenant = await Tenant.findByPk(tenant_id, {
-      attributes: ['id', 'company_name', 'tax_id', 'phone', 'address', 'email', 'logo_url', 'pdf_config', 'features'],
+      attributes: ['id', 'company_name', 'tax_id', 'phone', 'address', 'email', 'logo_url', 'pdf_config', 'features', 'business_config'],
     });
     return { order: data, tenant };
   }
 
   const tenant = await Tenant.findByPk(tenant_id, {
-    attributes: ['id', 'company_name', 'tax_id', 'phone', 'address', 'email', 'logo_url', 'pdf_config', 'features'],
+    attributes: ['id', 'company_name', 'tax_id', 'phone', 'address', 'email', 'logo_url', 'pdf_config', 'features', 'business_config'],
   });
   return { order: null, tenant };
 }
@@ -3277,6 +3292,14 @@ const generatePDF = async (req, res) => {
     let pdfBuffer, filename;
 
     if (type === 'intake') {
+      // Acta aceptada por el cliente: el PDF lleva la constancia electrónica
+      // en lugar de la línea de firma del cliente.
+      const { CustomerConsent, LegalDocumentVersion } = require('../../models');
+      order.intake_consent = await CustomerConsent.findOne({
+        where: { work_order_id: order.id, kind: 'vehicle_intake', status: 'accepted' },
+        include: [{ model: LegalDocumentVersion, as: 'document_version' }],
+        order: [['accepted_at', 'DESC']],
+      });
       pdfBuffer = await generateIntakeFormBuffer(order, tenant);
       filename  = `ingreso-${order.order_number}.pdf`;
     } else if (type === 'receipt') {
@@ -3322,6 +3345,19 @@ const updateChecklist = async (req, res) => {
     const order = await WorkOrder.findOne({ where: { id, tenant_id } });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
 
+    // Si el cliente ya aceptó el acta de ingreso, el inventario es la
+    // evidencia de lo que aceptó: no se cambia sin anular antes el acta.
+    const { CustomerConsent } = require('../../models');
+    const acceptedIntake = await CustomerConsent.count({
+      where: { work_order_id: id, kind: 'vehicle_intake', status: 'accepted' },
+    });
+    if (acceptedIntake) {
+      return res.status(409).json({
+        success: false,
+        message: 'El cliente ya aceptó el acta de ingreso. Para modificar el inventario, anula primero esa autorización.',
+      });
+    }
+
     // Raw SQL para evitar problemas de Sequelize con JSONB. OJO: antes esto
     // era `UPDATE work_orders` sin calificar schema -- para un tenant ya
     // cortado, el UPDATE afectaba 0 filas en "public" SIN error (una fila
@@ -3339,6 +3375,15 @@ const updateChecklist = async (req, res) => {
         type: sequelize.QueryTypes.UPDATE,
       }
     );
+
+    // Una solicitud de acta pendiente debe mostrar el inventario actual.
+    try {
+      const { refreshPendingIntake } = require('../../services/legal/consent.service');
+      const tenant = await Tenant.findByPk(tenant_id);
+      await refreshPendingIntake({ tenant, workOrderId: id });
+    } catch (refreshErr) {
+      logger.warn(`[OT] No se pudo actualizar el acta pendiente de ${order.order_number}: ${refreshErr.message}`);
+    }
 
     res.json({ success: true, data: req.body });
   } catch (error) {
@@ -3652,8 +3697,13 @@ async function getPublicOrderBody(orderId, res) {
 
     // Buscar datos del taller (tenant) para mostrar nombre y contacto
     const tenant = await Tenant.findByPk(order.tenant_id, {
-      attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color', 'features'],
+      attributes: ['company_name', 'phone', 'email', 'address', 'logo_url', 'primary_color', 'features', 'business_config'],
     });
+    // Ítems del inventario de ingreso configurados por el taller (ver
+    // consent.service.js#getConsentSettings) -- la vista pública los muestra
+    // con las mismas etiquetas que el asesor usó al recibir el vehículo.
+    const { getConsentSettings } = require('../../services/legal/consent.service');
+    const intakeChecklistItems = getConsentSettings(tenant).vehicle_intake.checklist_items;
     // Config independiente de la de remisiones/facturas de ventas — oculto
     // por defecto salvo que se desactive explícitamente
     // (features.hide_workorder_tax === false). Antes usaba hide_remision_tax,
@@ -3695,6 +3745,7 @@ async function getPublicOrderBody(orderId, res) {
       photos_in: order.photos_in || [],
       photos_out: order.photos_out || [],
       checklist_in: checklistIn,
+      intake_checklist_items: intakeChecklistItems,
       notes: order.notes,
       vehicle: order.vehicle,
       customer: order.customer ? {

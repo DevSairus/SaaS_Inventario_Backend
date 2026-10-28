@@ -444,7 +444,30 @@ const vehiclePortalLimiter = rateLimit({
   },
 });
 
+/**
+ * Rate limiter para la página pública de autorizaciones
+ * (/public/consents/:token -- habeas data y acta de ingreso). Envío y
+ * verificación de OTP sin autenticación: el servicio ya limita códigos e
+ * intentos por solicitud (consent.service.js); esto corta el barrido de
+ * tokens y el abuso de envíos de correo/WhatsApp desde una misma IP.
+ */
+const consentLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 60,
+  store: makeStore('consent'),
+  keyGenerator: ipKey,
+  handler: (req, res) => {
+    logger.warn('Consent rate limit exceeded', { ip: req.ip, path: req.path });
+    res.status(429).json({
+      success: false,
+      message: 'Demasiados intentos. Intenta de nuevo en un rato, o contacta al establecimiento directamente',
+      retryAfter: 60,
+    });
+  },
+});
+
 module.exports = {
+  consentLimiter,
   generalLimiter,
   authLimiter,
   createResourceLimiter,

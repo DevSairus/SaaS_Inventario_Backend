@@ -87,6 +87,9 @@ const Vehicle = require('./workshop/Vehicle');
 const WorkOrder = require('./workshop/WorkOrder');
 const WorkOrderItem = require('./workshop/WorkOrderItem');
 const WorkOrderQuoteRequest = require('./workshop/WorkOrderQuoteRequest');
+// Habeas Data / autorización de ingreso de vehículo
+const LegalDocumentVersion = require('./legal/LegalDocumentVersion');
+const CustomerConsent = require('./legal/CustomerConsent');
 const WorkshopAppointmentConfig = require('./workshop/WorkshopAppointmentConfig');
 const WorkshopAppointment = require('./workshop/WorkshopAppointment');
 const CommissionSettlement = require('./workshop/CommissionSettlement');
@@ -629,6 +632,13 @@ WorkOrder.hasMany(WorkOrderQuoteRequest, { foreignKey: 'work_order_id', as: 'quo
 WorkOrderItem.belongsTo(WorkOrderQuoteRequest, { foreignKey: 'quote_request_id', as: 'quote_request' });
 WorkOrderQuoteRequest.hasMany(WorkOrderItem, { foreignKey: 'quote_request_id', as: 'items' });
 
+// CustomerConsent ↔ Customer / WorkOrder / LegalDocumentVersion
+CustomerConsent.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Customer.hasMany(CustomerConsent, { foreignKey: 'customer_id', as: 'consents' });
+CustomerConsent.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+WorkOrder.hasMany(CustomerConsent, { foreignKey: 'work_order_id', as: 'consents' });
+CustomerConsent.belongsTo(LegalDocumentVersion, { foreignKey: 'document_version_id', as: 'document_version' });
+
 // WorkshopAppointmentConfig ↔ Branch
 WorkshopAppointmentConfig.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
 Branch.hasOne(WorkshopAppointmentConfig, { foreignKey: 'branch_id', as: 'appointment_config' });
@@ -1072,6 +1082,8 @@ module.exports = {
   AccountMappingAudit,
   AccountMigration,
   FormDraft,
+  LegalDocumentVersion,
+  CustomerConsent,
   IcaMunicipality,
   IcaActivity,
   IcaSettlement,

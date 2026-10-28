@@ -11,7 +11,10 @@ const {
   createPublicAppointment, getPublicAppointmentStatus,
 } = require('../controllers/workshop/workshopAppointments.controller');
 const { getPublicVehiclePortal } = require('../controllers/workshop/vehicles.controller');
-const { quoteResponseLimiter, appointmentBookingLimiter, vehiclePortalLimiter } = require('../middleware/rateLimiter');
+const { quoteResponseLimiter, appointmentBookingLimiter, vehiclePortalLimiter, consentLimiter } = require('../middleware/rateLimiter');
+const {
+  getPublicConsent, sendPublicOtp, acceptPublic, rejectPublic, getPublicPdf,
+} = require('../controllers/legal/consents.controller');
 const { getPublicPosts, getPublicPostBySlug } = require('../controllers/public/blog.controller');
 
 // GET /api/public/work-orders/:token
@@ -51,6 +54,15 @@ router.get('/workshop/:slug/:branchId/config', getPublicConfig);
 router.get('/workshop/:slug/:branchId/availability', getPublicAvailability);
 router.post('/workshop/:slug/:branchId/appointments', appointmentBookingLimiter, createPublicAppointment);
 router.get('/workshop/appointments/:token', getPublicAppointmentStatus);
+
+// ── Autorizaciones del cliente (habeas data / acta de ingreso) ──────────
+// El cliente lee el documento, pide un OTP (email o WhatsApp) y lo confirma.
+// Ver services/legal/consent.service.js.
+router.get('/consents/:token', consentLimiter, getPublicConsent);
+router.post('/consents/:token/otp', consentLimiter, sendPublicOtp);
+router.post('/consents/:token/accept', consentLimiter, acceptPublic);
+router.post('/consents/:token/reject', consentLimiter, rejectPublic);
+router.get('/consents/:token/pdf', consentLimiter, getPublicPdf);
 
 // ── Blog editorial (SEO) ─────────────────────────────────────────────────
 // GET /api/public/blog — listado paginado de artículos publicados.

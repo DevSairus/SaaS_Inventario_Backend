@@ -163,6 +163,10 @@ async function processDueReminders() {
 
 async function resolveAudiencePhones(tenantId, audienceFilter = {}) {
   const where = { tenant_id: tenantId, is_active: true };
+  // Habeas data activo: las campañas son publicidad (sección 2.4 del
+  // documento), solo van a quien la autorizó expresamente.
+  const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'business_config'] });
+  if (tenant?.business_config?.habeas_data?.enabled) where.marketing_opt_in = true;
   const customers = await Customer.findAll({
     where,
     attributes: ['id', 'phone', 'mobile'],

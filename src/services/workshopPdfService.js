@@ -449,18 +449,10 @@ const generateIntakeForm = async (res, order, tenant) => {
     }
     y += 22;
 
-    // Items del checklist (dos columnas)
-    const checkItems = [
-      { key: 'estado_general', label: 'Estado general' },
-      { key: 'testigos',        label: 'Testigos' },
-      { key: 'tanque',          label: 'Tanque combustible' },
-      { key: 'espejos',         label: 'Espejos' },
-      { key: 'sillin',          label: 'Sillín' },
-      { key: 'luces',           label: 'Luces' },
-      { key: 'carenaje',        label: 'Carenaje / plásticos' },
-      { key: 'llantas',         label: 'Llantas' },
-      { key: 'rele_encendido',  label: 'Rele de encendido' },
-    ];
+    // Items del checklist (dos columnas) -- configurables por tenant en
+    // business_config.vehicle_intake.checklist_items (ver consent.service.js).
+    const { getConsentSettings } = require('./legal/consent.service');
+    const checkItems = getConsentSettings(tenant).vehicle_intake.checklist_items;
 
     const colW = (INNER - 20) / 2;
     checkItems.forEach((item, idx) => {
@@ -502,6 +494,14 @@ const generateIntakeForm = async (res, order, tenant) => {
     }
     y += 65;
 
+    if (checklist.belongings) {
+      doc.roundedRect(MARGIN, y, INNER, 40, 5).strokeColor(C.border).lineWidth(0.5).stroke();
+      doc.font('Helvetica-Bold').fontSize(7).fillColor(C.gray).text('OBJETOS DEJADOS EN EL VEHÍCULO', MARGIN + 10, y + 8);
+      doc.font('Helvetica').fontSize(8.5).fillColor(C.dark)
+        .text(checklist.belongings, MARGIN + 10, y + 20, { width: INNER - 20, height: 18 });
+      y += 50;
+    }
+
     // ── Notas del taller ──
     if (order.notes) {
       doc.roundedRect(MARGIN, y, INNER, 45, 5).strokeColor(C.border).lineWidth(0.5).stroke();
@@ -511,10 +511,23 @@ const generateIntakeForm = async (res, order, tenant) => {
       y += 55;
     }
 
+    // ── Constancia electrónica del cliente (acta aceptada con OTP) ──
+    // Reemplaza la línea "Firma del cliente". Va en una página aparte si no
+    // cabe con las firmas abajo.
+    const consent = order.intake_consent;
+    if (consent) {
+      const { drawEvidenceBox } = require('./legal/consentPdf.service');
+      if (y + 150 > doc.page.height - 120) { doc.addPage(); y = MARGIN; }
+      y = drawEvidenceBox(doc, consent, MARGIN, y + 6, INNER) + 10;
+    }
+
     // ── Firmas ──
+    if (y + 60 > doc.page.height - 50) { doc.addPage(); y = MARGIN; }
     y = Math.max(y + 20, doc.page.height - 120);
     const sigW  = (INNER - 40) / 3;
-    const sigLabels = ['Firma del cliente', 'Firma del técnico', 'Firma del administrador'];
+    const sigLabels = consent
+      ? ['Cliente: aceptación electrónica', 'Firma del técnico', 'Firma del administrador']
+      : ['Firma del cliente', 'Firma del técnico', 'Firma del administrador'];
     sigLabels.forEach((lbl, i) => {
       const sx = MARGIN + i * (sigW + 20);
       doc.moveTo(sx, y + 35).lineTo(sx + sigW, y + 35).strokeColor(C.lightGray).lineWidth(0.5).stroke();
@@ -1336,4 +1349,9 @@ module.exports = {
   // intervención sobre el PDF de una cotización (SaleDiagnosisMark)
   renderDiagramToPng,
   SEVERITY_COLORS,
+  // Reutilizados por services/legal/consentPdf.service.js (constancia de
+  // autorización) para que tenga la misma cabecera que los PDF del taller.
+  drawHeader,
+  createBufferStream,
+  C,
 };

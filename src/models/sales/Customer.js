@@ -134,6 +134,23 @@ const Customer = sequelize.define('Customer', {
     allowNull: true,
     comment: 'Solo aplica con módulo Taller activo — desnormalizado desde Vehicle/WorkOrder',
   },
+  // ── Habeas Data (ver services/legal/consent.service.js) ─────
+  // Desnormalizado desde la última CustomerConsent 'habeas_data'
+  // (pending | accepted | rejected | revoked; null = nunca se pidió).
+  habeas_data_status: {
+    type: DataTypes.STRING(20),
+    allowNull: true,
+  },
+  habeas_data_at: {
+    type: DataTypes.DATE,
+    allowNull: true,
+  },
+  // Autorización separada para publicidad/campañas. Solo se vuelve true con
+  // una aceptación verificada; el cliente puede retirarla en cualquier momento.
+  marketing_opt_in: {
+    type: DataTypes.BOOLEAN,
+    allowNull: true,
+  },
 }, {
   tableName: 'customers',
   timestamps: true,

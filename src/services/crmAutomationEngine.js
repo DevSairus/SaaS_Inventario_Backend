@@ -102,6 +102,21 @@ async function actionSendWhatsAppTemplate({ tenant_id, opportunity, actionConfig
   const phone = customer?.phone || customer?.mobile || null;
   if (!phone) return null;
 
+  // Habeas data activo (ver services/legal/consent.service.js): el
+  // seguimiento de una oportunidad es gestión comercial (finalidad 2.1.b),
+  // pero no se le escribe a quien rechazó o revocó la autorización, y una
+  // plantilla de categoría MARKETING solo va a quien autorizó publicidad.
+  const { Tenant, WaTemplate } = require('../models');
+  const tenant = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'] });
+  if (tenant?.business_config?.habeas_data?.enabled) {
+    if (['rejected', 'revoked'].includes(customer.habeas_data_status)) return null;
+    const template = await WaTemplate.findOne({
+      where: { tenant_id, name: templateName, language: actionConfig?.language || 'es' },
+      attributes: ['category'],
+    });
+    if (String(template?.category || '').toUpperCase() === 'MARKETING' && customer.marketing_opt_in !== true) return null;
+  }
+
   try {
     return await waCloud.sendTemplateFromTenant({
       tenantId: tenant_id,

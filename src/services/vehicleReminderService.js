@@ -113,7 +113,7 @@ async function processVehicleReminders(tenantList, targetDates, results) {
       model:      Customer,
       as:         'customer',
       required:   false,
-      attributes: ['id', 'first_name', 'last_name', 'business_name', 'email', 'phone', 'mobile'],
+      attributes: ['id', 'first_name', 'last_name', 'business_name', 'email', 'phone', 'mobile', 'habeas_data_status'],
     }],
   });
 
@@ -128,6 +128,15 @@ async function processVehicleReminders(tenantList, targetDates, results) {
       results.skipped++;
       results.skippedDetails.push({ plate: vehicle.plate, reason: 'sin_cliente' });
       console.warn(`⚠️ [REMINDER] ${vehicle.plate} — sin cliente asociado`);
+      continue;
+    }
+
+    // Habeas data: si el titular la rechazó o la revocó, no se le escribe
+    // (los recordatorios de mantenimiento son la finalidad 2.2.h del
+    // documento). Sin solicitud aún (null/pending) se sigue enviando.
+    if (['rejected', 'revoked'].includes(customer.habeas_data_status)) {
+      results.skipped++;
+      results.skippedDetails.push({ plate: vehicle.plate, reason: 'sin_autorizacion_datos', customer: customer.id });
       continue;
     }
 

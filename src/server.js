@@ -152,6 +152,7 @@ const warehousesRoutes              = require('./routes/inventory/warehouses.rou
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
 const formDraftsRoutes              = require('./routes/formDrafts.routes');
+const consentsRoutes                = require('./routes/consents.routes');
 const payableAlertsRoutes           = require('./routes/payableAlerts.routes');
 const notificationsBundleRoutes     = require('./routes/notificationsBundle.routes');
 const superadminRoutes              = require('./routes/superadmin.routes');
@@ -305,6 +306,7 @@ app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware,
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
 app.use('/api/form-drafts',                    authMiddleware, tenantMiddleware, formDraftsRoutes);
+app.use('/api/consents',                       authMiddleware, tenantMiddleware, consentsRoutes);
 app.use('/api/payable-alerts',                 authMiddleware, tenantMiddleware, requireModule('treasury'), payableAlertsRoutes);
 app.use('/api/notifications',                  authMiddleware, tenantMiddleware, branchMiddleware, notificationsBundleRoutes);
 app.use('/api/dashboard',                      authMiddleware, tenantMiddleware, dashboardRoutes);

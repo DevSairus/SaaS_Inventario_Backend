@@ -150,3 +150,6 @@ vite.config.ts.timestamp-*
 *_dump.xml
 datos_dian.json
 *.zip
+
+# Documentos firmados de autorizaciones (desarrollo local, datos personales)
+private_uploads/
