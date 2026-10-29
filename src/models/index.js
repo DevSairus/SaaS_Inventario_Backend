@@ -48,6 +48,8 @@ const Combo = require('./inventory/Combo');
 const ComboItem = require('./inventory/ComboItem');
 const StockAlert = require('./StockAlert');
 const CostAlert = require('./inventory/CostAlert');
+const SupplierOrderList = require('./inventory/SupplierOrderList');
+const SupplierOrderListItem = require('./inventory/SupplierOrderListItem');
 const PayableAlert = require('./PayableAlert');
 
 // NUEVOS - Movimientos Avanzados
@@ -336,6 +338,17 @@ Tenant.hasMany(StockAlert, { foreignKey: 'tenant_id', as: 'stock_alerts' });
 CostAlert.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(CostAlert, { foreignKey: 'product_id', as: 'cost_alerts' });
 CostAlert.belongsTo(User, { foreignKey: 'resolved_by', as: 'resolver' });
+
+// SupplierOrderList (lista de pedido a proveedor, sin precios) ↔ ítems / proveedor / compra / usuarios
+SupplierOrderList.hasMany(SupplierOrderListItem, { foreignKey: 'list_id', as: 'items', onDelete: 'CASCADE' });
+SupplierOrderListItem.belongsTo(SupplierOrderList, { foreignKey: 'list_id', as: 'list' });
+SupplierOrderListItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+SupplierOrderListItem.belongsTo(User, { foreignKey: 'added_by', as: 'adder' });
+SupplierOrderList.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+Supplier.hasMany(SupplierOrderList, { foreignKey: 'supplier_id', as: 'order_lists' });
+SupplierOrderList.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
+SupplierOrderList.belongsTo(User, { foreignKey: 'ordered_by', as: 'orderer' });
+SupplierOrderList.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 
 // PayableAlert ↔ Tenant / Purchase / User (antigüedad de cuentas por pagar)
 Tenant.hasMany(PayableAlert, { foreignKey: 'tenant_id', as: 'payable_alerts' });
@@ -1017,6 +1030,8 @@ module.exports = {
   ComboItem,
   StockAlert,
   CostAlert,
+  SupplierOrderList,
+  SupplierOrderListItem,
   PayableAlert,
   Invoice,
   SubscriptionPlan,

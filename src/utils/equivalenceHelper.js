@@ -1,5 +1,6 @@
 const { ProductEquivalenceGroupMember, ProductEquivalenceGroup } = require('../models/inventory');
 const { getInProcessMap } = require('../services/inventory/stockInProcess.service');
+const { productSalePrice } = require('./salePricing');
 
 /**
  * Busca equivalentes con stock disponible para un producto.
@@ -38,7 +39,7 @@ async function getEquivalentsWithStock(productId, tenantId, opts = {}) {
       include: [{
         model: require('../models/inventory').Product,
         as: 'product',
-        attributes: ['id', 'sku', 'name', 'current_stock', 'sale_price', 'is_active'],
+        attributes: ['id', 'sku', 'name', 'current_stock', 'base_price', 'sale_price', 'is_active'],
         where: { is_active: true }
       }]
     });
@@ -68,7 +69,7 @@ async function getEquivalentsWithStock(productId, tenantId, opts = {}) {
           sku: m.product.sku,
           name: m.product.name,
           available_stock: availableReal,
-          sale_price: parseFloat(m.product.sale_price || 0)
+          sale_price: productSalePrice(m.product)
         });
       }
     }

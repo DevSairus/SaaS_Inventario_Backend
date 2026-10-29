@@ -183,7 +183,7 @@ exports.getValuation = async (req, res) => {
         c.name as category_name,
         COUNT(p.id)::integer as product_count,
         COALESCE(SUM(p.current_stock), 0)::numeric as total_stock,
-        COALESCE(SUM(p.current_stock * p.sale_price), 0)::numeric as total_value
+        COALESCE(SUM(p.current_stock * COALESCE(NULLIF(p.base_price, 0), p.sale_price, 0)), 0)::numeric as total_value
       FROM "${schema}"."categories" c
       LEFT JOIN "${schema}"."products" p ON c.id = p.category_id AND p.tenant_id = :tenantId
       WHERE c.tenant_id = :tenantId

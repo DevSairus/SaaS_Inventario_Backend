@@ -7,6 +7,7 @@ const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const taxService = require('../services/taxService');
 const { suggestedSalePrice, isValidMargin } = require('../utils/salePricing');
+const { inheritedMarginFor } = require('../services/inventory/productMargin.service');
 
 /**
  * Importar factura electrónica desde archivo ZIP
@@ -98,8 +99,11 @@ function paymentFormFromText(text) {
  * masiva desde el registro DIAN (sin decisiones: mapeo automático).
  */
 async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id }, opts = {}) {
-  const profit_margin = parseFloat(opts.profit_margin) || 30;
-  if (!isValidMargin(profit_margin)) {
+  // Sin margen = los productos nuevos heredan el de su categoría (o el
+  // global); si tampoco hay, 30 % propio como antes.
+  const parsedMargin = parseFloat(opts.profit_margin);
+  const profit_margin = Number.isFinite(parsedMargin) ? parsedMargin : null;
+  if (profit_margin !== null && !isValidMargin(profit_margin)) {
     throw new InvoiceImportError('El margen de ganancia es sobre la venta y debe ser menor a 100 %', 400);
   }
   const supplier_name_override = opts.supplier_name?.trim() || null;
@@ -502,7 +506,7 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
   return supplier;
 }
 
-async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = 30, manualLinks = {}, newProductData = {}) {
+async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = null, manualLinks = {}, newProductData = {}) {
   const processedItems = [];
 
   for (const item of items) {
@@ -575,6 +579,11 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
       // click, reintento) generan el mismo SKU para el mismo tenant, sin el
       // savepoint no podríamos recuperar la transacción para ir a buscar el
       // producto que ya quedó creado por la otra.
+      const inheritedMargin = profit_margin === null
+        ? await inheritedMarginFor(tenant_id, overrides.category_id || null, transaction)
+        : null;
+      const itemMargin = profit_margin !== null ? profit_margin : (inheritedMargin ?? 30);
+
       try {
         product = await sequelize.transaction({ transaction }, (t) => Product.create({
           tenant_id,
@@ -586,13 +595,14 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
           brand: overrides.brand?.trim() || null,
           unit_of_measure: overrides.unit_of_measure || 'unit',
           average_cost: item.unit_price,
-          base_price: suggestedSalePrice(item.unit_price, profit_margin, {
+          base_price: suggestedSalePrice(item.unit_price, itemMargin, {
             price_includes_tax: !!overrides.price_includes_tax,
             has_tax: item.tax_percentage > 0,
             tax_percentage: item.tax_percentage || 0,
             tax_config: { iva_status: item.iva_status },
           }) ?? 0,
-          profit_margin_percentage: profit_margin,
+          profit_margin_percentage: itemMargin,
+          margin_inherited: profit_margin === null && inheritedMargin !== null,
           current_stock: 0,
           min_stock: 1,
           track_inventory: true,

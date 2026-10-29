@@ -659,4 +659,6 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
   return done;
 }
 
-module.exports = { generatePremiumSalePDFBuffer };
+// loadContext/buildDianQrContent y los rótulos también los usa la tirilla POS
+// (services/pos/posTicket.service.js), para que ambos formatos digan lo mismo.
+module.exports = { generatePremiumSalePDFBuffer, loadContext, buildDianQrContent, DOC_TYPES, METHODS };

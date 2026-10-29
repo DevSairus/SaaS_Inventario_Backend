@@ -2,6 +2,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { Category } = require('../../models/inventory');
+const { syncInheritedMargins } = require('../../services/inventory/productMargin.service');
 
 /**
  * Obtener todas las categorías
@@ -43,7 +44,7 @@ const getAllCategories = async (req, res) => {
         attributes: ['id', 'name']
       }],
       order: [['name', 'ASC']],
-      attributes: ['id', 'name', 'description', 'parent_id', 'is_active', 'created_at', 'commission_category_id', 'retention_concept']
+      attributes: ['id', 'name', 'description', 'parent_id', 'is_active', 'created_at', 'commission_category_id', 'retention_concept', 'profit_margin_percentage']
     });
 
     res.json({
@@ -277,6 +278,7 @@ const updateCategory = async (req, res) => {
       });
     }
 
+    const previousParentId = category.parent_id;
     await category.update({
       name: name ? name.trim() : category.name,
       description: description !== undefined ? (description?.trim() || null) : category.description,
@@ -285,6 +287,11 @@ const updateCategory = async (req, res) => {
       commission_category_id: commission_category_id !== undefined ? (commission_category_id || null) : category.commission_category_id,
       retention_concept: retention_concept !== undefined ? (retention_concept || null) : category.retention_concept
     });
+
+    // Al moverla de padre puede cambiar el margen que heredan sus productos.
+    if ((category.parent_id || null) !== (previousParentId || null)) {
+      await syncInheritedMargins(category.tenant_id);
+    }
 
     const updatedCategory = await Category.findOne({
       where: { id },

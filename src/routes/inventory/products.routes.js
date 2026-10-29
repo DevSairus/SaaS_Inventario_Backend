@@ -36,6 +36,7 @@ const {
 } = require('../../controllers/inventory/vehicleApplications.controller');
 
 const { bulkImportProducts } = require('../../controllers/inventory/productsBulkImport.controller');
+const { getMargins, previewMargin, applyMargin } = require('../../controllers/inventory/productMargins.controller');
 
 const uploadProductImageMiddleware = require('../../middleware/uploadProductImage');
 const uploadProductsExcelMiddleware = require('../../middleware/uploadProductsExcel');
@@ -68,6 +69,13 @@ router.get('/vehicle-brands-lines', getBrandsAndLines);
 router.post('/vehicle-brands-lines', checkRole(...PRODUCTS_WRITE_ROLES), getOrCreateBrandAndLine);
 
 // Carga masiva de productos por Excel, incluye equivalencias por código (antes de /:id)
+// Márgenes de ganancia por categoría / global. Cambiarlos puede mover el
+// precio de cientos de productos a la vez: solo gerencia.
+const MARGINS_WRITE_ROLES = ['admin', 'manager', 'super_admin'];
+router.get('/margins', getMargins);
+router.post('/margins/preview', checkRole(...MARGINS_WRITE_ROLES), previewMargin);
+router.post('/margins/apply', checkRole(...MARGINS_WRITE_ROLES), applyMargin);
+
 router.post('/bulk-import', checkRole(...PRODUCTS_WRITE_ROLES), uploadProductsExcelMiddleware.single('archivo'), bulkImportProducts);
 
 // CRUD básico

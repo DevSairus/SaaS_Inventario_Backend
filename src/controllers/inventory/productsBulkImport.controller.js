@@ -5,6 +5,7 @@ const { sequelize } = require('../../config/database');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { cellToText } = require('../../utils/excelCell');
 const { suggestedSalePrice, isValidMargin } = require('../../utils/salePricing');
+const { inheritedMarginFor } = require('../../services/inventory/productMargin.service');
 
 const REQUIRED_COLUMNS = ['Código*', 'Nombre*'];
 const MAX_REPORTED_ERRORS = 300;
@@ -90,7 +91,9 @@ async function readExcelRows(buffer) {
   return { headers, rows };
 }
 
-function parseRow(rowNumber, data) {
+// globalMargin: margen global del tenant; una fila sin margen lo hereda (los
+// productos importados no traen categoría). Sin global, 30 % propio.
+function parseRow(rowNumber, data, globalMargin = null) {
   const errors = [];
   const sku = (data['Código*'] || '').trim();
   const name = (data['Nombre*'] || '').trim();
@@ -101,7 +104,9 @@ function parseRow(rowNumber, data) {
   const average_cost = !isNaN(averageCostRaw) && averageCostRaw >= 0 ? averageCostRaw : 0;
 
   const marginRaw = parseFloat(data['Margen Utilidad (%)']);
-  const profit_margin_percentage = !isNaN(marginRaw) && marginRaw >= 0 ? marginRaw : 30;
+  const hasMargin = !isNaN(marginRaw) && marginRaw >= 0;
+  const margin_inherited = !hasMargin && globalMargin !== null;
+  const profit_margin_percentage = hasMargin ? marginRaw : (margin_inherited ? globalMargin : 30);
   if (!isValidMargin(profit_margin_percentage)) errors.push(`El margen sobre la venta debe ser menor a 100 % (llegó ${profit_margin_percentage})`);
 
   const priceRaw = parseFloat(data['Precio Venta']);
@@ -126,7 +131,7 @@ function parseRow(rowNumber, data) {
     .map((c) => c.trim())
     .filter(Boolean);
 
-  return { rowNumber, sku, name, average_cost, profit_margin_percentage, base_price, current_stock, unit_of_measure, equivalent_codes, errors };
+  return { rowNumber, sku, name, average_cost, profit_margin_percentage, margin_inherited, base_price, current_stock, unit_of_measure, equivalent_codes, errors };
 }
 
 const normalizeSku = (s) => s.trim().toUpperCase();
@@ -236,7 +241,8 @@ const bulkImportProductsInner = async (req, res) => {
       });
     }
 
-    const parsedRows = rows.map((r) => parseRow(r.rowNumber, r.data));
+    const globalMargin = await inheritedMarginFor(tenantId, null);
+    const parsedRows = rows.map((r) => parseRow(r.rowNumber, r.data, globalMargin));
     markDuplicatesInFile(parsedRows);
 
     const validRows = parsedRows.filter((r) => r.errors.length === 0);
@@ -339,6 +345,7 @@ const bulkImportProductsInner = async (req, res) => {
         average_cost: bulkWarehouseId ? 0 : row.average_cost,
         base_price: row.base_price,
         profit_margin_percentage: row.profit_margin_percentage,
+        margin_inherited: row.margin_inherited,
         product_type: 'simple',
         warehouse_id: bulkWarehouseId || null,
         current_stock: bulkWarehouseId ? 0 : row.current_stock,

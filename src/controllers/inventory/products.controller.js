@@ -7,6 +7,7 @@ const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middlewa
 const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
 const { createMovement } = require('./movements.controller');
 const { isValidMargin } = require('../../utils/salePricing');
+const { inheritedMarginFor } = require('../../services/inventory/productMargin.service');
 
 // Debe reflejar exactamente el CHECK constraint de la tabla products
 // (ver 20260101000000-baseline-core-inventory-tables.js) -- si diverge,
@@ -338,7 +339,8 @@ const createProduct = async (req, res) => {
       min_stock = 0, max_stock, product_type = 'simple',
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
-      tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false
+      tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false,
+      margin_inherited = false
     } = req.body;
 
     if (profit_margin_percentage != null && profit_margin_percentage !== '' && !isValidMargin(profit_margin_percentage)) {
@@ -361,6 +363,11 @@ const createProduct = async (req, res) => {
     }
 
     const tenantId = req.user.role === 'super_admin' ? (req.body.tenant_id || null) : req.user.tenant_id;
+
+    // Si hereda, el margen lo pone la categoría (o el global), no el formulario.
+    const effectiveMargin = margin_inherited
+      ? await inheritedMarginFor(tenantId, category_id || null)
+      : (profit_margin_percentage || 0);
 
     const existingSku = await Product.findOne({ where: { sku: sku.trim(), tenant_id: tenantId } });
     if (existingSku) return res.status(400).json({ success: false, message: 'Ya existe un producto con ese SKU' });
@@ -437,7 +444,8 @@ const createProduct = async (req, res) => {
         average_cost: 0,
         sale_price: sale_price || 0,
         base_price: base_price || 0,
-        profit_margin_percentage: profit_margin_percentage || 0,
+        profit_margin_percentage: effectiveMargin,
+        margin_inherited: !!margin_inherited,
         product_type: safeProductType,
         current_stock: 0,
         reserved_stock: safeProductType === 'service' ? 0 : reserved_stock,
@@ -604,6 +612,15 @@ const updateProduct = async (req, res) => {
     // Los campos propios del vehículo (placa, VIN, etc.) se editan desde el
     // módulo Vehículos, no desde acá -- este objeto solo se usa al crear.
     delete updateData.vehicle;
+
+    // Producto que hereda: el margen sale de su categoría (la nueva, si se
+    // cambió) o del global, nunca del formulario.
+    if (updateData.margin_inherited !== undefined) updateData.margin_inherited = !!updateData.margin_inherited;
+    const inherits = updateData.margin_inherited !== undefined ? updateData.margin_inherited : product.margin_inherited;
+    if (inherits) {
+      const categoryId = updateData.category_id !== undefined ? updateData.category_id : product.category_id;
+      updateData.profit_margin_percentage = await inheritedMarginFor(tenantId, categoryId);
+    }
 
     await product.update(updateData);
     const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });

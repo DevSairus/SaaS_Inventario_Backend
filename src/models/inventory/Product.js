@@ -113,6 +113,13 @@ const Product = sequelize.define('Product', {
     type: DataTypes.DECIMAL(5, 2),
     allowNull: true
   },
+  // true = sigue el margen de su categoría o el global; profit_margin_percentage
+  // guarda una copia del margen efectivo (ver productMargin.service.js).
+  margin_inherited: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
   has_tax: {
     type: DataTypes.BOOLEAN,
     allowNull: false,

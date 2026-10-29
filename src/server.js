@@ -148,6 +148,7 @@ const adjustmentsRoutes             = require('./routes/inventory/adjustments.ro
 const physicalCountsRoutes          = require('./routes/inventory/physicalCounts.routes');
 const combosRoutes                  = require('./routes/inventory/combos.routes');
 const costAlertsRoutes              = require('./routes/inventory/costAlerts.routes');
+const orderListsRoutes              = require('./routes/inventory/orderLists.routes');
 const warehousesRoutes              = require('./routes/inventory/warehouses.routes');
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
@@ -215,6 +216,7 @@ const expensesRoutes                = require('./routes/expenses.routes');
 const cashflowRoutes                = require('./routes/cashflow.routes');
 const cashSessionsRoutes            = require('./routes/cashSessions.routes');
 const receiptsRoutes                = require('./routes/receipts.routes');
+const posTicketsRoutes              = require('./routes/posTickets.routes');
 const customerAdvancesRoutes        = require('./routes/customer-advances.routes');
 const customerAdvanceAlertsRoutes   = require('./routes/customer-advance-alerts.routes');
 
@@ -302,6 +304,7 @@ app.use('/api/inventory/adjustments',          authMiddleware, tenantMiddleware,
 app.use('/api/inventory/physical-counts',      authMiddleware, tenantMiddleware, physicalCountsRoutes);
 app.use('/api/inventory/combos',               authMiddleware, tenantMiddleware, combosRoutes);
 app.use('/api/inventory/cost-alerts',          authMiddleware, tenantMiddleware, costAlertsRoutes);
+app.use('/api/inventory/order-lists',          authMiddleware, tenantMiddleware, requireModule('inventory'), orderListsRoutes);
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
@@ -346,6 +349,7 @@ app.use('/api/expenses',                       authMiddleware, tenantMiddleware,
 app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashflowRoutes);
 app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashSessionsRoutes);
 app.use('/api/receipts',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), receiptsRoutes);
+app.use('/api/pos-tickets',                    authMiddleware, tenantMiddleware, branchMiddleware, posTicketsRoutes);
 app.use('/api/customer-advances',              authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerAdvancesRoutes);
 app.use('/api/customer-advance-alerts',        authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerAdvanceAlertsRoutes);
 app.use('/api/tenant',                         authMiddleware, tenantMiddleware, tenantRoutes);

@@ -3180,7 +3180,7 @@ const registerPayment = async (req, res) => {
     res.json({
       success: true,
       message: 'Pago registrado exitosamente',
-      data: { order: updatedOrder, receipt_number, amount_applied: effectiveAmount, balance: total - paid_amount },
+      data: { order: updatedOrder, payment_id, receipt_number, amount_applied: effectiveAmount, balance: total - paid_amount },
     });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();

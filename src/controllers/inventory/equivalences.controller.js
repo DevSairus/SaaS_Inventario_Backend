@@ -1,7 +1,54 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
-const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember } = require('../../models/inventory');
+const {
+  Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember, Purchase, PurchaseItem, Supplier
+} = require('../../models/inventory');
 const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
+const { productSalePrice } = require('../../utils/salePricing');
+
+// Resumen de compras por producto para la pestaña de equivalencias: la última
+// compra recibida (proveedor, fecha, costo, cantidad) y a cuántos proveedores
+// distintos se le ha comprado. Una sola consulta para todos los miembros.
+async function getPurchaseSummaryMap(tenantId, productIds) {
+  const ids = Array.from(new Set(productIds.filter(Boolean)));
+  if (ids.length === 0) return {};
+
+  const items = await PurchaseItem.findAll({
+    where: { product_id: { [Op.in]: ids } },
+    attributes: ['product_id', 'unit_cost', 'quantity', 'received_quantity'],
+    include: [{
+      model: Purchase,
+      as: 'purchase',
+      required: true,
+      where: { tenant_id: tenantId, status: { [Op.in]: ['partially_received', 'received'] } },
+      attributes: ['id', 'purchase_date', 'supplier_id'],
+      include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name', 'phone'] }]
+    }],
+    order: [[{ model: Purchase, as: 'purchase' }, 'purchase_date', 'DESC']]
+  });
+
+  const map = {};
+  for (const item of items) {
+    const entry = map[item.product_id] || (map[item.product_id] = { last: null, suppliers: new Set() });
+    if (item.purchase.supplier_id) entry.suppliers.add(item.purchase.supplier_id);
+    if (entry.last) continue;
+    const supplier = item.purchase.supplier;
+    entry.last = {
+      purchase_id: item.purchase.id,
+      date: item.purchase.purchase_date,
+      unit_cost: parseFloat(item.unit_cost) || 0,
+      quantity: parseFloat(item.received_quantity ?? item.quantity) || 0,
+      supplier_id: supplier?.id || null,
+      supplier_name: supplier ? (supplier.business_name || supplier.name) : null,
+      supplier_phone: supplier?.phone || null
+    };
+  }
+
+  for (const id of Object.keys(map)) {
+    map[id] = { last: map[id].last, suppliers_count: map[id].suppliers.size };
+  }
+  return map;
+}
 
 // GET /products/:id/equivalents
 // Retorna los grupos de equivalencia donde está este producto, con todos sus miembros y stock en vivo
@@ -50,7 +97,11 @@ const getProductEquivalents = async (req, res) => {
         include: [{
           model: Product,
           as: 'product',
-          attributes: ['id', 'sku', 'name', 'current_stock', 'sale_price', 'is_active', 'image_url']
+          attributes: [
+            'id', 'sku', 'name', 'brand', 'unit_of_measure', 'current_stock', 'min_stock',
+            'track_inventory', 'base_price', 'sale_price', 'average_cost', 'last_purchase_cost',
+            'last_purchase_date', 'is_active', 'image_url'
+          ]
         }],
         order: [['role', 'ASC'], ['created_at', 'ASC']]
       });
@@ -63,6 +114,7 @@ const getProductEquivalents = async (req, res) => {
     // todos los grupos (evita N+1 por producto).
     const allProductIds = groupMembersList.flatMap(({ members }) => members.map(m => m.product_id));
     const inProcessMap = tenantId ? await getInProcessMap(tenantId, allProductIds) : {};
+    const purchaseMap = tenantId ? await getPurchaseSummaryMap(tenantId, allProductIds) : {};
 
     const groups = groupMembersList.map(({ group, members }) => ({
       group_id: group.id,
@@ -73,6 +125,7 @@ const getProductEquivalents = async (req, res) => {
       members: members.map(m => {
         const currentStock = m.product ? parseFloat(m.product.current_stock) : 0;
         const inProcessQty = inProcessMap[m.product_id]?.total || 0;
+        const purchases = purchaseMap[m.product_id];
         return {
           member_id: m.id,
           product_id: m.product_id,
@@ -80,9 +133,18 @@ const getProductEquivalents = async (req, res) => {
           notes: m.notes,
           sku: m.product?.sku,
           name: m.product?.name,
+          brand: m.product?.brand || null,
+          unit_of_measure: m.product?.unit_of_measure || null,
+          track_inventory: m.product?.track_inventory !== false,
           current_stock: currentStock,
+          in_process_stock: inProcessQty,
           available_stock: currentStock - inProcessQty,
-          sale_price: m.product ? parseFloat(m.product.sale_price) : 0,
+          min_stock: m.product ? parseFloat(m.product.min_stock) || 0 : 0,
+          sale_price: m.product ? productSalePrice(m.product) : 0,
+          average_cost: m.product ? parseFloat(m.product.average_cost) || 0 : 0,
+          last_purchase_cost: m.product ? parseFloat(m.product.last_purchase_cost) || 0 : 0,
+          last_purchase: purchases?.last || null,
+          suppliers_count: purchases?.suppliers_count || 0,
           is_active: m.product?.is_active,
           image_url: m.product?.image_url
         };

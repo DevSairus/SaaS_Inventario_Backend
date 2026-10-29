@@ -37,6 +37,13 @@ const Category = sequelize.define('Category', {
     type: DataTypes.STRING(60),
     allowNull: true
   },
+  // Margen sobre la venta de la categoría. NULL = hereda de la categoría
+  // padre / margen global (ver productMargin.service.js). Solo se cambia
+  // desde "Márgenes de ganancia", que también lo propaga a los productos.
+  profit_margin_percentage: {
+    type: DataTypes.DECIMAL(5, 2),
+    allowNull: true
+  },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true
