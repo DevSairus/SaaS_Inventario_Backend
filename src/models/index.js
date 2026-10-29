@@ -112,6 +112,7 @@ const DiagramSystemCommissionMap = require('./workshop/DiagramSystemCommissionMa
 // plan-portal-mantenimiento-vehiculo.md)
 const MaintenanceType = require('./workshop/MaintenanceType');
 const VehicleMaintenanceRecord = require('./workshop/VehicleMaintenanceRecord');
+const VehicleReminderLog = require('./workshop/VehicleReminderLog');
 
 // ✅ NUEVO - CRM (Fase 1)
 const CustomerInteraction = require('./crm/CustomerInteraction');
@@ -842,6 +843,10 @@ VehicleMaintenanceRecord.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'veh
 WorkOrder.hasMany(VehicleMaintenanceRecord, { foreignKey: 'work_order_id', as: 'maintenance_records' });
 VehicleMaintenanceRecord.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
 
+// Recordatorios de vencimiento de SOAT / técnico-mecánica (vehicleReminderService.js)
+Vehicle.hasMany(VehicleReminderLog, { foreignKey: 'vehicle_id', as: 'reminder_logs' });
+VehicleReminderLog.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+
 // ── Cruce con nómina (categoría DIAN "Comisiones") ───────────────────────
 CommissionSettlement.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 CommissionSettlement.belongsTo(PayrollNovedad, { foreignKey: 'payroll_novedad_id', as: 'payroll_novedad' });
@@ -1068,6 +1073,7 @@ module.exports = {
   DiagramSystemCommissionMap,
   MaintenanceType,
   VehicleMaintenanceRecord,
+  VehicleReminderLog,
   CommissionSettlement,
   CommissionSettlementItem,
   ProductCommissionSettlement,

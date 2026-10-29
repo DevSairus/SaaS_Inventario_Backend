@@ -1,7 +1,7 @@
 // backend/src/controllers/workshop/vehicles.controller.js
 const crypto = require('crypto');
 const logger = require('../../config/logger');
-const { Vehicle, Customer, WorkOrder, WorkOrderItem, User, Sale, Tenant } = require('../../models');
+const { Vehicle, Customer, WorkOrder, WorkOrderItem, User, Sale, Tenant, VehicleReminderLog } = require('../../models');
 const { Op } = require('sequelize');
 const { searchMatch } = require('../../utils/searchText');
 const { runWithTenantSchema } = require('../../config/tenantContext');
@@ -222,6 +222,26 @@ const getMaintenance = async (req, res) => {
   } catch (error) {
     logger.error('Error obteniendo mantenimientos del vehículo:', error);
     res.status(500).json({ success: false, message: 'Error al obtener mantenimientos' });
+  }
+};
+
+// GET /workshop/vehicles/:id/reminders
+// Historial de recordatorios de vencimiento de SOAT / técnico-mecánica
+// (services/vehicleReminderService.js), los más recientes primero.
+const getReminders = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id }, attributes: ['id'] });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
+    const logs = await VehicleReminderLog.findAll({
+      where: { vehicle_id: vehicle.id, tenant_id: req.user.tenant_id },
+      attributes: ['id', 'document_type', 'expiry_date', 'days_before', 'channel', 'status', 'destination', 'detail', 'created_at'],
+      order: [['created_at', 'DESC']],
+      limit: 50,
+    });
+    res.json({ success: true, data: logs });
+  } catch (error) {
+    logger.error('Error obteniendo recordatorios del vehículo:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener los recordatorios' });
   }
 };
 
@@ -473,5 +493,5 @@ async function getPublicVehiclePortalBody(vehicleId, res) {
 
 module.exports = {
   list, getById, create, update, getHistory, remove,
-  getMaintenance, getPortalLink, sendPortalWhatsApp, getLabel, getPublicVehiclePortal,
+  getMaintenance, getReminders, getPortalLink, sendPortalWhatsApp, getLabel, getPublicVehiclePortal,
 };

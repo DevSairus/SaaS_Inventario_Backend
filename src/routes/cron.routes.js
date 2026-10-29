@@ -247,7 +247,7 @@ router.post('/test-reminder', cronAuth, async (req, res) => {
           customer: customerName,
           type: docType,
           days_simulated: days,
-          phone: phone || null,
+          phone: customer?.mobile || customer?.phone || null,
           email: customer?.email || null,
           channel: channel || 'sin_contacto',
         });
