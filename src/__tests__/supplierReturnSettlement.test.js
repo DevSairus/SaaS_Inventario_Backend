@@ -36,11 +36,21 @@ describe('saldo de la compra con devoluciones', () => {
 // ── Asiento (generateSupplierReturnEntry) ──
 const mockCreateDraftEntry = jest.fn(async (_t, data) => ({ id: 'je-1', ...data }));
 jest.mock('../config/database', () => ({
-  sequelize: { transaction: jest.fn(async () => ({ commit: jest.fn(), rollback: jest.fn() })), define: jest.fn(() => ({})) },
+  sequelize: {
+    transaction: jest.fn(async () => ({ commit: jest.fn(), rollback: jest.fn() })),
+    define: jest.fn(() => ({})),
+    // purchaseExcludedIvaShare: compra sin productos excluidos de IVA.
+    query: jest.fn(async () => [{ total: 0, excluded: 0 }]),
+    QueryTypes: { SELECT: 'SELECT' },
+  },
 }));
 jest.mock('../models', () => ({
   BankAccount: { findOne: jest.fn(async () => ({ chart_of_account_id: 'acc-bank-1' })) },
+  Tenant: { findByPk: jest.fn(async () => null) },
 }));
+// Código agregado después de estos tests: el seed de mapeos ICA (no aplica
+// acá) y la consulta de responsabilidad de IVA del tenant (null = responsable).
+jest.mock('../services/accounting/accountingSeed.service', () => ({ ensureIcaMappings: jest.fn(async () => {}) }));
 jest.mock('../services/accounting/journalEntry.service', () => ({
   getMappedAccountId: jest.fn(async (_t, key) => `acc:${key}`),
   createDraftEntry: (...args) => mockCreateDraftEntry(...args),

@@ -15,7 +15,7 @@ jest.mock('../models', () => ({
   SupplierReturn: model('SupplierReturn'),
   Supplier: {},
   Customer: {},
-  Tenant: {},
+  Tenant: { findByPk: jest.fn(async () => null) }, // sin timezone propio: America/Bogota
 }));
 jest.mock('../services/pdfService', () => ({}));
 jest.mock('../services/excelService', () => ({}));
@@ -23,7 +23,7 @@ jest.mock('../services/accounting/cashReconciliation.service', () => ({}));
 jest.mock('../utils/branchFilter', () => ({}));
 jest.mock('../services/workshop/workOrderPayments.service', () => ({ transferableAmount: (p) => Number(p.amount) }));
 
-const { buildCashFlow } = require('../controllers/finance/cashflow.controller');
+const { buildCashFlow, toDateOnly } = require('../controllers/finance/cashflow.controller');
 
 const DAY = '2026-10-09';
 
@@ -66,4 +66,34 @@ test('incluye las fuentes nuevas y excluye el saldo a favor', async () => {
   expect(purchaseOuts).toHaveLength(1);
   expect(purchaseOuts[0]).toMatchObject({ direction: 'out', amount: 5000 });
   expect(bySource['DEV-1']).toMatchObject({ source: 'customer_return_refund', direction: 'out', amount: 15000, date: DAY, cash_session_id: 'cs1' });
+});
+
+// Fecha local (Colombia, UTC-5), no UTC: lo registrado después de las 7 p. m.
+// caía al día siguiente y el cuadre de ese día no lo veía.
+test('toDateOnly usa la fecha local del tenant', () => {
+  expect(toDateOnly('2026-10-10T01:30:00.000Z')).toBe('2026-10-09'); // 8:30 p. m. del 9
+  expect(toDateOnly(new Date('2026-10-10T04:59:59Z'))).toBe('2026-10-09');
+  expect(toDateOnly('2026-10-09T05:00:00.000Z')).toBe('2026-10-09'); // medianoche local
+  expect(toDateOnly('2026-10-09T15:00:00-05:00')).toBe('2026-10-09');
+  // Fecha sin hora guardada como timestamp (new Date('YYYY-MM-DD')): se respeta.
+  expect(toDateOnly('2026-10-09T00:00:00.000Z')).toBe('2026-10-09');
+  expect(toDateOnly(new Date('2026-10-09T00:00:00Z'))).toBe('2026-10-09');
+  // Ya es fecha local: tal cual.
+  expect(toDateOnly('2026-10-09')).toBe('2026-10-09');
+  expect(toDateOnly('2026-10-09 22:00:00')).toBe('2026-10-09');
+  expect(toDateOnly(null)).toBeNull();
+  expect(toDateOnly('2026-10-10T01:30:00Z', 'America/Santo_Domingo')).toBe('2026-10-09'); // UTC-4
+  expect(toDateOnly('2026-10-10T03:30:00Z', 'America/Santo_Domingo')).toBe('2026-10-09');
+  expect(toDateOnly('2026-10-10T04:30:00Z', 'America/Santo_Domingo')).toBe('2026-10-10');
+});
+
+test('un pago de la noche entra en el día local, no en el siguiente', async () => {
+  rows.Sale = [{ sale_number: 'FV-9', customer_name: 'Ana', branch_id: 'b1', payment_history: [
+    { date: '2026-10-10T01:30:00.000Z', amount: 40000, method: 'Efectivo', cash_session_id: 'cs1' },
+  ] }];
+  const flow = await buildCashFlow('t1', { from_date: DAY, to_date: DAY, branch_id: 'b1' });
+  expect(flow.allTransactions.find((t) => t.reference === 'FV-9')).toMatchObject({ date: DAY, amount: 40000 });
+  const nextDay = await buildCashFlow('t1', { from_date: '2026-10-10', to_date: '2026-10-10', branch_id: 'b1' });
+  expect(nextDay.allTransactions.find((t) => t.reference === 'FV-9')).toBeUndefined();
+  rows.Sale = [];
 });

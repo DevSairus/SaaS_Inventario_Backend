@@ -54,4 +54,44 @@ async function withAdvisoryLockTry(lockName, fn) {
   });
 }
 
-module.exports = { withAdvisoryLockBlocking, withAdvisoryLockTry };
+/**
+ * Igual que withAdvisoryLockTry, pero con un lease en public.cron_locks en vez
+ * de un advisory lock de transacción: tomar y soltar el lease son dos queries
+ * cortas, y mientras corre fn() no queda ninguna transacción abierta ni
+ * conexión del pool retenida (con el advisory lock, cada job sostenía una
+ * conexión "idle in transaction" durante minutos -- Neon llegó a cortar una
+ * de 40 min).
+ *
+ * El lease vence solo a los ttlMs: si el proceso muere a mitad del job, otra
+ * réplica puede tomarlo después. Por eso ttlMs tiene que ser mayor que lo que
+ * puede durar el job; si lo supera, otra réplica podría arrancarlo en paralelo.
+ */
+async function withLeaseTry(lockName, ttlMs, fn) {
+  const owner = require('crypto').randomUUID();
+  const [rows] = await sequelize.query(`
+    INSERT INTO public.cron_locks (name, locked_until, locked_by, updated_at)
+    VALUES (:name, NOW() + (:ttlMs * INTERVAL '1 millisecond'), :owner, NOW())
+    ON CONFLICT (name) DO UPDATE
+      SET locked_until = EXCLUDED.locked_until, locked_by = EXCLUDED.locked_by, updated_at = NOW()
+      WHERE public.cron_locks.locked_until < NOW()
+    RETURNING name
+  `, { replacements: { name: lockName, ttlMs, owner } });
+  if (rows.length === 0) return { acquired: false };
+
+  const startedAt = new Date();
+  try {
+    const result = await fn();
+    return { acquired: true, result };
+  } finally {
+    // Se suelta, pero nunca antes de 55 s desde que empezó: las réplicas
+    // disparan el mismo cron con unos ms/segundos de diferencia, y un job que
+    // termina rápido no debe dejar que otra lo repita en ese mismo disparo.
+    await sequelize.query(
+      `UPDATE public.cron_locks SET locked_until = GREATEST(NOW(), :startedAt::timestamptz + INTERVAL '55 seconds'), updated_at = NOW()
+        WHERE name = :name AND locked_by = :owner`,
+      { replacements: { name: lockName, owner, startedAt } }
+    ).catch(() => { /* si falla, el lease vence solo */ });
+  }
+}
+
+module.exports = { withAdvisoryLockBlocking, withAdvisoryLockTry, withLeaseTry };

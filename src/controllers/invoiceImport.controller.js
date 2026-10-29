@@ -1,5 +1,6 @@
 // backend/src/controllers/invoiceImport.controller.js
 const AdmZip = require('adm-zip');
+const { nextPurchaseNumber } = require('../services/inventory/purchaseNumber.service');
 const { parseInvoiceXML, validateParsedData } = require('../services/invoiceXmlParser');
 const { Purchase, PurchaseItem, Product, Supplier, ProductSupplier } = require('../models/inventory');
 const { sequelize } = require('../config/database');
@@ -8,6 +9,7 @@ const { runWithTenantSchema } = require('../config/tenantContext');
 const taxService = require('../services/taxService');
 const { suggestedSalePrice, isValidMargin } = require('../utils/salePricing');
 const { inheritedMarginFor } = require('../services/inventory/productMargin.service');
+const { bulkUpdateById } = require('../utils/bulkUpdate');
 
 /**
  * Importar factura electrónica desde archivo ZIP
@@ -346,12 +348,8 @@ const previewInvoiceInner = async (req, res) => {
     // Por cada ítem, correr la misma cadena de búsqueda que processInvoiceItems()
     // (código exacto → SKU interno → nombre aproximado) pero sin crear ni guardar
     // nada — solo para sugerirle al frontend con qué producto vincularlo.
-    const itemsWithSuggestions = await Promise.all(
-      invoiceData.items.map(async (item, idx) => ({
-        ...item,
-        suggestion: await buildItemSuggestion(item, tenant_id, supplierCandidate?.id),
-      }))
-    );
+    const suggestions = await buildItemSuggestions(invoiceData.items, tenant_id, supplierCandidate?.id);
+    const itemsWithSuggestions = invoiceData.items.map((item, idx) => ({ ...item, suggestion: suggestions[idx] }));
 
     res.json({
       success: true,
@@ -423,39 +421,102 @@ async function findSupplierCandidate(supplierData, tenant_id) {
   return null;
 }
 
+// ── Emparejamiento de ítems con productos ───────────────────────────────────
+// Cadena de búsqueda de cada ítem: código del proveedor ya mapeado → decisión
+// del usuario en el modal → SKU interno igual al código → nombre aproximado →
+// crear producto. Antes eran 2-6 consultas por ítem, una tras otra (una
+// factura de 150 ítems podía pasar del límite de 30 s del frontend); ahora las
+// lecturas van en bloque al principio (loadMatchData), los ítems se recorren
+// en memoria en el mismo orden de siempre -- lo que crea o vincula un ítem lo
+// ven los siguientes, igual que antes -- y las escrituras van en bloque al final.
+
+const codeOf = (item) => (item.sku && !item.sku.startsWith('TEMP-') ? item.sku : null);
+const namePattern = (item) => `%${item.name}%`;
+
+// ILIKE de Postgres en JS (% = cualquier texto, _ = un carácter, \ escapa),
+// para buscar por nombre entre los productos creados en esta misma importación.
+function ilikeMatches(pattern, text) {
+  const escapeRe = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let re = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    if (c === '\\' && i + 1 < pattern.length) re += escapeRe(pattern[++i]);
+    else if (c === '%') re += '.*';
+    else if (c === '_') re += '.';
+    else re += escapeRe(c);
+  }
+  return new RegExp(`^${re}$`, 'is').test(String(text ?? ''));
+}
+
+/**
+ * Lecturas en bloque para emparejar ítems:
+ *  - mappingByCode: código del proveedor → product_id (mapeos confirmados)
+ *  - links: filas de product_suppliers de este proveedor para esos códigos y productos
+ *  - byId / bySku: productos
+ *  - fuzzyByItem: ítem → primer producto cuyo nombre contiene el del ítem, en
+ *    orden físico de la tabla (el mismo que devolvía el findOne de antes)
+ */
+async function loadMatchData(items, tenant_id, supplier_id, { transaction, productIds = [], skus = [], fuzzyItems = items } = {}) {
+  const codes = [...new Set(items.map(codeOf).filter(Boolean))];
+  const codeRows = supplier_id && codes.length
+    ? await ProductSupplier.findAll({ where: { tenant_id, supplier_id, supplier_code: codes }, transaction })
+    : [];
+  const mappingByCode = new Map(codeRows.map((m) => [m.supplier_code, m.product_id]));
+
+  const ids = [...new Set([...codeRows.map((m) => m.product_id), ...productIds].filter(Boolean))];
+  const byId = new Map(ids.length
+    ? (await Product.findAll({ where: { id: ids }, transaction })).map((p) => [p.id, p])
+    : []);
+
+  const allSkus = [...new Set([...codes, ...skus].filter(Boolean))];
+  const bySku = new Map(allSkus.length
+    ? (await Product.findAll({ where: { tenant_id, sku: allSkus }, transaction })).map((p) => [p.sku, p])
+    : []);
+
+  const fuzzyByItem = new Map();
+  if (fuzzyItems.length) {
+    const table = sequelize.getQueryInterface().queryGenerator.quoteTable(Product.getTableName());
+    const values = fuzzyItems.map((item, i) => `(${i}, ${sequelize.escape(namePattern(item))})`).join(', ');
+    // LATERAL + LIMIT 1: cada nombre usa el índice trigram de products.name
+    // por separado (un JOIN normal cruzaba todos los nombres contra toda la
+    // tabla). ORDER BY ctid = el primero en orden físico, como el findOne de antes.
+    const rows = await sequelize.query(`
+      SELECT v.idx AS "matchIndex", p.*
+        FROM (VALUES ${values}) AS v(idx, pattern)
+        CROSS JOIN LATERAL (
+          SELECT * FROM ${table} pp
+           WHERE pp.tenant_id = ${sequelize.escape(tenant_id)} AND pp.name ILIKE v.pattern
+           ORDER BY pp.ctid
+           LIMIT 1
+        ) p
+    `, { model: Product, mapToModel: true, transaction });
+    for (const p of rows) fuzzyByItem.set(fuzzyItems[p.get('matchIndex')], p);
+  }
+
+  return { codes, codeRows, mappingByCode, byId, bySku, fuzzyByItem };
+}
+
 // Misma cadena de búsqueda que processInvoiceItems() (código exacto → SKU
 // interno → nombre aproximado), pero de solo lectura — arma la "suggestion"
 // que el modal de importación usa para pre-cargar el selector de cada ítem.
-async function buildItemSuggestion(item, tenant_id, supplierId) {
-  const hasSupplierCode = item.sku && !item.sku.startsWith('TEMP-');
-
-  if (hasSupplierCode && supplierId) {
-    const mapping = await ProductSupplier.findOne({
-      where: { tenant_id, supplier_id: supplierId, supplier_code: item.sku },
-    });
-    if (mapping) {
-      const product = await Product.findByPk(mapping.product_id);
-      if (product) {
-        return { product_id: product.id, product_name: product.name, match_type: 'code_exact' };
-      }
+// Antes era una búsqueda por ítem, todas a la vez (Promise.all): con facturas
+// grandes agotaba el pool de conexiones.
+async function buildItemSuggestions(items, tenant_id, supplierId) {
+  const { mappingByCode, byId, bySku, fuzzyByItem } = await loadMatchData(items, tenant_id, supplierId);
+  return items.map((item) => {
+    const code = codeOf(item);
+    if (code && supplierId && mappingByCode.has(code)) {
+      const product = byId.get(mappingByCode.get(code));
+      if (product) return { product_id: product.id, product_name: product.name, match_type: 'code_exact' };
     }
-  }
-
-  if (hasSupplierCode) {
-    const bySku = await Product.findOne({ where: { tenant_id, sku: item.sku } });
-    if (bySku) {
-      return { product_id: bySku.id, product_name: bySku.name, match_type: 'sku_internal' };
+    if (code) {
+      const product = bySku.get(code);
+      if (product) return { product_id: product.id, product_name: product.name, match_type: 'sku_internal' };
     }
-  }
-
-  const byName = await Product.findOne({
-    where: { tenant_id, name: { [Op.iLike]: `%${item.name}%` } },
+    const product = fuzzyByItem.get(item);
+    if (product) return { product_id: product.id, product_name: product.name, match_type: 'name_fuzzy' };
+    return null;
   });
-  if (byName) {
-    return { product_id: byName.id, product_name: byName.name, match_type: 'name_fuzzy' };
-  }
-
-  return null;
 }
 
 async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
@@ -507,132 +568,172 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
 }
 
 async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = null, manualLinks = {}, newProductData = {}) {
-  const processedItems = [];
+  // manual_links llega con claves string ("0", "1"...) porque viene de JSON.parse
+  // sobre un objeto armado en el frontend con índices originales del array.
+  const linkOf = (item) => manualLinks[String(item.original_index)];
+  // Datos que el usuario definió en el panel "Crear producto nuevo" del
+  // modal (código, referencia, nombre, categoría, marca, unidad, IVA
+  // incluido) — permiten dejar el producto bien organizado desde acá en
+  // vez de tener que editarlo después.
+  const overridesOf = (item) => newProductData[String(item.original_index)] || {};
+
+  const { codes, codeRows, mappingByCode, byId, bySku, fuzzyByItem } = await loadMatchData(items, tenant_id, supplier_id, {
+    transaction,
+    productIds: items.map(linkOf).filter((l) => l && l !== 'CREATE_NEW'),
+    skus: items.map((item) => overridesOf(item).sku?.trim()),
+    // Solo los ítems sin decisión del usuario pueden caer al nombre aproximado.
+    fuzzyItems: items.filter((item) => !linkOf(item)),
+  });
+
+  // Filas de product_suppliers de este proveedor que pueden tocarse al
+  // guardar mapeos: las de los códigos de la factura y las de los productos
+  // ya existentes que se pueden vincular (índice único producto+proveedor).
+  const knownIds = [...new Set([...byId.keys(), ...[...bySku.values()].map((p) => p.id), ...[...fuzzyByItem.values()].map((p) => p.id)])];
+  const productRows = knownIds.length
+    ? await ProductSupplier.findAll({ where: { tenant_id, supplier_id, product_id: knownIds }, transaction })
+    : [];
+  const linkByProduct = new Map();
+  const codeOwner = new Map(); // código del proveedor → fila que lo tiene (índice único parcial)
+  for (const row of [...codeRows, ...productRows]) {
+    linkByProduct.set(row.product_id, row);
+    if (row.supplier_code) codeOwner.set(row.supplier_code, row);
+  }
+  const dirtyLinks = new Set();
+  const newLinks = [];
+
+  // Guardar/actualizar el mapeo código-proveedor → producto. Reutiliza la
+  // fila si ya existe (por ejemplo, creada antes al confirmar una compra — ver
+  // purchases.controller.js) para no pisar last_price/last_purchase_date.
+  // Índice único parcial (tenant_id, supplier_id, supplier_code): si ese
+  // código de proveedor ya está vinculado a OTRO producto no se guarda y la
+  // importación sigue — el ítem ya quedó vinculado al producto correcto, solo
+  // no se "recuerda" el código para la próxima vez. Se verifica en memoria
+  // antes de escribir: un INSERT que choca dejaría la transacción abortada.
+  const saveSupplierMapping = (product, supplier_code, supplier_description) => {
+    let row = linkByProduct.get(product.id);
+    const owner = codeOwner.get(supplier_code);
+    if (owner && owner !== row) {
+      console.warn(`⚠️  No se pudo guardar el mapeo de código "${supplier_code}": ya está vinculado a otro producto.`);
+      return;
+    }
+    if (row) {
+      if (row.supplier_code && row.supplier_code !== supplier_code) {
+        codeOwner.delete(row.supplier_code);
+        mappingByCode.delete(row.supplier_code);
+      }
+      row.supplier_code = supplier_code;
+      row.supplier_description = supplier_description;
+      if (!row.isNewLink) dirtyLinks.add(row);
+    } else {
+      row = { id: require('crypto').randomUUID(), product_id: product.id, supplier_code, supplier_description, isNewLink: true };
+      linkByProduct.set(product.id, row);
+      newLinks.push(row);
+    }
+    codeOwner.set(supplier_code, row);
+    mappingByCode.set(supplier_code, product.id);
+  };
+
+  const created = [];      // productos nuevos de esta importación, en orden
+  const pendingSku = [];   // nuevos sin código propio: SKU autogenerado al final
+  const marginCache = new Map(); // margen heredado por categoría (no cambia durante la importación)
+  const entries = [];
 
   for (const item of items) {
     let product = null;
     let isNew = false;
     let matchType = null;
 
-    const hasSupplierCode = item.sku && !item.sku.startsWith('TEMP-');
-    // manual_links llega con claves string ("0", "1"...) porque viene de JSON.parse
-    // sobre un objeto armado en el frontend con índices originales del array.
-    const manualLink = manualLinks[String(item.original_index)];
+    const code = codeOf(item);
+    const manualLink = linkOf(item);
 
     // 1) ¿Ya existe un mapeo tenant+proveedor+código_proveedor? Es la ÚNICA vía
     //    que se aplica sola, sin pasar por el usuario — el mapeo ya fue
     //    confirmado en una importación anterior.
-    if (hasSupplierCode) {
-      const mapping = await ProductSupplier.findOne({
-        where: { tenant_id, supplier_id, supplier_code: item.sku },
-        transaction,
-      });
-      if (mapping) {
-        product = await Product.findByPk(mapping.product_id, { transaction });
-        if (product) matchType = 'code_exact';
-      }
+    if (code && mappingByCode.has(code)) {
+      product = byId.get(mappingByCode.get(code)) || null;
+      if (product) matchType = 'code_exact';
     }
 
     // 2) Decisión del usuario en el modal de importación (aceptó una sugerencia,
     //    la cambió, o pidió crear un producto nuevo) — es la otra vía válida
     //    para terminar vinculando el ítem, y la única que se guarda como mapeo.
     if (!product && manualLink && manualLink !== 'CREATE_NEW') {
-      product = await Product.findByPk(manualLink, { transaction });
+      product = byId.get(manualLink) || null;
       if (product) matchType = 'manual';
     }
 
     // 3) Fallback automático heredado (llamadas directas al endpoint sin pasar
     //    por el modal, o sin decisión para este ítem): SKU interno igual al código.
-    if (!product && !manualLink && hasSupplierCode) {
-      product = await Product.findOne({ where: { tenant_id, sku: item.sku }, transaction });
+    if (!product && !manualLink && code) {
+      product = bySku.get(code) || null;
       if (product) matchType = 'sku_internal';
     }
 
-    // 4) Fallback automático heredado: nombre aproximado.
+    // 4) Fallback automático heredado: nombre aproximado (primero entre los
+    //    productos que ya existían, después entre los creados en esta importación).
     if (!product && !manualLink) {
-      product = await Product.findOne({
-        where: { tenant_id, name: { [Op.iLike]: `%${item.name}%` } },
-        transaction
-      });
+      product = fuzzyByItem.get(item) || created.find((p) => ilikeMatches(namePattern(item), p.name)) || null;
       if (product) matchType = 'name_fuzzy';
     }
 
-    // 5) Crear producto nuevo — comportamiento actual, disparado tanto por
-    //    "no se encontró nada" como por la decisión explícita CREATE_NEW.
+    // 5) Crear producto nuevo — disparado tanto por "no se encontró nada" como
+    //    por la decisión explícita CREATE_NEW. Se arma en memoria y se inserta
+    //    con los demás al final.
     if (!product) {
-      // Datos que el usuario definió en el panel "Crear producto nuevo" del
-      // modal (código, referencia, nombre, categoría, marca, unidad, IVA
-      // incluido) — permiten dejar el producto bien organizado desde acá en
-      // vez de tener que editarlo después.
-      const overrides = newProductData[String(item.original_index)] || {};
+      const overrides = overridesOf(item);
 
-      let newSku = overrides.sku?.trim() || (item.sku && !item.sku.startsWith('TEMP-') ? item.sku : null);
-      if (newSku) {
-        const skuTaken = await Product.findOne({ where: { tenant_id, sku: newSku }, transaction });
-        if (skuTaken) newSku = null; // el código elegido ya existe: caer a autogenerado
+      let newSku = overrides.sku?.trim() || code;
+      if (newSku && bySku.has(newSku)) newSku = null; // el código elegido ya existe: caer a autogenerado
+
+      const categoryId = overrides.category_id || null;
+      let inheritedMargin = null;
+      if (profit_margin === null) {
+        if (!marginCache.has(categoryId)) marginCache.set(categoryId, await inheritedMarginFor(tenant_id, categoryId, transaction));
+        inheritedMargin = marginCache.get(categoryId);
       }
-      if (!newSku) newSku = await generateUniqueSku(overrides.name?.trim() || item.name, tenant_id, transaction);
-
-      // Usamos un savepoint (nested transaction sobre la misma transacción) porque
-      // en Postgres un error dentro de una transacción la deja abortada para
-      // cualquier query posterior -- si dos importaciones concurrentes (doble
-      // click, reintento) generan el mismo SKU para el mismo tenant, sin el
-      // savepoint no podríamos recuperar la transacción para ir a buscar el
-      // producto que ya quedó creado por la otra.
-      const inheritedMargin = profit_margin === null
-        ? await inheritedMarginFor(tenant_id, overrides.category_id || null, transaction)
-        : null;
       const itemMargin = profit_margin !== null ? profit_margin : (inheritedMargin ?? 30);
 
-      try {
-        product = await sequelize.transaction({ transaction }, (t) => Product.create({
-          tenant_id,
-          product_type: 'simple', // valor válido según CHECK constraint de la DB
-          sku: newSku,
-          barcode: overrides.barcode?.trim() || newSku,  // por defecto, código de barras = mismo SKU
-          name: overrides.name?.trim() || item.name,
-          category_id: overrides.category_id || null,
-          brand: overrides.brand?.trim() || null,
-          unit_of_measure: overrides.unit_of_measure || 'unit',
-          average_cost: item.unit_price,
-          base_price: suggestedSalePrice(item.unit_price, itemMargin, {
-            price_includes_tax: !!overrides.price_includes_tax,
-            has_tax: item.tax_percentage > 0,
-            tax_percentage: item.tax_percentage || 0,
-            tax_config: { iva_status: item.iva_status },
-          }) ?? 0,
-          profit_margin_percentage: itemMargin,
-          margin_inherited: profit_margin === null && inheritedMargin !== null,
-          current_stock: 0,
-          min_stock: 1,
-          track_inventory: true,
-          is_active: true,
+      product = Product.build({
+        tenant_id,
+        product_type: 'simple', // valor válido según CHECK constraint de la DB
+        sku: newSku,
+        barcode: overrides.barcode?.trim() || newSku,  // por defecto, código de barras = mismo SKU
+        name: overrides.name?.trim() || item.name,
+        category_id: categoryId,
+        brand: overrides.brand?.trim() || null,
+        unit_of_measure: overrides.unit_of_measure || 'unit',
+        average_cost: item.unit_price,
+        base_price: suggestedSalePrice(item.unit_price, itemMargin, {
+          price_includes_tax: !!overrides.price_includes_tax,
           has_tax: item.tax_percentage > 0,
           tax_percentage: item.tax_percentage || 0,
-          // Excluido (sin IVA en la factura) o exento (IVA 0 %): así queda el
-          // producto para sus ventas, en vez de un 19 % por defecto.
-          tax_config: {
-            iva_status: item.iva_status || (item.tax_percentage > 0 ? 'gravado' : 'exento'),
-            iva: { enabled: item.tax_percentage > 0, rate: item.tax_percentage || 0 },
-            inc: { enabled: false, rate: 0 },
-            ica: { enabled: false, rate: 0 },
-          },
-          price_includes_tax: !!overrides.price_includes_tax
-        }, { transaction: t }));
+          tax_config: { iva_status: item.iva_status },
+        }) ?? 0,
+        profit_margin_percentage: itemMargin,
+        margin_inherited: profit_margin === null && inheritedMargin !== null,
+        current_stock: 0,
+        min_stock: 1,
+        track_inventory: true,
+        is_active: true,
+        has_tax: item.tax_percentage > 0,
+        tax_percentage: item.tax_percentage || 0,
+        // Excluido (sin IVA en la factura) o exento (IVA 0 %): así queda el
+        // producto para sus ventas, en vez de un 19 % por defecto.
+        tax_config: {
+          iva_status: item.iva_status || (item.tax_percentage > 0 ? 'gravado' : 'exento'),
+          iva: { enabled: item.tax_percentage > 0, rate: item.tax_percentage || 0 },
+          inc: { enabled: false, rate: 0 },
+          ica: { enabled: false, rate: 0 },
+        },
+        price_includes_tax: !!overrides.price_includes_tax
+      });
+      if (newSku) bySku.set(newSku, product);
+      else pendingSku.push({ product, baseName: overrides.name?.trim() || item.name, barcodeFromSku: !overrides.barcode?.trim() });
+      byId.set(product.id, product);
+      created.push(product);
 
-        isNew = true;
-        matchType = manualLink === 'CREATE_NEW' ? 'new_confirmed' : 'new';
-      } catch (err) {
-        if (err.name !== 'SequelizeUniqueConstraintError') throw err;
-
-        // Otra importación concurrente ganó la carrera y ya creó el producto
-        // con este mismo SKU: lo reutilizamos en vez de tumbar la importación.
-        product = await Product.findOne({ where: { tenant_id, sku: newSku }, transaction });
-        if (!product) throw err;
-
-        isNew = false;
-        matchType = 'sku_race_recovered';
-      }
+      isNew = true;
+      matchType = manualLink === 'CREATE_NEW' ? 'new_confirmed' : 'new';
     }
 
     // 6) Guardar/actualizar el mapeo código-proveedor → producto SOLO cuando la
@@ -640,73 +741,114 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
     //    Un match automático por SKU interno o por nombre (pasos 3 y 4) NUNCA
     //    guarda el mapeo por sí solo — así, si el match automático estaba
     //    equivocado, no queda "grabado" para las próximas importaciones.
-    if (hasSupplierCode && manualLink !== undefined) {
-      await saveSupplierMapping(tenant_id, supplier_id, product.id, item.sku, item.name, transaction);
+    if (code && manualLink !== undefined) {
+      saveSupplierMapping(product, code, item.name);
     }
 
-    processedItems.push({
-      product_id: product.id,
-      product_name: product.name,
-      product_sku: product.sku,
-      unit_of_measure: product.unit_of_measure || 'unit',
-      quantity: item.quantity,
-      unit_cost: item.unit_price,
-      tax_percentage: item.tax_percentage,
-      tax_amount: item.tax_amount,
-      inc_rate: Number(item.inc_rate) || 0,
-      inc_amount: Number(item.inc_amount) || 0,
-      subtotal: item.subtotal,
-      total: item.total,
-      isNew: isNew,
-      match_type: matchType
-    });
+    entries.push({ item, product, isNew, matchType });
   }
 
-  return processedItems;
-}
-
-// Crea o actualiza la fila de product_suppliers con el código del proveedor.
-// Reutiliza la fila si ya existe (por ejemplo, creada antes al confirmar una
-// compra — ver purchases.controller.js) para no pisar last_price/last_purchase_date.
-async function saveSupplierMapping(tenant_id, supplier_id, product_id, supplier_code, supplier_description, transaction) {
-  try {
-    const existing = await ProductSupplier.findOne({
-      where: { tenant_id, supplier_id, product_id },
-      transaction,
-    });
-
-    if (existing) {
-      await existing.update({ supplier_code, supplier_description }, { transaction });
-    } else {
-      await ProductSupplier.create({
-        tenant_id, supplier_id, product_id, supplier_code, supplier_description,
-      }, { transaction });
-    }
-  } catch (error) {
-    // Índice único parcial (tenant_id, supplier_id, supplier_code): salta si ese
-    // código de proveedor ya está vinculado a OTRO producto. No interrumpe la
-    // importación — el ítem ya quedó vinculado al producto correcto, solo no
-    // se pudo "recordar" el código para la próxima vez.
-    if (error.name === 'SequelizeUniqueConstraintError') {
-      console.warn(`⚠️  No se pudo guardar el mapeo de código "${supplier_code}": ya está vinculado a otro producto.`);
-      return;
-    }
-    throw error;
+  await assignGeneratedSkus(pendingSku, tenant_id, transaction, new Set(bySku.keys()));
+  const replaced = await insertNewProducts(created, tenant_id, transaction);
+  for (const entry of entries) {
+    const recovered = replaced.get(entry.product);
+    if (recovered) Object.assign(entry, { product: recovered, isNew: false, matchType: 'sku_race_recovered' });
   }
+
+  // Mapeos código-proveedor: un UPDATE y un INSERT para todos.
+  await bulkUpdateById(ProductSupplier, [...dirtyLinks].map((row) => ({
+    id: row.id, supplier_code: row.supplier_code, supplier_description: row.supplier_description,
+  })), ['supplier_code', 'supplier_description'], { transaction });
+  if (newLinks.length) {
+    await ProductSupplier.bulkCreate(newLinks.map((row) => ({
+      id: row.id,
+      tenant_id,
+      supplier_id,
+      product_id: (replaced.get(byId.get(row.product_id)) || { id: row.product_id }).id,
+      supplier_code: row.supplier_code,
+      supplier_description: row.supplier_description,
+    })), { transaction });
+  }
+
+  return entries.map(({ item, product, isNew, matchType }) => ({
+    product_id: product.id,
+    product_name: product.name,
+    product_sku: product.sku,
+    unit_of_measure: product.unit_of_measure || 'unit',
+    quantity: item.quantity,
+    unit_cost: item.unit_price,
+    tax_percentage: item.tax_percentage,
+    tax_amount: item.tax_amount,
+    inc_rate: Number(item.inc_rate) || 0,
+    inc_amount: Number(item.inc_amount) || 0,
+    subtotal: item.subtotal,
+    total: item.total,
+    isNew: isNew,
+    match_type: matchType
+  }));
 }
 
-async function generateUniqueSku(productName, tenant_id, transaction) {
-  const prefix = productName.substring(0, 3).toUpperCase();
+// SKU autogenerado (3 primeras letras del nombre + 6 dígitos de la hora, con
+// -1, -2... si ya existe) para los productos nuevos sin código, verificando
+// los choques contra la BD en bloque en vez de una consulta por candidato.
+async function assignGeneratedSkus(pending, tenant_id, transaction, usedSkus) {
   const timestamp = Date.now().toString().slice(-6);
-  let sku = `${prefix}-${timestamp}`;
-  let counter = 1;
-
-  while (await Product.findOne({ where: { tenant_id, sku }, transaction })) {
-    sku = `${prefix}-${timestamp}-${counter}`;
-    counter++;
+  let unresolved = pending.map((p) => ({ ...p, base: `${p.baseName.substring(0, 3).toUpperCase()}-${timestamp}`, counter: 0 }));
+  const candidate = (s) => (s.counter ? `${s.base}-${s.counter}` : s.base);
+  while (unresolved.length) {
+    const inDb = new Set((await Product.findAll({
+      where: { tenant_id, sku: [...new Set(unresolved.map(candidate))] },
+      attributes: ['sku'],
+      transaction,
+    })).map((p) => p.sku));
+    const next = [];
+    for (const s of unresolved) {
+      const sku = candidate(s);
+      if (inDb.has(sku) || usedSkus.has(sku)) {
+        s.counter++;
+        next.push(s);
+        continue;
+      }
+      s.product.sku = sku;
+      if (s.barcodeFromSku) s.product.barcode = sku;
+      usedSkus.add(sku);
+    }
+    unresolved = next;
   }
+}
 
-  return sku;
+// Inserta los productos nuevos en un solo INSERT. Usamos un savepoint (nested
+// transaction sobre la misma transacción) porque en Postgres un error dentro
+// de una transacción la deja abortada para cualquier query posterior -- si
+// dos importaciones concurrentes (doble click, reintento) generan el mismo SKU
+// para el mismo tenant, sin el savepoint no podríamos recuperar la
+// transacción. En ese caso se reintenta producto por producto, como antes:
+// el que choca reutiliza el producto que ya creó la otra importación.
+// Devuelve Map producto armado → producto existente que lo reemplazó.
+async function insertNewProducts(products, tenant_id, transaction) {
+  const replaced = new Map();
+  if (!products.length) return replaced;
+  try {
+    await sequelize.transaction({ transaction }, (t) => Product.bulkCreate(
+      products.map((p) => p.get({ plain: true })), { transaction: t, validate: true }
+    ));
+    return replaced;
+  } catch (err) {
+    if (err.name !== 'SequelizeUniqueConstraintError') throw err;
+  }
+  for (const product of products) {
+    try {
+      await sequelize.transaction({ transaction }, (t) => Product.create(product.get({ plain: true }), { transaction: t }));
+    } catch (err) {
+      if (err.name !== 'SequelizeUniqueConstraintError') throw err;
+      // Otra importación concurrente ganó la carrera y ya creó el producto
+      // con este mismo SKU: lo reutilizamos en vez de tumbar la importación.
+      const existing = await Product.findOne({ where: { tenant_id, sku: product.sku }, transaction });
+      if (!existing) throw err;
+      replaced.set(product, existing);
+    }
+  }
+  return replaced;
 }
 
 async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id, user_id, transaction, shipping_cost = 0, discount_amount = 0, branch_id = null) {
@@ -837,49 +979,35 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
     }
   }
 
-  for (const [index, item] of items.entries()) {
-    await PurchaseItem.create({
-      tenant_id,
-      purchase_id: purchase.id,
-      line_number: index + 1,
-      product_id: item.product_id,
-      product_name: item.product_name,
-      product_sku: item.product_sku,
-      unit_of_measure: item.unit_of_measure || 'unit',
-      quantity: item.quantity,
-      unit_cost: item.unit_cost,
-      tax_rate: item.tax_percentage,
-      tax_amount: item.tax_amount,
-      inc_rate: item.inc_rate || 0,
-      inc_amount: item.inc_amount || 0,
-      subtotal: item.subtotal,
-      total: item.total
-    }, { transaction });
-  }
+  // Un solo INSERT para todas las líneas (antes uno por línea). bulkCreate no
+  // corre el hook beforeValidate de PurchaseItem: line_total se fija acá.
+  await PurchaseItem.bulkCreate(items.map((item, index) => ({
+    tenant_id,
+    purchase_id: purchase.id,
+    line_number: index + 1,
+    product_id: item.product_id,
+    product_name: item.product_name,
+    product_sku: item.product_sku,
+    unit_of_measure: item.unit_of_measure || 'unit',
+    quantity: item.quantity,
+    unit_cost: item.unit_cost,
+    tax_rate: item.tax_percentage,
+    tax_amount: item.tax_amount,
+    inc_rate: item.inc_rate || 0,
+    inc_amount: item.inc_amount || 0,
+    subtotal: item.subtotal,
+    total: item.total,
+    line_total: item.total,
+  })), { transaction, validate: true });
 
   return purchase;
 }
 
+// Mismo generador que la compra manual (ver purchaseNumber.service.js): antes
+// este rellenaba a 4 dígitos y el manual a 5, y mezclados rompían la
+// numeración.
 async function generatePurchaseNumber(tenant_id, transaction) {
-  const year = new Date().getFullYear();
-  const prefix = `PC-${year}-`;
-
-  const lastPurchase = await Purchase.findOne({
-    where: {
-      tenant_id,
-      purchase_number: { [Op.like]: `${prefix}%` }
-    },
-    order: [['created_at', 'DESC']],
-    transaction
-  });
-
-  let sequence = 1;
-  if (lastPurchase) {
-    const lastNumber = lastPurchase.purchase_number.split('-').pop();
-    sequence = parseInt(lastNumber) + 1;
-  }
-
-  return `${prefix}${sequence.toString().padStart(4, '0')}`;
+  return nextPurchaseNumber(tenant_id, transaction);
 }
 
 // ============== EXPORTS ==============

@@ -187,8 +187,29 @@ const processOrderItems = (items) => {
   });
 };
 
+/**
+ * Redondea como lo hace Postgres al guardar en una columna NUMERIC(p, s):
+ * parte del texto que recibe la BD (String(n), que es como Sequelize manda un
+ * número) y redondea a `scale` decimales alejándose del cero en el empate.
+ * Sirve para predecir en memoria el valor que quedará guardado.
+ */
+const roundNumeric = (value, scale) => {
+  const n = Number(value);
+  if (!Number.isFinite(n) || scale === undefined) return n;
+  const text = String(Math.abs(n));
+  if (/e/i.test(text)) return Number(n.toFixed(scale));
+  const [intPart, fracPart = ''] = text.split('.');
+  if (fracPart.length <= scale) return n;
+  let digits = BigInt(intPart + fracPart.slice(0, scale));
+  if (fracPart.charCodeAt(scale) - 48 >= 5) digits += 1n;
+  const str = digits.toString().padStart(scale + 1, '0');
+  const rounded = Number(scale > 0 ? `${str.slice(0, -scale)}.${str.slice(-scale)}` : str);
+  return n < 0 ? -rounded : rounded;
+};
+
 module.exports = {
   roundToDecimals,
+  roundNumeric,
   parseNumber,
   calculate,
   calculateItemTotals,

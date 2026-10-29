@@ -7,6 +7,7 @@
 // se agrega un módulo de caja/bancos con transacciones propias, este
 // endpoint debería sumarlas aquí también en vez de reemplazarlas.
 const { Sale, Purchase, Expense, Supplier, Tenant, WorkOrder, CustomerAdvance, Customer, OpeningBalance, CustomerReturn, SupplierReturn } = require('../../models');
+const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { generateCashFlowPDF } = require('../../services/pdfService');
 const { generateCashFlowExcel } = require('../../services/excelService');
@@ -18,31 +19,98 @@ const { transferableAmount } = require('../../services/workshop/workOrderPayment
 // 1 peso de redondeo no es una alerta real.
 const RECONCILIATION_TOLERANCE = 1;
 
-const toDateOnly = (value) => {
-  if (!value) return null;
-  // Columnas DATE llegan como objeto Date (p. ej. received_date del anticipo):
-  // String(date) daba "Fri Oct 09 ..." -> "Fri" y el movimiento quedaba fuera
-  // de cualquier filtro por fecha (cuadre de caja incluido).
-  if (value instanceof Date) return isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
-  return String(value).split('T')[0].split(' ')[0];
+const DEFAULT_TIMEZONE = 'America/Bogota';
+const dateFormatters = new Map();
+const localDateFormatter = (timeZone) => {
+  if (!dateFormatters.has(timeZone)) {
+    // en-CA formatea como YYYY-MM-DD.
+    dateFormatters.set(timeZone, new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }));
+  }
+  return dateFormatters.get(timeZone);
 };
+
+// Fecha (YYYY-MM-DD) en que ocurrió un movimiento, en la hora local del
+// tenant. Antes los instantes se pasaban a fecha UTC: en Colombia (UTC-5)
+// todo lo registrado después de las 7 p. m. caía al día siguiente y el cuadre
+// de ese día no lo veía.
+//  - 'YYYY-MM-DD' o fecha/hora sin zona: ya es fecha local, se toma tal cual.
+//  - Instante (Date, o ISO con Z/offset): se convierte a la zona del tenant,
+//    salvo medianoche UTC exacta: eso es una fecha sin hora que se guardó
+//    como timestamp (new Date('YYYY-MM-DD')), y su fecha es la UTC.
+// Columnas DATE/TIMESTAMPTZ llegan como objeto Date (p. ej. received_date del
+// anticipo): String(date) daba "Fri Oct 09 ..." -> "Fri".
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?\s*(Z|[+-]\d{2}(:?\d{2})?)$/i;
+const toDateOnly = (value, timeZone = DEFAULT_TIMEZONE) => {
+  if (!value) return null;
+  let date = value;
+  if (!(value instanceof Date)) {
+    const str = String(value).trim();
+    if (!INSTANT_RE.test(str)) return str.split('T')[0].split(' ')[0];
+    date = new Date(str);
+  }
+  if (isNaN(date.getTime())) return null;
+  const isUtcMidnight = date.getUTCHours() === 0 && date.getUTCMinutes() === 0
+    && date.getUTCSeconds() === 0 && date.getUTCMilliseconds() === 0;
+  if (isUtcMidnight) return date.toISOString().slice(0, 10);
+  return localDateFormatter(timeZone).format(date);
+};
+
+// 'YYYY-MM-DD' ± días (para ensanchar el prefiltro SQL). Si no es una fecha
+// válida se devuelve igual: el filtro exacto de JS decide.
+const shiftDate = (dateStr, days) => {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  if (isNaN(d.getTime())) return dateStr;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+};
+
+// ── Prefiltro por fecha en SQL ───────────────────────────────────────────────
+// Sin esto, cada cuadre de caja (un día, una sede) traía TODO el historial de
+// pagos del tenant y filtraba en JS. Estas condiciones dejan pasar solo las
+// filas con al menos un movimiento cerca del rango: la fecha guardada (o la
+// fecha UTC del timestamp) puede diferir en un día de la fecha local que
+// calcula toDateOnly, así que el rango se ensancha un día a cada lado. El
+// filtro exacto por movimiento sigue siendo el de JS más abajo: esto solo
+// descarta filas que de todos modos no aportarían nada.
+const dateInRangeSql = (dateExpr, { from_date, to_date }) => [
+  from_date ? `${dateExpr} >= ${sequelize.escape(String(from_date))}` : null,
+  to_date ? `${dateExpr} <= ${sequelize.escape(String(to_date))}` : null,
+].filter(Boolean).join(' AND ');
+
+// Algún elemento de un historial JSONB (payment_history / refund_history) en el rango.
+const historyInRangeSql = (alias, column, range) => `EXISTS (
+  SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof("${alias}"."${column}") = 'array' THEN "${alias}"."${column}" ELSE '[]'::jsonb END) AS h(e)
+  WHERE ${dateInRangeSql(`split_part(split_part(h.e->>'date', 'T', 1), ' ', 1) COLLATE "C"`, range)})`;
+
+// Columna timestamp en el rango (por su fecha UTC).
+const columnInRangeSql = (alias, column, range) =>
+  dateInRangeSql(`to_char("${alias}"."${column}" AT TIME ZONE 'UTC', 'YYYY-MM-DD') COLLATE "C"`, range);
+
+const historyInRange = (alias, column, range) =>
+  (range.from_date || range.to_date ? [sequelize.literal(historyInRangeSql(alias, column, range))] : []);
 
 // Arma el objeto { summary, by_day, transactions } a partir de Ventas,
 // Compras y Gastos. Usado tanto por el JSON de la pantalla como por el PDF,
 // para que ambos siempre muestren exactamente los mismos números.
 const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) => {
-  const [sales, purchases, expenses, pendingWorkOrders, advances, openingBalances, returnRefunds, supplierRefunds] = await Promise.all([
+  const range = {
+    from_date: from_date ? shiftDate(String(from_date), -1) : null,
+    to_date: to_date ? shiftDate(String(to_date), 1) : null,
+  };
+  const filtered = Boolean(from_date || to_date);
+  const [tenant, sales, purchases, expenses, pendingWorkOrders, advances, openingBalances, returnRefunds, supplierRefunds] = await Promise.all([
+    Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'] }),
     Sale.findAll({
-      where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, [Op.and]: historyInRange('Sale', 'payment_history', range) },
       attributes: ['id', 'sale_number', 'customer_name', 'payment_history', 'branch_id']
     }),
     Purchase.findAll({
-      where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, [Op.and]: historyInRange('Purchase', 'payment_history', range) },
       include: [{ model: Supplier, as: 'supplier', attributes: ['name'] }],
       attributes: ['id', 'purchase_number', 'payment_history', 'branch_id']
     }),
     Expense.findAll({
-      where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, [Op.and]: historyInRange('Expense', 'payment_history', range) },
       attributes: ['id', 'expense_number', 'description', 'category', 'payment_history', 'branch_id']
     }),
     // Abonos cobrados en una OT ANTES de facturarla (sale_id null) — antes
@@ -51,7 +119,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // se trasladan a Sale.payment_history (ver generateSale) y ya se cuentan
     // por ese lado — incluir ambos duplicaría el monto.
     WorkOrder.findAll({
-      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, sale_id: null },
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, sale_id: null, [Op.and]: historyInRange('WorkOrder', 'payment_history', range) },
       attributes: ['id', 'order_number', 'payment_history'],
     }),
     // Anticipos de clientes: el ingreso de caja ocurre el día que se RECIBE
@@ -60,14 +128,19 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // en SQL porque un anticipo anulado nunca movió caja real — se excluye
     // abajo junto con el resto del armado de transacciones.
     CustomerAdvance.findAll({
-      where: { tenant_id, status: { [Op.ne]: 'voided' } },
+      // Entra si se recibió en el rango o si alguna devolución cae en él.
+      where: {
+        tenant_id,
+        status: { [Op.ne]: 'voided' },
+        ...(filtered && { [Op.and]: [sequelize.literal(`((${columnInRangeSql('CustomerAdvance', 'received_date', range)}) OR ${historyInRangeSql('CustomerAdvance', 'refund_history', range)})`)] }),
+      },
       include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] }],
       attributes: ['id', 'advance_number', 'amount', 'received_date', 'method', 'branch_id', 'cash_session_id', 'refund_history', 'reassigned_from_id', 'customer_return_id'],
     }),
     // Abonos a saldos iniciales (Contabilidad → Saldos Iniciales): cobros de
     // cartera vieja (entrada) o pagos a proveedores (salida).
     OpeningBalance.findAll({
-      where: { tenant_id, paid_amount: { [Op.gt]: 0 } },
+      where: { tenant_id, paid_amount: { [Op.gt]: 0 }, [Op.and]: historyInRange('OpeningBalance', 'payment_history', range) },
       include: [
         { model: Customer, as: 'customer', attributes: ['first_name', 'last_name', 'business_name'] },
         { model: Supplier, as: 'supplier', attributes: ['name'] },
@@ -79,7 +152,11 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // Una devolución reversada conserva su reintegro original (ya ocurrió) y
     // suma el movimiento inverso (reversal_*).
     CustomerReturn.findAll({
-      where: { tenant_id, status: { [Op.in]: ['approved', 'reversed'] }, settlement_type: 'refund', refund_amount: { [Op.gt]: 0 } },
+      where: {
+        tenant_id, status: { [Op.in]: ['approved', 'reversed'] }, settlement_type: 'refund', refund_amount: { [Op.gt]: 0 },
+        // Reintegro o su reversión dentro del rango.
+        ...(filtered && { [Op.and]: [sequelize.literal(`((${columnInRangeSql('CustomerReturn', 'refund_date', range)}) OR (${columnInRangeSql('CustomerReturn', 'reversed_at', range)}))`)] }),
+      },
       include: [{ model: Customer, as: 'customer', attributes: ['first_name', 'last_name', 'business_name'] }],
       attributes: ['id', 'return_number', 'refund_amount', 'refund_method', 'refund_date', 'refund_branch_id', 'refund_cash_session_id',
         'status', 'reversal_amount', 'reversal_method', 'reversed_at', 'reversal_branch_id', 'reversal_cash_session_id'],
@@ -87,12 +164,19 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // Dinero que el proveedor reintegró por la parte ya pagada de una
     // devolución (settlement_type 'refund', ver approveSupplierReturn).
     SupplierReturn.findAll({
-      where: { tenant_id, status: { [Op.in]: ['approved', 'reversed'] }, settlement_type: 'refund', refund_amount: { [Op.gt]: 0 } },
+      where: {
+        tenant_id, status: { [Op.in]: ['approved', 'reversed'] }, settlement_type: 'refund', refund_amount: { [Op.gt]: 0 },
+        // Reintegro o su reversión dentro del rango.
+        ...(filtered && { [Op.and]: [sequelize.literal(`((${columnInRangeSql('SupplierReturn', 'refund_date', range)}) OR (${columnInRangeSql('SupplierReturn', 'reversed_at', range)}))`)] }),
+      },
       include: [{ model: Supplier, as: 'supplier', attributes: ['name'] }],
       attributes: ['id', 'return_number', 'refund_amount', 'refund_method', 'refund_date', 'refund_branch_id', 'refund_cash_session_id',
         'status', 'reversal_amount', 'reversal_method', 'reversed_at', 'reversal_branch_id', 'reversal_cash_session_id'],
     }),
   ]);
+
+  const timeZone = tenant?.business_config?.timezone || DEFAULT_TIMEZONE;
+  const dateOf = (value) => toDateOnly(value, timeZone);
 
   let transactions = [];
 
@@ -102,7 +186,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // en que se recibió, más abajo -- sumarla otra vez la duplicaba).
     (s.payment_history || []).filter(p => p.source !== 'retention' && p.source !== 'advance').forEach(p => {
       transactions.push({
-        date: toDateOnly(p.date),
+        date: dateOf(p.date),
         amount: parseFloat(p.amount) || 0,
         direction: 'in',
         source: 'sale',
@@ -122,7 +206,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
       const amount = transferableAmount(p);
       if (amount <= 0) return;
       transactions.push({
-        date: toDateOnly(p.date),
+        date: dateOf(p.date),
         amount,
         direction: 'in',
         source: 'work_order',
@@ -150,7 +234,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // en el anticipo de origen. Tampoco el saldo a favor de una devolución
     // (customer_return_id): ese dinero entró con el pago de la venta.
     if (!a.reassigned_from_id && !a.customer_return_id) transactions.push({
-      date: toDateOnly(a.received_date),
+      date: dateOf(a.received_date),
       amount: parseFloat(a.amount) || 0,
       direction: 'in',
       source: 'customer_advance',
@@ -165,7 +249,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // en la fecha en que se devolvió, igual que un gasto.
     (a.refund_history || []).forEach(r => {
       transactions.push({
-        date: toDateOnly(r.date),
+        date: dateOf(r.date),
         amount: parseFloat(r.amount) || 0,
         direction: 'out',
         source: 'customer_advance_refund',
@@ -185,7 +269,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
       : (ob.supplier?.name || 'Proveedor');
     (ob.payment_history || []).forEach(pay => {
       transactions.push({
-        date: toDateOnly(pay.date),
+        date: dateOf(pay.date),
         amount: parseFloat(pay.amount) || 0,
         direction: isReceivable ? 'in' : 'out',
         source: isReceivable ? 'opening_receivable' : 'opening_payable',
@@ -203,7 +287,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
       ? (r.customer.business_name || `${r.customer.first_name || ''} ${r.customer.last_name || ''}`.trim())
       : 'Cliente';
     transactions.push({
-      date: toDateOnly(r.refund_date),
+      date: dateOf(r.refund_date),
       amount: parseFloat(r.refund_amount) || 0,
       direction: 'out',
       source: 'customer_return_refund',
@@ -215,7 +299,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     });
     if (r.status === 'reversed' && Number(r.reversal_amount) > 0) {
       transactions.push({
-        date: toDateOnly(r.reversed_at),
+        date: dateOf(r.reversed_at),
         amount: parseFloat(r.reversal_amount) || 0,
         direction: 'in',
         source: 'customer_return_reversal',
@@ -230,7 +314,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
 
   supplierRefunds.forEach(r => {
     transactions.push({
-      date: toDateOnly(r.refund_date),
+      date: dateOf(r.refund_date),
       amount: parseFloat(r.refund_amount) || 0,
       direction: 'in',
       source: 'supplier_return_refund',
@@ -242,7 +326,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     });
     if (r.status === 'reversed' && Number(r.reversal_amount) > 0) {
       transactions.push({
-        date: toDateOnly(r.reversed_at),
+        date: dateOf(r.reversed_at),
         amount: parseFloat(r.reversal_amount) || 0,
         direction: 'out',
         source: 'supplier_return_reversal',
@@ -260,7 +344,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
     // que salga (ver supplierReturns.controller.js#applySupplierCredit).
     (p.payment_history || []).filter(pay => pay.source !== 'supplier_credit').forEach(pay => {
       transactions.push({
-        date: toDateOnly(pay.date),
+        date: dateOf(pay.date),
         amount: parseFloat(pay.amount) || 0,
         direction: 'out',
         source: 'purchase',
@@ -275,7 +359,7 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
   expenses.forEach(e => {
     (e.payment_history || []).forEach(pay => {
       transactions.push({
-        date: toDateOnly(pay.date),
+        date: dateOf(pay.date),
         amount: parseFloat(pay.amount) || 0,
         direction: 'out',
         source: 'expense',
@@ -467,4 +551,4 @@ const getCashFlowReconciliation = async (req, res) => {
   }
 };
 
-module.exports = { getCashFlow, getCashFlowPDF, getCashFlowExcel, getCashFlowReconciliation, buildCashFlow };
+module.exports = { getCashFlow, getCashFlowPDF, getCashFlowExcel, getCashFlowReconciliation, buildCashFlow, toDateOnly, shiftDate };

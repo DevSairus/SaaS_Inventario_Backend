@@ -1,5 +1,5 @@
 // backend/src/middleware/branch.js
-const { Branch, UserBranch } = require('../models');
+const { getAdminBranch, getUserBranches } = require('../services/requestCache');
 
 /**
  * Middleware para resolver y validar la sede (branch) activa del request.
@@ -35,12 +35,10 @@ const branchMiddleware = async (req, res, next) => {
 
     // ── Admin: puede operar cualquier sede del tenant ──────────────────────
     if (isTenantAdmin) {
-      let branch;
+      // Cacheado unos segundos (services/requestCache.js): esto corre en cada request.
+      const branch = await getAdminBranch(req.tenant_id, requestedBranchId);
 
       if (requestedBranchId) {
-        branch = await Branch.findOne({
-          where: { id: requestedBranchId, tenant_id: req.tenant_id, is_active: true },
-        });
         if (!branch) {
           return res.status(404).json({ success: false, message: 'Sede no encontrada o inactiva', code: 'BRANCH_NOT_FOUND' });
         }
@@ -53,10 +51,6 @@ const branchMiddleware = async (req, res, next) => {
         // existía, y el 404 real salía de acá, antes de llegar a
         // requireModule). 409 dice "tu request es válido pero el tenant
         // tiene una precondición sin cumplir".
-        branch = await Branch.findOne({
-          where: { tenant_id: req.tenant_id, is_active: true },
-          order: [['is_main', 'DESC'], ['created_at', 'ASC']],
-        });
         if (!branch) {
           return res.status(409).json({
             success: false,
@@ -72,10 +66,7 @@ const branchMiddleware = async (req, res, next) => {
     }
 
     // ── Usuario normal: debe tener la sede asignada en user_branches ───────
-    const userBranches = await UserBranch.findAll({
-      where: { user_id: req.user.id },
-      include: [{ model: Branch, as: 'branch', where: { is_active: true } }],
-    });
+    const userBranches = await getUserBranches(req.tenant_id, req.user.id);
 
     if (userBranches.length === 0) {
       return res.status(403).json({

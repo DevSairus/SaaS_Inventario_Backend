@@ -208,7 +208,8 @@ async function checkAllStockAlerts() {
   const { Tenant } = require('../models');
   const { runWithTenantSchema } = require('../config/tenantContext');
 
-  const tenants = await Tenant.findAll({ attributes: ['id', 'schema_name'] });
+  // Solo empresas activas: una desactivada no puede entrar a ver sus alertas.
+  const tenants = await Tenant.findAll({ where: { is_active: true }, attributes: ['id', 'schema_name'] });
   let totalChecked = 0;
 
   // Tenants en modo legado (schema_name null): sus productos siguen en

@@ -106,6 +106,42 @@ Checklist al agregar un modelo o un endpoint de listado nuevo:
 - No olvidar la migración (`addIndex`) además de declararlo en el modelo —
   el `indexes:` del modelo no crea nada solo en la DB real.
 
+## 5. Búsquedas `'%texto%'`: usar `searchMatch`, no un `Op.or` de `iLike`
+
+Un `Op.or` de `iLike '%x%'` sobre varias columnas recorre la tabla completa
+salvo que CADA columna tenga índice trigram. Para productos, ventas,
+clientes y vehículos ya existe un índice sobre la expresión concatenada
+(`src/utils/searchText.js` + migración `2026102901`):
+
+```js
+const { searchMatch } = require('../utils/searchText');
+where[Op.and] = [searchMatch('products', 'Product', palabra)];
+```
+
+Si agregás una tabla o cambiás sus columnas en `SEARCH_COLUMNS`, hace falta
+una migración que (re)cree el índice con `searchExpression(tabla)`: la
+expresión de la query y la del índice tienen que ser idénticas.
+
+## 6. Datos que se leen en cada request: `services/requestCache.js`
+
+El tenant, la sede activa y el mapa rol → permisos se cachean en memoria
+(30-60 s) y se invalidan con hooks de Sequelize. Si escribís esas tablas
+con SQL crudo (`sequelize.query('UPDATE tenants ...')`), llamá a
+`invalidateTenant(id)` — el hook no se entera.
+
+## 7. Jobs del scheduler: no despertar a Neon sin necesidad
+
+Neon suspende el compute tras ~5 min sin consultas; cualquier query lo
+despierta y se paga. En `src/jobs/scheduler.js`:
+
+- Job frecuente (cada pocos minutos) → `shouldRun()` que decida **sin tocar
+  la BD** si hay trabajo (ver `hasDueReminders` en `waCampaigns.service.js`).
+- Job apagado por variable de entorno → `enabled()`, para que ni se programe.
+- Job periódico que solo sirve con gente trabajando → horario hábil.
+- Minuto distinto a los demás: no todo a la hora en punto.
+- El lock entre réplicas es un lease (`withLeaseTry`), sin transacción
+  abierta; `leaseTtlMs` tiene que ser mayor que lo que puede durar el job.
+
 ---
 
 Si algo de esto no aplica a tu caso particular (por ejemplo, un job que

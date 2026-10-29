@@ -214,6 +214,20 @@ async function resetTenantForDelivery(sequelize, tenant, decisions, { execute = 
       report.wipe.push({ table, rows });
     }
 
+    // Numeración del kárdex (services/inventory/movementNumber.service.js):
+    // si se borraron los movimientos, vuelve a empezar en MOV-AAAA-00001. Se
+    // reinicia en vez de borrar la secuencia para no romper a un servidor en
+    // marcha que ya la tiene cacheada como existente.
+    if (execute && deleteOrder.includes('inventory_movements')) {
+      const [seqs] = await sequelize.query(
+        `SELECT sequencename FROM pg_sequences WHERE schemaname = :schemaName AND sequencename LIKE 'inventory_movement_number_%_seq'`,
+        { replacements: { schemaName }, transaction }
+      );
+      for (const { sequencename } of seqs) {
+        await sequelize.query(`SELECT setval('"${schemaName}"."${sequencename}"', 1, false)`, { transaction });
+      }
+    }
+
     const productsGroup = ASK_GROUPS.find((g) => g.key === 'catalogo_productos');
     if (productsGroup?.resetStockIfKept && groupDecisions.catalogo_productos && physicalSet.has('products')) {
       if (execute) {

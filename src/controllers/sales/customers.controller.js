@@ -4,6 +4,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../models');
 const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 const { economicSalesWhere } = require('../../utils/remisionVisibility');
+const { searchMatch } = require('../../utils/searchText');
 
 // Utilidad: el frontend envía full_name, la DB tiene first_name + last_name
 function splitFullName(fullName) {
@@ -61,31 +62,24 @@ const getAll = async (req, res) => {
     if (search) {
       // Cada palabra debe aparecer en nombre completo, razón social, NIT, email o teléfono
       // (así "juan perez" encuentra a "Juan Carlos Pérez" en first_name + last_name).
+      // Todos esos campos van en una sola expresión indexada (ver utils/searchText.js).
       const words = String(search).trim().split(/\s+/).filter(Boolean).slice(0, 5);
-      const fullName = sequelize.fn('concat_ws', ' ', sequelize.col('first_name'), sequelize.col('last_name'));
-      where[Op.and] = words.map(w => ({
-        [Op.or]: [
-          sequelize.where(fullName, { [Op.iLike]: `%${w}%` }),
-          { business_name: { [Op.iLike]: `%${w}%` } },
-          { tax_id: { [Op.iLike]: `%${w}%` } },
-          { email: { [Op.iLike]: `%${w}%` } },
-          { phone: { [Op.iLike]: `%${w}%` } }
-        ]
-      }));
+      where[Op.and] = words.map(w => searchMatch('customers', 'Customer', w));
     }
 
     if (type) where.customer_type = type;
     if (status === 'active') where.is_active = true;
     else if (status === 'inactive') where.is_active = false;
 
-    const customers = await Customer.findAll({
-      where,
-      order: [['first_name', 'ASC'], ['last_name', 'ASC']],
-      limit: parseInt(limit),
-      offset: parseInt(offset)
-    });
-
-    const total = await Customer.count({ where });
+    const [customers, total] = await Promise.all([
+      Customer.findAll({
+        where,
+        order: [['first_name', 'ASC'], ['last_name', 'ASC']],
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      }),
+      Customer.count({ where }),
+    ]);
 
     res.json({
       success: true,
@@ -310,12 +304,7 @@ const search = async (req, res) => {
     const customers = await Customer.findAll({
       where: {
         tenant_id: tenantId,
-        [Op.or]: [
-          { first_name: { [Op.iLike]: `%${q}%` } },
-          { last_name: { [Op.iLike]: `%${q}%` } },
-          { tax_id: { [Op.iLike]: `%${q}%` } },
-          { email: { [Op.iLike]: `%${q}%` } },
-        ]
+        [Op.and]: [searchMatch('customers', 'Customer', q)],
       },
       order: [['first_name', 'ASC']],
       limit: 20

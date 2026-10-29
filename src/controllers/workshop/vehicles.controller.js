@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const logger = require('../../config/logger');
 const { Vehicle, Customer, WorkOrder, WorkOrderItem, User, Sale, Tenant } = require('../../models');
 const { Op } = require('sequelize');
+const { searchMatch } = require('../../utils/searchText');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { resolveRecordSchemaByToken } = require('../../utils/publicTokenResolver');
 const { resolveVehicleMaintenance } = require('../../services/workshop/maintenance.service');
@@ -19,11 +20,8 @@ const list = async (req, res) => {
     const where = { tenant_id, is_active: true };
     if (customer_id) where.customer_id = customer_id;
     if (search) {
-      where[Op.or] = [
-        { plate: { [Op.iLike]: `%${search}%` } },
-        { brand: { [Op.iLike]: `%${search}%` } },
-        { model: { [Op.iLike]: `%${search}%` } },
-      ];
+      // Placa/marca/modelo en una sola expresión indexada (ver utils/searchText.js).
+      where[Op.and] = [searchMatch('vehicles', 'Vehicle', search)];
     }
 
     const { count, rows } = await Vehicle.findAndCountAll({

@@ -284,7 +284,7 @@ async function runPollingRules() {
   const { getEffectiveModulesForTenantId } = require('./moduleAccess');
 
   const results = { rulesTriggered: 0, errors: 0, tenantsSkipped: 0 };
-  const allTenants = await Tenant.findAll({ attributes: ['id', 'schema_name'] });
+  const allTenants = await Tenant.findAll({ where: { is_active: true }, attributes: ['id', 'schema_name'] });
 
   // Antes: `for (const tenant of allTenants) { await processTenantRules(...) }`
   // -- un tenant a la vez, sosteniendo el pool de conexiones todo el rato
@@ -294,8 +294,11 @@ async function runPollingRules() {
   // el mismo mecanismo que ya sostiene requests HTTP concurrentes de
   // distintos tenants, así que paralelizar acá es seguro. El límite de
   // concurrencia evita saturar el pool de golpe con tenants que tengan
-  // muchas reglas activas.
-  const TENANT_CONCURRENCY = 5;
+  // muchas reglas activas. Se multiplica con ACTIONS_CONCURRENCY de cada
+  // tenant: 2 × 5 = 10 operaciones como máximo, y quedan 5 de las 15
+  // conexiones del pool para los requests HTTP (con 5 eran 25: más que el
+  // pool entero, y los usuarios quedaban esperando conexión).
+  const TENANT_CONCURRENCY = 2;
   await mapWithConcurrencyLimit(allTenants, TENANT_CONCURRENCY, async (tenant) => {
     const modules = await getEffectiveModulesForTenantId(tenant.id);
     if (!modules.includes('crm')) {

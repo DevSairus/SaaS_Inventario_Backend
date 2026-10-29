@@ -19,6 +19,28 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// ── Aviso en memoria de trabajo pendiente ───────────────────────────────────
+// Los jobs wa-reminders y wa-campaigns corren cada 5 min, 24/7: si cada
+// corrida consultara la BD, Neon nunca podría suspenderse. Este proceso
+// recuerda cuándo puede haber algo que hacer y el scheduler no toca la BD
+// mientras tanto (ver shouldRun en jobs/scheduler.js).
+//  - Al arrancar no sabe nada: la primera corrida consulta la BD.
+//  - Cada corrida recalcula lo que queda pendiente.
+//  - createReminderJob / startCampaign lo actualizan al instante.
+// Con varias réplicas, cada una se entera de lo que se crea en ella misma;
+// por si algo llega por otro lado (otra réplica que se reinició, SQL a mano),
+// el aviso se descarta y se vuelve a consultar cada WA_HINT_MAX_AGE_MS.
+const WA_HINT_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const waHint = {
+  nextReminderAt: 0, // ms; 0 = desconocido/ya, Infinity = nada pendiente
+  remindersCheckedAt: 0,
+  campaignsPending: true,
+  campaignsCheckedAt: 0,
+};
+const hintExpired = (checkedAt) => Date.now() - checkedAt > WA_HINT_MAX_AGE_MS;
+const hasDueReminders = () => hintExpired(waHint.remindersCheckedAt) || waHint.nextReminderAt <= Date.now();
+const hasPendingCampaigns = () => hintExpired(waHint.campaignsCheckedAt) || waHint.campaignsPending;
+
 async function syncTemplatesForTenant(tenantId) {
   const config = await waCloud.getTenantWaConfig(tenantId);
   if (!config?.own_waba_id) {
@@ -98,7 +120,7 @@ async function createReminderJob({
     err.status = 400;
     throw err;
   }
-  return WaReminderJob.create({
+  const job = await WaReminderJob.create({
     tenant_id: tenantId,
     customer_id: customerId || null,
     phone: clean,
@@ -109,11 +131,23 @@ async function createReminderJob({
     status: 'pending',
     created_by_user_id: userId,
   });
+  waHint.nextReminderAt = Math.min(waHint.nextReminderAt, job.scheduled_at.getTime());
+  return job;
 }
 
 async function processDueReminders() {
-  const tenants = await Tenant.findAll({ where: { is_active: true }, attributes: ['id', 'schema_name'] });
+  const startedAt = Date.now();
+  // Desde acá, createReminderJob anota en waHint lo que se cree mientras corre.
+  waHint.nextReminderAt = Infinity;
+  let tenants;
+  try {
+    tenants = await Tenant.findAll({ where: { is_active: true }, attributes: ['id', 'schema_name'] });
+  } catch (err) {
+    waHint.nextReminderAt = 0;
+    throw err;
+  }
   let processed = 0;
+  let nextReminderAt = Infinity;
 
   for (const tenant of tenants) {
     const run = async () => {
@@ -148,6 +182,11 @@ async function processDueReminders() {
         }
         await sleep(60); // ~16 mps max local; coexistencia tipicamente ~20 mps
       }
+
+      // Próximo pendiente de este tenant (los que no alcanzaron a salir en
+      // este lote por el limit siguen con scheduled_at vencido: "ya").
+      const next = await WaReminderJob.min('scheduled_at', { where: { tenant_id: tenant.id, status: 'pending' } });
+      if (next) nextReminderAt = Math.min(nextReminderAt, new Date(next).getTime());
     };
 
     try {
@@ -155,9 +194,12 @@ async function processDueReminders() {
       else await run();
     } catch (err) {
       logger.warn(`[WA Reminders] tenant ${tenant.id}: ${err.message}`);
+      nextReminderAt = 0; // falló: reintentar en la próxima corrida
     }
   }
 
+  waHint.nextReminderAt = Math.min(nextReminderAt, waHint.nextReminderAt);
+  waHint.remindersCheckedAt = startedAt;
   return { processed };
 }
 
@@ -255,12 +297,22 @@ async function startCampaign(tenantId, campaignId) {
     throw err;
   }
   await campaign.update({ status: 'queued', started_at: campaign.started_at || new Date() });
+  waHint.campaignsPending = true;
   return campaign;
 }
 
 async function processQueuedCampaigns() {
-  const tenants = await Tenant.findAll({ where: { is_active: true }, attributes: ['id', 'schema_name'] });
+  const startedAt = Date.now();
+  waHint.campaignsPending = false; // startCampaign lo vuelve a prender si llega una mientras corre
+  let tenants;
+  try {
+    tenants = await Tenant.findAll({ where: { is_active: true }, attributes: ['id', 'schema_name'] });
+  } catch (err) {
+    waHint.campaignsPending = true;
+    throw err;
+  }
   let sent = 0;
+  let stillPending = false;
 
   for (const tenant of tenants) {
     const run = async () => {
@@ -319,8 +371,12 @@ async function processQueuedCampaigns() {
         });
         if (pendingLeft === 0) {
           await campaign.update({ status: 'completed', finished_at: new Date() });
+        } else {
+          stillPending = true;
         }
       }
+      // Solo se procesan 3 por corrida: si había 3, puede haber más en cola.
+      if (campaigns.length >= 3) stillPending = true;
     };
 
     try {
@@ -328,9 +384,12 @@ async function processQueuedCampaigns() {
       else await run();
     } catch (err) {
       logger.warn(`[WA Campaigns] tenant ${tenant.id}: ${err.message}`);
+      stillPending = true; // falló: reintentar en la próxima corrida
     }
   }
 
+  if (stillPending) waHint.campaignsPending = true;
+  waHint.campaignsCheckedAt = startedAt;
   return { sent };
 }
 
@@ -343,4 +402,6 @@ module.exports = {
   startCampaign,
   processQueuedCampaigns,
   resolveAudiencePhones,
+  hasDueReminders,
+  hasPendingCampaigns,
 };

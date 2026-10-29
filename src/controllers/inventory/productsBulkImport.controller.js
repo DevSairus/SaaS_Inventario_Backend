@@ -6,6 +6,7 @@ const { runWithTenantSchema } = require('../../config/tenantContext');
 const { cellToText } = require('../../utils/excelCell');
 const { suggestedSalePrice, isValidMargin } = require('../../utils/salePricing');
 const { inheritedMarginFor } = require('../../services/inventory/productMargin.service');
+const { nextMovementNumbers } = require('../../services/inventory/movementNumber.service');
 
 const REQUIRED_COLUMNS = ['Código*', 'Nombre*'];
 const MAX_REPORTED_ERRORS = 300;
@@ -397,16 +398,9 @@ const bulkImportProductsInner = async (req, res) => {
     // fila -- no hace falta recalcular contra un stock previo como createMovement.
     let stockEntry = null;
     if (stockedRows.length > 0) {
-      const year = new Date().getFullYear();
-      const lastMovement = await InventoryMovement.findOne({
-        where: { tenant_id: tenantId, movement_number: { [Op.like]: `MOV-${year}-%` } },
-        order: [['movement_number', 'DESC']],
-      });
-      let nextMovementNumber = 1;
-      if (lastMovement) {
-        const lastNumber = parseInt(lastMovement.movement_number.split('-')[2], 10);
-        if (!isNaN(lastNumber)) nextMovementNumber = lastNumber + 1;
-      }
+      // Mismo generador que createMovement: un lote de números de la
+      // secuencia, sin chocar con movimientos que se crean a la vez.
+      const movementNumbers = await nextMovementNumbers(stockedRows.length);
 
       const today = new Date().toISOString().split('T')[0];
       const movementPayload = stockedRows.map((row, idx) => {
@@ -414,7 +408,7 @@ const bulkImportProductsInner = async (req, res) => {
         const totalCost = row.quantity * row.unit_cost;
         return {
           tenant_id: tenantId,
-          movement_number: `MOV-${year}-${String(nextMovementNumber + idx).padStart(5, '0')}`,
+          movement_number: movementNumbers[idx],
           movement_type: 'entrada',
           direction: 'in',
           movement_reason: 'initial_stock',

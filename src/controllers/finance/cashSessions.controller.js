@@ -4,7 +4,7 @@
 // movimientos de payment_history de Ventas/Compras/Gastos de esa sede en la
 // fecha de la caja, y los agrupa por método de pago normalizado.
 const { CashSession, Branch, User } = require('../../models');
-const { buildCashFlow } = require('./cashflow.controller');
+const { buildCashFlow, shiftDate } = require('./cashflow.controller');
 const { getOpenSession } = require('../../services/finance/cashSession.service');
 
 const ZERO_BUCKET = { efectivo: 0, tarjeta: 0, transferencia: 0, otro: 0 };
@@ -26,19 +26,26 @@ function normalizeMethod(method) {
 // sede, agrupadas por método normalizado.
 // Movimientos que efectivamente pertenecen a ESTA sesión: los que ya llevan
 // `cash_session_id` explícito deben coincidir exactamente (evita que un pago
-// de otra sesión abierta el mismo día en la misma sede se cuele); los pagos
-// legados (de antes de que existiera este vínculo) siguen entrando por el
-// criterio anterior de fecha+sede, para no romper el histórico.
+// de otra sesión abierta el mismo día en la misma sede se cuele), sin
+// importar la fecha -- una caja que se deja abierta de un día para otro
+// recibe pagos con fecha posterior a session_date y antes no los contaba.
+// Los pagos legados (de antes de que existiera este vínculo) siguen entrando
+// por el criterio anterior de fecha+sede, para no romper el histórico.
 const filterBySession = (transactions, session) =>
-  transactions.filter(t => !t.cash_session_id || t.cash_session_id === session.id);
+  transactions.filter(t => (t.cash_session_id
+    ? t.cash_session_id === session.id
+    : t.date === session.session_date));
+
+// Movimientos candidatos de la sesión: desde su fecha hasta que se cerró
+// (abierta: hasta hoy, sin tope). filterBySession decide cuáles son suyos.
+const sessionCashFlow = (session) => buildCashFlow(session.tenant_id, {
+  from_date: session.session_date, // 'YYYY-MM-DD' (DATEONLY)
+  to_date: session.closed_at ? shiftDate(new Date(session.closed_at).toISOString().slice(0, 10), 1) : undefined,
+  branch_id: session.branch_id,
+});
 
 const calculateExpected = async (session) => {
-  const dateStr = session.session_date; // 'YYYY-MM-DD' (DATEONLY)
-  const cashFlow = await buildCashFlow(session.tenant_id, {
-    from_date: dateStr,
-    to_date: dateStr,
-    branch_id: session.branch_id,
-  });
+  const cashFlow = await sessionCashFlow(session);
 
   const relevant = filterBySession(cashFlow.allTransactions, session);
 
@@ -270,12 +277,7 @@ const getSessionPayments = async (req, res) => {
     const session = await CashSession.findOne({ where: { id, tenant_id } });
     if (!session) return res.status(404).json({ success: false, message: 'Caja no encontrada' });
 
-    const dateStr = session.session_date;
-    const cashFlow = await buildCashFlow(tenant_id, {
-      from_date: dateStr,
-      to_date: dateStr,
-      branch_id: session.branch_id,
-    });
+    const cashFlow = await sessionCashFlow(session);
 
     const transactions = filterBySession(cashFlow.allTransactions, session)
       .map(t => ({ ...t, bucket: normalizeMethod(t.method) }));

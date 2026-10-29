@@ -73,6 +73,10 @@ async function cutoverTenant(slug) {
     );
 
     console.log(`\n✅ Tenant "${slug}" migrado y activo en "${schemaName}"`);
+    // El servidor cachea el tenant ~30s (services/requestCache.js) y este
+    // script no puede invalidar esa caché: hasta que venza, los requests
+    // siguen usando el schema anterior.
+    console.log('⚠️  Los servidores en marcha toman el cambio en ~30s (caché del tenant). Reinícialos si necesitas que sea inmediato.');
   } finally {
     await sequelize.close();
   }

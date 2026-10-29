@@ -5,12 +5,14 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const taxService = require('../../services/taxService');
 const { computePurchaseRetentions, computeExpenseRetentions } = require('../../services/retentionEngine.service');
-const { createMovement } = require('./movements.controller');
+const { createMovementsBatch } = require('./movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { resolveLandedPurchaseUnitCost } = require('../../utils/costResolver');
-const { registerPurchaseCost } = require('../../services/inventory/purchaseCost.service');
+const { registerPurchaseCostsBatch } = require('../../services/inventory/purchaseCost.service');
+const { bulkUpdateById } = require('../../utils/bulkUpdate');
+const { nextPurchaseNumber } = require('../../services/inventory/purchaseNumber.service');
 const { purchaseNetPayable, purchasePaymentStatus, round2 } = require('../../utils/purchaseAmounts');
 const { recordPurchasePaymentEntries, newPaymentRecord } = require('../../services/inventory/purchasePayments.service');
 
@@ -22,31 +24,6 @@ const creationCashPayment = (amount, method, date, user_id) => ({
   source: CREATION_CASH_SOURCE,
 });
 
-/**
- * Generar número de compra único
- */
-const generatePurchaseNumber = async (tenant_id, transaction = null) => {
-  const year = new Date().getFullYear();
-  const prefix = `PC-${year}-`;
-
-  const lastPurchase = await Purchase.findOne({
-    where: {
-      tenant_id,
-      purchase_number: { [Op.like]: `${prefix}%` }
-    },
-    order: [['purchase_number', 'DESC']],
-    lock: transaction ? transaction.LOCK.UPDATE : undefined,
-    transaction: transaction || undefined
-  });
-
-  let nextNumber = 1;
-  if (lastPurchase) {
-    const lastNumber = parseInt(lastPurchase.purchase_number.split('-').pop(), 10);
-    if (!isNaN(lastNumber)) nextNumber = lastNumber + 1;
-  }
-
-  return `${prefix}${String(nextNumber).padStart(5, '0')}`;
-};
 
 /**
  * Obtener todas las compras con filtros y paginación
@@ -265,12 +242,15 @@ const createPurchase = async (req, res) => {
 
     const itemsToCreate = [];
 
+    // Todos los productos de una vez (antes una consulta por línea).
+    const productsById = new Map((await Product.findAll({
+      where: { id: [...new Set(items.map((i) => i.product_id).filter(Boolean))], tenant_id },
+      transaction: t
+    })).map((p) => [p.id, p]));
+
     for (const item of items) {
       // Verificar que el producto existe
-      const product = await Product.findOne({
-        where: { id: item.product_id, tenant_id },
-        transaction: t
-      });
+      const product = productsById.get(item.product_id);
 
       if (!product) {
         throw new Error(`Producto ${item.product_id} no encontrado`);
@@ -340,67 +320,54 @@ const createPurchase = async (req, res) => {
       retentions
     );
 
-    // Generar número de compra con lock dentro de la transacción (evita duplicados bajo concurrencia)
-    const MAX_RETRIES = 5;
-    let purchase;
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      const purchase_number = await generatePurchaseNumber(tenant_id, t);
-      try {
-        purchase = await Purchase.create({
-          tenant_id,
-          branch_id: req.branch_id || null,
-          purchase_number,
-          supplier_id,
-          user_id,
-          purchase_date: purchase_date || new Date(),
-          expected_delivery_date,
-          due_date: isCash ? null : effectiveDueDate,
-          payment_terms: effectivePaymentTerms,
-          status: 'draft',
-          subtotal,
-          tax_amount,
-          discount_amount: parseFloat(discount_amount),
-          shipping_cost: parseFloat(shipping_cost),
-          total_amount,
-          payment_method,
-          payment_status: isCash ? 'paid' : 'pending',
-          // Contado: se paga el neto (total - retenciones), no el total.
-          paid_amount: isCash ? round2(total_amount - retentions.total) : 0,
-          payment_history: isCash
-            ? [creationCashPayment(round2(total_amount - retentions.total), payment_method || 'Efectivo', purchase_date || new Date(), user_id)]
-            : [],
-          invoice_number,
-          reference,
-          notes,
-          internal_notes,
-          warehouse_id,
-          // Retenciones (Fase C) — agregadas por tipo + detalle por concepto
-          ...taxService.purchaseRetentionFields(retentions),
-          tax_breakdown,
-          requires_support_document: effectiveRequiresSupportDocument,
-        }, { transaction: t });
-        break; // éxito
-      } catch (uniqueErr) {
-        if (
-          uniqueErr.name === 'SequelizeUniqueConstraintError' &&
-          uniqueErr.fields?.purchase_number &&
-          attempt < MAX_RETRIES
-        ) {
-          continue;
-        }
-        throw uniqueErr;
-      }
-    }
+    // Número de compra bajo lock del tenant (ver purchaseNumber.service.js). Antes
+    // había un bucle de reintentos ante número duplicado, pero dentro de una
+    // transacción ya abortada por el error ningún reintento podía funcionar.
+    const purchase_number = await nextPurchaseNumber(tenant_id, t);
+    const purchase = await Purchase.create({
+      tenant_id,
+      branch_id: req.branch_id || null,
+      purchase_number,
+      supplier_id,
+      user_id,
+      purchase_date: purchase_date || new Date(),
+      expected_delivery_date,
+      due_date: isCash ? null : effectiveDueDate,
+      payment_terms: effectivePaymentTerms,
+      status: 'draft',
+      subtotal,
+      tax_amount,
+      discount_amount: parseFloat(discount_amount),
+      shipping_cost: parseFloat(shipping_cost),
+      total_amount,
+      payment_method,
+      payment_status: isCash ? 'paid' : 'pending',
+      // Contado: se paga el neto (total - retenciones), no el total.
+      paid_amount: isCash ? round2(total_amount - retentions.total) : 0,
+      payment_history: isCash
+        ? [creationCashPayment(round2(total_amount - retentions.total), payment_method || 'Efectivo', purchase_date || new Date(), user_id)]
+        : [],
+      invoice_number,
+      reference,
+      notes,
+      internal_notes,
+      warehouse_id,
+      // Retenciones (Fase C) — agregadas por tipo + detalle por concepto
+      ...taxService.purchaseRetentionFields(retentions),
+      tax_breakdown,
+      requires_support_document: effectiveRequiresSupportDocument,
+    }, { transaction: t });
 
-    // Crear los items
-    for (const [index, itemData] of itemsToCreate.entries()) {
-      await PurchaseItem.create({
-        tenant_id,
-        purchase_id: purchase.id,
-        line_number: index + 1,
-        ...itemData
-      }, { transaction: t });
-    }
+    // Crear los items en un solo INSERT, con las mismas validaciones que
+    // PurchaseItem.create. bulkCreate no corre el hook beforeValidate, así que
+    // line_total (columna legada, copia de total) se fija acá.
+    await PurchaseItem.bulkCreate(itemsToCreate.map((itemData, index) => ({
+      tenant_id,
+      purchase_id: purchase.id,
+      line_number: index + 1,
+      ...itemData,
+      line_total: itemData.total,
+    })), { transaction: t, validate: true });
 
     // Commit ANTES de buscar la compra completa
     await t.commit();
@@ -955,90 +922,100 @@ const receivePurchase = async (req, res) => {
     const receiptItems = [];
     const ivaDeductible = await require('../../services/accounting/autoEntries.service').isIvaDeductible(tenant_id);
 
-    for (const purchaseItem of purchase.items) {
-      const received_quantity = receivedNow.get(purchaseItem.id);
-      if (!received_quantity) continue;
+    // Todo en bloque (antes ~14 consultas por línea, en serie: una compra de
+    // 150 líneas pasaba de 2.000 consultas y superaba el límite de 30 s del
+    // frontend). Mismo orden y mismos cálculos que línea por línea:
+    // createMovementsBatch y registerPurchaseCostsBatch reproducen
+    // createMovement y registerPurchaseCost.
+    const linesNow = purchase.items.filter((it) => receivedNow.get(it.id));
 
-      // Cantidad recibida ACUMULADA en el ítem.
-      await purchaseItem.update({
-        received_quantity: round2(Number(purchaseItem.received_quantity || 0) + received_quantity)
-      }, { transaction: t });
+    // Cantidad recibida ACUMULADA en cada ítem (también en memoria: se usa
+    // abajo para saber si la compra quedó completa).
+    for (const purchaseItem of linesNow) {
+      purchaseItem.setDataValue('received_quantity', round2(Number(purchaseItem.received_quantity || 0) + receivedNow.get(purchaseItem.id)));
+    }
+    await bulkUpdateById(PurchaseItem, linesNow.map((it) => ({ id: it.id, received_quantity: it.received_quantity })), ['received_quantity'], { transaction: t });
 
-      const product = await Product.findByPk(purchaseItem.product_id, { transaction: t });
+    // Para el costo aterrizado hace falta el producto (IVA al costo si se
+    // vende excluido); se lee una vez para todas las líneas.
+    const productTax = new Map((await Product.findAll({
+      where: { id: [...new Set(linesNow.map((it) => it.product_id))] },
+      attributes: ['id', 'tax_config'],
+      transaction: t,
+    })).map((p) => [p.id, p]));
+
+    // El kardex debe capitalizar lo mismo que el asiento contable acredita
+    // a 143501 (subtotal - descuento global + flete, ver
+    // generatePurchaseEntry), no el precio de lista de la línea.
+    // IVA al costo: no responsable de IVA, o producto que se vende excluido
+    // (asignación directa, art. 490 E.T. -- mismo criterio que generatePurchaseEntry).
+    const landedCost = new Map();
+    for (const purchaseItem of linesNow) {
+      const product = productTax.get(purchaseItem.product_id);
       if (!product) continue;
-
-      // El kardex debe capitalizar lo mismo que el asiento contable acredita
-      // a 143501 (subtotal - descuento global + flete, ver
-      // generatePurchaseEntry), no el precio de lista de la línea.
-      // IVA al costo: no responsable de IVA, o producto que se vende excluido
-      // (asignación directa, art. 490 E.T. -- mismo criterio que generatePurchaseEntry).
-      const landedUnitCost = resolveLandedPurchaseUnitCost(purchaseItem, purchase, {
+      landedCost.set(purchaseItem.id, resolveLandedPurchaseUnitCost(purchaseItem, purchase, {
         ivaToCost: !ivaDeductible || product.tax_config?.iva_status === 'excluido',
+      }));
+    }
+    const linesWithProduct = linesNow.filter((it) => landedCost.has(it.id));
+
+    // Movimientos de entrada (actualizan current_stock, available_stock y average_cost)
+    const { products } = await createMovementsBatch(linesWithProduct.map((purchaseItem) => ({
+      tenant_id: tenant_id,
+      movement_type: 'entrada',
+      movement_reason: 'purchase_receipt',
+      reference_type: 'purchase',
+      reference_id: purchase.id,
+      product_id: purchaseItem.product_id,
+      warehouse_id: resolvedWarehouseId,
+      quantity: receivedNow.get(purchaseItem.id),
+      unit_cost: landedCost.get(purchaseItem.id),
+      user_id: req.user.id,
+      movement_date: movementDate,
+      notes: `Recepcion compra ${purchase.purchase_number} - ${purchaseItem.product_name}`
+    })), t, { skipMissing: true });
+
+    for (const purchaseItem of linesWithProduct) {
+      receiptItems.push({ item_id: purchaseItem.id, product_id: purchaseItem.product_id, product_name: purchaseItem.product_name, quantity: receivedNow.get(purchaseItem.id) });
+    }
+
+    // Último costo de compra + precio de venta por margen (que nunca baja
+    // solo) + alerta de variación de costo. Costo aterrizado (no el precio
+    // de lista): es el mismo que entró al kardex y al asiento.
+    await registerPurchaseCostsBatch(
+      linesWithProduct.filter((it) => products.has(it.product_id)).map((purchaseItem) => ({
+        product: products.get(purchaseItem.product_id),
+        newCost: landedCost.get(purchaseItem.id) || parseFloat(purchaseItem.unit_cost) || 0,
+      })),
+      { tenant_id, date: purchase.purchase_date, sourceType: 'purchase', sourceId: purchase.id, sourceNumber: purchase.purchase_number },
+      t
+    );
+
+    // Actualizar/crear relación product_suppliers para que el botón de
+    // proveedores tenga datos (con productos repetidos, gana la última línea).
+    const supplierLinks = new Map();
+    for (const purchaseItem of linesWithProduct) {
+      if (!products.has(purchaseItem.product_id)) continue;
+      supplierLinks.set(purchaseItem.product_id, {
+        last_price: parseFloat(purchaseItem.unit_cost),
+        last_purchase_date: purchase.purchase_date || new Date(),
       });
-
-      // Crear movimiento de entrada (actualiza current_stock y average_cost automáticamente)
-      await createMovement({
-        tenant_id: tenant_id,
-        movement_type: 'entrada',
-        movement_reason: 'purchase_receipt',
-        reference_type: 'purchase',
-        reference_id: purchase.id,
-        product_id: purchaseItem.product_id,
-        warehouse_id: resolvedWarehouseId,
-        quantity: received_quantity,
-        unit_cost: landedUnitCost,
-        user_id: req.user.id,
-        movement_date: movementDate,
-        notes: `Recepcion compra ${purchase.purchase_number} - ${purchaseItem.product_name}`
-      }, t);
-
-      receiptItems.push({ item_id: purchaseItem.id, product_id: purchaseItem.product_id, product_name: purchaseItem.product_name, quantity: received_quantity });
-
-      // Re-leer producto para obtener stock y costo actualizados por createMovement
-      const updatedProduct = await Product.findByPk(purchaseItem.product_id, { transaction: t });
-
-      // Campos adicionales que createMovement no cubre
-      await updatedProduct.update({
-        available_stock: parseFloat(updatedProduct.current_stock) - parseFloat(updatedProduct.reserved_stock || 0)
-      }, { transaction: t });
-
-      // Último costo de compra + precio de venta por margen (que nunca baja
-      // solo) + alerta de variación de costo. Costo aterrizado (no el precio
-      // de lista): es el mismo que entró al kardex y al asiento.
-      await registerPurchaseCost({
-        tenant_id,
-        product: updatedProduct,
-        newCost: landedUnitCost || parseFloat(purchaseItem.unit_cost) || 0,
-        date: purchase.purchase_date,
-        sourceType: 'purchase',
-        sourceId: purchase.id,
-        sourceNumber: purchase.purchase_number
-      }, t);
-
-      // ✅ Actualizar/crear relación product_suppliers para que el botón de proveedores tenga datos
-      const existingLink = await ProductSupplier.findOne({
-        where: {
-          product_id: purchaseItem.product_id,
-          supplier_id: purchase.supplier_id,
-          tenant_id: tenant_id
-        },
+    }
+    if (supplierLinks.size > 0) {
+      const existingLinks = await ProductSupplier.findAll({
+        where: { product_id: [...supplierLinks.keys()], supplier_id: purchase.supplier_id, tenant_id: tenant_id },
+        attributes: ['id', 'product_id'],
         transaction: t
       });
-
-      if (existingLink) {
-        await existingLink.update({
-          last_price: parseFloat(purchaseItem.unit_cost),
-          last_purchase_date: purchase.purchase_date || new Date()
-        }, { transaction: t });
-      } else {
-        await ProductSupplier.create({
-          tenant_id: tenant_id,
-          product_id: purchaseItem.product_id,
-          supplier_id: purchase.supplier_id,
-          last_price: parseFloat(purchaseItem.unit_cost),
-          last_purchase_date: purchase.purchase_date || new Date()
-        }, { transaction: t });
-      }
+      const linked = new Set(existingLinks.map((l) => l.product_id));
+      await bulkUpdateById(ProductSupplier, existingLinks.map((l) => ({ id: l.id, ...supplierLinks.get(l.product_id) })),
+        ['last_price', 'last_purchase_date'], { transaction: t });
+      await ProductSupplier.bulkCreate([...supplierLinks].filter(([productId]) => !linked.has(productId)).map(([productId, data]) => ({
+        tenant_id: tenant_id,
+        product_id: productId,
+        supplier_id: purchase.supplier_id,
+        ...data,
+      })), { transaction: t });
     }
 
     // ¿Quedó todo recibido? purchaseItem.update ya dejó en memoria la

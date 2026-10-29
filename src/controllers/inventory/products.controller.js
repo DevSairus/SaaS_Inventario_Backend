@@ -8,6 +8,7 @@ const { getInProcessMap } = require('../../services/inventory/stockInProcess.ser
 const { createMovement } = require('./movements.controller');
 const { isValidMargin } = require('../../utils/salePricing');
 const { inheritedMarginFor } = require('../../services/inventory/productMargin.service');
+const { searchMatch } = require('../../utils/searchText');
 
 // Debe reflejar exactamente el CHECK constraint de la tabla products
 // (ver 20260101000000-baseline-core-inventory-tables.js) -- si diverge,
@@ -109,17 +110,12 @@ const getAllProducts = async (req, res) => {
       // alguno de los campos (AND de ORs), no la frase completa como una
       // sola subcadena -- así "filtro aceite" encuentra "Filtro de aceite
       // Mann" y también funciona con el orden invertido ("aceite filtro").
+      // Nombre/sku/código de barras/descripción van en una sola expresión
+      // indexada (ver utils/searchText.js).
       const searchWords = search.trim().split(/\s+/).filter(Boolean);
       whereClause[Op.and] = [
         ...(whereClause[Op.and] || []),
-        ...searchWords.map(word => ({
-          [Op.or]: [
-            { name: { [Op.iLike]: `%${word}%` } },
-            { sku: { [Op.iLike]: `%${word}%` } },
-            { barcode: { [Op.iLike]: `%${word}%` } },
-            { description: { [Op.iLike]: `%${word}%` } }
-          ]
-        }))
+        ...searchWords.map(word => searchMatch('products', 'Product', word))
       ];
 
       // Escapes para insertar de forma segura en el literal SQL / regex POSIX.

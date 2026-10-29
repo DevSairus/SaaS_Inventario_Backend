@@ -84,7 +84,7 @@ const Product = sequelize.define('Product', {
   // estos atributos en el modelo, Sequelize descartaba en silencio el update
   // que ya hacía receivePurchase y la columna quedaba siempre en 0.
   last_purchase_cost: {
-    type: DataTypes.DECIMAL(15, 4),
+    type: DataTypes.DECIMAL(15, 2),
     allowNull: true,
     defaultValue: 0
   },
@@ -148,17 +148,17 @@ const Product = sequelize.define('Product', {
     comment: 'Configuración de impuestos: { iva, inc, ica }'
   },
   current_stock: {
-    type: DataTypes.DECIMAL(15, 2),
+    type: DataTypes.DECIMAL(15, 4),
     allowNull: false,
     defaultValue: 0
   },
   reserved_stock: {
-    type: DataTypes.DECIMAL(15, 2),
+    type: DataTypes.DECIMAL(15, 4),
     allowNull: false,
     defaultValue: 0
   },
   available_stock: {
-    type: DataTypes.DECIMAL(15, 2),
+    type: DataTypes.DECIMAL(15, 4),
     allowNull: false,
     defaultValue: 0
   },

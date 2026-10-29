@@ -1,5 +1,6 @@
-const Permission = require('../models/auth/Permission');
-const RolePermission = require('../models/auth/RolePermission');
+// El mapa rol -> permisos se cachea en memoria (services/requestCache.js):
+// antes eran 2 queries por permiso en cada request.
+const { checkRolePermission } = require('../services/requestCache');
 
 /**
  * Requiere UN permiso
@@ -20,27 +21,16 @@ const checkPermission = (permissionName) => {
         return next();
       }
 
-      // La tabla permissions no tiene columna is_active: filtrar por ella
-      // tiraba error SQL (500) para cualquier rol distinto de super_admin.
-      const permission = await Permission.findOne({
-        where: { name: permissionName }
-      });
+      const result = await checkRolePermission(role, permissionName);
 
-      if (!permission) {
+      if (result === 'missing') {
         return res.status(403).json({
           success: false,
           message: 'Permiso no encontrado'
         });
       }
 
-      const hasPermission = await RolePermission.findOne({
-        where: {
-          role,
-          permission_id: permission.id
-        }
-      });
-
-      if (!hasPermission) {
+      if (result !== 'ok') {
         return res.status(403).json({
           success: false,
           message: 'No tienes permisos para esta acción'
@@ -78,25 +68,16 @@ const checkPermissions = (permissions = []) => {
       }
 
       for (const permName of permissions) {
-        const permission = await Permission.findOne({
-          where: { name: permName }
-        });
+        const result = await checkRolePermission(role, permName);
 
-        if (!permission) {
+        if (result === 'missing') {
           return res.status(403).json({
             success: false,
             message: `Permiso no encontrado: ${permName}`
           });
         }
 
-        const hasPermission = await RolePermission.findOne({
-          where: {
-            role,
-            permission_id: permission.id
-          }
-        });
-
-        if (!hasPermission) {
+        if (result !== 'ok') {
           return res.status(403).json({
             success: false,
             message: 'No tienes todos los permisos requeridos'
@@ -135,20 +116,7 @@ const checkAnyPermission = (permissions = []) => {
       }
 
       for (const permName of permissions) {
-        const permission = await Permission.findOne({
-          where: { name: permName }
-        });
-
-        if (!permission) continue;
-
-        const hasPermission = await RolePermission.findOne({
-          where: {
-            role,
-            permission_id: permission.id
-          }
-        });
-
-        if (hasPermission) {
+        if (await checkRolePermission(role, permName) === 'ok') {
           return next();
         }
       }

@@ -8,6 +8,7 @@ const {
 } = require('../../models');
 const { Op } = require('sequelize');
 const { createMovement } = require('../inventory/movements.controller');
+const { nextMovementNumber } = require('../../services/inventory/movementNumber.service');
 const Tenant = require('../../models/auth/Tenant');
 const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
 const { resolveBranchFilter, getBranchWarehouseIds } = require('../../utils/branchFilter');
@@ -104,17 +105,6 @@ async function generateOrderNumber(tenant_id, transaction) {
   return `${prefix}${String(seq).padStart(4, '0')}`;
 }
 
-async function generateMovementNumber(tenant_id, transaction) {
-  const year = new Date().getFullYear();
-  const last  = await InventoryMovement.findOne({
-    where: { tenant_id, movement_number: { [Op.like]: `MOV-${year}-%` } },
-    order: [['movement_number', 'DESC']],
-    transaction,
-  });
-  const seq = last ? parseInt(last.movement_number.split('-')[2]) + 1 : 1;
-  return `MOV-${year}-${String(seq).padStart(5, '0')}`;
-}
-
 // Solo los ítems 'aprobado' (default para los que no usan cotización) cuentan
 // en los totales de la OT — un ítem 'pendiente' todavía no tiene luz verde
 // del cliente y uno 'rechazado' no se va a cobrar, así que ninguno de los
@@ -156,12 +146,19 @@ async function applyItemStockMovement(item, order, product, tenant_id, user_id, 
     throw new Error('La OT debe tener una bodega asignada para descontar repuestos');
   }
 
+  // Releer con lock: los llamadores leen el producto sin bloquearlo, y dos
+  // descuentos simultáneos del mismo repuesto calculaban el stock nuevo
+  // sobre el mismo valor (uno de los dos se perdía). La validación de stock
+  // suficiente sigue siendo de cada llamador, como antes.
+  if (transaction) await product.reload({ lock: transaction.LOCK.UPDATE, transaction });
+
   const qty = parseFloat(item.quantity);
   const previous_stock = parseFloat(product.current_stock) || 0;
   const new_stock      = previous_stock - qty;
   const unit_cost_val  = resolveUnitCost(item, product);
 
-  const movement_number = await generateMovementNumber(tenant_id, transaction);
+  // Mismo generador que createMovement (secuencia, sin lock ni duplicados).
+  const movement_number = await nextMovementNumber({ transaction });
 
   // Este movimiento no pasa por createMovement (movements.controller.js) --
   // sincronizar available_stock acá también, igual que se hizo ahí (H3),

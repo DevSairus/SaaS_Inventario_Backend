@@ -1,5 +1,5 @@
 // src/middleware/tenant.js (versión con schema-per-tenant)
-const Tenant = require('../models/auth/Tenant');
+const { getTenant } = require('../services/requestCache');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const { isSessionRevoked, sessionRevokedResponse } = require('../utils/sessionRevocation');
 const { isRestrictedPlatformUser } = require('./platformScope');
@@ -29,7 +29,8 @@ const tenantMiddleware = async (req, res, next) => {
       return res.status(403).json({ success: false, message: 'Usuario no asociado a ninguna empresa' });
     }
 
-    const tenant = await Tenant.findByPk(req.user.tenant_id);
+    // Cacheado unos segundos (services/requestCache.js): esto corre en cada request.
+    const tenant = await getTenant(req.user.tenant_id);
     if (!tenant) {
       return res.status(404).json({ success: false, message: 'Empresa no encontrada' });
     }
@@ -95,7 +96,7 @@ const tenantMiddleware = async (req, res, next) => {
 const optionalTenantMiddleware = async (req, res, next) => {
   try {
     if (req.user && req.user.tenant_id) {
-      const tenant = await Tenant.findByPk(req.user.tenant_id);
+      const tenant = await getTenant(req.user.tenant_id);
       req.tenant_id = tenant?.id || null;
       req.tenant = tenant || null;
       if (tenant?.schema_name) {

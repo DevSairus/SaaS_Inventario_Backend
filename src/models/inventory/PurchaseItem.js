@@ -72,7 +72,7 @@ const PurchaseItem = sequelize.define('PurchaseItem', {
     comment: 'Unidad de medida al momento de la compra (histórico, tomado del producto)'
   },
   unit_cost: {
-    type: DataTypes.DECIMAL(15, 4),
+    type: DataTypes.DECIMAL(15, 2),
     allowNull: false,
     comment: 'Precio unitario de compra'
   },

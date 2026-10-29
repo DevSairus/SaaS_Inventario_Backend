@@ -31,17 +31,12 @@ async function getVariationThreshold(tenant_id, transaction) {
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_VARIATION_THRESHOLD;
 }
 
-/**
- * @param {object} params
- * @param {Model}  params.product   instancia de Product ya leída dentro de la transacción
- * @param {number} params.newCost   costo unitario (sin IVA) de esta compra
- * @param {string} params.date      fecha de la compra (YYYY-MM-DD)
- * @param {'purchase'|'adjustment'} params.sourceType
- * @returns {{ priceUpdated: boolean, priceHeld: boolean, alert: object|null }}
- */
-async function registerPurchaseCost({ tenant_id, product, newCost, date, sourceType, sourceId = null, sourceNumber = null }, transaction) {
+// Cálculo de un registro de costo sobre el estado actual del producto, sin
+// tocar la BD (lo comparten registerPurchaseCost y registerPurchaseCostsBatch).
+// Devuelve null si no aplica; si no, { updates, alert|null, priceHeld }.
+function planPurchaseCost(product, newCost, date, threshold, { sourceType, sourceId = null, sourceNumber = null }) {
   const cost = parseFloat(newCost);
-  if (!product || !Number.isFinite(cost) || cost <= 0) return { priceUpdated: false, priceHeld: false, alert: null };
+  if (!product || !Number.isFinite(cost) || cost <= 0) return null;
 
   const previousCost = parseFloat(product.last_purchase_cost) || 0;
   const currentPrice = parseFloat(product.base_price) || 0;
@@ -60,39 +55,110 @@ async function registerPurchaseCost({ tenant_id, product, newCost, date, sourceT
     }
   }
 
-  await product.update(updates, { transaction });
-
   const variationPct = previousCost > 0 ? round2(((cost - previousCost) / previousCost) * 100) : null;
-  const threshold = await getVariationThreshold(tenant_id, transaction);
   const variationAlert = threshold > 0 && variationPct !== null && Math.abs(variationPct) >= threshold;
 
-  if (!variationAlert && !priceHeld) return { priceUpdated: !!updates.base_price, priceHeld, alert: null };
+  if (!variationAlert && !priceHeld) return { updates, alert: null, priceHeld };
 
   const alertType = variationAlert ? (variationPct > 0 ? 'cost_increase' : 'cost_decrease') : 'price_held';
   const severity = variationAlert && threshold > 0 && Math.abs(variationPct) >= threshold * 2 ? 'critical' : 'warning';
 
+  return {
+    updates,
+    priceHeld,
+    alert: {
+      product_id: product.id,
+      alert_type: alertType,
+      severity,
+      previous_cost: previousCost > 0 ? previousCost : null,
+      new_cost: cost,
+      variation_pct: variationPct,
+      previous_price: currentPrice || null,
+      suggested_price: suggestedPrice,
+      price_held: priceHeld,
+      source_type: sourceType,
+      source_id: sourceId,
+      source_number: sourceNumber,
+    },
+  };
+}
+
+const REPLACED_NOTE = 'Reemplazada por una alerta de costo más reciente';
+
+/**
+ * @param {object} params
+ * @param {Model}  params.product   instancia de Product ya leída dentro de la transacción
+ * @param {number} params.newCost   costo unitario (sin IVA) de esta compra
+ * @param {string} params.date      fecha de la compra (YYYY-MM-DD)
+ * @param {'purchase'|'adjustment'} params.sourceType
+ * @returns {{ priceUpdated: boolean, priceHeld: boolean, alert: object|null }}
+ */
+async function registerPurchaseCost({ tenant_id, product, newCost, date, sourceType, sourceId = null, sourceNumber = null }, transaction) {
+  const threshold = await getVariationThreshold(tenant_id, transaction);
+  const plan = planPurchaseCost(product, newCost, date, threshold, { sourceType, sourceId, sourceNumber });
+  if (!plan) return { priceUpdated: false, priceHeld: false, alert: null };
+
+  await product.update(plan.updates, { transaction });
+  if (!plan.alert) return { priceUpdated: !!plan.updates.base_price, priceHeld: plan.priceHeld, alert: null };
+
   await CostAlert.update(
-    { status: 'resolved', resolved_date: new Date(), resolution_notes: 'Reemplazada por una alerta de costo más reciente' },
+    { status: 'resolved', resolved_date: new Date(), resolution_notes: REPLACED_NOTE },
     { where: { tenant_id, product_id: product.id, status: 'active' }, transaction }
   );
 
-  const alert = await CostAlert.create({
-    tenant_id,
-    product_id: product.id,
-    alert_type: alertType,
-    severity,
-    previous_cost: previousCost > 0 ? previousCost : null,
-    new_cost: cost,
-    variation_pct: variationPct,
-    previous_price: currentPrice || null,
-    suggested_price: suggestedPrice,
-    price_held: priceHeld,
-    source_type: sourceType,
-    source_id: sourceId,
-    source_number: sourceNumber,
-  }, { transaction });
+  const alert = await CostAlert.create({ tenant_id, ...plan.alert }, { transaction });
 
-  return { priceUpdated: !!updates.base_price, priceHeld, alert };
+  return { priceUpdated: !!plan.updates.base_price, priceHeld: plan.priceHeld, alert };
 }
 
-module.exports = { registerPurchaseCost, DEFAULT_VARIATION_THRESHOLD };
+// Escala de las columnas de products que toca un registro de costo (ver
+// PRODUCT_STOCK_SCALE en movements.controller.js: mismo motivo).
+const PRODUCT_COST_SCALE = { last_purchase_cost: 2, base_price: 2 };
+
+/**
+ * Igual que llamar registerPurchaseCost por cada entrada, en orden, con las
+ * escrituras en bloque. `entries`: [{ product, newCost }] (las instancias se
+ * actualizan en memoria). Un producto repetido deja, como antes, solo su
+ * última alerta activa y las anteriores resueltas como reemplazadas.
+ */
+async function registerPurchaseCostsBatch(entries, { tenant_id, date, sourceType, sourceId = null, sourceNumber = null }, transaction) {
+  const { bulkUpdateById } = require('../../utils/bulkUpdate');
+  const { roundNumeric } = require('../../utils/numberUtils');
+  const Product = require('../../models/inventory/Product');
+
+  const threshold = await getVariationThreshold(tenant_id, transaction);
+  const changed = new Set();
+  const alerts = [];
+  for (const { product, newCost } of entries) {
+    const plan = planPurchaseCost(product, newCost, date, threshold, { sourceType, sourceId, sourceNumber });
+    if (!plan) continue;
+    for (const [col, value] of Object.entries(plan.updates)) {
+      product.setDataValue(col, PRODUCT_COST_SCALE[col] !== undefined ? roundNumeric(value, PRODUCT_COST_SCALE[col]) : value);
+    }
+    changed.add(product);
+    if (plan.alert) alerts.push(plan.alert);
+  }
+  if (changed.size === 0) return;
+
+  const columns = ['last_purchase_cost', 'last_purchase_date', 'base_price'];
+  await bulkUpdateById(Product, [...changed].map((p) => ({
+    id: p.id,
+    last_purchase_cost: p.getDataValue('last_purchase_cost'),
+    last_purchase_date: p.getDataValue('last_purchase_date'),
+    base_price: p.getDataValue('base_price'),
+  })), columns, { transaction });
+
+  if (alerts.length === 0) return;
+  await CostAlert.update(
+    { status: 'resolved', resolved_date: new Date(), resolution_notes: REPLACED_NOTE },
+    { where: { tenant_id, product_id: [...new Set(alerts.map((a) => a.product_id))], status: 'active' }, transaction }
+  );
+  // De varias alertas del mismo producto en este lote, solo la última queda activa.
+  const lastIndex = new Map(alerts.map((a, i) => [a.product_id, i]));
+  const now = new Date();
+  await CostAlert.bulkCreate(alerts.map((a, i) => (lastIndex.get(a.product_id) === i
+    ? { tenant_id, ...a }
+    : { tenant_id, ...a, status: 'resolved', resolved_date: now, resolution_notes: REPLACED_NOTE })), { transaction });
+}
+
+module.exports = { registerPurchaseCost, registerPurchaseCostsBatch, DEFAULT_VARIATION_THRESHOLD };

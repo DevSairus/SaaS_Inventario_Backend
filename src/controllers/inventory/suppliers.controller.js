@@ -1,5 +1,5 @@
 const { Supplier } = require('../../models/inventory');
-const { Op } = require('sequelize');
+const { Op, fn, col, where: sqlWhere } = require('sequelize');
 const { sanitizeRetentionConcepts } = require('../../services/taxService');
 const { PAYROLL_FUND_TYPES } = require('../../data/payroll-funds-colombia');
 
@@ -69,13 +69,16 @@ const getSuppliers = async (req, res) => {
     const where = { tenant_id };
 
     if (search) {
-      where[Op.or] = [
-        { name: { [Op.iLike]: `%${search}%` } },
-        { business_name: { [Op.iLike]: `%${search}%` } },
-        { tax_id: { [Op.iLike]: `%${search}%` } },
-        { email: { [Op.iLike]: `%${search}%` } },
-        { contact_name: { [Op.iLike]: `%${search}%` } }
-      ];
+      // Cada palabra debe aparecer en alguno de los campos, en cualquier orden
+      // ("sanitas eps" encuentra "EPS Sanitas"), sin distinguir tildes ni
+      // mayúsculas ("perez" encuentra "Pérez").
+      const words = String(search).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .split(/\s+/).filter(Boolean).slice(0, 5);
+      const unaccented = (column) => fn('translate', fn('lower', col(column)), 'áéíóúüñàèìòù', 'aeiouunaeiou');
+      where[Op.and] = words.map((word) => ({
+        [Op.or]: ['name', 'business_name', 'tax_id', 'email', 'contact_name', 'phone']
+          .map((column) => sqlWhere(unaccented(column), { [Op.like]: `%${word}%` })),
+      }));
     }
 
     if (is_active !== undefined && is_active !== '') {

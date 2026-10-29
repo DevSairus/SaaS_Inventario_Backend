@@ -49,7 +49,7 @@ const InventoryMovement = sequelize.define('InventoryMovement', {
     allowNull: false
   },
   quantity: {
-    type: DataTypes.DECIMAL(15, 2),
+    type: DataTypes.DECIMAL(15, 4),
     allowNull: false
   },
   unit_cost: {

@@ -21,6 +21,7 @@ const { pickComboFields, presentComboLines, expandComboApprovals } = require('..
 const { applyRemisionFilter } = require('../../utils/remisionVisibility');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 const { daysOverdueOf, pendingReceivableWhere, draftSaleWhere, effectiveDueDateSql } = require('../../utils/receivables');
+const { searchMatch } = require('../../utils/searchText');
 const { createCustomerAdvanceRecord, afterAdvanceCommitted, splitExcess } = require('../../services/finance/customerAdvance.service');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
@@ -214,15 +215,9 @@ const getAll = async (req, res) => {
     }
 
     if (search && !customer_name && !vehicle_plate) {
-      where[Op.or] = [
-        { sale_number: { [Op.iLike]: `%${search}%` } },
-        { customer_name: { [Op.iLike]: `%${search}%` } },
-        { customer_tax_id: { [Op.iLike]: `%${search}%` } },
-        { customer_email: { [Op.iLike]: `%${search}%` } },
-        { customer_phone: { [Op.iLike]: `%${search}%` } },
-        { vehicle_plate: { [Op.iLike]: `%${search}%` } },
-        { dian_invoice_number: { [Op.iLike]: `%${search}%` } },
-      ];
+      // Número, cliente, NIT, email, teléfono, placa y número DIAN en una
+      // sola expresión indexada (ver utils/searchText.js).
+      where[Op.and] = [...(where[Op.and] || []), searchMatch('sales', 'Sale', search)];
     }
 
     if (from_date && to_date) {
@@ -233,7 +228,7 @@ const getAll = async (req, res) => {
       where.sale_date = { [Op.lte]: to_date };
     }
 
-    const sales = await Sale.findAll({
+    const [sales, total] = await Promise.all([Sale.findAll({
       where,
       include: [
         {
@@ -259,9 +254,7 @@ const getAll = async (req, res) => {
         : [['sale_date', 'DESC'], ['created_at', 'DESC'], ['id', 'DESC']],
       limit: safeLimit,
       offset: safeOffset,
-    });
-
-    const total = await Sale.count({ where });
+    }), Sale.count({ where })]);
 
     // Saldo (neto de devoluciones) y días vencidos, para mostrar la cartera
     // directamente en el listado.
