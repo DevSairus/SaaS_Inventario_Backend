@@ -19,22 +19,27 @@
 
 const CostAlert = require('../../models/inventory/CostAlert');
 const Tenant = require('../../models/auth/Tenant');
-const { suggestedSalePrice } = require('../../utils/salePricing');
+const { suggestedSalePrice, normalizeMarginMethod } = require('../../utils/salePricing');
 
 const DEFAULT_VARIATION_THRESHOLD = 10;
 const round2 = (n) => Math.round(n * 100) / 100;
 
-async function getVariationThreshold(tenant_id, transaction) {
+// Umbral de alerta de variación y método de cálculo del precio (margen sobre
+// la venta o recargo sobre el costo), ambos de tenants.business_config.
+async function getCostSettings(tenant_id, transaction) {
   const tenant = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'], transaction });
   const raw = tenant?.business_config?.cost_variation_alert_pct;
   const value = parseFloat(raw);
-  return Number.isFinite(value) && value >= 0 ? value : DEFAULT_VARIATION_THRESHOLD;
+  return {
+    threshold: Number.isFinite(value) && value >= 0 ? value : DEFAULT_VARIATION_THRESHOLD,
+    marginMethod: normalizeMarginMethod(tenant?.business_config?.margin_method),
+  };
 }
 
 // Cálculo de un registro de costo sobre el estado actual del producto, sin
 // tocar la BD (lo comparten registerPurchaseCost y registerPurchaseCostsBatch).
 // Devuelve null si no aplica; si no, { updates, alert|null, priceHeld }.
-function planPurchaseCost(product, newCost, date, threshold, { sourceType, sourceId = null, sourceNumber = null }) {
+function planPurchaseCost(product, newCost, date, { threshold, marginMethod }, { sourceType, sourceId = null, sourceNumber = null }) {
   const cost = parseFloat(newCost);
   if (!product || !Number.isFinite(cost) || cost <= 0) return null;
 
@@ -46,7 +51,7 @@ function planPurchaseCost(product, newCost, date, threshold, { sourceType, sourc
 
   let suggestedPrice = null;
   let priceHeld = false;
-  if (margin > 0) suggestedPrice = suggestedSalePrice(cost, margin, product);
+  if (margin > 0) suggestedPrice = suggestedSalePrice(cost, margin, product, marginMethod);
   if (suggestedPrice !== null) {
     if (currentPrice > 0 && suggestedPrice < currentPrice - 0.005) {
       priceHeld = true;
@@ -94,8 +99,8 @@ const REPLACED_NOTE = 'Reemplazada por una alerta de costo más reciente';
  * @returns {{ priceUpdated: boolean, priceHeld: boolean, alert: object|null }}
  */
 async function registerPurchaseCost({ tenant_id, product, newCost, date, sourceType, sourceId = null, sourceNumber = null }, transaction) {
-  const threshold = await getVariationThreshold(tenant_id, transaction);
-  const plan = planPurchaseCost(product, newCost, date, threshold, { sourceType, sourceId, sourceNumber });
+  const settings = await getCostSettings(tenant_id, transaction);
+  const plan = planPurchaseCost(product, newCost, date, settings, { sourceType, sourceId, sourceNumber });
   if (!plan) return { priceUpdated: false, priceHeld: false, alert: null };
 
   await product.update(plan.updates, { transaction });
@@ -126,11 +131,11 @@ async function registerPurchaseCostsBatch(entries, { tenant_id, date, sourceType
   const { roundNumeric } = require('../../utils/numberUtils');
   const Product = require('../../models/inventory/Product');
 
-  const threshold = await getVariationThreshold(tenant_id, transaction);
+  const settings = await getCostSettings(tenant_id, transaction);
   const changed = new Set();
   const alerts = [];
   for (const { product, newCost } of entries) {
-    const plan = planPurchaseCost(product, newCost, date, threshold, { sourceType, sourceId, sourceNumber });
+    const plan = planPurchaseCost(product, newCost, date, settings, { sourceType, sourceId, sourceNumber });
     if (!plan) continue;
     for (const [col, value] of Object.entries(plan.updates)) {
       product.setDataValue(col, PRODUCT_COST_SCALE[col] !== undefined ? roundNumeric(value, PRODUCT_COST_SCALE[col]) : value);

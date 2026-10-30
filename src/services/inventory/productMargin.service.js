@@ -17,13 +17,18 @@
 // toca los productos que heredan; con `force` también pasa a heredar los
 // que tienen margen propio. Opcionalmente recalcula el precio de venta con
 // la misma regla de las compras: el precio nunca baja salvo allow_decrease.
+//
+// Cómo se interpreta el porcentaje (margen sobre la venta o recargo sobre el
+// costo) lo define business_config.margin_method (utils/salePricing.js).
 
 const { sequelize } = require('../../config/database');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const Tenant = require('../../models/auth/Tenant');
 const CostAlert = require('../../models/inventory/CostAlert');
 const { Product, Category } = require('../../models/inventory');
-const { suggestedSalePrice, isValidMargin } = require('../../utils/salePricing');
+const {
+  suggestedSalePrice, isValidMargin, normalizeMarginMethod, marginRangeMessage, maxMarginFor, MARGIN_METHODS,
+} = require('../../utils/salePricing');
 
 const EPS = 0.005;
 const PREVIEW_ROWS = 500;
@@ -50,7 +55,48 @@ async function loadTree(tenant_id, transaction) {
     id: c.id, name: c.name, parent_id: c.parent_id, is_active: c.is_active,
     own: toMargin(c.profit_margin_percentage),
   }]));
-  return { tenant, global: toMargin(tenant?.business_config?.default_profit_margin_pct), byId };
+  return {
+    tenant, byId,
+    global: toMargin(tenant?.business_config?.default_profit_margin_pct),
+    method: normalizeMarginMethod(tenant?.business_config?.margin_method),
+  };
+}
+
+/** Método de cálculo del precio del tenant: 'on_sale' | 'markup'. */
+async function getMarginMethod(tenant_id, transaction) {
+  const tenant = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'], transaction });
+  return normalizeMarginMethod(tenant?.business_config?.margin_method);
+}
+
+/**
+ * Cambia el método de cálculo. No toca márgenes ni precios guardados: aplica a
+ * los próximos cálculos (compras, importaciones, formulario, cambios de margen).
+ * Los márgenes que no caben en el nuevo método (≥ 100 % al pasar a "sobre la
+ * venta") bloquean el cambio para que ninguna compra deje de calcular precio.
+ */
+async function setMarginMethod(tenant_id, method) {
+  if (!MARGIN_METHODS.includes(method)) throw new MarginError('Método de cálculo inválido');
+  const tenant = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'] });
+  if (!tenant) throw new MarginError('Empresa no encontrada', 404);
+  const max = maxMarginFor(method);
+  const schema = getCurrentSchema() || 'public';
+  const [[{ count }]] = await sequelize.query(`
+    SELECT COUNT(*)::int AS count FROM "${schema}"."products"
+    WHERE tenant_id = :tenant_id AND profit_margin_percentage > :max
+  `, { replacements: { tenant_id, max } });
+  const [[{ cats }]] = await sequelize.query(`
+    SELECT COUNT(*)::int AS cats FROM "${schema}"."categories"
+    WHERE tenant_id = :tenant_id AND profit_margin_percentage > :max
+  `, { replacements: { tenant_id, max } });
+  const global = toMargin(tenant.business_config?.default_profit_margin_pct);
+  if (count > 0 || cats > 0 || (global !== null && global > max)) {
+    throw new MarginError(
+      `No se puede cambiar: hay ${count} producto(s), ${cats} categoría(s)${global !== null && global > max ? ' y el margen global' : ''} con margen mayor a ${max} %. ${marginRangeMessage(method)}.`,
+      409,
+    );
+  }
+  await tenant.update({ business_config: { ...(tenant.business_config || {}), margin_method: method } });
+  return { margin_method: method };
 }
 
 // { margin, source_id }: source_id es la categoría que define el margen, o
@@ -97,7 +143,7 @@ async function getMarginOverview(tenant_id) {
     };
   }).sort((a, b) => a.name.localeCompare(b.name, 'es'));
 
-  return { global_margin: tree.global, uncategorized_products: countBy.get(null) || empty, categories };
+  return { margin_method: tree.method, global_margin: tree.global, uncategorized_products: countBy.get(null) || empty, categories };
 }
 
 /**
@@ -158,12 +204,12 @@ function scopeCategoryIds(tree, scope, categoryId) {
   return ids;
 }
 
-function validateRequest({ scope, category_id, margin }) {
+function validateRequest({ scope, category_id, margin }, method) {
   if (!['global', 'category'].includes(scope)) throw new MarginError('Indica si el margen es global o de una categoría');
   if (scope === 'category' && !category_id) throw new MarginError('Selecciona la categoría');
   const m = toMargin(margin);
   if (margin !== null && margin !== undefined && margin !== '' && m === null) throw new MarginError('Margen inválido');
-  if (m !== null && !isValidMargin(m)) throw new MarginError('El margen es sobre el precio de venta: debe estar entre 0 y 99,99 %');
+  if (m !== null && !isValidMargin(m, method)) throw new MarginError(marginRangeMessage(method));
   return m;
 }
 
@@ -173,8 +219,8 @@ function validateRequest({ scope, category_id, margin }) {
  */
 async function planMarginChange(tenant_id, params, transaction = null) {
   const { scope, category_id = null, force = false, recalc_prices = true, allow_decrease = false } = params;
-  const margin = validateRequest(params);
   const tree = await loadTree(tenant_id, transaction);
+  const margin = validateRequest(params, tree.method);
   if (scope === 'category' && !tree.byId.has(category_id)) throw new MarginError('Categoría no encontrada', 404);
 
   const before = scope === 'global' ? tree.global : tree.byId.get(category_id).own;
@@ -219,7 +265,7 @@ async function planMarginChange(tenant_id, params, transaction = null) {
       if (!(cost > 0)) {
         row.action = 'sin_costo'; stats.no_cost += 1;
       } else {
-        const suggested = suggestedSalePrice(cost, newMargin, p);
+        const suggested = suggestedSalePrice(cost, newMargin, p, tree.method);
         row.suggested_price = suggested;
         if (Math.abs(suggested - current) < EPS) { row.action = 'igual'; stats.price_same += 1; }
         else if (suggested > current || current <= 0) { row.action = 'sube'; row.final_price = suggested; stats.price_up += 1; }
@@ -287,7 +333,7 @@ async function applyMarginChange(tenant_id, params) {
         const row = rowById.get(alert.product_id);
         if (!row || row.new_margin === null) continue;
         const product = await Product.findByPk(row.id, { attributes: ['id', 'price_includes_tax', 'has_tax', 'tax_percentage', 'tax_config'], transaction });
-        const suggested = suggestedSalePrice(alert.new_cost, row.new_margin, product);
+        const suggested = suggestedSalePrice(alert.new_cost, row.new_margin, product, plan.tree.method);
         if (suggested === null) continue;
         if (suggested >= row.final_price - EPS) {
           alertsResolved += 1;
@@ -314,6 +360,8 @@ async function applyMarginChange(tenant_id, params) {
 module.exports = {
   MarginError,
   inheritedMarginFor,
+  getMarginMethod,
+  setMarginMethod,
   getMarginOverview,
   syncInheritedMargins,
   previewMarginChange,

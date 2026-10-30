@@ -6,8 +6,8 @@ const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
 const { createMovement } = require('./movements.controller');
-const { isValidMargin } = require('../../utils/salePricing');
-const { inheritedMarginFor } = require('../../services/inventory/productMargin.service');
+const { isValidMargin, marginRangeMessage } = require('../../utils/salePricing');
+const { inheritedMarginFor, getMarginMethod } = require('../../services/inventory/productMargin.service');
 const { searchMatch } = require('../../utils/searchText');
 
 // Debe reflejar exactamente el CHECK constraint de la tabla products
@@ -339,10 +339,6 @@ const createProduct = async (req, res) => {
       margin_inherited = false
     } = req.body;
 
-    if (profit_margin_percentage != null && profit_margin_percentage !== '' && !isValidMargin(profit_margin_percentage)) {
-      return res.status(400).json({ success: false, message: 'El margen de ganancia es sobre el precio de venta: debe estar entre 0 y 99,99 %' });
-    }
-
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
     const safeProductType = VALID_PRODUCT_TYPES.includes(product_type) ? product_type : 'simple';
 
@@ -359,6 +355,13 @@ const createProduct = async (req, res) => {
     }
 
     const tenantId = req.user.role === 'super_admin' ? (req.body.tenant_id || null) : req.user.tenant_id;
+
+    if (profit_margin_percentage != null && profit_margin_percentage !== '') {
+      const marginMethod = await getMarginMethod(tenantId);
+      if (!isValidMargin(profit_margin_percentage, marginMethod)) {
+        return res.status(400).json({ success: false, message: marginRangeMessage(marginMethod) });
+      }
+    }
 
     // Si hereda, el margen lo pone la categoría (o el global), no el formulario.
     const effectiveMargin = margin_inherited
@@ -545,12 +548,15 @@ const updateProduct = async (req, res) => {
     const product = await Product.findOne({ where: whereClause });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
 
-    const marginIn = updateData.profit_margin_percentage;
-    if (marginIn != null && marginIn !== '' && !isValidMargin(marginIn)) {
-      return res.status(400).json({ success: false, message: 'El margen de ganancia es sobre el precio de venta: debe estar entre 0 y 99,99 %' });
-    }
-
     const tenantId = req.user.role === 'super_admin' ? product.tenant_id : req.user.tenant_id;
+
+    const marginIn = updateData.profit_margin_percentage;
+    if (marginIn != null && marginIn !== '') {
+      const marginMethod = await getMarginMethod(tenantId);
+      if (!isValidMargin(marginIn, marginMethod)) {
+        return res.status(400).json({ success: false, message: marginRangeMessage(marginMethod) });
+      }
+    }
 
     if (updateData.sku && updateData.sku !== product.sku) {
       const existingSku = await Product.findOne({ where: { sku: updateData.sku.trim(), tenant_id: tenantId, id: { [Op.ne]: id } } });

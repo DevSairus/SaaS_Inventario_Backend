@@ -1,7 +1,7 @@
 // Márgenes de ganancia por categoría y global (ver
 // services/inventory/productMargin.service.js).
 const {
-  MarginError, getMarginOverview, previewMarginChange, applyMarginChange,
+  MarginError, getMarginOverview, previewMarginChange, applyMarginChange, setMarginMethod,
 } = require('../../services/inventory/productMargin.service');
 
 const tenantOf = (req) => req.user?.tenant_id || null;
@@ -52,4 +52,16 @@ const applyMargin = async (req, res) => {
   }
 };
 
-module.exports = { getMargins, previewMargin, applyMargin };
+// PUT /products/margins/method { margin_method: 'on_sale' | 'markup' }
+const updateMarginMethod = async (req, res) => {
+  const tenantId = tenantOf(req);
+  if (!tenantId) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
+  try {
+    const result = await setMarginMethod(tenantId, req.body?.margin_method);
+    res.json({ success: true, message: 'Método de cálculo actualizado', data: result });
+  } catch (error) {
+    fail(res, error, 'Error al cambiar el método de cálculo del precio');
+  }
+};
+
+module.exports = { getMargins, previewMargin, applyMargin, updateMarginMethod };

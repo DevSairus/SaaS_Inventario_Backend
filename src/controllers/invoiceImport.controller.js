@@ -7,8 +7,8 @@ const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const taxService = require('../services/taxService');
-const { suggestedSalePrice, isValidMargin } = require('../utils/salePricing');
-const { inheritedMarginFor } = require('../services/inventory/productMargin.service');
+const { suggestedSalePrice, isValidMargin, marginRangeMessage } = require('../utils/salePricing');
+const { inheritedMarginFor, getMarginMethod } = require('../services/inventory/productMargin.service');
 const { bulkUpdateById } = require('../utils/bulkUpdate');
 
 /**
@@ -105,8 +105,9 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
   // global); si tampoco hay, 30 % propio como antes.
   const parsedMargin = parseFloat(opts.profit_margin);
   const profit_margin = Number.isFinite(parsedMargin) ? parsedMargin : null;
-  if (profit_margin !== null && !isValidMargin(profit_margin)) {
-    throw new InvoiceImportError('El margen de ganancia es sobre la venta y debe ser menor a 100 %', 400);
+  const marginMethod = await getMarginMethod(tenant_id);
+  if (profit_margin !== null && !isValidMargin(profit_margin, marginMethod)) {
+    throw new InvoiceImportError(marginRangeMessage(marginMethod), 400);
   }
   const supplier_name_override = opts.supplier_name?.trim() || null;
   const removed_items = opts.removed_items || [];
@@ -636,6 +637,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
   const created = [];      // productos nuevos de esta importación, en orden
   const pendingSku = [];   // nuevos sin código propio: SKU autogenerado al final
   const marginCache = new Map(); // margen heredado por categoría (no cambia durante la importación)
+  const marginMethod = await getMarginMethod(tenant_id, transaction);
   const entries = [];
 
   for (const item of items) {
@@ -708,7 +710,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
           has_tax: item.tax_percentage > 0,
           tax_percentage: item.tax_percentage || 0,
           tax_config: { iva_status: item.iva_status },
-        }) ?? 0,
+        }, marginMethod) ?? 0,
         profit_margin_percentage: itemMargin,
         margin_inherited: profit_margin === null && inheritedMargin !== null,
         current_stock: 0,

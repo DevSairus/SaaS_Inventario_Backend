@@ -4,8 +4,8 @@ const { Product, ProductEquivalenceGroup, ProductEquivalenceGroupMember, Invento
 const { sequelize } = require('../../config/database');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { cellToText } = require('../../utils/excelCell');
-const { suggestedSalePrice, isValidMargin } = require('../../utils/salePricing');
-const { inheritedMarginFor } = require('../../services/inventory/productMargin.service');
+const { suggestedSalePrice, isValidMargin, marginRangeMessage } = require('../../utils/salePricing');
+const { inheritedMarginFor, getMarginMethod } = require('../../services/inventory/productMargin.service');
 const { nextMovementNumbers } = require('../../services/inventory/movementNumber.service');
 
 const REQUIRED_COLUMNS = ['Código*', 'Nombre*'];
@@ -94,7 +94,8 @@ async function readExcelRows(buffer) {
 
 // globalMargin: margen global del tenant; una fila sin margen lo hereda (los
 // productos importados no traen categoría). Sin global, 30 % propio.
-function parseRow(rowNumber, data, globalMargin = null) {
+// marginMethod: 'on_sale' | 'markup' (business_config.margin_method).
+function parseRow(rowNumber, data, globalMargin = null, marginMethod = undefined) {
   const errors = [];
   const sku = (data['Código*'] || '').trim();
   const name = (data['Nombre*'] || '').trim();
@@ -108,7 +109,7 @@ function parseRow(rowNumber, data, globalMargin = null) {
   const hasMargin = !isNaN(marginRaw) && marginRaw >= 0;
   const margin_inherited = !hasMargin && globalMargin !== null;
   const profit_margin_percentage = hasMargin ? marginRaw : (margin_inherited ? globalMargin : 30);
-  if (!isValidMargin(profit_margin_percentage)) errors.push(`El margen sobre la venta debe ser menor a 100 % (llegó ${profit_margin_percentage})`);
+  if (!isValidMargin(profit_margin_percentage, marginMethod)) errors.push(`${marginRangeMessage(marginMethod)} (llegó ${profit_margin_percentage})`);
 
   const priceRaw = parseFloat(data['Precio Venta']);
   let base_price;
@@ -116,7 +117,7 @@ function parseRow(rowNumber, data, globalMargin = null) {
     base_price = priceRaw;
   } else if (average_cost > 0) {
     // Los productos importados se crean con price_includes_tax: false.
-    base_price = suggestedSalePrice(average_cost, profit_margin_percentage) ?? 0;
+    base_price = suggestedSalePrice(average_cost, profit_margin_percentage, {}, marginMethod) ?? 0;
   } else {
     base_price = 0;
   }
@@ -243,7 +244,8 @@ const bulkImportProductsInner = async (req, res) => {
     }
 
     const globalMargin = await inheritedMarginFor(tenantId, null);
-    const parsedRows = rows.map((r) => parseRow(r.rowNumber, r.data, globalMargin));
+    const marginMethod = await getMarginMethod(tenantId);
+    const parsedRows = rows.map((r) => parseRow(r.rowNumber, r.data, globalMargin, marginMethod));
     markDuplicatesInFile(parsedRows);
 
     const validRows = parsedRows.filter((r) => r.errors.length === 0);

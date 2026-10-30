@@ -19,6 +19,9 @@
 // sobre el costo de la alerta; si con la fórmula nueva el precio ya no baja,
 // la alerta se resuelve.
 //
+// Respeta el método de cálculo de cada tenant (business_config.margin_method):
+// los que trabajan con recargo sobre el costo se recalculan con recargo.
+//
 // Uso: node src/scripts/recalcSalePricesByMargin.js                  (vista previa, no cambia nada)
 //      node src/scripts/recalcSalePricesByMargin.js --tenant=slug    (solo ese tenant)
 //      node src/scripts/recalcSalePricesByMargin.js --csv=ruta.csv   (detalle por producto; por defecto en la carpeta temporal)
@@ -32,7 +35,7 @@ const path = require('path');
 const { Op } = require('sequelize');
 const { sequelize } = require('../config/database');
 const { runWithTenantSchema } = require('../config/tenantContext');
-const { suggestedSalePrice, isValidMargin } = require('../utils/salePricing');
+const { suggestedSalePrice, isValidMargin, normalizeMarginMethod } = require('../utils/salePricing');
 
 const arg = (name) => process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=').slice(1).join('=');
 const APPLY = process.argv.includes('--apply');
@@ -57,6 +60,7 @@ async function recalcTenant(tenant) {
     order: [['sku', 'ASC']],
   });
 
+  const method = normalizeMarginMethod(tenant.business_config?.margin_method);
   const t = APPLY ? await sequelize.transaction() : null;
   try {
     for (const p of products) {
@@ -70,10 +74,10 @@ async function recalcTenant(tenant) {
         price_includes_tax: p.price_includes_tax ? 'sí' : 'no', current, suggested: null, final: current, action: '',
       };
 
-      if (!isValidMargin(margin)) { row.action = 'margen ≥ 100 %: revisar a mano'; stats.margen_invalido += 1; rows.push(row); continue; }
+      if (!isValidMargin(margin, method)) { row.action = 'margen fuera de rango: revisar a mano'; stats.margen_invalido += 1; rows.push(row); continue; }
       if (!(cost > 0)) { row.action = 'sin costo'; stats.sin_costo += 1; rows.push(row); continue; }
 
-      const suggested = suggestedSalePrice(cost, margin, p);
+      const suggested = suggestedSalePrice(cost, margin, p, method);
       row.suggested = suggested;
       if (Math.abs(suggested - current) < EPS) {
         row.action = 'igual'; stats.igual += 1;
@@ -94,7 +98,7 @@ async function recalcTenant(tenant) {
     for (const alert of alerts) {
       const p = byId.get(alert.product_id);
       if (!p) continue;
-      const suggested = suggestedSalePrice(alert.new_cost, p.profit_margin_percentage, p);
+      const suggested = suggestedSalePrice(alert.new_cost, p.profit_margin_percentage, p, method);
       if (suggested === null) continue;
       const finalPrice = rows.find((r) => r.sku === p.sku)?.final ?? (parseFloat(p.base_price) || 0);
       if (suggested >= finalPrice - EPS) {
@@ -102,7 +106,7 @@ async function recalcTenant(tenant) {
         if (APPLY) {
           await alert.update({
             status: 'resolved', resolved_date: new Date(),
-            resolution_notes: 'Resuelta al recalcular precios con margen sobre la venta: el precio ya no baja',
+            resolution_notes: 'Resuelta al recalcular precios por margen: el precio ya no baja',
           }, { transaction: t });
         }
       } else if (Math.abs(suggested - parseFloat(alert.suggested_price)) >= EPS) {
@@ -121,7 +125,7 @@ async function recalcTenant(tenant) {
 
 async function main() {
   const [tenants] = await sequelize.query(
-    `SELECT id, slug, schema_name FROM public.tenants ${ONLY_TENANT ? 'WHERE slug = :slug' : ''} ORDER BY slug ASC`,
+    `SELECT id, slug, schema_name, business_config FROM public.tenants ${ONLY_TENANT ? 'WHERE slug = :slug' : ''} ORDER BY slug ASC`,
     { replacements: { slug: ONLY_TENANT } }
   );
   if (!tenants.length) { console.log(ONLY_TENANT ? `No existe el tenant ${ONLY_TENANT}` : 'No hay tenants'); process.exit(1); }
@@ -141,7 +145,7 @@ async function main() {
       if (!rows.length) { console.log(`${tenant.slug}: sin productos con margen`); continue; }
       const changed = rows.filter((r) => r.final !== r.current);
       const delta = changed.reduce((s, r) => s + (r.final - r.current), 0);
-      console.log(`${tenant.slug}: ${rows.length} con margen — sube ${stats.sube}, ${ALLOW_DECREASE ? `baja ${stats.baja}` : `se conserva (bajaría) ${stats.conservado}`}, igual ${stats.igual}, sin costo ${stats.sin_costo}, margen ≥100 % ${stats.margen_invalido}`);
+      console.log(`${tenant.slug}: ${rows.length} con margen — sube ${stats.sube}, ${ALLOW_DECREASE ? `baja ${stats.baja}` : `se conserva (bajaría) ${stats.conservado}`}, igual ${stats.igual}, sin costo ${stats.sin_costo}, margen fuera de rango ${stats.margen_invalido} (${normalizeMarginMethod(tenant.business_config?.margin_method) === 'markup' ? 'recargo' : 'sobre la venta'})`);
       if (stats.alertas_recalculadas || stats.alertas_resueltas) {
         console.log(`   alertas de precio conservado: ${stats.alertas_recalculadas} con sugerido corregido, ${stats.alertas_resueltas} se resuelven`);
       }
