@@ -16,6 +16,7 @@ const {
   getPublicConsent, sendPublicOtp, acceptPublic, rejectPublic, getPublicPdf,
 } = require('../controllers/legal/consents.controller');
 const { getPublicPosts, getPublicPostBySlug } = require('../controllers/public/blog.controller');
+const { getPublicOrderListPdf } = require('../controllers/inventory/orderLists.controller');
 
 // GET /api/public/work-orders/:token
 // El cliente consulta el estado de su OT con el token compartido por WhatsApp.
@@ -63,6 +64,10 @@ router.post('/consents/:token/otp', consentLimiter, sendPublicOtp);
 router.post('/consents/:token/accept', consentLimiter, acceptPublic);
 router.post('/consents/:token/reject', consentLimiter, rejectPublic);
 router.get('/consents/:token/pdf', consentLimiter, getPublicPdf);
+
+// ── Pedido a proveedor (PDF compartido por WhatsApp) ─────────────────────
+// GET /api/public/order-lists/:token/pdf — ver orderLists.controller.js.
+router.get('/order-lists/:token/pdf', consentLimiter, getPublicOrderListPdf);
 
 // ── Blog editorial (SEO) ─────────────────────────────────────────────────
 // GET /api/public/blog — listado paginado de artículos publicados.

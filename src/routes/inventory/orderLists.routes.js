@@ -27,6 +27,9 @@ router.patch('/:id', ctrl.updateOrderList);
 router.get('/:id/pdf', manage, ctrl.getOrderListPdf);
 router.post('/:id/send-email', manage, ctrl.sendOrderListEmail);
 router.post('/:id/log-send', manage, ctrl.logOrderListSend);
+// WhatsApp: PDF directo por la Cloud API, o enlace público al PDF para wa.me
+router.post('/:id/share-link', manage, ctrl.getShareLink);
+router.post('/:id/send-whatsapp', manage, ctrl.sendOrderListWhatsApp);
 router.patch('/:id/close', manage, ctrl.closeOrderList);
 router.patch('/:id/cancel', manage, ctrl.cancelOrderList);
 router.get('/:id/purchase-draft', manage, ctrl.getPurchaseDraft);

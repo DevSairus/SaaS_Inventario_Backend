@@ -35,6 +35,9 @@ const SupplierOrderList = sequelize.define('SupplierOrderList', {
   purchase_id: { type: DataTypes.UUID, allowNull: true },
   sent_log: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
   created_by: { type: DataTypes.UUID, allowNull: true },
+  // Enlace público al PDF (compartir por WhatsApp sin Cloud API). Ver la
+  // migración 2026103001-add-order-list-share-token.js.
+  share_token: { type: DataTypes.UUID, allowNull: true },
 }, {
   tableName: 'supplier_order_lists',
   timestamps: true,

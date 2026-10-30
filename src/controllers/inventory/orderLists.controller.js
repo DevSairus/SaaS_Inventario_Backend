@@ -36,6 +36,24 @@ const listsTable = () => `"${getCurrentSchema() || 'public'}"."supplier_order_li
 const httpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const userName = (u) => [u?.first_name, u?.last_name].filter(Boolean).join(' ') || u?.email || null;
 
+// req.user es el JWT decodificado (id, correo, rol): no trae el nombre. Para
+// el "Solicitado por" del PDF, la firma del correo y el historial de envíos
+// se lee el usuario de la base.
+async function currentUserName(req) {
+  const user = await User.findByPk(req.user.id, { attributes: userAttributes });
+  return userName(user) || req.user.email || null;
+}
+
+// Agrega user_name a cada envío del historial (los registrados antes solo
+// guardaban user_id).
+async function withSenderNames(sentLog = []) {
+  const ids = [...new Set(sentLog.filter((s) => s.user_id && !s.user_name).map((s) => s.user_id))];
+  if (!ids.length) return sentLog;
+  const users = await User.findAll({ where: { id: ids }, attributes: userAttributes });
+  const names = new Map(users.map((u) => [u.id, userName(u)]));
+  return sentLog.map((s) => (s.user_name || !s.user_id ? s : { ...s, user_name: names.get(s.user_id) || null }));
+}
+
 /**
  * Cantidad sugerida para pedir: llevar el stock hasta el máximo; si el
  * producto no tiene máximo, hasta el doble del mínimo / punto de reorden.
@@ -94,6 +112,7 @@ async function loadList(tenant_id, id, { transaction, taxAttributes = false } = 
       { model: Purchase, as: 'purchase', attributes: ['id', 'purchase_number', 'status'] },
       { model: User, as: 'orderer', attributes: userAttributes },
       { model: User, as: 'creator', attributes: userAttributes },
+      { model: User, as: 'canceller', attributes: userAttributes },
     ],
     order: [[{ model: SupplierOrderListItem, as: 'items' }, 'created_at', 'ASC']],
     transaction,
@@ -148,6 +167,8 @@ const getOrderLists = async (req, res) => {
         { model: Supplier, as: 'supplier', attributes: supplierAttributes },
         { model: Purchase, as: 'purchase', attributes: ['id', 'purchase_number', 'status'] },
         { model: User, as: 'orderer', attributes: userAttributes },
+        { model: User, as: 'creator', attributes: userAttributes },
+        { model: User, as: 'canceller', attributes: userAttributes },
       ],
       attributes: {
         include: [
@@ -289,6 +310,15 @@ const getOrderListById = async (req, res) => {
     const codes = await supplierCodesFor(tenant_id, list.supplier_id, list.items.map((i) => i.product_id));
     const data = list.toJSON();
     data.items = data.items.map((i) => ({ ...i, supplier_code: codes.get(i.product_id) || null }));
+    data.sent_log = await withSenderNames(data.sent_log);
+    // Para ofrecer el envío del PDF por la Cloud API desde el detalle.
+    try {
+      const status = await require('../../services/whatsappCloud.service').getWhatsAppStatus(tenant_id);
+      data.whatsapp_cloud = !!status.operational;
+    } catch {
+      data.whatsapp_cloud = false;
+    }
+    delete data.share_token;
     res.json({ success: true, data });
   } catch (error) {
     sendError(res, error, 'Error al obtener la lista de pedido', 'getOrderListById');
@@ -623,7 +653,7 @@ async function loadPdfData(req) {
   if (!list.items.length) throw httpError(400, 'La lista está vacía');
   const supplierCodes = await supplierCodesFor(tenant_id, list.supplier_id, list.items.map((i) => i.product_id));
   const tenant = await Tenant.findByPk(tenant_id);
-  return { list, tenant, opts: { supplierCodes, requestedBy: userName(req.user) } };
+  return { list, tenant, opts: { supplierCodes, requestedBy: await currentUserName(req) } };
 }
 
 // GET /order-lists/:id/pdf
@@ -688,7 +718,7 @@ const sendOrderListEmail = async (req, res) => {
     }
 
     await SupplierOrderList.update(
-      { sent_log: [...(list.sent_log || []), { date: new Date(), channel: 'email', to, cc, user_id: req.user.id }] },
+      { sent_log: [...(list.sent_log || []), { date: new Date(), channel: 'email', to, cc, user_id: req.user.id, user_name: opts.requestedBy }] },
       { where: { id: list.id, tenant_id: list.tenant_id } }
     );
     res.json({ success: true, message: `Pedido enviado a ${to.join(', ')}`, data: { to, cc } });
@@ -707,10 +737,120 @@ const logOrderListSend = async (req, res) => {
     if (!list) throw httpError(404, 'Lista de pedido no encontrada');
     const channel = req.body?.channel === 'whatsapp' ? 'whatsapp' : null;
     if (!channel) throw httpError(400, 'Canal no válido');
-    await list.update({ sent_log: [...(list.sent_log || []), { date: new Date(), channel, to: req.body?.to || null, user_id: req.user.id }] });
+    const via = ['wa_me', 'file'].includes(req.body?.via) ? req.body.via : 'wa_me';
+    await list.update({ sent_log: [...(list.sent_log || []), { date: new Date(), channel, via, to: req.body?.to || null, user_id: req.user.id, user_name: await currentUserName(req) }] });
     res.json({ success: true, data: list });
   } catch (error) {
     sendError(res, error, 'Error registrando el envío', 'logOrderListSend');
+  }
+};
+
+const backendBaseUrl = (req) => (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '').replace(/\/api$/, '');
+
+/**
+ * Enlace público al PDF del pedido, para compartirlo por WhatsApp sin la
+ * Cloud API (wa.me no adjunta archivos). Lo crea la primera vez.
+ * POST /order-lists/:id/share-link → { pdf_url }
+ */
+const getShareLink = async (req, res) => {
+  try {
+    const list = await SupplierOrderList.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!list) throw httpError(404, 'Lista de pedido no encontrada');
+    if (list.status === 'cancelled') throw httpError(400, 'No se puede enviar un pedido descartado');
+    if (!list.share_token) await list.update({ share_token: require('crypto').randomUUID() });
+    res.json({ success: true, data: { pdf_url: `${backendBaseUrl(req)}/api/public/order-lists/${list.share_token}/pdf` } });
+  } catch (error) {
+    sendError(res, error, 'Error generando el enlace del pedido', 'getShareLink');
+  }
+};
+
+/**
+ * Envía el PDF del pedido como documento por la WhatsApp Cloud API del
+ * tenant. Meta solo deja enviar un documento suelto si el proveedor escribió
+ * en las últimas 24 h; si no, responde 409 (code WA_WINDOW_CLOSED) y la
+ * pantalla ofrece el enlace al PDF.
+ * POST /order-lists/:id/send-whatsapp { to }
+ */
+const sendOrderListWhatsApp = async (req, res) => {
+  try {
+    const to = String(req.body?.to || '').replace(/\D/g, '');
+    if (to.length < 10) throw httpError(400, 'Escribe el celular del proveedor con indicativo (ej. 573001234567)');
+    const { list, tenant, opts } = await loadPdfData(req);
+    if (list.status === 'cancelled') throw httpError(400, 'No se puede enviar un pedido descartado');
+
+    const waCloud = require('../../services/whatsappCloud.service');
+    const status = await waCloud.getWhatsAppStatus(req.user.tenant_id);
+    if (!status.operational) throw httpError(400, 'WhatsApp no está conectado');
+
+    const { generateOrderListPDFBuffer } = require('../../services/orderListPdf.service');
+    const pdf = await generateOrderListPDFBuffer(list, tenant, opts);
+    const company = tenant?.dian_config?.company_name || tenant?.company_name || '';
+    try {
+      await waCloud.sendMediaFromTenant({
+        tenantId: req.user.tenant_id,
+        to,
+        type: 'document',
+        fileBuffer: pdf,
+        mimeType: 'application/pdf',
+        filename: `Pedido-${list.list_number}.pdf`,
+        caption: `Pedido ${list.list_number}${company ? ` de ${company}` : ''} (${list.items.length} ítem(s)). Por favor confírmanos disponibilidad y tiempo de entrega.`,
+        userId: req.user.id,
+        source: 'api',
+      });
+    } catch (err) {
+      if (err.code === 'WA_WINDOW_CLOSED') {
+        return res.status(409).json({
+          success: false,
+          code: 'WA_WINDOW_CLOSED',
+          message: 'El proveedor no te ha escrito por WhatsApp en las últimas 24 h, así que Meta no deja enviarle el PDF directo. Envíale el enlace al PDF.',
+        });
+      }
+      throw err;
+    }
+
+    await SupplierOrderList.update(
+      { sent_log: [...(list.sent_log || []), { date: new Date(), channel: 'whatsapp', via: 'cloud_api', to, user_id: req.user.id, user_name: opts.requestedBy }] },
+      { where: { id: list.id, tenant_id: list.tenant_id } }
+    );
+    res.json({ success: true, message: `PDF enviado por WhatsApp a ${to}` });
+  } catch (error) {
+    sendError(res, error, 'Error enviando el pedido por WhatsApp', 'sendOrderListWhatsApp');
+  }
+};
+
+/**
+ * PDF público del pedido (sin sesión), por su share_token.
+ * GET /api/public/order-lists/:token/pdf
+ */
+const getPublicOrderListPdf = async (req, res) => {
+  const { resolveRecordSchemaByToken } = require('../../utils/publicTokenResolver');
+  const { runWithTenantSchema } = require('../../config/tenantContext');
+  try {
+    const resolved = await resolveRecordSchemaByToken({ table: 'supplier_order_lists', column: 'share_token', token: req.params.token });
+    if (!resolved) return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+    await runWithTenantSchema(resolved.schemaName, async () => {
+      const base = await SupplierOrderList.findOne({ where: { id: resolved.id }, attributes: ['id', 'tenant_id', 'status'] });
+      if (!base || base.status === 'cancelled') return res.status(404).json({ success: false, message: 'Pedido no encontrado' });
+      const list = await loadList(base.tenant_id, base.id);
+      const supplierCodes = await supplierCodesFor(base.tenant_id, list.supplier_id, list.items.map((i) => i.product_id));
+      const tenant = await Tenant.findByPk(base.tenant_id);
+      // Responsable: quien lo marcó como pedido o, si sigue abierto, quien
+      // lo compartió por última vez (o quien lo abrió).
+      const sentLog = await withSenderNames(list.sent_log || []);
+      const lastSender = [...sentLog].reverse().find((s) => s.user_name)?.user_name;
+      const requestedBy = userName(list.orderer) || lastSender || userName(list.creator);
+      const { generateOrderListPDFBuffer } = require('../../services/orderListPdf.service');
+      const pdf = await generateOrderListPDFBuffer(list, tenant, { supplierCodes, requestedBy });
+      res.set({
+        'Content-Type': 'application/pdf',
+        'Content-Disposition': `inline; filename="Pedido-${list.list_number}.pdf"`,
+        'Cache-Control': 'no-store',
+      });
+      res.send(pdf);
+    });
+  } catch (error) {
+    logger.error('Error sirviendo el PDF público del pedido:', error);
+    res.status(500).json({ success: false, message: 'Error generando el PDF del pedido' });
   }
 };
 
@@ -732,4 +872,7 @@ module.exports = {
   getOrderListPdf,
   sendOrderListEmail,
   logOrderListSend,
+  getShareLink,
+  sendOrderListWhatsApp,
+  getPublicOrderListPdf,
 };

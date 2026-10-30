@@ -350,6 +350,7 @@ Supplier.hasMany(SupplierOrderList, { foreignKey: 'supplier_id', as: 'order_list
 SupplierOrderList.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
 SupplierOrderList.belongsTo(User, { foreignKey: 'ordered_by', as: 'orderer' });
 SupplierOrderList.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+SupplierOrderList.belongsTo(User, { foreignKey: 'cancelled_by', as: 'canceller' });
 
 // PayableAlert ↔ Tenant / Purchase / User (antigüedad de cuentas por pagar)
 Tenant.hasMany(PayableAlert, { foreignKey: 'tenant_id', as: 'payable_alerts' });
