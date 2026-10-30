@@ -745,7 +745,10 @@ const logOrderListSend = async (req, res) => {
   }
 };
 
-const backendBaseUrl = (req) => (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '').replace(/\/api$/, '');
+// El enlace que recibe el proveedor apunta al FRONTEND (/pedido/:token, que
+// pide el PDF a /api/public/order-lists/:token/pdf por debajo), nunca al
+// dominio del backend -- mismo criterio que publicDocumentUrl en ventas.
+const frontendBaseUrl = (req) => (process.env.FRONTEND_URL || req.get('origin') || '').split(',')[0].trim().replace(/\/$/, '');
 
 /**
  * Enlace público al PDF del pedido, para compartirlo por WhatsApp sin la
@@ -758,7 +761,7 @@ const getShareLink = async (req, res) => {
     if (!list) throw httpError(404, 'Lista de pedido no encontrada');
     if (list.status === 'cancelled') throw httpError(400, 'No se puede enviar un pedido descartado');
     if (!list.share_token) await list.update({ share_token: require('crypto').randomUUID() });
-    res.json({ success: true, data: { pdf_url: `${backendBaseUrl(req)}/api/public/order-lists/${list.share_token}/pdf` } });
+    res.json({ success: true, data: { pdf_url: `${frontendBaseUrl(req)}/pedido/${list.share_token}` } });
   } catch (error) {
     sendError(res, error, 'Error generando el enlace del pedido', 'getShareLink');
   }
