@@ -17,6 +17,15 @@ const { Customer } = require('../models');
 
 const OWNERSHIP_BYPASS_ROLES = ['admin', 'manager', 'super_admin'];
 
+// ¿El usuario NO puede transaccionar con este cliente? Exportado para los
+// flujos que resuelven el cliente dentro del controller y no por
+// customer_id del body (ej. OT rápida que reutiliza un cliente por su
+// cédula/NIT -- workOrders.controller.js#quickCreate).
+const isBlockedByAccountOwnership = (customer, user) => {
+  if (!customer || OWNERSHIP_BYPASS_ROLES.includes(user?.role)) return false;
+  return !!customer.is_assigned_account && customer.owner_user_id !== user?.id;
+};
+
 const checkAccountOwnership = async (req, res, next) => {
   try {
     const customerId = req.body?.customer_id;
@@ -37,7 +46,7 @@ const checkAccountOwnership = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
     }
 
-    if (customer.is_assigned_account && customer.owner_user_id !== req.user.id) {
+    if (isBlockedByAccountOwnership(customer, req.user)) {
       return res.status(403).json({
         success: false,
         code: 'ACCOUNT_ASSIGNED_TO_ANOTHER_USER',
@@ -52,4 +61,4 @@ const checkAccountOwnership = async (req, res, next) => {
   }
 };
 
-module.exports = { checkAccountOwnership };
+module.exports = { checkAccountOwnership, isBlockedByAccountOwnership };

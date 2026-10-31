@@ -138,95 +138,104 @@ function approvedQuoteTotals(sale, billable) {
 // de origen (p.ej. el leadgen_id de Meta).
 const PAYMENT_REMINDER_REF = 'payment_reminder';
 
+// Filtros del listado de ventas (GET /sales), compartidos con el listado
+// unificado de cotizaciones (quotes.controller.js) para que ambos filtren igual.
+function buildSaleListWhere(req) {
+  const tenantId = req.tenant_id;
+  const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, payment_view, aging } = req.query;
+  const where = { tenant_id: tenantId };
+
+  // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+  // sede autorizada del usuario. Admin/super_admin conservan el filtro
+  // opcional (ej: viendo el historial de una sede específica distinta a la
+  // activa; si no lo envían, ven todas las sedes del tenant).
+  const branch_id = resolveBranchFilter(req);
+  if (branch_id) where.branch_id = branch_id;
+
+  // Cotizaciones y ventas son listados separados: una cotización
+  // (document_type='cotizacion') no es venta hasta que el cliente la
+  // aprueba y se convierte en remisión/factura. `quote_view` trae las
+  // cotizaciones + las ya convertidas (quote_number, para ver su traza);
+  // el listado de Ventas trae todo lo demás, incluidos los borradores de
+  // venta (document_type=null, se tipan al confirmar).
+  if (quote_view === 'true') {
+    where[Op.and] = [
+      ...(where[Op.and] || []),
+      { [Op.or]: [{ document_type: 'cotizacion' }, { quote_number: { [Op.ne]: null } }] },
+    ];
+    if (status) where.status = status;
+  } else {
+    if (status) where.status = status;
+    if (document_type) where.document_type = document_type;
+    else where[Op.and] = [...(where[Op.and] || []), NOT_QUOTE_WHERE];
+  }
+  // En Cotizaciones, 'convertida' = ya pasó a remisión/factura; cualquier
+  // otro estado se refiere a cotizaciones todavía sin convertir.
+  if (quote_view === 'true' && quote_status === 'convertida') {
+    where.quote_number = { [Op.ne]: null };
+    where[Op.and].push(NOT_QUOTE_WHERE);
+  } else if (quote_status) {
+    where.quote_status = quote_status;
+    if (quote_view === 'true') where.document_type = 'cotizacion';
+  }
+  if (customer_id) where.customer_id = customer_id;
+  if (dian_status) where.dian_status = dian_status;
+  // Remisiones ocultas a no-admin si el tenant lo configuró
+  // (utils/remisionVisibility.js) -- va en Op.and para no chocar con el
+  // Op.or de quote_view / search.
+  // Facturas consolidadas sí se listan: son documentos (no se suman, ver getStats).
+  applyRemisionFilter(req, where, { includeConsolidated: true });
+
+  // "Por cobrar": mismos documentos que Cuentas por Cobrar (facturas y
+  // remisiones confirmadas con saldo) más los borradores de venta, que
+  // todavía no son cartera pero sí plata por recibir. `aging` acota a
+  // vencidas / por vencer (solo confirmadas) o solo borradores. Va en
+  // Op.and para combinarse con el filtro de tipo de documento sin pisarlo.
+  const pendingView = payment_view === 'pending' && quote_view !== 'true';
+  if (pendingView) {
+    const dueVsToday = (op) => sequelize.where(sequelize.literal(effectiveDueDateSql()), op, sequelize.literal('CURRENT_DATE'));
+    let pendingCondition;
+    if (aging === 'overdue') pendingCondition = { [Op.and]: [pendingReceivableWhere(req), dueVsToday(Op.lt)] };
+    else if (aging === 'upcoming') pendingCondition = { [Op.and]: [pendingReceivableWhere(req), dueVsToday(Op.gte)] };
+    else if (aging === 'draft') pendingCondition = draftSaleWhere();
+    else pendingCondition = { [Op.or]: [pendingReceivableWhere(req), draftSaleWhere()] };
+    where[Op.and] = [...(where[Op.and] || []), pendingCondition];
+  }
+
+  if (customer_name) {
+    where.customer_name = { [Op.iLike]: `%${customer_name}%` };
+  }
+
+  if (vehicle_plate) {
+    where.vehicle_plate = { [Op.iLike]: `%${vehicle_plate}%` };
+  }
+
+  if (search && !customer_name && !vehicle_plate) {
+    // Número, cliente, NIT, email, teléfono, placa y número DIAN en una
+    // sola expresión indexada (ver utils/searchText.js).
+    where[Op.and] = [...(where[Op.and] || []), searchMatch('sales', 'Sale', search)];
+  }
+
+  if (from_date && to_date) {
+    where.sale_date = { [Op.between]: [from_date, to_date] };
+  } else if (from_date) {
+    where.sale_date = { [Op.gte]: from_date };
+  } else if (to_date) {
+    where.sale_date = { [Op.lte]: to_date };
+  }
+  return { where, pendingView };
+}
+
 // Obtener todas las ventas
 const getAll = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, payment_view, aging, limit = 50, offset = 0 } = req.query;
+    const { limit = 50, offset = 0 } = req.query;
     // Cap de seguridad — evita requests que traigan miles de ventas en memoria
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
     const safeOffset = Math.max(0, parseInt(offset) || 0);
 
-    const where = { tenant_id: tenantId };
-
-    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
-    // sede autorizada del usuario. Admin/super_admin conservan el filtro
-    // opcional (ej: viendo el historial de una sede específica distinta a la
-    // activa; si no lo envían, ven todas las sedes del tenant).
-    const branch_id = resolveBranchFilter(req);
-    if (branch_id) where.branch_id = branch_id;
-
-    // Cotizaciones y ventas son listados separados: una cotización
-    // (document_type='cotizacion') no es venta hasta que el cliente la
-    // aprueba y se convierte en remisión/factura. `quote_view` trae las
-    // cotizaciones + las ya convertidas (quote_number, para ver su traza);
-    // el listado de Ventas trae todo lo demás, incluidos los borradores de
-    // venta (document_type=null, se tipan al confirmar).
-    if (quote_view === 'true') {
-      where[Op.and] = [
-        ...(where[Op.and] || []),
-        { [Op.or]: [{ document_type: 'cotizacion' }, { quote_number: { [Op.ne]: null } }] },
-      ];
-      if (status) where.status = status;
-    } else {
-      if (status) where.status = status;
-      if (document_type) where.document_type = document_type;
-      else where[Op.and] = [...(where[Op.and] || []), NOT_QUOTE_WHERE];
-    }
-    // En Cotizaciones, 'convertida' = ya pasó a remisión/factura; cualquier
-    // otro estado se refiere a cotizaciones todavía sin convertir.
-    if (quote_view === 'true' && quote_status === 'convertida') {
-      where.quote_number = { [Op.ne]: null };
-      where[Op.and].push(NOT_QUOTE_WHERE);
-    } else if (quote_status) {
-      where.quote_status = quote_status;
-      if (quote_view === 'true') where.document_type = 'cotizacion';
-    }
-    if (customer_id) where.customer_id = customer_id;
-    if (dian_status) where.dian_status = dian_status;
-    // Remisiones ocultas a no-admin si el tenant lo configuró
-    // (utils/remisionVisibility.js) -- va en Op.and para no chocar con el
-    // Op.or de quote_view / search.
-    // Facturas consolidadas sí se listan: son documentos (no se suman, ver getStats).
-    applyRemisionFilter(req, where, { includeConsolidated: true });
-
-    // "Por cobrar": mismos documentos que Cuentas por Cobrar (facturas y
-    // remisiones confirmadas con saldo) más los borradores de venta, que
-    // todavía no son cartera pero sí plata por recibir. `aging` acota a
-    // vencidas / por vencer (solo confirmadas) o solo borradores. Va en
-    // Op.and para combinarse con el filtro de tipo de documento sin pisarlo.
-    const pendingView = payment_view === 'pending' && quote_view !== 'true';
-    if (pendingView) {
-      const dueVsToday = (op) => sequelize.where(sequelize.literal(effectiveDueDateSql()), op, sequelize.literal('CURRENT_DATE'));
-      let pendingCondition;
-      if (aging === 'overdue') pendingCondition = { [Op.and]: [pendingReceivableWhere(req), dueVsToday(Op.lt)] };
-      else if (aging === 'upcoming') pendingCondition = { [Op.and]: [pendingReceivableWhere(req), dueVsToday(Op.gte)] };
-      else if (aging === 'draft') pendingCondition = draftSaleWhere();
-      else pendingCondition = { [Op.or]: [pendingReceivableWhere(req), draftSaleWhere()] };
-      where[Op.and] = [...(where[Op.and] || []), pendingCondition];
-    }
-
-    if (customer_name) {
-      where.customer_name = { [Op.iLike]: `%${customer_name}%` };
-    }
-
-    if (vehicle_plate) {
-      where.vehicle_plate = { [Op.iLike]: `%${vehicle_plate}%` };
-    }
-
-    if (search && !customer_name && !vehicle_plate) {
-      // Número, cliente, NIT, email, teléfono, placa y número DIAN en una
-      // sola expresión indexada (ver utils/searchText.js).
-      where[Op.and] = [...(where[Op.and] || []), searchMatch('sales', 'Sale', search)];
-    }
-
-    if (from_date && to_date) {
-      where.sale_date = { [Op.between]: [from_date, to_date] };
-    } else if (from_date) {
-      where.sale_date = { [Op.gte]: from_date };
-    } else if (to_date) {
-      where.sale_date = { [Op.lte]: to_date };
-    }
+    const { where, pendingView } = buildSaleListWhere(req);
 
     const [sales, total] = await Promise.all([Sale.findAll({
       where,
@@ -2939,6 +2948,7 @@ const annulConsolidated = async (req, res) => {
 };
 
 module.exports = {
+  buildSaleListWhere,
   generateSaleNumber,
   nextFreeSaleNumber,
   getAll,

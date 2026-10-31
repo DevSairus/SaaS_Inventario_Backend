@@ -9,6 +9,8 @@ const { checkRole } = require('../middleware/auth');
 
 // Estadísticas (debe ir antes de /:id)
 router.get('/stats', salesController.getStats);
+// Cotizaciones de Ventas + Taller en un solo listado paginado
+router.get('/quotes', require('../controllers/sales/quotes.controller').list);
 
 // CRUD de ventas
 router.get('/',    salesController.getAll);

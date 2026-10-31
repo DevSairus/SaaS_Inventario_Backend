@@ -5,6 +5,7 @@ const { sequelize } = require('../../models');
 const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 const { economicSalesWhere } = require('../../utils/remisionVisibility');
 const { searchMatch } = require('../../utils/searchText');
+const { MAX_LIMIT } = require('../../utils/pagination');
 
 // Utilidad: el frontend envía full_name, la DB tiene first_name + last_name
 function splitFullName(fullName) {
@@ -54,7 +55,9 @@ function sanitizeCustomerRetentionConfig(cfg) {
 // Obtener todos los clientes
 const getAll = async (req, res) => {
   try {
-    const { search, type, status, limit = 50, offset = 0 } = req.query;
+    const { search, type, status, limit: rawLimit = 50, offset = 0 } = req.query;
+    // Tope por página (MAX_LIMIT = 200): pedir miles de filas ya no las trae todas.
+    const limit = Math.min(Math.max(1, parseInt(rawLimit, 10) || 50), MAX_LIMIT);
     const tenantId = req.tenant_id;
 
     const where = { tenant_id: tenantId };

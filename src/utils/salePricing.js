@@ -51,8 +51,8 @@ function isValidMargin(margin, method) {
 // Mensaje de error para un margen fuera de rango según el método del tenant.
 function marginRangeMessage(method) {
   return normalizeMarginMethod(method) === 'markup'
-    ? 'El margen es un recargo sobre el costo: debe estar entre 0 y 999,99 %'
-    : 'El margen es sobre el precio de venta: debe estar entre 0 y 99,99 %';
+    ? 'El margen de ganancia es un recargo sobre el costo: debe estar entre 0 y 999,99 %'
+    : 'El margen de ganancia es sobre el precio de venta: debe estar entre 0 y 99,99 %';
 }
 
 /**

@@ -7,6 +7,7 @@ router.get('/', purchasesController.getPurchases);
 router.get('/stats', purchasesController.getPurchaseStats);
 router.get('/retentions/catalog', purchasesController.getRetentionCatalog);
 router.post('/retentions/preview', purchasesController.previewRetentions);
+router.post('/resolve-products', purchasesController.resolveProductCodes);
 router.get('/:id', purchasesController.getPurchaseById);
 router.get('/:id/pdf', purchasesController.getPurchaseOrderPdf);
 router.post('/:id/send-email', purchasesController.sendPurchaseOrderEmail);

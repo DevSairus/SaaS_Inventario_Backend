@@ -5,7 +5,8 @@ const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
-const { purchaseNetPayable, purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2, purchaseDaysOverdue, purchaseEffectiveDueDate } = require('../../utils/purchaseAmounts');
+const { purchaseNetPayable, purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2, purchaseDaysOverdue, purchaseEffectiveDueDate, DEFAULT_PAYABLE_TERM_DAYS } = require('../../utils/purchaseAmounts');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
 // Obtener resumen de cuentas por pagar
 // Saldo a favor con proveedores que quedó sin aplicar al aprobar una
@@ -33,129 +34,210 @@ const availableSupplierCredits = async (tenantId) => {
   }));
 };
 
+// Filtro de las compras con saldo pendiente (obligaciones reales, sin
+// pagar del todo). supplier_id='none' = compras sin proveedor. search
+// busca en número de compra, factura del proveedor y nombre del proveedor.
+const pendingPayablesWhere = (req) => {
+  const tenantId = req.user.tenant_id;
+  const { from_date, to_date, supplier_id, search } = req.query;
+
+  const where = {
+    tenant_id: tenantId,
+    // Solo obligaciones reales: mercancía recibida, o factura del proveedor
+    // registrada. Una orden confirmada sin nada de eso es solo un pedido.
+    ...payablePurchaseWhere(),
+    payment_status: { [Op.in]: ['pending', 'partial'] }
+  };
+
+  if (supplier_id) where.supplier_id = supplier_id === 'none' ? null : supplier_id;
+
+  // Para roles no-admin, se ignora el branch_id de query y se fuerza la
+  // sede autorizada del usuario.
+  const branch_id = resolveBranchFilter(req);
+  if (branch_id) where.branch_id = branch_id;
+
+  if (from_date && to_date) {
+    where.purchase_date = { [Op.between]: [from_date, to_date] };
+  } else if (from_date) {
+    where.purchase_date = { [Op.gte]: from_date };
+  } else if (to_date) {
+    where.purchase_date = { [Op.lte]: to_date };
+  }
+
+  const term = String(search || '').trim();
+  if (term) {
+    where[Op.and] = [...(where[Op.and] || []), { [Op.or]: [
+      { purchase_number: { [Op.iLike]: `%${term}%` } },
+      { invoice_number: { [Op.iLike]: `%${term}%` } },
+      { '$supplier.name$': { [Op.iLike]: `%${term}%` } },
+    ] }];
+  }
+  return where;
+};
+
+// Mismas reglas que purchaseBalance / purchaseEffectiveDueDate /
+// purchaseDaysOverdue (utils/purchaseAmounts.js), en SQL para sumar sin
+// traer las compras a memoria.
+const BALANCE_SQL = `GREATEST(GREATEST("Purchase"."total_amount" - COALESCE("Purchase"."total_retentions", 0), 0) - COALESCE("Purchase"."paid_amount", 0) - COALESCE("Purchase"."returned_amount", 0), 0)`;
+const OVERDUE_SQL = `(COALESCE("Purchase"."due_date", "Purchase"."purchase_date" + ${DEFAULT_PAYABLE_TERM_DAYS}) < CURRENT_DATE)`;
+
+const PAYABLE_ATTRIBUTES = [
+  'id', 'purchase_number', 'purchase_date', 'due_date', 'supplier_id',
+  'total_amount', 'total_retentions', 'paid_amount', 'returned_amount', 'payment_status', 'payment_method',
+  'payment_history', 'invoice_number', 'status'
+];
+const SUPPLIER_INCLUDE = { model: Supplier, as: 'supplier', attributes: ['id', 'name', 'tax_id', 'email', 'phone'] };
+
+// Fila de cuentas por pagar con saldo, vencimiento y días vencidos.
+const toPayableRow = (purchase, today = new Date()) => {
+  const balance = purchaseBalance(purchase); // neto de retenciones
+  // due_date o, si falta, compra + 30 días (misma regla que las alertas).
+  const daysOverdue = purchaseDaysOverdue(purchase, today);
+  return {
+    id: purchase.id,
+    purchase_number: purchase.purchase_number,
+    purchase_date: purchase.purchase_date,
+    due_date: purchase.due_date,
+    // Vencimiento usado para el cálculo (due_date o compra + 30 días).
+    effective_due_date: purchaseEffectiveDueDate(purchase),
+    invoice_number: purchase.invoice_number,
+    supplier_id: purchase.supplier_id,
+    supplier: purchase.supplier,
+    supplier_name: purchase.supplier?.name || 'Sin proveedor',
+    total_amount: parseFloat(purchase.total_amount),
+    total_retentions: parseFloat(purchase.total_retentions || 0),
+    net_payable: purchaseNetPayable(purchase),
+    paid_amount: parseFloat(purchase.paid_amount || 0),
+    balance,
+    payment_status: purchase.payment_status,
+    payment_method: purchase.payment_method,
+    days_overdue: Math.max(daysOverdue, 0),
+    is_overdue: daysOverdue > 0,
+    payment_history: purchase.payment_history || [],
+    status: purchase.status
+  };
+};
+
+// Totales y agrupación por proveedor, sumados en la base (antes se traían
+// todas las compras abiertas y se sumaban en JS).
+const payableTotalsBySupplier = async (req) => {
+  const groups = await Purchase.findAll({
+    where: pendingPayablesWhere(req),
+    include: [{ ...SUPPLIER_INCLUDE, attributes: [] }],
+    attributes: [
+      'supplier_id',
+      [sequelize.fn('COUNT', sequelize.col('Purchase.id')), 'purchase_count'],
+      [sequelize.fn('SUM', sequelize.col('Purchase.total_amount')), 'total_amount'],
+      [sequelize.fn('SUM', sequelize.fn('COALESCE', sequelize.col('Purchase.paid_amount'), 0)), 'paid_amount'],
+      [sequelize.literal(`SUM(${BALANCE_SQL})`), 'balance'],
+      [sequelize.literal(`SUM(CASE WHEN ${OVERDUE_SQL} THEN ${BALANCE_SQL} ELSE 0 END)`), 'overdue_amount'],
+      [sequelize.fn('MIN', sequelize.col('Purchase.purchase_date')), 'first_date'],
+    ],
+    group: ['Purchase.supplier_id'],
+    order: [[sequelize.literal('first_date'), 'ASC']],
+    raw: true,
+  });
+
+  const supplierIds = groups.map(g => g.supplier_id).filter(Boolean);
+  const suppliers = supplierIds.length
+    ? await Supplier.findAll({ where: { id: supplierIds }, attributes: SUPPLIER_INCLUDE.attributes })
+    : [];
+  const supplierById = new Map(suppliers.map(sp => [sp.id, sp]));
+
+  let totalPayable = 0;
+  let totalOverdue = 0;
+  let totalPurchases = 0;
+  const bySupplier = groups.map(g => {
+    const supplier = g.supplier_id ? supplierById.get(g.supplier_id) || null : null;
+    const row = {
+      supplier_id: g.supplier_id,
+      supplier_name: supplier?.name || 'Sin proveedor',
+      supplier,
+      purchase_count: Number(g.purchase_count) || 0,
+      total_amount: round2(Number(g.total_amount) || 0),
+      paid_amount: round2(Number(g.paid_amount) || 0),
+      balance: round2(Number(g.balance) || 0),
+      overdue_amount: round2(Number(g.overdue_amount) || 0),
+    };
+    totalPayable += row.balance;
+    totalOverdue += row.overdue_amount;
+    totalPurchases += row.purchase_count;
+    return row;
+  });
+
+  return {
+    summary: {
+      total_payable: round2(totalPayable),
+      total_overdue: round2(totalOverdue),
+      total_purchases: totalPurchases,
+      total_suppliers: bySupplier.length
+    },
+    by_supplier: bySupplier,
+  };
+};
+
+// GET /accounts-payable/summary?from_date=&to_date=&supplier_id=&lite=
+// lite=true: solo totales y agrupación por proveedor, sin las compras (que
+// se piden paginadas a /accounts-payable/documents). Sin lite se mantiene la
+// respuesta completa de antes (compras anidadas + all_purchases).
 const getAccountsPayableSummary = async (req, res) => {
   try {
     const tenantId = req.user.tenant_id;
-    const { from_date, to_date, supplier_id } = req.query;
+    const lite = req.query.lite === 'true';
+    const { summary, by_supplier } = await payableTotalsBySupplier(req);
 
-    const where = {
-      tenant_id: tenantId,
-      // Solo obligaciones reales: mercancía recibida, o factura del proveedor
-      // registrada. Una orden confirmada sin nada de eso es solo un pedido.
-      ...payablePurchaseWhere(),
-      payment_status: { [Op.in]: ['pending', 'partial'] }
-    };
-
-    if (supplier_id) where.supplier_id = supplier_id;
-
-    // Para roles no-admin, se ignora el branch_id de query y se fuerza la
-    // sede autorizada del usuario.
-    const branch_id = resolveBranchFilter(req);
-    if (branch_id) where.branch_id = branch_id;
-
-    if (from_date && to_date) {
-      where.purchase_date = { [Op.between]: [from_date, to_date] };
-    } else if (from_date) {
-      where.purchase_date = { [Op.gte]: from_date };
-    } else if (to_date) {
-      where.purchase_date = { [Op.lte]: to_date };
-    }
-
-    const pendingPurchases = await Purchase.findAll({
-      where,
-      include: [
-        {
-          model: Supplier,
-          as: 'supplier',
-          attributes: ['id', 'name', 'tax_id', 'email', 'phone']
-        }
-      ],
-      order: [['purchase_date', 'ASC']],
-      attributes: [
-        'id', 'purchase_number', 'purchase_date', 'due_date', 'supplier_id',
-        'total_amount', 'total_retentions', 'paid_amount', 'returned_amount', 'payment_status', 'payment_method',
-        'payment_history', 'invoice_number', 'status'
-      ]
-    });
-
-    let totalPayable = 0;
-    let totalOverdue = 0;
-    const today = new Date();
-
-    const purchasesWithDetails = pendingPurchases.map(purchase => {
-      const balance = purchaseBalance(purchase); // neto de retenciones
-      // due_date o, si falta, compra + 30 días (misma regla que las alertas).
-      const daysOverdue = purchaseDaysOverdue(purchase, today);
-      const isOverdue = daysOverdue > 0;
-
-      totalPayable += balance;
-      if (isOverdue) totalOverdue += balance;
-
-      return {
-        id: purchase.id,
-        purchase_number: purchase.purchase_number,
-        purchase_date: purchase.purchase_date,
-        due_date: purchase.due_date,
-        // Vencimiento usado para el cálculo (due_date o compra + 30 días).
-        effective_due_date: purchaseEffectiveDueDate(purchase),
-        invoice_number: purchase.invoice_number,
-        supplier_id: purchase.supplier_id,
-        supplier: purchase.supplier,
-        supplier_name: purchase.supplier?.name || 'Sin proveedor',
-        total_amount: parseFloat(purchase.total_amount),
-        total_retentions: parseFloat(purchase.total_retentions || 0),
-        net_payable: purchaseNetPayable(purchase),
-        paid_amount: parseFloat(purchase.paid_amount || 0),
-        balance,
-        payment_status: purchase.payment_status,
-        payment_method: purchase.payment_method,
-        days_overdue: Math.max(daysOverdue, 0),
-        is_overdue: isOverdue,
-        payment_history: purchase.payment_history || [],
-        status: purchase.status
+    let full = {};
+    if (!lite) {
+      const purchases = await Purchase.findAll({
+        where: pendingPayablesWhere(req),
+        include: [SUPPLIER_INCLUDE],
+        order: [['purchase_date', 'ASC'], ['id', 'ASC']],
+        attributes: PAYABLE_ATTRIBUTES,
+      });
+      const today = new Date();
+      const allPurchases = purchases.map(p => toPayableRow(p, today));
+      const keyOf = (id) => id || 'sin_proveedor';
+      const nested = {};
+      allPurchases.forEach(p => { (nested[keyOf(p.supplier_id)] ||= []).push(p); });
+      full = {
+        by_supplier: by_supplier.map(sp => ({ ...sp, purchases: nested[keyOf(sp.supplier_id)] || [] })),
+        all_purchases: allPurchases,
       };
-    });
-
-    const bySupplier = {};
-    purchasesWithDetails.forEach(purchase => {
-      const supplierId = purchase.supplier_id || 'sin_proveedor';
-      if (!bySupplier[supplierId]) {
-        bySupplier[supplierId] = {
-          supplier_id: purchase.supplier_id,
-          supplier_name: purchase.supplier_name,
-          supplier: purchase.supplier,
-          purchase_count: 0,
-          total_amount: 0,
-          paid_amount: 0,
-          balance: 0,
-          overdue_amount: 0,
-          purchases: []
-        };
-      }
-      bySupplier[supplierId].purchase_count++;
-      bySupplier[supplierId].total_amount += parseFloat(purchase.total_amount);
-      bySupplier[supplierId].paid_amount += parseFloat(purchase.paid_amount);
-      bySupplier[supplierId].balance += purchase.balance;
-      if (purchase.is_overdue) bySupplier[supplierId].overdue_amount += purchase.balance;
-      bySupplier[supplierId].purchases.push(purchase);
-    });
+    }
 
     res.json({
       success: true,
       data: {
-        summary: {
-          total_payable: totalPayable,
-          total_overdue: totalOverdue,
-          total_purchases: pendingPurchases.length,
-          total_suppliers: Object.keys(bySupplier).length
-        },
-        by_supplier: Object.values(bySupplier),
-        all_purchases: purchasesWithDetails,
+        summary,
+        by_supplier,
+        ...full,
         supplier_credits: await availableSupplierCredits(tenantId)
       }
     });
   } catch (error) {
     console.error('Error obteniendo cuentas por pagar:', error);
+    res.status(500).json({ success: false, message: 'Error obteniendo cuentas por pagar' });
+  }
+};
+
+// GET /accounts-payable/documents?page=&limit=&search=&supplier_id=&from_date=&to_date=
+// Compras con saldo pendiente, paginadas en la base (mismo orden que /summary).
+const listPayableDocuments = async (req, res) => {
+  try {
+    const pg = parsePagination(req.query);
+    const { rows, count } = await Purchase.findAndCountAll({
+      where: pendingPayablesWhere(req),
+      include: [SUPPLIER_INCLUDE],
+      order: [['purchase_date', 'ASC'], ['id', 'ASC']],
+      attributes: PAYABLE_ATTRIBUTES,
+      limit: pg.limit,
+      offset: pg.offset,
+      subQuery: false,
+    });
+    const today = new Date();
+    res.json({ success: true, data: rows.map(p => toPayableRow(p, today)), pagination: buildPagination(pg, count) });
+  } catch (error) {
+    console.error('Error listando cuentas por pagar:', error);
     res.status(500).json({ success: false, message: 'Error obteniendo cuentas por pagar' });
   }
 };
@@ -421,6 +503,7 @@ const registerPayment = async (req, res) => {
 
 module.exports = {
   getAccountsPayableSummary,
+  listPayableDocuments,
   getSupplierAccountsPayable,
   getPaymentHistory,
   getAgingReport,

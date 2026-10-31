@@ -6,6 +6,7 @@
 const { CashSession, Branch, User } = require('../../models');
 const { buildCashFlow, shiftDate } = require('./cashflow.controller');
 const { getOpenSession } = require('../../services/finance/cashSession.service');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
 const ZERO_BUCKET = { efectivo: 0, tarjeta: 0, transferencia: 0, otro: 0 };
 
@@ -226,18 +227,21 @@ const listSessions = async (req, res) => {
       if (to_date) where.session_date[Op.lte] = to_date;
     }
 
-    const sessions = await CashSession.findAll({
+    const pg = parsePagination(req.query);
+    const { rows: sessions, count } = await CashSession.findAndCountAll({
       where,
       include: [
         { model: Branch, as: 'branch', attributes: ['id', 'name', 'code'] },
         { model: User, as: 'opener', attributes: ['id', 'first_name', 'last_name'] },
         { model: User, as: 'closer', attributes: ['id', 'first_name', 'last_name'] },
       ],
-      order: [['session_date', 'DESC'], ['opened_at', 'DESC']],
-      limit: 100,
+      order: [['session_date', 'DESC'], ['opened_at', 'DESC'], ['id', 'DESC']],
+      limit: pg.limit,
+      offset: pg.offset,
+      distinct: true,
     });
 
-    res.json({ success: true, data: sessions });
+    res.json({ success: true, data: sessions, pagination: buildPagination(pg, count) });
   } catch (error) {
     console.error('Error listando cajas:', error);
     res.status(500).json({ success: false, message: 'Error listando cajas' });

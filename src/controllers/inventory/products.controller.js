@@ -422,6 +422,8 @@ const createProduct = async (req, res) => {
       }
 
       const effectiveTrackInventory = safeProductType === 'service' ? false : track_inventory;
+      const initialQuantity = effectiveTrackInventory ? parseFloat(effectiveCurrentStock) || 0 : 0;
+      const initialCost = parseFloat(average_cost) || 0;
 
       // El producto se crea SIEMPRE en cero -- si trae stock inicial, ese
       // stock entra por un InventoryMovement real (igual que una compra),
@@ -440,7 +442,11 @@ const createProduct = async (req, res) => {
         brand: brand?.trim() || null,
         vehicle_id: vehicleRecord?.id || null,
         unit_of_measure: unit_of_measure?.trim() || null,
-        average_cost: 0,
+        // Con stock inicial, el costo lo fija la entrada de inventario de abajo
+        // (kardex + asiento). Sin stock, el costo digitado se guarda tal cual:
+        // con existencias en 0 no mueve el valor del inventario, sirve de base
+        // al precio sugerido y la primera compra lo reemplaza.
+        average_cost: initialQuantity > 0 ? 0 : initialCost,
         sale_price: sale_price || 0,
         base_price: base_price || 0,
         profit_margin_percentage: effectiveMargin,
@@ -461,8 +467,6 @@ const createProduct = async (req, res) => {
         retention_concept: retention_concept || null,
       }, { transaction });
 
-      const initialQuantity = effectiveTrackInventory ? parseFloat(effectiveCurrentStock) || 0 : 0;
-      const initialCost = parseFloat(average_cost) || 0;
       if (initialQuantity > 0) {
         // Igual que en un vehículo la bodega no siempre es obligatoria en el
         // formulario (ver ProductFormModal), se cae a una bodega por defecto

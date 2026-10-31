@@ -1,5 +1,6 @@
 const { Employee } = require('../../models');
 const { Op } = require('sequelize');
+const { MAX_LIMIT } = require('../../utils/pagination');
 
 const NULLABLE_FIELDS = [
   'other_names', 'second_surname', 'email', 'phone', 'position', 'cost_center',
@@ -49,8 +50,10 @@ const getEmployees = async (req, res) => {
       sort_by = 'first_name',
       sort_order = 'ASC',
       page = 1,
-      limit = 20,
+      limit: rawLimit = 20,
     } = req.query;
+    // Tope por página (MAX_LIMIT = 200): pedir miles de filas ya no las trae todas.
+    const limit = Math.min(Math.max(1, parseInt(rawLimit, 10) || 20), MAX_LIMIT);
 
     const offset = (page - 1) * limit;
     const where = { tenant_id };

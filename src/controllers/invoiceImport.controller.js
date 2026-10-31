@@ -125,6 +125,19 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
   // ítems marcados CREATE_NEW: { "2": { sku, barcode, name, category_id,
   // brand, unit_of_measure, price_includes_tax } } (índice original → datos).
   const new_product_data = opts.new_product_data || {};
+  // Margen por línea: { "0": 35, "3": 40 } (índice original → %). Vacío = la
+  // línea usa el margen general de arriba (solo productos nuevos) o el de la
+  // categoría / global. En un producto nuevo se crea con él; en todos queda
+  // en la línea de la compra y pasa al producto al RECIBIRLA.
+  const items_margins = {};
+  for (const [idx, raw] of Object.entries(opts.items_margins || {})) {
+    if (raw === null || raw === undefined || raw === '') continue;
+    const m = Math.round(Number(raw) * 100) / 100;
+    if (!Number.isFinite(m) || !isValidMargin(m, marginMethod)) {
+      throw new InvoiceImportError(`Margen de la línea ${Number(idx) + 1} inválido. ${marginRangeMessage(marginMethod)}`, 400);
+    }
+    items_margins[String(idx)] = m;
+  }
 
   const invoiceData = await parseInvoiceXML(xmlContent);
   // Respaldo de la forma de pago cuando el XML no trae PaymentMeans/ID:
@@ -173,6 +186,7 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
       .map((item, originalIdx) => ({
         ...item,
         original_index: originalIdx, // para resolver manual_links[idx] tras el filtro
+        line_margin: items_margins[String(originalIdx)] ?? null,
         tax_percentage: items_tax_overrides[originalIdx] !== undefined
           ? parseFloat(items_tax_overrides[originalIdx])
           : item.tax_percentage,
@@ -239,6 +253,7 @@ const importInvoiceInner = async (req, res) => {
         items_tax_overrides: JSON.parse(req.body.items_tax_overrides || '{}'),
         manual_links: JSON.parse(req.body.manual_links || '{}'),
         new_product_data: JSON.parse(req.body.new_product_data || '{}'),
+        items_margins: JSON.parse(req.body.items_margins || '{}'),
         payment_form_hint: source.dianDocument?.payment_form || null,
       }
     );
@@ -504,18 +519,24 @@ async function loadMatchData(items, tenant_id, supplier_id, { transaction, produ
 // grandes agotaba el pool de conexiones.
 async function buildItemSuggestions(items, tenant_id, supplierId) {
   const { mappingByCode, byId, bySku, fuzzyByItem } = await loadMatchData(items, tenant_id, supplierId);
+  // margin_pct: margen actual del producto, para mostrarlo en la columna
+  // Margen % del modal (vacío = lo conserva).
+  const pick = (product, match_type) => ({
+    product_id: product.id, product_name: product.name, match_type,
+    margin_pct: product.profit_margin_percentage === null ? null : Number(product.profit_margin_percentage),
+  });
   return items.map((item) => {
     const code = codeOf(item);
     if (code && supplierId && mappingByCode.has(code)) {
       const product = byId.get(mappingByCode.get(code));
-      if (product) return { product_id: product.id, product_name: product.name, match_type: 'code_exact' };
+      if (product) return pick(product, 'code_exact');
     }
     if (code) {
       const product = bySku.get(code);
-      if (product) return { product_id: product.id, product_name: product.name, match_type: 'sku_internal' };
+      if (product) return pick(product, 'sku_internal');
     }
     const product = fuzzyByItem.get(item);
-    if (product) return { product_id: product.id, product_name: product.name, match_type: 'name_fuzzy' };
+    if (product) return pick(product, 'name_fuzzy');
     return null;
   });
 }
@@ -688,12 +709,15 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
       if (newSku && bySku.has(newSku)) newSku = null; // el código elegido ya existe: caer a autogenerado
 
       const categoryId = overrides.category_id || null;
+      // Margen de la línea > margen general de la importación > el de la
+      // categoría (o el global) > 30 %.
+      const ownMargin = item.line_margin !== null && item.line_margin !== undefined ? item.line_margin : profit_margin;
       let inheritedMargin = null;
-      if (profit_margin === null) {
+      if (ownMargin === null) {
         if (!marginCache.has(categoryId)) marginCache.set(categoryId, await inheritedMarginFor(tenant_id, categoryId, transaction));
         inheritedMargin = marginCache.get(categoryId);
       }
-      const itemMargin = profit_margin !== null ? profit_margin : (inheritedMargin ?? 30);
+      const itemMargin = ownMargin !== null ? ownMargin : (inheritedMargin ?? 30);
 
       product = Product.build({
         tenant_id,
@@ -712,7 +736,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
           tax_config: { iva_status: item.iva_status },
         }, marginMethod) ?? 0,
         profit_margin_percentage: itemMargin,
-        margin_inherited: profit_margin === null && inheritedMargin !== null,
+        margin_inherited: ownMargin === null && inheritedMargin !== null,
         current_stock: 0,
         min_stock: 1,
         track_inventory: true,
@@ -785,6 +809,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
     inc_amount: Number(item.inc_amount) || 0,
     subtotal: item.subtotal,
     total: item.total,
+    profit_margin_pct: item.line_margin ?? null,
     isNew: isNew,
     match_type: matchType
   }));
@@ -997,6 +1022,7 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
     tax_amount: item.tax_amount,
     inc_rate: item.inc_rate || 0,
     inc_amount: item.inc_amount || 0,
+    profit_margin_pct: item.profit_margin_pct ?? null,
     subtotal: item.subtotal,
     total: item.total,
     line_total: item.total,

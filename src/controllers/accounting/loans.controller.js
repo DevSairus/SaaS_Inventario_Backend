@@ -15,6 +15,7 @@ const { Op } = require('sequelize');
 const { generateAmortizationSchedule } = require('../../services/accounting/loanAmortization.service');
 const { generateLoanPaymentEntry } = require('../../services/accounting/autoEntries.service');
 const logger = require('../../config/logger');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
 const LOAN_TYPES = ['bancario', 'tercero'];
 
@@ -41,10 +42,14 @@ exports.list = async (req, res) => {
     if (req.query.status) where.status = req.query.status;
     if (req.query.branch_id) where.branch_id = req.query.branch_id;
 
-    const loans = await Loan.findAll({
+    const pg = parsePagination(req.query);
+    const { rows: loans, count } = await Loan.findAndCountAll({
       where,
       include: [...ACCOUNT_INCLUDES, { model: LoanInstallment, as: 'installments', attributes: ['installment_number', 'status', 'balance_after', 'due_date'] }],
-      order: [['disbursement_date', 'DESC']],
+      order: [['disbursement_date', 'DESC'], ['id', 'DESC']],
+      limit: pg.limit,
+      offset: pg.offset,
+      distinct: true,
     });
 
     const data = loans.map((l) => {
@@ -53,7 +58,7 @@ exports.list = async (req, res) => {
       return { ...json, pending_balance: pendingBalance(json), pending_installments: pendingCount };
     });
 
-    res.json({ success: true, data });
+    res.json({ success: true, data, pagination: buildPagination(pg, count) });
   } catch (error) {
     logger.error('Error en loans.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al listar créditos', error: process.env.NODE_ENV === 'production' ? undefined : error.message });

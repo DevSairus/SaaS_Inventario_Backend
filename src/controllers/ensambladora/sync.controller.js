@@ -3,6 +3,7 @@ const { EnsambladoraEventoSync } = require('../../models');
 const { reenviarEventoExistente } = require('../../services/ensambladora/syncOutboundClient');
 const { registrarAuditoria } = require('../../services/ensambladora/auditLog');
 const logger = require('../../config/logger');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
 /**
  * POST /api/webhooks/ensambladora/sync/inbound
@@ -82,12 +83,18 @@ async function listEvents(req, res) {
     if (req.query.direccion) where.direccion = req.query.direccion;
     if (req.query.revisado != null) where.revisado = req.query.revisado === 'true';
 
-    const eventos = await EnsambladoraEventoSync.findAll({
+    const pg = parsePagination(req.query, { defaultLimit: 100 });
+    const { rows: eventos, count } = await EnsambladoraEventoSync.findAndCountAll({
       where,
-      order: [['created_at', 'DESC']],
-      limit: 100,
+      order: [['created_at', 'DESC'], ['id', 'DESC']],
+      limit: pg.limit,
+      offset: pg.offset,
     });
-    res.json({ success: true, data: eventos });
+    // Aviso del encabezado: pendientes/error sobre todo el filtro, no solo la página.
+    let pendientesOError = 0;
+    if (!where.estado) pendientesOError = await EnsambladoraEventoSync.count({ where: { ...where, estado: ['pendiente', 'error'] } });
+    else if (['pendiente', 'error'].includes(where.estado)) pendientesOError = count;
+    res.json({ success: true, data: eventos, pagination: buildPagination(pg, count), pendientes_o_error: pendientesOError });
   } catch (error) {
     logger.error('[Ensambladora Sync] Error listando eventos', { message: error.message });
     res.status(500).json({ success: false, message: 'Error listando eventos de sincronización' });

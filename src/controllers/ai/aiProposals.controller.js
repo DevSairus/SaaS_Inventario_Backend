@@ -3,6 +3,7 @@ const { AiProposal, User } = require('../../models');
 const { PROPOSAL_EXECUTORS } = require('../../services/ai/proposalExecutor');
 const { ALLOWED_ROLES } = require('./aiAssistant.controller');
 const logger = require('../../config/logger');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
 function hasAccess(req) {
   return ALLOWED_ROLES.includes(req.user.role) || req.user.role === 'super_admin';
@@ -19,17 +20,19 @@ exports.listProposals = async (req, res) => {
     const where = { tenant_id: req.tenant_id };
     if (status !== 'all') where.status = status;
 
-    const proposals = await AiProposal.findAll({
+    const pg = parsePagination(req.query);
+    const { rows: proposals, count } = await AiProposal.findAndCountAll({
       where,
-      order: [['created_at', 'DESC']],
-      limit: 100,
+      order: [['created_at', 'DESC'], ['id', 'DESC']],
+      limit: pg.limit,
+      offset: pg.offset,
       include: [
         { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'] },
         { model: User, as: 'reviewer', attributes: ['id', 'first_name', 'last_name'] },
       ],
     });
 
-    res.json({ success: true, data: proposals });
+    res.json({ success: true, data: proposals, pagination: buildPagination(pg, count) });
   } catch (error) {
     logger.error(`[aiProposals.listProposals] ${error.message}`);
     res.status(500).json({ success: false, message: 'Error al listar propuestas de NEXA' });

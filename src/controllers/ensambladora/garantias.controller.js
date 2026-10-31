@@ -4,6 +4,7 @@ const { sendEventToCore } = require('../../services/ensambladora/syncOutboundCli
 const { consultarGarantias, consultarGarantia } = require('../../services/ensambladora/coreApiClient');
 const { registrarAuditoria } = require('../../services/ensambladora/auditLog');
 const logger = require('../../config/logger');
+const { parsePagination, paginateArray } = require('../../utils/pagination');
 
 /**
  * Sube (si hay archivos y Cloudinary está configurado) la evidencia de cada
@@ -62,7 +63,12 @@ async function subirEvidencias(req, items, carpeta) {
 async function listarTodas(req, res) {
   try {
     const garantias = await consultarGarantias(req.tenant_id);
-    res.json({ success: true, data: garantias });
+    // El Core devuelve todas; el filtro por estado y la paginación se
+    // hacen aquí para no mandarle al navegador el listado completo.
+    if (!Array.isArray(garantias)) return res.json({ success: true, data: garantias });
+    const { estado } = req.query;
+    const filtradas = estado ? garantias.filter((g) => g.estado === estado) : garantias;
+    res.json({ success: true, ...paginateArray(filtradas, parsePagination(req.query)), total_sin_filtro: garantias.length });
   } catch (error) {
     logger.error('[Ensambladora] Error consultando garantías', { message: error.message });
     res.status(502).json({ success: false, code: 'error_consultando_core', message: 'No se pudieron consultar las garantías' });

@@ -25,6 +25,10 @@ router.get('/', ctrl.list);
 router.get('/:id/pdf', ctrl.generatePDF);
 router.get('/:id', ctrl.getById);
 router.post('/', checkAccountOwnership, ctrl.create);
+// OT rápida: placa + cliente + km en una sola transacción (crea vehículo y/o
+// cliente si no existen). checkAccountOwnership aplica igual cuando llega un
+// customer_id existente; el cliente reutilizado por cédula se valida adentro.
+router.post('/quick', checkAccountOwnership, ctrl.quickCreate);
 router.put('/:id', ctrl.update);
 router.patch('/:id/status', ctrl.changeStatus);
 router.post('/:id/revert-status', ctrl.revertStatus); // solo administrador — ver revertStatus en el controller

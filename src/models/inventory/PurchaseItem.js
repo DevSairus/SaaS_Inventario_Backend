@@ -112,6 +112,13 @@ const PurchaseItem = sequelize.define('PurchaseItem', {
     type: DataTypes.DECIMAL(15, 2),
     defaultValue: 0
   },
+  // Margen de ganancia de esta línea (opcional): al recibir la compra pasa a
+  // ser el margen propio del producto. NULL = el producto conserva el suyo.
+  // Ver la migración 2026103003.
+  profit_margin_pct: {
+    type: DataTypes.DECIMAL(6, 2),
+    allowNull: true
+  },
   batch_number: {
     type: DataTypes.STRING(100),
     allowNull: true

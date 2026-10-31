@@ -50,6 +50,8 @@ const StockAlert = require('./StockAlert');
 const CostAlert = require('./inventory/CostAlert');
 const SupplierOrderList = require('./inventory/SupplierOrderList');
 const SupplierOrderListItem = require('./inventory/SupplierOrderListItem');
+const PriceAdjustment = require('./inventory/PriceAdjustment');
+const PriceAdjustmentItem = require('./inventory/PriceAdjustmentItem');
 const PayableAlert = require('./PayableAlert');
 
 // NUEVOS - Movimientos Avanzados
@@ -339,6 +341,12 @@ Tenant.hasMany(StockAlert, { foreignKey: 'tenant_id', as: 'stock_alerts' });
 CostAlert.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(CostAlert, { foreignKey: 'product_id', as: 'cost_alerts' });
 CostAlert.belongsTo(User, { foreignKey: 'resolved_by', as: 'resolver' });
+
+// PriceAdjustment (ajuste de precio de venta AJP-, solo base_price) ↔ ítems / producto / usuario
+PriceAdjustment.hasMany(PriceAdjustmentItem, { foreignKey: 'adjustment_id', as: 'items', onDelete: 'CASCADE' });
+PriceAdjustmentItem.belongsTo(PriceAdjustment, { foreignKey: 'adjustment_id', as: 'adjustment' });
+PriceAdjustmentItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+PriceAdjustment.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
 
 // SupplierOrderList (lista de pedido a proveedor, sin precios) ↔ ítems / proveedor / compra / usuarios
 SupplierOrderList.hasMany(SupplierOrderListItem, { foreignKey: 'list_id', as: 'items', onDelete: 'CASCADE' });
@@ -1038,6 +1046,8 @@ module.exports = {
   CostAlert,
   SupplierOrderList,
   SupplierOrderListItem,
+  PriceAdjustment,
+  PriceAdjustmentItem,
   PayableAlert,
   Invoice,
   SubscriptionPlan,

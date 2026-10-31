@@ -15,6 +15,23 @@ const { bulkUpdateById } = require('../../utils/bulkUpdate');
 const { nextPurchaseNumber } = require('../../services/inventory/purchaseNumber.service');
 const { purchaseNetPayable, purchasePaymentStatus, round2 } = require('../../utils/purchaseAmounts');
 const { recordPurchasePaymentEntries, newPaymentRecord } = require('../../services/inventory/purchasePayments.service');
+const { isValidMargin, marginRangeMessage } = require('../../utils/salePricing');
+const { getMarginMethod } = require('../../services/inventory/productMargin.service');
+
+// Margen de ganancia opcional de una línea de compra (purchase_items.
+// profit_margin_pct): vacío = el producto conserva el suyo. Se aplica al
+// producto al recibir la compra (ver receivePurchase y purchaseCost.service).
+const lineMargin = (v) => (v === null || v === undefined || v === '' ? null : Math.round(Number(v) * 100) / 100);
+
+// Mensaje de error si algún margen de línea está fuera de rango para el
+// método de cálculo del negocio; null si todos están bien.
+async function lineMarginsError(tenant_id, items = []) {
+  const withMargin = items.filter((it) => lineMargin(it?.profit_margin_pct) !== null);
+  if (!withMargin.length) return null;
+  const method = await getMarginMethod(tenant_id);
+  const bad = withMargin.find((it) => !isValidMargin(lineMargin(it.profit_margin_pct), method));
+  return bad ? `Margen de la línea inválido (${bad.profit_margin_pct}). ${marginRangeMessage(method)}` : null;
+}
 
 // Pago de contado marcado al crear la compra (plazo 0). Se reemplaza si al
 // confirmar se indica otro pago, y se recalcula si se editan los ítems.
@@ -137,7 +154,7 @@ const getPurchaseById = async (req, res) => {
             {
               model: Product,
               as: 'product',
-              attributes: ['id', 'sku', 'name', 'unit_of_measure']
+              attributes: ['id', 'sku', 'name', 'unit_of_measure', 'profit_margin_percentage']
             }
           ]
         }
@@ -190,6 +207,11 @@ const createPurchase = async (req, res) => {
     // Validaciones
     if (!supplier_id || !items || items.length === 0) {
       throw new Error('Proveedor y al menos un producto son requeridos');
+    }
+    const marginError = await lineMarginsError(tenant_id, items);
+    if (marginError) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: marginError });
     }
 
     // Verificar que el proveedor existe y pertenece al tenant
@@ -291,6 +313,7 @@ const createPurchase = async (req, res) => {
         inc_amount: item_inc,
         discount_percentage,
         discount_amount: item_discount,
+        profit_margin_pct: lineMargin(item.profit_margin_pct),
         subtotal: item_subtotal_after_discount,
         total: item_total,
         notes: item.notes || null
@@ -387,7 +410,7 @@ const createPurchase = async (req, res) => {
             {
               model: Product,
               as: 'product',
-              attributes: ['id', 'sku', 'name', 'unit_of_measure']
+              attributes: ['id', 'sku', 'name', 'unit_of_measure', 'profit_margin_percentage']
             }
           ]
         }
@@ -475,6 +498,12 @@ const updatePurchase = async (req, res) => {
       applied_retentions,
     } = req.body;
 
+    const marginError = await lineMarginsError(tenant_id, items || []);
+    if (marginError) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: marginError });
+    }
+
     // Si se proporcionan items, recalcular totales
     if (items && items.length > 0) {
       // Eliminar items anteriores
@@ -532,6 +561,7 @@ const updatePurchase = async (req, res) => {
           inc_amount: item_inc,
           discount_percentage,
           discount_amount: item_discount,
+          profit_margin_pct: lineMargin(item.profit_margin_pct),
           subtotal: item_subtotal_after_discount,
           total: item_total,
           notes: item.notes || null
@@ -986,6 +1016,8 @@ const receivePurchase = async (req, res) => {
       linesWithProduct.filter((it) => products.has(it.product_id)).map((purchaseItem) => ({
         product: products.get(purchaseItem.product_id),
         newCost: landedCost.get(purchaseItem.id) || parseFloat(purchaseItem.unit_cost) || 0,
+        // Margen escrito en la línea (XML, Excel o a mano): pasa al producto.
+        margin: lineMargin(purchaseItem.profit_margin_pct),
       })),
       { tenant_id, date: purchase.purchase_date, sourceType: 'purchase', sourceId: purchase.id, sourceNumber: purchase.purchase_number },
       t
@@ -1519,7 +1551,71 @@ const getPurchaseStats = async (req, res) => {
   }
 };
 
+/**
+ * POST /purchases/resolve-products { codes: [], supplier_id? }
+ * Para importar las líneas de una compra desde Excel: busca cada código como
+ * SKU, código de barras o código con que el proveedor elegido identifica el
+ * producto (product_suppliers.supplier_code), sin distinguir mayúsculas.
+ * Devuelve { products: { "<código tal como llegó>": producto } }; los que no
+ * aparecen no vienen en el objeto.
+ */
+const resolveProductCodes = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const codes = [...new Set((req.body?.codes || []).map((c) => String(c ?? '').trim()).filter(Boolean))].slice(0, 2000);
+    if (!codes.length) return res.json({ success: true, data: { products: {} } });
+    const upper = codes.map((c) => c.toUpperCase());
+    const attributes = ['id', 'sku', 'barcode', 'name', 'is_active', 'tax_percentage', 'has_tax', 'tax_config',
+      'profit_margin_percentage', 'last_purchase_cost', 'average_cost'];
+
+    const found = await Product.findAll({
+      where: {
+        tenant_id,
+        [Op.or]: [
+          sequelize.where(sequelize.fn('UPPER', sequelize.col('sku')), { [Op.in]: upper }),
+          sequelize.where(sequelize.fn('UPPER', sequelize.col('barcode')), { [Op.in]: upper }),
+        ],
+      },
+      attributes,
+    });
+    const byKey = new Map();
+    // Primero el SKU y después el código de barras: si un código es SKU de
+    // un producto y código de barras de otro, gana el SKU.
+    for (const p of found) if (p.barcode) byKey.set(String(p.barcode).toUpperCase(), p);
+    for (const p of found) byKey.set(String(p.sku).toUpperCase(), p);
+
+    const missing = upper.filter((c) => !byKey.has(c));
+    if (missing.length && req.body?.supplier_id) {
+      const links = await ProductSupplier.findAll({
+        where: {
+          tenant_id, supplier_id: req.body.supplier_id,
+          [Op.and]: [sequelize.where(sequelize.fn('UPPER', sequelize.col('supplier_code')), { [Op.in]: missing })],
+        },
+        attributes: ['product_id', 'supplier_code'],
+      });
+      const viaSupplier = links.length
+        ? new Map((await Product.findAll({ where: { tenant_id, id: links.map((l) => l.product_id) }, attributes })).map((p) => [p.id, p]))
+        : new Map();
+      for (const l of links) {
+        const p = viaSupplier.get(l.product_id);
+        if (p) byKey.set(String(l.supplier_code).toUpperCase(), p);
+      }
+    }
+
+    const products = {};
+    for (const c of codes) {
+      const p = byKey.get(c.toUpperCase());
+      if (p) products[c] = p;
+    }
+    res.json({ success: true, data: { products } });
+  } catch (error) {
+    console.error('Error en resolveProductCodes:', error);
+    res.status(500).json({ success: false, message: 'Error al buscar los productos del archivo' });
+  }
+};
+
 module.exports = {
+  resolveProductCodes,
   buildReceiptPortion,
   getRetentionCatalog,
   previewRetentions,

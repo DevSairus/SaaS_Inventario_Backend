@@ -39,15 +39,23 @@ async function getCostSettings(tenant_id, transaction) {
 // Cálculo de un registro de costo sobre el estado actual del producto, sin
 // tocar la BD (lo comparten registerPurchaseCost y registerPurchaseCostsBatch).
 // Devuelve null si no aplica; si no, { updates, alert|null, priceHeld }.
-function planPurchaseCost(product, newCost, date, { threshold, marginMethod }, { sourceType, sourceId = null, sourceNumber = null }) {
+// marginOverride: margen escrito en la línea de la compra (purchase_items.
+// profit_margin_pct). Pasa a ser el margen propio del producto y el precio se
+// calcula con él; null = el producto conserva el suyo.
+function planPurchaseCost(product, newCost, date, { threshold, marginMethod }, { sourceType, sourceId = null, sourceNumber = null }, marginOverride = null) {
   const cost = parseFloat(newCost);
   if (!product || !Number.isFinite(cost) || cost <= 0) return null;
 
   const previousCost = parseFloat(product.last_purchase_cost) || 0;
   const currentPrice = parseFloat(product.base_price) || 0;
-  const margin = parseFloat(product.profit_margin_percentage) || 0;
+  const override = marginOverride === null || marginOverride === undefined ? null : parseFloat(marginOverride);
+  const margin = Number.isFinite(override) ? override : (parseFloat(product.profit_margin_percentage) || 0);
 
   const updates = { last_purchase_cost: cost, last_purchase_date: date };
+  if (Number.isFinite(override)) {
+    updates.profit_margin_percentage = override;
+    updates.margin_inherited = false;
+  }
 
   let suggestedPrice = null;
   let priceHeld = false;
@@ -118,11 +126,12 @@ async function registerPurchaseCost({ tenant_id, product, newCost, date, sourceT
 
 // Escala de las columnas de products que toca un registro de costo (ver
 // PRODUCT_STOCK_SCALE en movements.controller.js: mismo motivo).
-const PRODUCT_COST_SCALE = { last_purchase_cost: 2, base_price: 2 };
+const PRODUCT_COST_SCALE = { last_purchase_cost: 2, base_price: 2, profit_margin_percentage: 2 };
 
 /**
  * Igual que llamar registerPurchaseCost por cada entrada, en orden, con las
- * escrituras en bloque. `entries`: [{ product, newCost }] (las instancias se
+ * escrituras en bloque. `entries`: [{ product, newCost, margin? }] (margin:
+ * margen de la línea de la compra, ver planPurchaseCost; las instancias se
  * actualizan en memoria). Un producto repetido deja, como antes, solo su
  * última alerta activa y las anteriores resueltas como reemplazadas.
  */
@@ -134,8 +143,8 @@ async function registerPurchaseCostsBatch(entries, { tenant_id, date, sourceType
   const settings = await getCostSettings(tenant_id, transaction);
   const changed = new Set();
   const alerts = [];
-  for (const { product, newCost } of entries) {
-    const plan = planPurchaseCost(product, newCost, date, settings, { sourceType, sourceId, sourceNumber });
+  for (const { product, newCost, margin = null } of entries) {
+    const plan = planPurchaseCost(product, newCost, date, settings, { sourceType, sourceId, sourceNumber }, margin);
     if (!plan) continue;
     for (const [col, value] of Object.entries(plan.updates)) {
       product.setDataValue(col, PRODUCT_COST_SCALE[col] !== undefined ? roundNumeric(value, PRODUCT_COST_SCALE[col]) : value);
@@ -145,12 +154,14 @@ async function registerPurchaseCostsBatch(entries, { tenant_id, date, sourceType
   }
   if (changed.size === 0) return;
 
-  const columns = ['last_purchase_cost', 'last_purchase_date', 'base_price'];
+  const columns = ['last_purchase_cost', 'last_purchase_date', 'base_price', 'profit_margin_percentage', 'margin_inherited'];
   await bulkUpdateById(Product, [...changed].map((p) => ({
     id: p.id,
     last_purchase_cost: p.getDataValue('last_purchase_cost'),
     last_purchase_date: p.getDataValue('last_purchase_date'),
     base_price: p.getDataValue('base_price'),
+    profit_margin_percentage: p.getDataValue('profit_margin_percentage'),
+    margin_inherited: p.getDataValue('margin_inherited'),
   })), columns, { transaction });
 
   if (alerts.length === 0) return;

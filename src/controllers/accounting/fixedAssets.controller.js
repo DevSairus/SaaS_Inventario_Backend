@@ -15,6 +15,7 @@
 const { FixedAsset, FixedAssetDepreciationEntry, ChartOfAccount, JournalEntry } = require('../../models');
 const { runDepreciationForTenant, lastClosedPeriod } = require('../../services/accounting/fixedAssetDepreciation.service');
 const logger = require('../../config/logger');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
 const CATEGORIES = ['vehiculo', 'maquinaria', 'equipo_computo', 'muebles_enseres', 'otro'];
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -50,10 +51,14 @@ exports.list = async (req, res) => {
     if (req.query.branch_id) where.branch_id = req.query.branch_id;
     if (req.query.category) where.category = req.query.category;
 
-    const assets = await FixedAsset.findAll({
+    const pg = parsePagination(req.query);
+    const { rows: assets, count } = await FixedAsset.findAndCountAll({
       where,
       include: ACCOUNT_INCLUDES,
-      order: [['acquisition_date', 'DESC']],
+      order: [['acquisition_date', 'DESC'], ['id', 'DESC']],
+      limit: pg.limit,
+      offset: pg.offset,
+      distinct: true,
     });
 
     const latestByAsset = await getLatestAccumulatedByAsset(assets.map((a) => a.id));
@@ -63,7 +68,7 @@ exports.list = async (req, res) => {
       return { ...a.toJSON(), accumulated_depreciation: accumulated, book_value: bookValue(a, accumulated) };
     });
 
-    res.json({ success: true, data });
+    res.json({ success: true, data, pagination: buildPagination(pg, count) });
   } catch (error) {
     logger.error('Error en fixedAssets.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al listar activos fijos', error: process.env.NODE_ENV === 'production' ? undefined : error.message });

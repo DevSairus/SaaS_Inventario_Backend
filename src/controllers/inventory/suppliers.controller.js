@@ -2,6 +2,7 @@ const { Supplier } = require('../../models/inventory');
 const { Op, fn, col, where: sqlWhere } = require('sequelize');
 const { sanitizeRetentionConcepts } = require('../../services/taxService');
 const { PAYROLL_FUND_TYPES } = require('../../data/payroll-funds-colombia');
+const { MAX_LIMIT } = require('../../utils/pagination');
 
 const sanitizeFundTypes = (value) => (Array.isArray(value) ? [...new Set(value.filter((t) => PAYROLL_FUND_TYPES.includes(t)))] : []);
 
@@ -43,8 +44,10 @@ const getSuppliers = async (req, res) => {
       sort_by = 'name',
       sort_order = 'ASC',
       page = 1,
-      limit = 10
+      limit: rawLimit = 10
     } = req.query;
+    // Tope por página (MAX_LIMIT = 200): pedir miles de filas ya no las trae todas.
+    const limit = Math.min(Math.max(1, parseInt(rawLimit, 10) || 10), MAX_LIMIT);
 
     // ✅ Validar autenticación
     if (!req.user) {

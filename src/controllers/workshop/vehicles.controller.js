@@ -10,11 +10,15 @@ const { resolveVehicleMaintenance } = require('../../services/workshop/maintenan
 const QRCode = require('qrcode');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const whatsappService = require('../../services/whatsappService');
+const { findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
+const { MAX_LIMIT } = require('../../utils/pagination');
 
 const list = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { search, customer_id, page = 1, limit = 20 } = req.query;
+    const { search, customer_id, page = 1, limit: rawLimit = 20 } = req.query;
+    // Tope por página (MAX_LIMIT = 200): pedir miles de filas ya no las trae todas.
+    const limit = Math.min(Math.max(1, parseInt(rawLimit, 10) || 20), MAX_LIMIT);
     const offset = (page - 1) * limit;
 
     const where = { tenant_id, is_active: true };
@@ -491,7 +495,21 @@ async function getPublicVehiclePortalBody(vehicleId, res) {
   }
 }
 
+// Búsqueda exacta por placa para el modal de OT rápida: compara sin
+// espacios ni guiones (ver services/workshop/vehiclePlate.service.js) y
+// devuelve el vehículo con su propietario, o data=null si no existe (no es
+// un error: en ese caso la OT rápida lo crea con solo la placa).
+const getByPlate = async (req, res) => {
+  try {
+    const vehicle = await findVehicleByPlate(req.user.tenant_id, req.params.plate);
+    res.json({ success: true, data: vehicle || null });
+  } catch (error) {
+    logger.error('Error buscando vehículo por placa:', error);
+    res.status(500).json({ success: false, message: 'Error al buscar el vehículo' });
+  }
+};
+
 module.exports = {
-  list, getById, create, update, getHistory, remove,
+  list, getById, getByPlate, create, update, getHistory, remove,
   getMaintenance, getReminders, getPortalLink, sendPortalWhatsApp, getLabel, getPublicVehiclePortal,
 };

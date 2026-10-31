@@ -4,16 +4,21 @@ const { Op } = require('sequelize');
 const { Opportunity, Customer, User, Sale, WorkOrder, CrmLossReason } = require('../../models');
 const { applyOwnershipScope } = require('../../utils/crmScope');
 const { computeLeadPriority } = require('../../utils/crmLeadScore');
-const { loadStageMap, resolveEntryStageKey } = require('../../utils/crmPipelineStages');
+const { loadStageMap, resolveEntryStageKey, keysByType } = require('../../utils/crmPipelineStages');
 const { applyOpportunityCreatedRules } = require('../../services/crmAutomationEngine');
 const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
 
 // Listado para el tablero Kanban — agrupado por stage en el frontend, acá
 // se entrega plano y ya filtrado por visibilidad (§5-bis, capa A).
+// closed_days=N (opcional): las cerradas (ganadas/perdidas) solo si se
+// cerraron en los últimos N días. Las abiertas siempre vienen; las cerradas
+// son las que crecen sin fin. open_only=true: solo las abiertas (la bandeja
+// de WhatsApp solo las usa para mostrar el negocio en curso de cada chat).
 const list = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
     const { stage, owner_user_id } = req.query;
+    const closedDays = parseInt(req.query.closed_days, 10);
 
     let where = { tenant_id };
     if (stage) where.stage = stage;
@@ -26,6 +31,24 @@ const list = async (req, res) => {
     where = await applyOwnershipScope(req, where, 'owner_user_id');
 
     const stageMap = await loadStageMap(tenant_id);
+
+    if (req.query.open_only === 'true') {
+      where = { ...where, [Op.and]: [...(where[Op.and] || []), { stage: { [Op.in]: keysByType(stageMap, 'open') } }] };
+    }
+
+    if (closedDays > 0) {
+      const closedKeys = [...keysByType(stageMap, 'won'), ...keysByType(stageMap, 'lost')];
+      if (closedKeys.length) {
+        const since = new Date(Date.now() - closedDays * 24 * 60 * 60 * 1000);
+        where = {
+          ...where,
+          [Op.and]: [
+            ...(where[Op.and] || []),
+            { [Op.or]: [{ stage: { [Op.notIn]: closedKeys } }, { stage_changed_at: { [Op.gte]: since } }] },
+          ],
+        };
+      }
+    }
 
     const opportunities = await Opportunity.findAll({
       where,

@@ -2,8 +2,9 @@ const { JournalEntry, JournalEntryLine, ChartOfAccount } = require('../../models
 const { createDraftEntry, updateDraftEntry, postEntry, voidEntry, reverseEntry } = require('../../services/accounting/journalEntry.service');
 const logger = require('../../config/logger');
 const { entryThirdParties, resolveThirdParties, searchThirdParties } = require('../../services/accounting/thirdParty.service');
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 
-// GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=&third_party_id=&q=
+// GET /api/accounting/journal-entries?status=&source_type=&from=&to=&branch_id=&third_party_id=&q=&page=&limit=
 exports.list = async (req, res) => {
   try {
     const { Op } = require('sequelize');
@@ -37,17 +38,19 @@ exports.list = async (req, res) => {
       if (to) where.entry_date[Op.lte] = to;
     }
 
-    const entries = await JournalEntry.findAll({
+    const pg = parsePagination(req.query);
+    const { rows: entries, count } = await JournalEntry.findAndCountAll({
       where,
       order: [['entry_date', 'DESC'], ['entry_number', 'DESC']],
-      limit: 200,
+      limit: pg.limit,
+      offset: pg.offset,
     });
 
     // Tercero principal de cada asiento (cliente / proveedor / empleado)
     const tpMap = await entryThirdParties(entries.map(e => e.id));
     const data = entries.map(e => ({ ...e.toJSON(), third_party: tpMap.get(e.id) || null }));
 
-    res.json({ success: true, data });
+    res.json({ success: true, data, pagination: buildPagination(pg, count) });
   } catch (error) {
     logger.error('Error en journalEntries.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al listar asientos', error: process.env.NODE_ENV === 'production' ? undefined : error.message });

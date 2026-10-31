@@ -11,6 +11,13 @@ router.get(
   accountsPayableController.getAccountsPayableSummary
 );
 
+// Compras con saldo pendiente, paginadas
+router.get(
+  '/documents',
+  checkRole('admin', 'manager', 'accountant'),
+  accountsPayableController.listPayableDocuments
+);
+
 // Obtener reporte de antigüedad de saldos
 router.get(
   '/aging-report',

@@ -209,7 +209,7 @@ async function loadAccessibleConversation(req, conversationId) {
 
 const listConversations = async (req, res) => {
   try {
-    const { q, status, scope } = req.query;
+    const { q, status, scope, view } = req.query;
     let where = { tenant_id: req.tenant_id };
     if (status) where.status = status;
 
@@ -235,22 +235,38 @@ const listConversations = async (req, res) => {
       };
     }
 
+    // Vistas de la bandeja que antes se filtraban en el navegador sobre lo ya
+    // cargado (con "Cargar más" quedarían incompletas). Van en Op.and para no
+    // pisar el scope de visibilidad.
+    const viewWhere = {
+      unassigned: { assigned_user_id: null },
+      pinned: { is_pinned: true },
+      followups: { follow_up_at: { [Op.ne]: null, [Op.lte]: new Date(Date.now() + 48 * 3600 * 1000) } },
+    }[view];
+    if (viewWhere) where = { ...where, [Op.and]: [...(where[Op.and] || []), viewWhere] };
+
+    // "Cargar más" por desplazamiento (offset): se pide una fila de más para
+    // saber si quedan conversaciones sin mostrar.
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
     const conversations = await WaConversation.findAll({
       where,
       include: [
         { model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone', 'mobile'] },
         { model: User, as: 'assignee', attributes: ['id', 'first_name', 'last_name'] },
       ],
-      order: [['is_pinned', 'DESC'], ['follow_up_at', 'ASC'], ['last_message_at', 'DESC'], ['updated_at', 'DESC']],
-      limit: Math.min(Number(req.query.limit) || 50, 100),
+      order: [['is_pinned', 'DESC'], ['follow_up_at', 'ASC'], ['last_message_at', 'DESC'], ['updated_at', 'DESC'], ['id', 'DESC']],
+      limit: limit + 1,
+      offset,
     });
 
-    const data = conversations.map((c) => {
+    const hasMore = conversations.length > limit;
+    const data = conversations.slice(0, limit).map((c) => {
       const plain = c.toJSON();
       plain.window = windowStatus(c.last_inbound_at);
       return plain;
     });
-    res.json({ success: true, data });
+    res.json({ success: true, data, has_more: hasMore });
   } catch (error) {
     logger.error('[WA Cloud] list conversations:', error);
     res.status(500).json({ success: false, message: 'Error al listar conversaciones' });

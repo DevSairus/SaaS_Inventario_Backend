@@ -60,14 +60,15 @@ const getNotificationsBundle = async (req, res) => {
     // ya se auto-ocultan si vienen 0 resultados). Cuentas por pagar sí se
     // gatea explícitamente: sin módulo de tesorería no debe mostrarse nada.
     const tasks = {
-      stock: invoke(stockAlertsController.getStockAlerts, req, { status: 'active', limit: 500 }),
+      // 200 = tope por página de estos endpoints; el total real va en `counts`.
+      stock: invoke(stockAlertsController.getStockAlerts, req, { status: 'active', limit: 200 }),
       advance: invoke(advanceAlertsController.getAdvanceAlerts, req, {
-        status: 'active', limit: 500, sort_by: 'days_since_received', sort_order: 'DESC',
+        status: 'active', limit: 200, sort_by: 'days_since_received', sort_order: 'DESC',
       }),
     };
     if (hasTreasury) {
       tasks.payable = invoke(payableAlertsController.getPayableAlerts, req, {
-        status: 'active', limit: 500, sort_by: 'days_to_due', sort_order: 'ASC',
+        status: 'active', limit: 200, sort_by: 'days_to_due', sort_order: 'ASC',
       });
     }
     if (hasCrm) {
@@ -85,11 +86,13 @@ const getNotificationsBundle = async (req, res) => {
     const keys = Object.keys(tasks);
     const results = await Promise.all(Object.values(tasks));
 
-    const data = {};
+    const data = { counts: {} };
     keys.forEach((key, i) => {
       const r = results[i];
       if (r.statusCode === 200 && r.body?.success) {
         data[key] = r.body.data;
+        // Total real de las listas paginadas (pueden venir recortadas).
+        if (r.body.pagination?.total != null) data.counts[key] = r.body.pagination.total;
       } else {
         data[key] = null;
         logger.warn(`[notifications-bundle] sección "${key}" falló (tenant ${tenant_id}): ${r.body?.message || 'sin detalle'}`);

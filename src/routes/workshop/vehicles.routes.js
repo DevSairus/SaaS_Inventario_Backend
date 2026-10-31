@@ -3,6 +3,9 @@ const router = express.Router();
 const ctrl = require('../../controllers/workshop/vehicles.controller');
 
 router.get('/', ctrl.list);
+// Búsqueda exacta por placa (sin espacios/guiones) -- modal de OT rápida.
+// Va antes de '/:id' para que 'by-plate' no se tome como id.
+router.get('/by-plate/:plate', ctrl.getByPlate);
 router.get('/:id', ctrl.getById);
 router.get('/:id/history', ctrl.getHistory);
 // Portal del vehículo / mantenimientos (plan-portal-mantenimiento-vehiculo.md)

@@ -11,6 +11,13 @@ router.get(
   accountsReceivableController.getAccountsReceivableSummary
 );
 
+// Documentos con saldo pendiente, paginados
+router.get(
+  '/documents',
+  checkRole('admin', 'manager', 'accountant'),
+  accountsReceivableController.listReceivableDocuments
+);
+
 // Obtener reporte de antigüedad de saldos
 router.get(
   '/aging-report',

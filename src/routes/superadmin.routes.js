@@ -1640,24 +1640,50 @@ router.get(
   checkPermission('superadmin.view_all'),
   async (req, res) => {
     try {
-      const invoices = await SubscriptionInvoice.findAll({
-        where: tenantScopeWhere(req, 'tenant_id'),
-        include: [
-          {
-            model: Tenant,
-            as: 'tenant',
-            attributes: ['id', 'company_name'],
-          },
-          {
-            model: SubscriptionPlan,
-            as: 'plan',
-            attributes: ['id', 'name', 'slug'],
-          },
-        ],
-        order: [['created_at', 'DESC']],
+      // Paginado; los contadores de la cabecera se calculan sobre todo.
+      const { parsePagination, buildPagination } = require('../utils/pagination');
+      const { fn, col } = SubscriptionInvoice.sequelize;
+      const pg = parsePagination(req.query);
+      const scopeWhere = tenantScopeWhere(req, 'tenant_id');
+      const [statsRows, { rows: invoices, count }] = await Promise.all([
+        SubscriptionInvoice.findAll({
+          where: scopeWhere,
+          attributes: ['status', [fn('COUNT', col('id')), 'count'], [fn('SUM', col('amount')), 'amount']],
+          group: ['status'],
+          raw: true,
+        }),
+        SubscriptionInvoice.findAndCountAll({
+          where: scopeWhere,
+          limit: pg.limit,
+          offset: pg.offset,
+          distinct: true,
+          include: [
+            {
+              model: Tenant,
+              as: 'tenant',
+              attributes: ['id', 'company_name'],
+            },
+            {
+              model: SubscriptionPlan,
+              as: 'plan',
+              attributes: ['id', 'name', 'slug'],
+            },
+          ],
+          order: [['created_at', 'DESC'], ['id', 'DESC']],
+        }),
+      ]);
+      const stats = { total: 0, paid: 0, pending: 0, total_amount: 0 };
+      statsRows.forEach((r) => {
+        const n = Number(r.count) || 0;
+        stats.total += n;
+        stats.total_amount += Number(r.amount) || 0;
+        if (r.status === 'paid') stats.paid = n;
+        if (r.status === 'pending') stats.pending = n;
       });
 
       res.json({
+        pagination: buildPagination(pg, count),
+        stats,
         invoices: invoices.map((inv) => ({
           id: inv.id,
           invoice_number: inv.invoice_number,

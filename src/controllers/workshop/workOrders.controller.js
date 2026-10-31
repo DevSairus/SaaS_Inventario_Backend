@@ -22,6 +22,8 @@ const maintenanceService = require('../../services/workshop/maintenance.service'
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const woPayments = require('../../services/workshop/workOrderPayments.service');
+const { normalizePlate, cleanPlate, findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
+const { isBlockedByAccountOwnership } = require('../../middleware/checkAccountOwnership');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -327,16 +329,141 @@ const getById = async (req, res) => {
 };
 
 // ── CREATE ────────────────────────────────────────────────────────────────────
+//
+// El núcleo de creación de la OT vive en createWorkOrderCore (dentro de la
+// transacción) + finishWorkOrderCreation (después del commit), compartido por
+// create() y quickCreate() (OT rápida): numeración, bodega por defecto de la
+// sede, km → vehículo, vínculo del propietario, CRM y aviso de recepción
+// tienen que comportarse igual venga la OT del formulario completo o del
+// modal rápido -- si se duplicara, tarde o temprano una de las dos se queda
+// atrás.
+
+/**
+ * Crea la OT dentro de `transaction` (no hace commit). Asume que vehicle_id y
+ * customer_id ya fueron validados por el llamador.
+ */
+async function createWorkOrderCore({ tenant_id, user_id, branch_id, data, transaction }) {
+  const {
+    vehicle_id, customer_id, technician_id, warehouse_id,
+    mileage_in, problem_description, promised_at, notes,
+  } = data;
+
+  const order_number = await generateOrderNumber(tenant_id, transaction);
+
+  // Sanitizar campos UUID opcionales: convertir string vacío a null
+  const sanitizedTechnicianId = technician_id || null;
+  const sanitizedCustomerId = customer_id || null;
+
+  // Si no viene bodega explícita, usar la bodega default de la sede activa
+  // como respaldo (el frontend ya la precarga, pero esto protege contra
+  // integraciones/clientes que no la envíen -- y la OT rápida nunca la envía).
+  let sanitizedWarehouseId = warehouse_id || null;
+  if (!sanitizedWarehouseId && branch_id) {
+    const branchWarehouse = await Warehouse.findOne({
+      where: { branch_id, tenant_id, is_active: true },
+      order: [['is_default', 'DESC'], ['created_at', 'ASC']],
+      transaction,
+    });
+    sanitizedWarehouseId = branchWarehouse?.id || null;
+  }
+
+  if (mileage_in) {
+    await Vehicle.update({ current_mileage: mileage_in }, { where: { id: vehicle_id, tenant_id }, transaction });
+  }
+
+  // Si el vehículo no tiene propietario y la OT lleva cliente, vincularlo permanentemente
+  if (sanitizedCustomerId) {
+    await Vehicle.update(
+      { customer_id: sanitizedCustomerId },
+      { where: { id: vehicle_id, tenant_id, customer_id: null }, transaction }
+    );
+  }
+
+  return WorkOrder.create({
+    tenant_id, order_number, vehicle_id,
+    customer_id: sanitizedCustomerId,
+    technician_id: sanitizedTechnicianId,
+    warehouse_id: sanitizedWarehouseId,
+    mileage_in, problem_description, promised_at, notes,
+    created_by: user_id,
+    received_at: new Date(),
+  }, { transaction });
+}
+
+/**
+ * Pasos posteriores al commit: vínculo CRM (asíncrono), recarga de la OT con
+ * vehículo/cliente/técnico y aviso de recepción. Devuelve { full, reception_notice }.
+ */
+async function finishWorkOrderCreation({ order, tenant_id, user_id, opportunity_id = null }) {
+  // ── CRM (C.3): si esta OT nace de una Opportunity del pipeline, se
+  // vincula y la etapa avanza — mismo patrón/criterio que C.2 en
+  // sales.controller.js#create: no bloquea la respuesta, resuelve la
+  // etapa contra la configuración real del tenant (CrmPipelineStage,
+  // Fase B.4) en vez de asumir una key fija, y solo se mueve si la
+  // oportunidad sigue abierta.
+  if (opportunity_id) {
+    setImmediate(async () => {
+      try {
+        const { Opportunity } = require('../../models');
+        const { loadStageMap } = require('../../utils/crmPipelineStages');
+        const opportunity = await Opportunity.findOne({ where: { id: opportunity_id, tenant_id } });
+        if (!opportunity) return;
+
+        const stageMap = await loadStageMap(tenant_id);
+        const currentStage = stageMap[opportunity.stage];
+        const updateData = { work_order_id: order.id };
+
+        if (currentStage && currentStage.stage_type === 'open') {
+          const quotedStage = stageMap['cotizado'] && stageMap['cotizado'].stage_type === 'open'
+            ? stageMap['cotizado']
+            : Object.values(stageMap)
+                .filter(s => s.stage_type === 'open' && s.sort_order > currentStage.sort_order)
+                .sort((a, b) => a.sort_order - b.sort_order)[0];
+
+          if (quotedStage) {
+            updateData.stage = quotedStage.key;
+            updateData.stage_changed_at = new Date();
+          }
+        }
+
+        await opportunity.update(updateData);
+      } catch (err) {
+        logger.warn(`[crm] Error vinculando OT ${order.order_number} a oportunidad ${opportunity_id}: ${err.message}`);
+      }
+    });
+  }
+
+  const full = await WorkOrder.findByPk(order.id, {
+    include: [
+      { model: Vehicle,  as: 'vehicle' },
+      { model: Customer, as: 'customer' },
+      { model: User,     as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
+    ],
+  });
+
+  // Aviso de recepción al cliente (seguimiento + acta de ingreso si está
+  // activa) -- ver consent.service.js#notifyVehicleReception. Nunca tumba
+  // la creación: si algo falla, la OT ya quedó creada.
+  let reception_notice = null;
+  try {
+    const consentSvc = require('../../services/legal/consent.service');
+    const tenant = await Tenant.findByPk(tenant_id);
+    const settings = consentSvc.getConsentSettings(tenant);
+    if (settings.vehicle_intake.notify_on_reception) {
+      reception_notice = await consentSvc.notifyVehicleReception({ tenant, order: full, userId: user_id });
+    }
+  } catch (noticeErr) {
+    logger.warn(`[OT] Aviso de recepción ${order.order_number} falló: ${noticeErr.message}`);
+  }
+
+  return { full, reception_notice };
+}
 
 const create = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
     const tenant_id = req.user.tenant_id;
-    const {
-      vehicle_id, customer_id, technician_id, warehouse_id,
-      mileage_in, problem_description, promised_at, notes,
-      opportunity_id = null,
-    } = req.body;
+    const { vehicle_id, customer_id, opportunity_id = null } = req.body;
 
     if (!vehicle_id) {
       await transaction.rollback();
@@ -347,114 +474,198 @@ const create = async (req, res) => {
       return res.status(400).json({ success: false, message: 'El cliente es requerido' });
     }
 
-    const order_number = await generateOrderNumber(tenant_id, transaction);
-
-    // Sanitizar campos UUID opcionales: convertir string vacío a null
-    const sanitizedTechnicianId = technician_id || null;
-    const sanitizedCustomerId = customer_id || null;
-
-    // Si no viene bodega explícita, usar la bodega default de la sede activa
-    // como respaldo (el frontend ya la precarga, pero esto protege contra
-    // integraciones/clientes que no la envíen).
-    let sanitizedWarehouseId = warehouse_id || null;
-    if (!sanitizedWarehouseId && req.branch_id) {
-      const branchWarehouse = await Warehouse.findOne({
-        where: { branch_id: req.branch_id, tenant_id, is_active: true },
-        order: [['is_default', 'DESC'], ['created_at', 'ASC']],
-        transaction,
-      });
-      sanitizedWarehouseId = branchWarehouse?.id || null;
-    }
-
-    if (mileage_in) {
-      await Vehicle.update({ current_mileage: mileage_in }, { where: { id: vehicle_id, tenant_id }, transaction });
-    }
-
-    // Si el vehículo no tiene propietario y la OT lleva cliente, vincularlo permanentemente
-    if (sanitizedCustomerId) {
-      await Vehicle.update(
-        { customer_id: sanitizedCustomerId },
-        { where: { id: vehicle_id, tenant_id, customer_id: null }, transaction }
-      );
-    }
-
-    const order = await WorkOrder.create({
-      tenant_id, order_number, vehicle_id,
-      customer_id: sanitizedCustomerId,
-      technician_id: sanitizedTechnicianId,
-      warehouse_id: sanitizedWarehouseId,
-      mileage_in, problem_description, promised_at, notes,
-      created_by: req.user.id,
-      received_at: new Date(),
-    }, { transaction });
+    const order = await createWorkOrderCore({
+      tenant_id, user_id: req.user.id, branch_id: req.branch_id, data: req.body, transaction,
+    });
 
     await transaction.commit();
 
-    // ── CRM (C.3): si esta OT nace de una Opportunity del pipeline, se
-    // vincula y la etapa avanza — mismo patrón/criterio que C.2 en
-    // sales.controller.js#create: no bloquea la respuesta, resuelve la
-    // etapa contra la configuración real del tenant (CrmPipelineStage,
-    // Fase B.4) en vez de asumir una key fija, y solo se mueve si la
-    // oportunidad sigue abierta.
-    if (opportunity_id) {
-      setImmediate(async () => {
-        try {
-          const { Opportunity } = require('../../models');
-          const { loadStageMap } = require('../../utils/crmPipelineStages');
-          const opportunity = await Opportunity.findOne({ where: { id: opportunity_id, tenant_id } });
-          if (!opportunity) return;
-
-          const stageMap = await loadStageMap(tenant_id);
-          const currentStage = stageMap[opportunity.stage];
-          const updateData = { work_order_id: order.id };
-
-          if (currentStage && currentStage.stage_type === 'open') {
-            const quotedStage = stageMap['cotizado'] && stageMap['cotizado'].stage_type === 'open'
-              ? stageMap['cotizado']
-              : Object.values(stageMap)
-                  .filter(s => s.stage_type === 'open' && s.sort_order > currentStage.sort_order)
-                  .sort((a, b) => a.sort_order - b.sort_order)[0];
-
-            if (quotedStage) {
-              updateData.stage = quotedStage.key;
-              updateData.stage_changed_at = new Date();
-            }
-          }
-
-          await opportunity.update(updateData);
-        } catch (err) {
-          logger.warn(`[crm] Error vinculando OT ${order.order_number} a oportunidad ${opportunity_id}: ${err.message}`);
-        }
-      });
-    }
-
-    const full = await WorkOrder.findByPk(order.id, {
-      include: [
-        { model: Vehicle,  as: 'vehicle' },
-        { model: Customer, as: 'customer' },
-        { model: User,     as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
-      ],
+    const { full, reception_notice } = await finishWorkOrderCreation({
+      order, tenant_id, user_id: req.user.id, opportunity_id,
     });
-
-    // Aviso de recepción al cliente (seguimiento + acta de ingreso si está
-    // activa) -- ver consent.service.js#notifyVehicleReception. Nunca tumba
-    // la creación: si algo falla, la OT ya quedó creada.
-    let reception_notice = null;
-    try {
-      const consentSvc = require('../../services/legal/consent.service');
-      const tenant = await Tenant.findByPk(tenant_id);
-      const settings = consentSvc.getConsentSettings(tenant);
-      if (settings.vehicle_intake.notify_on_reception) {
-        reception_notice = await consentSvc.notifyVehicleReception({ tenant, order: full, userId: req.user.id });
-      }
-    } catch (noticeErr) {
-      logger.warn(`[OT] Aviso de recepción ${order.order_number} falló: ${noticeErr.message}`);
-    }
 
     res.status(201).json({ success: true, message: 'Orden de trabajo creada', data: full, reception_notice });
   } catch (error) {
-    await transaction.rollback();
+    // Si el fallo fue después del commit (recarga/aviso), ya no hay nada que revertir.
+    if (!transaction.finished) await transaction.rollback();
     logger.error('Error creando OT:', error);
+    res.status(500).json({ success: false, message: 'Error al crear la orden' });
+  }
+};
+
+// ── OT RÁPIDA ─────────────────────────────────────────────────────────────────
+//
+// Recepción con lo mínimo (placa, cliente, km y opcionalmente el motivo) para
+// no frenar la entrada del carro: marca/modelo/RUNT/etc. se completan después
+// desde la ficha del vehículo. Todo en UNA transacción -- si falla la OT no
+// queda un vehículo o cliente huérfano creado a medias. Ver
+// QuickWorkOrderModal.jsx en el frontend.
+
+// Hora local de "entrega prometida" por defecto de la OT rápida: el modal no
+// pide fecha (sería un campo más en el celular), así que se asume "hoy al
+// cierre" en la zona del tenant (business_config.timezone, mismo criterio que
+// cashflow.controller.js) y se ajusta luego en la OT si hace falta. Si ya
+// pasaron las 18:00 locales, se promete para mañana a la misma hora -- una
+// fecha ya vencida al crear la OT la pintaría atrasada desde el primer minuto.
+const QUICK_PROMISE_HOUR = 18;
+const DEFAULT_TIMEZONE = 'America/Bogota';
+
+// 'YYYY-MM-DD' + hora local de `timeZone` -> instante (Date). Se calcula el
+// desfase real de la zona en ese momento con Intl en vez de asumir UTC-5.
+function localWallTimeToInstant(dateStr, hour, timeZone) {
+  const guess = new Date(`${dateStr}T${String(hour).padStart(2, '0')}:00:00Z`);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone, hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(guess).map(p => [p.type, p.value])
+  );
+  const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+  return new Date(guess.getTime() - (asUtc - guess.getTime()));
+}
+
+function defaultQuickPromisedAt(tenant, now = new Date()) {
+  let timeZone = tenant?.business_config?.timezone || DEFAULT_TIMEZONE;
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone });
+  } catch {
+    timeZone = DEFAULT_TIMEZONE; // zona mal configurada: no tumbar la OT por eso
+  }
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+  const promised = localWallTimeToInstant(today, QUICK_PROMISE_HOUR, timeZone);
+  return promised > now ? promised : new Date(promised.getTime() + 24 * 60 * 60 * 1000);
+}
+
+const quickCreate = async (req, res) => {
+  const tenant_id = req.user.tenant_id;
+  const { plate, customer_id, new_customer, mileage_in, problem_description } = req.body || {};
+
+  // ── Validaciones (antes de abrir la transacción) ──
+  const plateToSave = cleanPlate(plate);
+  if (!normalizePlate(plate)) {
+    return res.status(400).json({ success: false, message: 'La placa es requerida' });
+  }
+  if (plateToSave.length > 20) {
+    return res.status(400).json({ success: false, message: 'La placa no puede tener más de 20 caracteres' });
+  }
+  if (!customer_id && !new_customer) {
+    return res.status(400).json({ success: false, message: 'El cliente es requerido: selecciona uno existente o registra uno nuevo' });
+  }
+  let newCustomerData = null;
+  if (!customer_id) {
+    const first_name = String(new_customer.first_name || '').trim();
+    const mobile = String(new_customer.mobile || new_customer.phone || '').trim();
+    if (!first_name) {
+      return res.status(400).json({ success: false, message: 'El nombre del cliente es requerido' });
+    }
+    if (!mobile.replace(/\D/g, '')) {
+      return res.status(400).json({ success: false, message: 'El celular del cliente es requerido' });
+    }
+    newCustomerData = {
+      first_name,
+      last_name: String(new_customer.last_name || '').trim() || null,
+      // Celular en `mobile` (indicativo por defecto 57 en el modelo): así el
+      // aviso de recepción y los recordatorios por WhatsApp lo pueden usar de
+      // una vez (ver utils/customerWhatsappPhone.js).
+      mobile,
+      tax_id: String(new_customer.tax_id || '').trim() || null,
+    };
+  }
+  if (mileage_in === undefined || mileage_in === null || String(mileage_in).trim() === '') {
+    return res.status(400).json({ success: false, message: 'El kilometraje de ingreso es requerido' });
+  }
+  const km = Number(mileage_in);
+  if (!Number.isFinite(km) || km < 0) {
+    return res.status(400).json({ success: false, message: 'El kilometraje debe ser un número válido (0 o mayor)' });
+  }
+  const mileage = Math.round(km);
+
+  const transaction = await sequelize.transaction();
+  try {
+    // ── Cliente ──
+    let customer = null;
+    let customerCreated = false;
+    if (customer_id) {
+      customer = await Customer.findOne({ where: { id: customer_id, tenant_id }, transaction });
+      if (!customer) {
+        await transaction.rollback();
+        return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
+      }
+    } else {
+      // Si la cédula/NIT ya existe se reutiliza ese cliente en vez de fallar
+      // como POST /customers (índice único tenant+tax_id): en recepción lo
+      // que importa es no frenar la OT; los datos del existente mandan.
+      if (newCustomerData.tax_id) {
+        customer = await Customer.findOne({ where: { tenant_id, tax_id: newCustomerData.tax_id }, transaction });
+        // checkAccountOwnership solo ve customer_id del body: un cliente
+        // reutilizado por documento tiene que pasar por la misma regla.
+        if (customer && isBlockedByAccountOwnership(customer, req.user)) {
+          await transaction.rollback();
+          return res.status(403).json({
+            success: false,
+            code: 'ACCOUNT_ASSIGNED_TO_ANOTHER_USER',
+            message: 'Ya existe un cliente con esa cédula/NIT y es una cuenta asignada a otro asesor',
+          });
+        }
+      }
+      if (!customer) {
+        customer = await Customer.create({ tenant_id, ...newCustomerData }, { transaction });
+        customerCreated = true;
+      }
+    }
+
+    // ── Vehículo ──
+    let vehicle = await findVehicleByPlate(tenant_id, plate, { transaction });
+    let vehicleCreated = false;
+    if (!vehicle) {
+      // Solo la placa (+ propietario); vehicle_type queda en el default del
+      // modelo. El resto se completa desde la ficha del vehículo.
+      vehicle = await Vehicle.create({
+        tenant_id,
+        plate: plateToSave,
+        customer_id: customer.id,
+      }, { transaction });
+      vehicleCreated = true;
+    }
+
+    const tenant = await Tenant.findByPk(tenant_id, { transaction });
+    const order = await createWorkOrderCore({
+      tenant_id, user_id: req.user.id, branch_id: req.branch_id, transaction,
+      data: {
+        vehicle_id: vehicle.id,
+        customer_id: customer.id,
+        mileage_in: mileage,
+        problem_description: String(problem_description || '').trim() || null,
+        promised_at: defaultQuickPromisedAt(tenant),
+      },
+    });
+
+    await transaction.commit();
+
+    // Gamificación CRM (cliente nuevo) -- mismo evento que customers.controller#create.
+    if (customerCreated) {
+      try {
+        const { applyGoalProgressEvent } = require('../../services/crmGamificationService');
+        await applyGoalProgressEvent({ tenant_id, event_type: 'customer_created', user_id: customer.owner_user_id || req.user.id });
+      } catch (err) {
+        logger.warn(`[OT rápida] Evento de gamificación de cliente nuevo falló: ${err.message}`);
+      }
+    }
+
+    const { full, reception_notice } = await finishWorkOrderCreation({ order, tenant_id, user_id: req.user.id });
+
+    res.status(201).json({
+      success: true,
+      message: 'Orden de trabajo creada',
+      data: full,
+      reception_notice,
+      vehicle_created: vehicleCreated,
+      customer_created: customerCreated,
+    });
+  } catch (error) {
+    if (!transaction.finished) await transaction.rollback();
+    logger.error('Error creando OT rápida:', error);
     res.status(500).json({ success: false, message: 'Error al crear la orden' });
   }
 };
@@ -1924,75 +2135,92 @@ const getPendingQuoteNotifications = async (req, res) => {
  * de Ventas en QuotesPage.jsx. El status real ('enviada'/'aprobada'/
  * 'rechazada'/'parcial') se deriva igual que en getPendingQuoteNotifications.
  */
+// Rondas de cotización de taller, filtradas, contadas y paginadas en SQL
+// (antes se traían todas y se filtraban en memoria). El estado se deriva de
+// los ítems igual que en getPendingQuoteNotifications: 'enviada' mientras no
+// responden; si no, parcial/aprobada/rechazada según lo aprobado. El total es
+// la suma de lo aprobado. Orden: más reciente primero. Lo usa también el
+// listado unificado de cotizaciones (sales/quotes.controller.js).
+const listWorkshopQuoteRows = async (tenant_id, { status, from_date, to_date, customer_name, vehicle_plate } = {}, { limit = 50, offset = 0 } = {}) => {
+  const schema = getCurrentSchema() || 'public';
+  const items = `"${schema}"."work_order_items"`;
+  const countWhere = (approval) => `(SELECT COUNT(*) FROM ${items} i WHERE i.quote_request_id = "WorkOrderQuoteRequest"."id" AND i.approval_status = '${approval}')`;
+  const derivedStatusSql = `(CASE WHEN "WorkOrderQuoteRequest"."status" = 'enviada' THEN 'enviada'
+    WHEN ${countWhere('aprobado')} > 0 AND ${countWhere('rechazado')} > 0 THEN 'parcial'
+    WHEN ${countWhere('aprobado')} > 0 THEN 'aprobada' ELSE 'rechazada' END)`;
+  const approvedTotalSql = `(SELECT COALESCE(SUM(i.total), 0) FROM ${items} i WHERE i.quote_request_id = "WorkOrderQuoteRequest"."id" AND i.approval_status = 'aprobado')`;
+
+  const and = [{ tenant_id }];
+  if (from_date) and.push({ sent_at: { [Op.gte]: from_date } });
+  if (to_date) and.push({ sent_at: { [Op.lte]: to_date } });
+  if (status) and.push(sequelize.where(sequelize.literal(derivedStatusSql), status));
+  if (customer_name) {
+    const term = `%${String(customer_name).trim()}%`;
+    and.push({ [Op.or]: [
+      { '$work_order.customer.business_name$': { [Op.iLike]: term } },
+      sequelize.where(
+        sequelize.fn('concat_ws', ' ', sequelize.col('work_order->customer.first_name'), sequelize.col('work_order->customer.last_name')),
+        { [Op.iLike]: term },
+      ),
+    ] });
+  }
+  if (vehicle_plate) and.push({ '$work_order.vehicle.plate$': { [Op.iLike]: `%${String(vehicle_plate).trim()}%` } });
+
+  const { rows, count } = await WorkOrderQuoteRequest.findAndCountAll({
+    where: { [Op.and]: and },
+    attributes: {
+      include: [
+        [sequelize.literal(derivedStatusSql), 'derived_status'],
+        [sequelize.literal(approvedTotalSql), 'approved_total'],
+      ],
+    },
+    include: [
+      {
+        model: WorkOrder, as: 'work_order',
+        attributes: ['id', 'order_number'],
+        required: true,
+        include: [
+          { model: Vehicle,  as: 'vehicle',  attributes: ['id', 'plate'] },
+          { model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] },
+        ],
+      },
+    ],
+    order: [['sent_at', 'DESC'], ['id', 'DESC']],
+    limit,
+    offset,
+    subQuery: false,
+    distinct: true,
+  });
+
+  const data = rows.map(q => {
+    const customer = q.work_order?.customer;
+    return {
+      id: q.id,
+      work_order_id: q.work_order_id,
+      order_number: q.work_order?.order_number,
+      vehicle_plate: q.work_order?.vehicle?.plate || null,
+      customer_name: customer
+        ? (customer.business_name || `${customer.first_name || ''} ${customer.last_name || ''}`.trim())
+        : null,
+      quote_status: q.get('derived_status'),
+      sent_at: q.sent_at,
+      responded_at: q.responded_at,
+      approved_by_name: q.approved_by_name,
+      total_amount: parseFloat(q.get('approved_total') || 0),
+    };
+  });
+
+  return { rows: data, total: count };
+};
+
 const getWorkshopQuotes = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { status, from_date, to_date, customer_name, vehicle_plate, limit = 50, offset = 0 } = req.query;
+    const { limit = 50, offset = 0 } = req.query;
     const safeLimit  = Math.min(Math.max(1, parseInt(limit)  || 50), 200);
     const safeOffset = Math.max(0, parseInt(offset) || 0);
 
-    const where = { tenant_id };
-    if (from_date && to_date) where.sent_at = { [Op.between]: [from_date, to_date] };
-    else if (from_date) where.sent_at = { [Op.gte]: from_date };
-    else if (to_date) where.sent_at = { [Op.lte]: to_date };
-
-    const quoteRequests = await WorkOrderQuoteRequest.findAll({
-      where,
-      include: [
-        {
-          model: WorkOrder, as: 'work_order',
-          attributes: ['id', 'order_number'],
-          include: [
-            { model: Vehicle,  as: 'vehicle',  attributes: ['id', 'plate'] },
-            { model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] },
-          ],
-        },
-        { model: WorkOrderItem, as: 'items', attributes: ['id', 'approval_status', 'total'] },
-      ],
-      order: [['sent_at', 'DESC']],
-    });
-
-    let data = quoteRequests.map(q => {
-      const items = q.items || [];
-      const anyApproved = items.some(i => i.approval_status === 'aprobado');
-      const anyRejected = items.some(i => i.approval_status === 'rechazado');
-      const derivedStatus = q.status === 'enviada'
-        ? 'enviada'
-        : (anyApproved && anyRejected ? 'parcial' : anyApproved ? 'aprobada' : 'rechazada');
-      const total_amount = items
-        .filter(i => i.approval_status === 'aprobado')
-        .reduce((sum, i) => sum + parseFloat(i.total || 0), 0);
-      const customer = q.work_order?.customer;
-      const customerName = customer
-        ? (customer.business_name || `${customer.first_name || ''} ${customer.last_name || ''}`.trim())
-        : null;
-
-      return {
-        id: q.id,
-        work_order_id: q.work_order_id,
-        order_number: q.work_order?.order_number,
-        vehicle_plate: q.work_order?.vehicle?.plate || null,
-        customer_name: customerName,
-        quote_status: derivedStatus,
-        sent_at: q.sent_at,
-        responded_at: q.responded_at,
-        approved_by_name: q.approved_by_name,
-        total_amount,
-      };
-    });
-
-    if (status) data = data.filter(q => q.quote_status === status);
-    if (customer_name) {
-      const needle = customer_name.toLowerCase();
-      data = data.filter(q => (q.customer_name || '').toLowerCase().includes(needle));
-    }
-    if (vehicle_plate) {
-      const needle = vehicle_plate.toLowerCase();
-      data = data.filter(q => (q.vehicle_plate || '').toLowerCase().includes(needle));
-    }
-
-    const total = data.length;
-    const paged = data.slice(safeOffset, safeOffset + safeLimit);
+    const { rows: paged, total } = await listWorkshopQuoteRows(tenant_id, req.query, { limit: safeLimit, offset: safeOffset });
 
     res.json({
       success: true,
@@ -3897,4 +4125,4 @@ const sendWhatsApp = async (req, res) => {
     res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
-module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, addCombo, updateCombo, removeCombo, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder };
+module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, addCombo, updateCombo, removeCombo, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listWorkshopQuoteRows, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder, quickCreate };

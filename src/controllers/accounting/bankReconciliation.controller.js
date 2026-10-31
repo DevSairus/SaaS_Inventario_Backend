@@ -17,8 +17,8 @@ const logger = require('../../config/logger');
 // GET /bank-accounts/:id/reconciliation
 exports.view = async (req, res) => {
   try {
-    const { status, from_date, to_date } = req.query;
-    const data = await service.getReconciliationView(req.tenant_id, req.params.id, { status, from_date, to_date });
+    const { status, from_date, to_date, page, limit, candidates_page } = req.query;
+    const data = await service.getReconciliationView(req.tenant_id, req.params.id, { status, from_date, to_date, page, limit, candidates_page });
     res.json({ success: true, data });
   } catch (error) {
     logger.error('Error en bankReconciliation.controller.js (view):', error);

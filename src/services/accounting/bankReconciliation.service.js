@@ -15,6 +15,7 @@
 // parámetro en cada llamada (`toleranceDays`), no está hardcodeado ni
 // requiere migración para cambiarlo. Si más adelante se quiere un valor
 // persistente por tenant/cuenta, basta con agregar la columna y leerla acá.
+const { parsePagination, buildPagination } = require('../../utils/pagination');
 const { Op } = require('sequelize');
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../../config/database');
@@ -110,8 +111,11 @@ async function runAutoMatch(tenantId, bankAccountId, { toleranceDays = DEFAULT_T
  * todavía (independiente de monto/fecha -- el filtro fino de "qué pareja
  * con qué" lo hace el usuario al conciliar manualmente).
  */
-async function getReconciliationView(tenantId, bankAccountId, { status, from_date, to_date } = {}) {
+async function getReconciliationView(tenantId, bankAccountId, { status, from_date, to_date, page, limit, candidates_page } = {}) {
   const { BankAccount, BankTransaction } = require('../../models');
+  // Cada columna se pagina por separado (banco: page; contable: candidates_page).
+  const txPg = parsePagination({ page, limit }, { defaultLimit: 100 });
+  const candPg = parsePagination({ page: candidates_page, limit }, { defaultLimit: 100 });
 
   const bankAccount = await BankAccount.findOne({ where: { id: bankAccountId, tenant_id: tenantId } });
   if (!bankAccount) throw new Error('Cuenta bancaria no encontrada');
@@ -124,7 +128,12 @@ async function getReconciliationView(tenantId, bankAccountId, { status, from_dat
     if (to_date) where.transaction_date[Op.lte] = to_date;
   }
 
-  const bankTransactions = await BankTransaction.findAll({ where, order: [['transaction_date', 'DESC']] });
+  const { rows: bankTransactions, count: txCount } = await BankTransaction.findAndCountAll({
+    where,
+    order: [['transaction_date', 'DESC'], ['id', 'DESC']],
+    limit: txPg.limit,
+    offset: txPg.offset,
+  });
 
   const schema = getCurrentSchema() || 'public';
   const dateFilter = [];
@@ -133,7 +142,8 @@ async function getReconciliationView(tenantId, bankAccountId, { status, from_dat
   const dateClause = dateFilter.length ? `AND ${dateFilter.join(' AND ')}` : '';
 
   const accountingLines = await sequelize.query(
-    `SELECT l.id, l.debit, l.credit, l.description, e.entry_date::text AS entry_date, e.entry_number
+    `SELECT l.id, l.debit, l.credit, l.description, e.entry_date::text AS entry_date, e.entry_number,
+            COUNT(*) OVER() AS full_count
      FROM "${schema}"."journal_entry_lines" l
      JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      WHERE e.tenant_id = :tenantId
@@ -144,14 +154,26 @@ async function getReconciliationView(tenantId, bankAccountId, { status, from_dat
          WHERE bt.matched_journal_entry_line_id IS NOT NULL
        )
        ${dateClause}
-     ORDER BY e.entry_date DESC`,
+     ORDER BY e.entry_date DESC, l.id DESC
+     LIMIT :limit OFFSET :offset`,
     {
-      replacements: { tenantId, accountId: bankAccount.chart_of_account_id, fromDate: from_date || null, toDate: to_date || null },
+      replacements: { tenantId, accountId: bankAccount.chart_of_account_id, fromDate: from_date || null, toDate: to_date || null, limit: candPg.limit, offset: candPg.offset },
       type: QueryTypes.SELECT,
     }
   );
 
-  return { bank_account: bankAccount, bank_transactions: bankTransactions, accounting_candidates: accountingLines };
+  const candidatesTotal = accountingLines.length ? Number(accountingLines[0].full_count) : 0;
+  const candidates = accountingLines.map(({ full_count, ...line }) => line);
+
+  return {
+    bank_account: bankAccount,
+    bank_transactions: bankTransactions,
+    bank_transactions_pagination: buildPagination(txPg, txCount),
+    accounting_candidates: candidates,
+    // Con candidates_page fuera de rango no vuelven filas ni conteo; el
+    // frontend regresa a la página 1.
+    accounting_candidates_pagination: buildPagination(candPg, candidatesTotal),
+  };
 }
 
 /** Concilia manualmente UN movimiento del banco con UNA línea contable elegida por el usuario. */

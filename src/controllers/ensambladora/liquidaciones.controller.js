@@ -20,11 +20,16 @@ const {
   consultarLineas,
 } = require('../../services/ensambladora/coreApiClient');
 const logger = require('../../config/logger');
+const { parsePagination, paginateArray } = require('../../utils/pagination');
 
 async function listarLiquidaciones(req, res) {
   try {
     const liquidaciones = await consultarLiquidaciones(req.tenant_id);
-    res.json({ success: true, data: liquidaciones });
+    // Igual que garantías: el Core devuelve todas, aquí se filtra y pagina.
+    if (!Array.isArray(liquidaciones)) return res.json({ success: true, data: liquidaciones });
+    const { estado } = req.query;
+    const filtradas = estado ? liquidaciones.filter((l) => l.estado === estado) : liquidaciones;
+    res.json({ success: true, ...paginateArray(filtradas, parsePagination(req.query)), total_sin_filtro: liquidaciones.length });
   } catch (error) {
     logger.error('[Ensambladora] Error consultando liquidaciones', { message: error.message });
     res.status(502).json({ success: false, code: 'error_consultando_core', message: 'No se pudieron consultar las liquidaciones' });
