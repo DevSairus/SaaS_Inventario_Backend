@@ -23,13 +23,29 @@ const { directDbDialectOptions } = require('./_directDbSsl');
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 
 async function cutoverTenant(slug) {
+  // pool de UNA conexión: el advisory lock de abajo es de sesión, así que el
+  // lock, todas las queries de este script y el unlock tienen que ir por la
+  // misma conexión física.
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
     dialectOptions: directDbDialectOptions(DATABASE_URL),
     logging: false,
+    pool: { max: 1, min: 1 },
   });
 
+  let locked = false;
   try {
+    // Dos cortes simultáneos del mismo tenant (ej. el panel daba timeout a
+    // los 30s y se apretaba "Reintentar" mientras el primero seguía) corren
+    // las mismas migraciones en paralelo sobre el schema y chocan con
+    // "relation ... already exists". El lock se libera solo si el proceso muere.
+    const [[{ ok }]] = await sequelize.query(
+      `SELECT pg_try_advisory_lock(hashtext(:key)) AS ok`,
+      { replacements: { key: `cutover:${slug}` } }
+    );
+    if (!ok) throw new Error(`Ya hay un cutover en curso para "${slug}". Espera a que termine antes de reintentar.`);
+    locked = true;
+
     const [[tenant]] = await sequelize.query(
       `SELECT id, slug, schema_name FROM public.tenants WHERE slug = :slug`,
       { replacements: { slug } }
@@ -78,6 +94,12 @@ async function cutoverTenant(slug) {
     // siguen usando el schema anterior.
     console.log('⚠️  Los servidores en marcha toman el cambio en ~30s (caché del tenant). Reinícialos si necesitas que sea inmediato.');
   } finally {
+    if (locked) {
+      await sequelize.query(
+        `SELECT pg_advisory_unlock(hashtext(:key))`,
+        { replacements: { key: `cutover:${slug}` } }
+      ).catch(() => {}); // close() de todas formas suelta el lock de sesión
+    }
     await sequelize.close();
   }
 }
