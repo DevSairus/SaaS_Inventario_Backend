@@ -25,6 +25,10 @@ const PUBLIC_ONLY_TABLES = new Set([
   'subscription_invoices', 'super_admin_mercadopago_config',
   'permissions', 'role_permissions', 'announcements',
   'user_announcement_views', 'blog_posts', 'sequelize_migrations', 'SequelizeMeta',
+  // Tiene tenant_id pero es de plataforma (qué empresas ve cada super_admin/
+  // support) y solo existe en public -- sin esto el corte intentaba copiarla a
+  // "tenant_<slug>.platform_user_tenants" y la limpieza la borraba de public.
+  'platform_user_tenants',
 ]);
 
 async function getAllFkEdges(sequelize) {
