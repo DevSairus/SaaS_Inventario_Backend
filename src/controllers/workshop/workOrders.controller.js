@@ -27,6 +27,7 @@ const { isBlockedByAccountOwnership } = require('../../middleware/checkAccountOw
 const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
 const { buildWaLink } = require('../../services/whatsappService');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
+const { getEventTemplate, eventComponents } = require('../../services/waEventTemplates');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -2300,14 +2301,30 @@ const markAllQuoteNotificationsSeen = async (req, res) => {
 // La ronda ya quedó guardada (y la transacción cerrada): nada de WhatsApp
 // puede tumbar la respuesta. Sin celular queda el wa.me sin destinatario
 // para que el asesor elija el contacto.
-async function quoteWhatsApp({ tenantId, customer, message, userId }) {
+// Con plantilla de cotización configurada (Meta y WhatsApp) sale por ella,
+// con el token de la OT en el botón.
+async function quoteWhatsApp({ tenantId, order, customer, message, token, userId }) {
   const phone = getCustomerWhatsappNumber(customer);
   const waMe = (reason) => ({
     channel: 'wa_me', whatsapp_url: buildWaLink(phone, message), conversation_id: null, fallback_reason: reason,
   });
   if (!phone) return waMe('no_phone');
   try {
-    const sent = await deliverWhatsApp({ tenantId, to: phone, body: message, userId: userId || null });
+    const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'business_config'] });
+    const saved = getEventTemplate(tenant, 'quote_ot');
+    let template = null;
+    if (saved) {
+      const vehicle = order.vehicle_id
+        ? await Vehicle.findOne({ where: { id: order.vehicle_id, tenant_id: tenantId }, attributes: ['plate', 'brand', 'model'] })
+        : null;
+      const vehicleText = [vehicle?.brand, vehicle?.model, vehicle?.plate].filter(Boolean).join(' ');
+      template = {
+        name: saved.name,
+        language: saved.language,
+        components: eventComponents(saved, [customer?.first_name || customer?.trade_name || customer?.business_name, order.order_number, vehicleText], token),
+      };
+    }
+    const sent = await deliverWhatsApp({ tenantId, to: phone, body: message, template, userId: userId || null });
     const { waLink, ...rest } = waResponse(sent);
     return { ...rest, whatsapp_url: waLink || null, conversation_id: sent.conversation_id || null };
   } catch (err) {
@@ -2390,7 +2407,7 @@ const sendQuoteRequest = async (req, res) => {
       data: {
         quote_request_id: quoteRequest.id,
         share_url: shareUrl,
-        ...await quoteWhatsApp({ tenantId: tenant_id, customer, message, userId: req.user?.id }),
+        ...await quoteWhatsApp({ tenantId: tenant_id, order, customer, message, token, userId: req.user?.id }),
         items_count: pendingItems.length,
       },
     });
@@ -2454,7 +2471,7 @@ const resendQuoteRequest = async (req, res) => {
       data: {
         quote_request_id: quoteRequest.id,
         share_url: shareUrl,
-        ...await quoteWhatsApp({ tenantId: tenant_id, customer, message, userId: req.user?.id }),
+        ...await quoteWhatsApp({ tenantId: tenant_id, order, customer, message, token, userId: req.user?.id }),
         items_count: items.length,
       },
     });

@@ -2,7 +2,7 @@
 const { Op } = require('sequelize');
 const logger = require('../../config/logger') || console;
 const waCloud = require('../../services/whatsappCloud.service');
-const { WaConversation, WaMessage, Customer, User } = require('../../models');
+const { WaConversation, WaMessage, Customer, User, Tenant } = require('../../models');
 const {
   applyWaConversationScope,
   canManageAllAssignments,
@@ -446,6 +446,29 @@ const listTemplates = async (req, res) => {
   }
 };
 
+const eventTemplates = require('../../services/waEventTemplates');
+
+const listEventTemplates = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id, { attributes: ['id', 'business_config'] });
+    res.json({ success: true, data: await eventTemplates.listEventTemplates(tenant) });
+  } catch (error) {
+    logger.error('[WA Cloud] event-templates:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener las plantillas por mensaje' });
+  }
+};
+
+const setEventTemplate = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const data = await eventTemplates.setEventTemplate(tenant, req.params.event, req.body || {});
+    res.json({ success: true, data });
+  } catch (error) {
+    if (!error.status) logger.error('[WA Cloud] set event-template:', error);
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Error al guardar la plantilla' });
+  }
+};
+
 const createReminder = async (req, res) => {
   try {
     const {
@@ -783,6 +806,8 @@ module.exports = {
   assignConversation,
   syncTemplates,
   listTemplates,
+  listEventTemplates,
+  setEventTemplate,
   createReminder,
   listReminders,
   createCampaign,
