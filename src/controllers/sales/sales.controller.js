@@ -2510,7 +2510,7 @@ const sendWhatsApp = async (req, res) => {
     res.json({ success: true, ...waResponse(sent), pdfUrl });
   } catch (error) {
     logger.error('Error generando enlace WhatsApp:', error);
-    res.status(500).json({ success: false, message: 'Error al generar enlace de WhatsApp' });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Error al generar enlace de WhatsApp' });
   }
 };
 

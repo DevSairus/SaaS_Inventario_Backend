@@ -24,7 +24,7 @@ const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/ca
 const woPayments = require('../../services/workshop/workOrderPayments.service');
 const { normalizePlate, cleanPlate, findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
 const { isBlockedByAccountOwnership } = require('../../middleware/checkAccountOwnership');
-const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery');
+const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
 const { buildWaLink } = require('../../services/whatsappService');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 
@@ -2284,15 +2284,17 @@ const markAllQuoteNotificationsSeen = async (req, res) => {
 // para que el asesor elija el contacto.
 async function quoteWhatsApp({ tenantId, customer, message, userId }) {
   const phone = getCustomerWhatsappNumber(customer);
-  const waMe = { channel: 'wa_me', whatsapp_url: buildWaLink(phone, message), conversation_id: null };
-  if (!phone) return waMe;
+  const waMe = (reason) => ({
+    channel: 'wa_me', whatsapp_url: buildWaLink(phone, message), conversation_id: null, fallback_reason: reason,
+  });
+  if (!phone) return waMe('no_phone');
   try {
     const sent = await deliverWhatsApp({ tenantId, to: phone, body: message, userId: userId || null });
     const { waLink, ...rest } = waResponse(sent);
     return { ...rest, whatsapp_url: waLink || null, conversation_id: sent.conversation_id || null };
   } catch (err) {
     logger.warn(`[WhatsApp] Cotización OT tenant=${tenantId}: ${err.message}`);
-    return waMe;
+    return waMe(FALLBACK.ERROR);
   }
 }
 
@@ -4036,7 +4038,7 @@ const sendWhatsApp = async (req, res) => {
     res.json({ success: true, ...waResponse(sent), shareUrl });
   } catch (error) {
     logger.error('[WhatsApp] Error generando enlace OT:', error.message, error.stack);
-    res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
 module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, addCombo, updateCombo, removeCombo, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listWorkshopQuoteRows, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder, quickCreate };

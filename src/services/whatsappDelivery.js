@@ -56,8 +56,17 @@ async function deliverWhatsApp({
   // Carga diferida: los controladores importan este módulo y no deben
   // arrastrar los modelos de WhatsApp al importarse.
   const waCloud = require('./whatsappCloud.service');
-  const wa = status || await waCloud.getWhatsAppStatus(tenantId);
   let reason = FALLBACK.NOT_CONNECTED;
+  let wa = status;
+  if (!wa) {
+    try {
+      wa = await waCloud.getWhatsAppStatus(tenantId);
+    } catch (err) {
+      logger.warn(`[WhatsApp] tenant=${tenantId} sin estado de conexión: ${err.message}`);
+      reason = FALLBACK.ERROR;
+      wa = { operational: false };
+    }
+  }
   if (wa.operational) {
     try {
       const sent = template?.name && !wa.demo_mode

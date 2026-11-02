@@ -94,6 +94,13 @@ describe('deliverWhatsApp', () => {
       .rejects.toMatchObject({ fallbackReason: FALLBACK.NOT_CONNECTED });
   });
 
+  test('si no se puede leer el estado de la conexión, cae a wa.me con motivo error', async () => {
+    waCloud.getWhatsAppStatus.mockRejectedValue(new Error('db caída'));
+    const res = await deliverWhatsApp({ tenantId: 't1', to: '573166876163', body: 'hola' });
+    expect(res).toMatchObject({ channel: 'wa_me', reason: FALLBACK.ERROR });
+    expect(waCloud.sendTextFromTenant).not.toHaveBeenCalled();
+  });
+
   test('reutiliza el status recibido (cron) sin volver a consultarlo', async () => {
     waCloud.sendTextFromTenant.mockResolvedValue({ conversation_id: 'c4' });
     await deliverWhatsApp({ tenantId: 't1', to: '573166876163', body: 'x', status: LIVE });

@@ -399,6 +399,18 @@ async function findOrCreateConversation({ tenantId, schemaName, phone, name, cus
   const waPhone = normalizePhone(phone);
   const run = async () => {
     const { WaConversation } = require('../models');
+    // Chats guardados antes con el número sin indicativo: se pasan al número
+    // completo, que es como Meta entrega las respuestas.
+    const rawPhone = String(phone || '').replace(/\D/g, '');
+    if (rawPhone && rawPhone !== waPhone) {
+      const exists = await WaConversation.count({ where: { tenant_id: tenantId, wa_contact_phone: waPhone } });
+      if (!exists) {
+        await WaConversation.update(
+          { wa_contact_phone: waPhone },
+          { where: { tenant_id: tenantId, wa_contact_phone: rawPhone } },
+        );
+      }
+    }
     let [conv] = await WaConversation.findOrCreate({
       where: { tenant_id: tenantId, wa_contact_phone: waPhone },
       defaults: {

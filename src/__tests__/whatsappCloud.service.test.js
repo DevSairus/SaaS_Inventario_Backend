@@ -14,6 +14,7 @@ jest.mock('../models', () => ({
   },
   WaConversation: {
     findOrCreate: jest.fn(), findByPk: jest.fn(), update: jest.fn(), increment: jest.fn(), destroy: jest.fn().mockResolvedValue(0),
+    count: jest.fn(),
   },
 }));
 
@@ -186,6 +187,34 @@ describe('connectWithToken', () => {
       accessToken: 'token',
       wabaId: WABA_ID,
     })).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('findOrCreateConversation', () => {
+  const { WaConversation } = require('../models');
+  const conv = { wa_contact_name: 'Ana', customer_id: 'cus' };
+
+  beforeEach(() => {
+    WaConversation.findOrCreate.mockResolvedValue([conv]);
+    WaConversation.update.mockClear();
+  });
+
+  it('pasa un chat viejo de 10 dígitos al número con indicativo, solo en su tenant', async () => {
+    WaConversation.count.mockResolvedValue(0);
+    await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '3166876163' });
+    expect(WaConversation.update).toHaveBeenCalledWith(
+      { wa_contact_phone: '573166876163' },
+      { where: { tenant_id: TENANT_ID, wa_contact_phone: '3166876163' } },
+    );
+    expect(WaConversation.findOrCreate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenant_id: TENANT_ID, wa_contact_phone: '573166876163' },
+    }));
+  });
+
+  it('si ya existe el chat con indicativo no toca el viejo', async () => {
+    WaConversation.count.mockResolvedValue(1);
+    await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '3166876163' });
+    expect(WaConversation.update).not.toHaveBeenCalled();
   });
 });
 

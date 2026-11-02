@@ -306,7 +306,7 @@ const sendPortalWhatsApp = async (req, res) => {
     res.json({ success: true, ...waResponse(sent), portal_url: portalUrl });
   } catch (error) {
     logger.error('[WhatsApp] Error enviando portal del vehículo:', error);
-    res.status(500).json({ success: false, message: error.message || 'Error al enviar el portal por WhatsApp' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Error al enviar el portal por WhatsApp' });
   }
 };
 
