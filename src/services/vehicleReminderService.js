@@ -26,6 +26,7 @@
 const { Op } = require('sequelize');
 const { sendEmail } = require('./emailService');
 const { getCustomerWhatsappNumber } = require('../utils/customerWhatsappPhone');
+const { deliverWhatsApp, bodyParams, FALLBACK } = require('./whatsappDelivery');
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -163,30 +164,25 @@ async function sendEmailReminder({ key, customer, content, VehicleReminderLog, r
 async function sendWhatsappReminder({ key, tenant, customer, content, plate, settings, waStatus, VehicleReminderLog, results }) {
   const phone = getCustomerWhatsappNumber(customer);
   if (!phone) return log(VehicleReminderLog, key, 'skipped', null, 'El cliente no tiene celular', results);
-  if (!waStatus?.operational) return log(VehicleReminderLog, key, 'failed', phone, 'WhatsApp no está conectado', results);
-  const waCloud = require('./whatsappCloud.service');
   try {
-    if (settings.whatsapp_template && !waStatus.demo_mode) {
-      await waCloud.sendTemplateFromTenant({
-        tenantId: tenant.id,
-        to: phone,
-        templateName: settings.whatsapp_template,
+    await deliverWhatsApp({
+      tenantId: tenant.id,
+      to: phone,
+      body: content.whatsappText,
+      status: waStatus,
+      allowWaLink: false,
+      template: settings.whatsapp_template && {
+        name: settings.whatsapp_template,
         language: settings.whatsapp_language,
-        components: [{
-          type: 'body',
-          parameters: [customerNameOf(customer), TYPE_LONG[key.document_type], plate, content.expiryText]
-            .map((text) => ({ type: 'text', text: String(text) })),
-        }],
-        source: 'api',
-      });
-    } else {
-      await waCloud.sendTextFromTenant({ tenantId: tenant.id, to: phone, body: content.whatsappText, source: 'api' });
-    }
+        components: [bodyParams([customerNameOf(customer), TYPE_LONG[key.document_type], plate, content.expiryText])],
+      },
+    });
     return log(VehicleReminderLog, key, 'sent', phone, null, results);
   } catch (err) {
-    const detail = err.code === 'WA_WINDOW_CLOSED'
-      ? 'Sin plantilla de WhatsApp y el cliente no ha escrito en las últimas 24 h'
-      : err.message;
+    const detail = {
+      [FALLBACK.NOT_CONNECTED]: 'WhatsApp no está conectado',
+      [FALLBACK.WINDOW_CLOSED]: 'Sin plantilla de WhatsApp y el cliente no ha escrito en las últimas 24 h',
+    }[err.fallbackReason] || err.message;
     return log(VehicleReminderLog, key, 'failed', phone, detail, results);
   }
 }

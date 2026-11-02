@@ -14,6 +14,7 @@ jest.mock('../models', () => ({
   },
   WaConversation: {
     findOrCreate: jest.fn(), findByPk: jest.fn(), update: jest.fn(), increment: jest.fn(), destroy: jest.fn().mockResolvedValue(0),
+    count: jest.fn(),
   },
 }));
 
@@ -189,6 +190,34 @@ describe('connectWithToken', () => {
   });
 });
 
+describe('findOrCreateConversation', () => {
+  const { WaConversation } = require('../models');
+  const conv = { wa_contact_name: 'Ana', customer_id: 'cus' };
+
+  beforeEach(() => {
+    WaConversation.findOrCreate.mockResolvedValue([conv]);
+    WaConversation.update.mockClear();
+  });
+
+  it('pasa un chat viejo de 10 dígitos al número con indicativo, solo en su tenant', async () => {
+    WaConversation.count.mockResolvedValue(0);
+    await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '3166876163' });
+    expect(WaConversation.update).toHaveBeenCalledWith(
+      { wa_contact_phone: '573166876163' },
+      { where: { tenant_id: TENANT_ID, wa_contact_phone: '3166876163' } },
+    );
+    expect(WaConversation.findOrCreate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenant_id: TENANT_ID, wa_contact_phone: '573166876163' },
+    }));
+  });
+
+  it('si ya existe el chat con indicativo no toca el viejo', async () => {
+    WaConversation.count.mockResolvedValue(1);
+    await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '3166876163' });
+    expect(WaConversation.update).not.toHaveBeenCalled();
+  });
+});
+
 describe('updateMessageStatus', () => {
   it('escribe el estado dentro del schema del tenant', async () => {
     Tenant.findByPk.mockResolvedValue({ id: TENANT_ID, schema_name: 'tenant_motos_estrada' });
@@ -202,7 +231,7 @@ describe('updateMessageStatus', () => {
     expect(runWithTenantSchema).toHaveBeenCalledWith('tenant_motos_estrada', expect.any(Function));
     expect(WaMessage.update).toHaveBeenCalledWith(
       { status: 'delivered' },
-      { where: { meta_message_id: 'wamid.ABC' } }
+      { where: { tenant_id: TENANT_ID, meta_message_id: 'wamid.ABC' } }
     );
   });
 
@@ -220,7 +249,12 @@ describe('updateMessageStatus', () => {
   });
 
   it('ignora eventos incompletos', async () => {
-    await waCloud.updateMessageStatus({ metaMessageId: null, status: 'read' });
+    await waCloud.updateMessageStatus({ metaMessageId: null, status: 'read', tenantId: TENANT_ID });
+    expect(WaMessage.update).not.toHaveBeenCalled();
+  });
+
+  it('sin tenant no toca ninguna fila (no hay cruce entre tenants)', async () => {
+    await waCloud.updateMessageStatus({ metaMessageId: 'wamid.ABC', status: 'read', tenantId: null });
     expect(WaMessage.update).not.toHaveBeenCalled();
   });
 });

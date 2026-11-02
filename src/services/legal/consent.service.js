@@ -28,6 +28,7 @@ const { sequelize } = require('../../config/database');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { encryptToken, decryptToken } = require('../../utils/metaTokenCrypto');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
+const { deliverWhatsApp, bodyParams, FALLBACK } = require('../whatsappDelivery');
 const { getEffectiveModulesForTenantId } = require('../moduleAccess');
 const { habeasDataStandard, VEHICLE_INTAKE_STANDARD } = require('../../data/legal/standardDocuments');
 
@@ -492,38 +493,31 @@ async function deliverOtp({ tenant, customer, channel, code, kind }) {
   if (channel === 'whatsapp') {
     const phone = getCustomerWhatsappNumber(customer);
     if (!phone) throw httpError(400, 'El cliente no tiene celular registrado');
-    const waCloud = require('../whatsappCloud.service');
-    const status = await waCloud.getWhatsAppStatus(tenant.id);
-    if (!status.operational) throw httpError(400, 'WhatsApp Cloud API no está conectado');
     const { otp } = getConsentSettings(tenant);
-    if (otp.whatsapp_template && !status.demo_mode) {
-      await waCloud.sendTemplateFromTenant({
+    try {
+      // El código no puede ir por wa.me: lo abriría el asesor, no el cliente.
+      await deliverWhatsApp({
         tenantId: tenant.id,
         to: phone,
-        templateName: otp.whatsapp_template,
-        language: otp.whatsapp_language || 'es',
+        body: `*${tenantName}*\nTu código para confirmar la ${KIND_LABELS[kind]} es: *${code}*\nVence en 10 minutos. No lo compartas.`,
+        allowWaLink: false,
         // Plantillas de autenticación de Meta: el código va en el cuerpo y
         // en el botón "copiar código".
-        components: [
-          { type: 'body', parameters: [{ type: 'text', text: code }] },
-          { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: code }] },
-        ],
-        source: 'api',
+        template: otp.whatsapp_template && {
+          name: otp.whatsapp_template,
+          language: otp.whatsapp_language || 'es',
+          components: [
+            bodyParams([code]),
+            { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: code }] },
+          ],
+        },
       });
-    } else {
-      try {
-        await waCloud.sendTextFromTenant({
-          tenantId: tenant.id,
-          to: phone,
-          body: `*${tenantName}*\nTu código para confirmar la ${KIND_LABELS[kind]} es: *${code}*\nVence en 10 minutos. No lo compartas.`,
-          source: 'api',
-        });
-      } catch (err) {
-        if (err.code === 'WA_WINDOW_CLOSED') {
-          throw httpError(400, 'El cliente no ha escrito por WhatsApp en las últimas 24 h y no hay plantilla de código configurada. Usa el correo o configura la plantilla en Configuración → Datos personales.');
-        }
-        throw err;
+    } catch (err) {
+      if (err.fallbackReason === FALLBACK.NOT_CONNECTED) throw httpError(400, 'WhatsApp Cloud API no está conectado');
+      if (err.fallbackReason === FALLBACK.WINDOW_CLOSED) {
+        throw httpError(400, 'El cliente no ha escrito por WhatsApp en las últimas 24 h y no hay plantilla de código configurada. Usa el correo o configura la plantilla en Configuración → Datos personales.');
       }
+      throw err;
     }
     return { destination: phone };
   }
@@ -788,22 +782,7 @@ async function sendConsentLink({ tenant, consent, channels = ['whatsapp'], userI
     if (!phone) {
       result.whatsapp = { sent: false, error: 'El cliente no tiene celular registrado' };
     } else {
-      let sentByCloud = false;
-      try {
-        const waCloud = require('../whatsappCloud.service');
-        const status = await waCloud.getWhatsAppStatus(tenant.id);
-        if (status.operational) {
-          const sent = await waCloud.sendTextFromTenant({ tenantId: tenant.id, to: phone, body: message, userId, source: 'api' });
-          sentByCloud = true;
-          result.whatsapp = { sent: true, channel: 'cloud_api', conversation_id: sent.conversation_id };
-        }
-      } catch (err) {
-        logger.warn(`[Consent] Cloud API no envió el enlace, se usa wa.me: ${err.message}`);
-      }
-      if (!sentByCloud) {
-        const { buildWaLink } = require('../whatsappService');
-        result.whatsapp = { sent: false, channel: 'wa_me', whatsapp_url: buildWaLink(phone, message) };
-      }
+      result.whatsapp = consentWaResult(await deliverWhatsApp({ tenantId: tenant.id, to: phone, body: message, userId }));
     }
   }
 
@@ -840,6 +819,13 @@ async function sendConsentLink({ tenant, consent, channels = ['whatsapp'], userI
   });
   await consent.save();
   return result;
+}
+
+// Forma que ya consumen ConsentRequestModal y receptionNotice.
+function consentWaResult(sent) {
+  return sent.channel === 'cloud_api'
+    ? { sent: true, channel: sent.channel, conversation_id: sent.conversation_id }
+    : { sent: false, channel: sent.channel, whatsapp_url: sent.waLink, fallback_reason: sent.reason };
 }
 
 // ─── Aviso de recepción del vehículo ───────────────────────────────────────
@@ -909,39 +895,18 @@ async function notifyVehicleReception({ tenant, order, userId = null }) {
 
   const phone = getCustomerWhatsappNumber(customer);
   if (phone) {
-    let sent = false;
-    try {
-      const waCloud = require('../whatsappCloud.service');
-      const status = await waCloud.getWhatsAppStatus(tenant.id);
-      if (status.operational) {
-        const template = settings.vehicle_intake.whatsapp_reception_template;
-        if (template && !status.demo_mode) {
-          await waCloud.sendTemplateFromTenant({
-            tenantId: tenant.id,
-            to: phone,
-            templateName: template,
-            language: settings.otp.whatsapp_language || 'es',
-            components: [{
-              type: 'body',
-              parameters: [name || 'cliente', wo.order_number, plate || '-', intakeUrl || trackingUrl]
-                .map((text) => ({ type: 'text', text: String(text) })),
-            }],
-            userId,
-            source: 'api',
-          });
-        } else {
-          await waCloud.sendTextFromTenant({ tenantId: tenant.id, to: phone, body: message, userId, source: 'api' });
-        }
-        sent = true;
-        result.whatsapp = { sent: true, channel: 'cloud_api' };
-      }
-    } catch (err) {
-      logger.info(`[Consent] Aviso de recepción ${wo.order_number} por Cloud API no salió (${err.code || err.message}); queda wa.me`);
-    }
-    if (!sent) {
-      const { buildWaLink } = require('../whatsappService');
-      result.whatsapp = { sent: false, channel: 'wa_me', whatsapp_url: buildWaLink(phone, message) };
-    }
+    const templateName = settings.vehicle_intake.whatsapp_reception_template;
+    result.whatsapp = consentWaResult(await deliverWhatsApp({
+      tenantId: tenant.id,
+      to: phone,
+      body: message,
+      userId,
+      template: templateName && {
+        name: templateName,
+        language: settings.otp.whatsapp_language || 'es',
+        components: [bodyParams([name || 'cliente', wo.order_number, plate || '-', intakeUrl || trackingUrl])],
+      },
+    }));
   }
 
   return result;

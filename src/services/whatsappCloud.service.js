@@ -6,15 +6,39 @@ const { encryptToken, decryptToken } = require('../utils/metaTokenCrypto');
 const { TenantMetaConfig, Tenant, Customer } = require('../models');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const { windowStatus } = require('../utils/waWorkspacePrefs');
+const { normalizeWhatsAppPhone: normalizePhone } = require('../utils/customerWhatsappPhone');
 
-function normalizePhone(phone) {
-  return String(phone || '').replace(/\D/g, '');
+function httpError(status, message, code) {
+  const err = new Error(message);
+  err.status = status;
+  if (code) err.code = code;
+  return err;
 }
 
 async function getTenantWaConfig(tenantId) {
   return TenantMetaConfig.findOne({
     where: { tenant_id: tenantId, is_active: true },
   });
+}
+
+/** Config + token del número del tenant para hablar con Meta, o error 400. */
+async function getLiveSender(tenantId) {
+  const config = await getTenantWaConfig(tenantId);
+  if (!config?.own_phone_number_id) {
+    throw httpError(400, 'WhatsApp Cloud API no está conectado para este tenant', 'WA_NOT_CONNECTED');
+  }
+  const token = await resolveAccessToken(config);
+  if (!token) throw httpError(400, 'Token de WhatsApp no disponible', 'WA_NOT_CONNECTED');
+  return { config, token };
+}
+
+// Ventana de servicio de 24h (Customer Service Window, docs de Meta): texto
+// libre y adjuntos solo dentro de las 24h desde el último mensaje entrante
+// del cliente; fuera de ella Meta exige una plantilla aprobada.
+function assertWindowOpen(conv) {
+  if (!windowStatus(conv.last_inbound_at).open) {
+    throw httpError(409, 'La ventana de 24h de este contacto está cerrada -- usa una plantilla aprobada para reiniciar la conversación', 'WA_WINDOW_CLOSED');
+  }
 }
 
 async function getOrCreateTenantWaConfig(tenantId) {
@@ -375,6 +399,18 @@ async function findOrCreateConversation({ tenantId, schemaName, phone, name, cus
   const waPhone = normalizePhone(phone);
   const run = async () => {
     const { WaConversation } = require('../models');
+    // Chats guardados antes con el número sin indicativo: se pasan al número
+    // completo, que es como Meta entrega las respuestas.
+    const rawPhone = String(phone || '').replace(/\D/g, '');
+    if (rawPhone && rawPhone !== waPhone) {
+      const exists = await WaConversation.count({ where: { tenant_id: tenantId, wa_contact_phone: waPhone } });
+      if (!exists) {
+        await WaConversation.update(
+          { wa_contact_phone: waPhone },
+          { where: { tenant_id: tenantId, wa_contact_phone: rawPhone } },
+        );
+      }
+    }
     let [conv] = await WaConversation.findOrCreate({
       where: { tenant_id: tenantId, wa_contact_phone: waPhone },
       defaults: {
@@ -414,7 +450,7 @@ async function appendMessage({
   const run = async () => {
     const { WaConversation, WaMessage } = require('../models');
     if (metaMessageId) {
-      const existing = await WaMessage.findOne({ where: { meta_message_id: metaMessageId } });
+      const existing = await WaMessage.findOne({ where: { tenant_id: tenantId, meta_message_id: metaMessageId } });
       if (existing) return existing;
     }
     const msg = await WaMessage.create({
@@ -433,11 +469,12 @@ async function appendMessage({
     const updates = {
       last_message_at: new Date(),
     };
+    const convWhere = { id: conversationId, tenant_id: tenantId };
     if (direction === 'in') {
       updates.last_inbound_at = new Date();
-      await WaConversation.increment('unread_count', { by: 1, where: { id: conversationId } });
+      await WaConversation.increment('unread_count', { by: 1, where: convWhere });
     }
-    await WaConversation.update(updates, { where: { id: conversationId } });
+    await WaConversation.update(updates, { where: convWhere });
     return msg;
   };
   return schemaName ? runWithTenantSchema(schemaName, run) : run();
@@ -452,19 +489,8 @@ async function sendTemplateFromTenant({
   userId = null,
   source = 'api',
 }) {
-  const config = await getTenantWaConfig(tenantId);
-  if (!config?.own_phone_number_id) {
-    const err = new Error('WhatsApp Cloud API no está conectado para este tenant');
-    err.status = 400;
-    throw err;
-  }
-  const token = await resolveAccessToken(config);
-  if (!token) {
-    const err = new Error('Token de WhatsApp no disponible');
-    err.status = 400;
-    throw err;
-  }
-
+  to = normalizePhone(to);
+  const { config, token } = await getLiveSender(tenantId);
   const tenant = await Tenant.findByPk(tenantId);
   const data = await metaClient.sendWhatsAppTemplate({
     phoneNumberId: config.own_phone_number_id,
@@ -481,7 +507,7 @@ async function sendTemplateFromTenant({
     schemaName: tenant?.schema_name,
     phone: to,
   });
-  await appendMessage({
+  const msg = await appendMessage({
     tenantId,
     schemaName: tenant?.schema_name,
     conversationId: conv.id,
@@ -495,11 +521,13 @@ async function sendTemplateFromTenant({
     rawPayload: data,
   });
   await config.update({ last_wa_message_at: new Date(), last_error: null });
+  emitConversationEvent(tenantId, conv, msg);
   return { meta: data, conversation_id: conv.id, meta_message_id: metaMessageId };
 }
 
 async function sendTextFromTenant({ tenantId, to, body, userId = null, source = 'api' }) {
-  const status = await getWhatsAppStatus(tenantId);
+  to = normalizePhone(to);
+  const demoMode = await isDemoMode(tenantId);
   const tenant = await Tenant.findByPk(tenantId);
 
   // Modo demo: persiste localmente sin llamar a Meta.
@@ -519,7 +547,7 @@ async function sendTextFromTenant({ tenantId, to, body, userId = null, source = 
   // Ahora wa_demo_mode manda siempre que esté prendido, sin importar si
   // también hay una conexión real -- para usar la conexión real, el admin
   // apaga el demo desde Configuración → WhatsApp.
-  if (status.demo_mode) {
+  if (demoMode) {
     const conv = await findOrCreateConversation({
       tenantId,
       schemaName: tenant?.schema_name,
@@ -549,36 +577,11 @@ async function sendTextFromTenant({ tenantId, to, body, userId = null, source = 
     };
   }
 
-  const config = await getTenantWaConfig(tenantId);
-  if (!config?.own_phone_number_id) {
-    const err = new Error('WhatsApp Cloud API no está conectado para este tenant');
-    err.status = 400;
-    throw err;
-  }
-  const token = await resolveAccessToken(config);
-  if (!token) {
-    const err = new Error('Token de WhatsApp no disponible');
-    err.status = 400;
-    throw err;
-  }
-
-  // Ventana de servicio de 24h (Customer Service Window, docs de Meta):
-  // texto libre SOLO se puede enviar dentro de las 24h desde el último
-  // mensaje entrante del cliente; fuera de esa ventana Meta rechaza el
-  // envío con el error 131047 y solo admite plantillas aprobadas (por eso
-  // sendTemplateFromTenant NO tiene este chequeo -- las plantillas están
-  // hechas justo para iniciar/reabrir conversación). Antes esto no se
-  // validaba acá: el agente se enteraba recién cuando Meta devolvía el
-  // error luego de intentar enviar. Se avisa antes, con el mismo cálculo
-  // (`windowStatus`) que ya se le muestra al asesor en el inbox.
+  const { config, token } = await getLiveSender(tenantId);
+  // Se valida antes de llamar a Meta (que respondería 131047) con el mismo
+  // cálculo que el inbox le muestra al asesor.
   const conv = await findOrCreateConversation({ tenantId, schemaName: tenant?.schema_name, phone: to });
-  const win = windowStatus(conv.last_inbound_at);
-  if (!win.open) {
-    const err = new Error('La ventana de 24h de este contacto está cerrada -- usa una plantilla aprobada para reiniciar la conversación');
-    err.status = 409;
-    err.code = 'WA_WINDOW_CLOSED';
-    throw err;
-  }
+  assertWindowOpen(conv);
 
   const data = await metaClient.sendWhatsAppText({
     phoneNumberId: config.own_phone_number_id,
@@ -854,28 +857,24 @@ async function ingestInboundWhatsApp({
  * evento de socket sí se emitiera. Por eso acá se resuelve el schema del
  * tenant igual que en ingestInboundWhatsApp.
  */
-async function updateMessageStatus({ metaMessageId, status, tenantId = null }) {
-  if (!metaMessageId || !status) return;
+async function updateMessageStatus({ metaMessageId, status, tenantId }) {
+  // Sin tenant (número no registrado) no se toca nada: un update solo por
+  // meta_message_id podría alcanzar filas de otro tenant en el schema común.
+  if (!metaMessageId || !status || !tenantId) return;
   try {
     const { WaMessage } = require('../models');
     const run = async () => WaMessage.update(
       { status },
-      { where: { meta_message_id: metaMessageId } }
+      { where: { tenant_id: tenantId, meta_message_id: metaMessageId } }
     );
 
-    let schemaName = null;
-    if (tenantId) {
-      const tenant = await Tenant.findByPk(tenantId);
-      schemaName = tenant?.schema_name || null;
-    }
-    await (schemaName ? runWithTenantSchema(schemaName, run) : run());
+    const tenant = await Tenant.findByPk(tenantId);
+    await (tenant?.schema_name ? runWithTenantSchema(tenant.schema_name, run) : run());
 
-    if (tenantId) {
-      try {
-        const { emitWaTenant } = require('./whatsappNotifications.socket');
-        emitWaTenant(tenantId, 'wa:message-status', { meta_message_id: metaMessageId, status });
-      } catch (_) { /* socket opcional */ }
-    }
+    try {
+      const { emitWaTenant } = require('./whatsappNotifications.socket');
+      emitWaTenant(tenantId, 'wa:message-status', { meta_message_id: metaMessageId, status });
+    } catch (_) { /* socket opcional */ }
   } catch (err) {
     logger.debug?.(`[WA Cloud] status update skip: ${err.message}`);
   }
@@ -900,7 +899,7 @@ async function disconnectWhatsApp(tenantId) {
 
 function emitConversationEvent(tenantId, conversation, message) {
   try {
-    const { emitWaTenant, emitWaUser, emitWaConversation } = require('./whatsappNotifications.socket');
+    const { emitWaConversationEvent } = require('./whatsappNotifications.socket');
     const payload = {
       conversation_id: conversation.id,
       conversation: {
@@ -926,11 +925,12 @@ function emitConversationEvent(tenantId, conversation, message) {
           }
         : null,
     };
-    emitWaTenant(tenantId, 'wa:new-message', payload);
-    emitWaConversation(conversation.id, 'wa:new-message', payload);
-    if (conversation.assigned_user_id) {
-      emitWaUser(conversation.assigned_user_id, 'wa:new-message', payload);
-    }
+    emitWaConversationEvent(
+      tenantId,
+      { conversationId: conversation.id, userId: conversation.assigned_user_id },
+      'wa:new-message',
+      payload,
+    );
   } catch (_) { /* socket opcional en tests/serverless */ }
 }
 
@@ -946,7 +946,8 @@ async function sendMediaFromTenant({
   userId = null,
   source = 'api',
 }) {
-  const status = await getWhatsAppStatus(tenantId);
+  to = normalizePhone(to);
+  const demoMode = await isDemoMode(tenantId);
   const tenant = await Tenant.findByPk(tenantId);
   const { uploadToCloudinary } = require('../utils/uploadToCloudinary');
 
@@ -975,7 +976,8 @@ async function sendMediaFromTenant({
         : type === 'video' ? '🎬 Video'
           : `📎 ${filename || 'Archivo'}`);
 
-  if (!status.connected && status.demo_mode) {
+  // Igual que en sendTextFromTenant: el demo manda aunque haya conexión real.
+  if (demoMode) {
     const conv = await findOrCreateConversation({
       tenantId,
       schemaName: tenant?.schema_name,
@@ -1013,34 +1015,10 @@ async function sendMediaFromTenant({
     };
   }
 
-  const config = await getTenantWaConfig(tenantId);
-  if (!config?.own_phone_number_id) {
-    const err = new Error('WhatsApp Cloud API no está conectado para este tenant');
-    err.status = 400;
-    throw err;
-  }
-  const token = await resolveAccessToken(config);
-  if (!token) {
-    const err = new Error('Token de WhatsApp no disponible');
-    err.status = 400;
-    throw err;
-  }
-
-  // Igual que en sendTextFromTenant: fuera de la ventana de 24h Meta solo
-  // acepta plantillas aprobadas, así que un adjunto se rechaza. Se avisa
-  // antes de gastar la subida del binario a Meta.
-  const convForWindow = await findOrCreateConversation({
-    tenantId,
-    schemaName: tenant?.schema_name,
-    phone: to,
-  });
-  const win = windowStatus(convForWindow.last_inbound_at);
-  if (!win.open) {
-    const err = new Error('La ventana de 24h de este contacto está cerrada -- usa una plantilla aprobada para reiniciar la conversación');
-    err.status = 409;
-    err.code = 'WA_WINDOW_CLOSED';
-    throw err;
-  }
+  const { config, token } = await getLiveSender(tenantId);
+  // Antes de gastar la subida del binario a Meta.
+  const conv = await findOrCreateConversation({ tenantId, schemaName: tenant?.schema_name, phone: to });
+  assertWindowOpen(conv);
 
   const uploadedMeta = await metaClient.uploadWhatsAppMediaBinary({
     phoneNumberId: config.own_phone_number_id,
@@ -1067,11 +1045,6 @@ async function sendMediaFromTenant({
   });
 
   const metaMessageId = data?.messages?.[0]?.id || null;
-  const conv = await findOrCreateConversation({
-    tenantId,
-    schemaName: tenant?.schema_name,
-    phone: to,
-  });
   const msg = await appendMessage({
     tenantId,
     schemaName: tenant?.schema_name,
