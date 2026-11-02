@@ -9,7 +9,8 @@ const { resolveRecordSchemaByToken } = require('../../utils/publicTokenResolver'
 const { resolveVehicleMaintenance } = require('../../services/workshop/maintenance.service');
 const QRCode = require('qrcode');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
-const whatsappService = require('../../services/whatsappService');
+const { buildWaLink } = require('../../services/whatsappService');
+const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery');
 const { findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
 const { MAX_LIMIT } = require('../../utils/pagination');
 
@@ -263,16 +264,15 @@ const getPortalLink = async (req, res) => {
 
     const token = await ensurePortalToken(vehicle);
     const portalUrl = portalUrlFor(token);
-    const text = encodeURIComponent(
-      `Hola! Aquí puedes consultar la hoja de vida y el próximo mantenimiento de tu vehículo ${vehicle.plate}:\n${portalUrl}`
-    );
-    const phone = getCustomerWhatsappNumber(vehicle.customer);
     res.json({
       success: true,
       data: {
         token,
         portal_url: portalUrl,
-        whatsapp_url: phone ? `https://wa.me/${phone}?text=${text}` : `https://wa.me/?text=${text}`,
+        whatsapp_url: buildWaLink(
+          getCustomerWhatsappNumber(vehicle.customer),
+          `Hola! Aquí puedes consultar la hoja de vida y el próximo mantenimiento de tu vehículo ${vehicle.plate}:\n${portalUrl}`,
+        ),
       },
     });
   } catch (error) {
@@ -302,37 +302,8 @@ const sendPortalWhatsApp = async (req, res) => {
     const greeting = vehicle.customer?.first_name ? `Hola ${vehicle.customer.first_name}!` : 'Hola!';
     const message = `${greeting} Te compartimos la hoja de vida de tu vehículo *${vehicle.plate}*: historial de servicios y próximo mantenimiento.\n${portalUrl}`;
 
-    try {
-      const waCloud = require('../../services/whatsappCloud.service');
-      const status = await waCloud.getWhatsAppStatus(tenant_id);
-      if (status.operational) {
-        const sent = await waCloud.sendTextFromTenant({
-          tenantId: tenant_id,
-          to: phone,
-          body: message,
-          userId: req.user?.id || null,
-          source: 'api',
-        });
-        return res.json({
-          success: true,
-          channel: 'cloud_api',
-          portal_url: portalUrl,
-          conversation_id: sent.conversation_id,
-          message: `Portal enviado por WhatsApp Cloud API a ${phone}.`,
-        });
-      }
-    } catch (cloudErr) {
-      logger.warn('[WhatsApp] Cloud fallback a wa.me portal vehículo:', cloudErr.message);
-    }
-
-    const result = await whatsappService.sendText(phone, message);
-    res.json({
-      success: true,
-      channel: 'wa_me',
-      waLink: result.waLink,
-      portal_url: portalUrl,
-      message: `Enlace listo para enviar a ${phone}.`,
-    });
+    const sent = await deliverWhatsApp({ tenantId: tenant_id, to: phone, body: message, userId: req.user?.id || null });
+    res.json({ success: true, ...waResponse(sent), portal_url: portalUrl });
   } catch (error) {
     logger.error('[WhatsApp] Error enviando portal del vehículo:', error);
     res.status(500).json({ success: false, message: error.message || 'Error al enviar el portal por WhatsApp' });

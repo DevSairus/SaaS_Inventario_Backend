@@ -5,6 +5,8 @@
 
 let waNsp = null;
 
+const convRoom = (tenantId, conversationId) => `tenant:${tenantId}:wa:conv:${conversationId}`;
+
 function initWhatsAppNotifications(io) {
   const nsp = io.of('/whatsapp');
 
@@ -26,11 +28,13 @@ function initWhatsAppNotifications(io) {
     if (tenantId) socket.join(`tenant:${tenantId}:wa`);
     if (userId) socket.join(`user:${userId}:wa`);
 
-    socket.on('wa:subscribe', ({ conversationId }) => {
-      if (conversationId) socket.join(`wa:conv:${conversationId}`);
+    // La sala lleva el tenant del JWT: conocer el id de una conversación de
+    // otro tenant no basta para escucharla.
+    socket.on('wa:subscribe', ({ conversationId } = {}) => {
+      if (tenantId && conversationId) socket.join(convRoom(tenantId, conversationId));
     });
-    socket.on('wa:unsubscribe', ({ conversationId }) => {
-      if (conversationId) socket.leave(`wa:conv:${conversationId}`);
+    socket.on('wa:unsubscribe', ({ conversationId } = {}) => {
+      if (tenantId && conversationId) socket.leave(convRoom(tenantId, conversationId));
     });
   });
 
@@ -48,14 +52,21 @@ function emitWaUser(userId, event, data) {
   waNsp.to(`user:${userId}:wa`).emit(event, data);
 }
 
-function emitWaConversation(conversationId, event, data) {
-  if (!waNsp || !conversationId) return;
-  waNsp.to(`wa:conv:${conversationId}`).emit(event, data);
+/**
+ * Evento de una conversación: tenant + sala de la conversación + asesor
+ * asignado en UNA sola emisión (socket.io no repite a quien esté en varias).
+ */
+function emitWaConversationEvent(tenantId, { conversationId, userId }, event, data) {
+  if (!waNsp || !tenantId) return;
+  let target = waNsp.to(`tenant:${tenantId}:wa`);
+  if (conversationId) target = target.to(convRoom(tenantId, conversationId));
+  if (userId) target = target.to(`user:${userId}:wa`);
+  target.emit(event, data);
 }
 
 module.exports = {
   initWhatsAppNotifications,
   emitWaTenant,
   emitWaUser,
-  emitWaConversation,
+  emitWaConversationEvent,
 };

@@ -28,6 +28,7 @@
 // una vez al día.
 const { Op } = require('sequelize');
 const { mapWithConcurrencyLimit } = require('../utils/concurrency');
+const { getCustomerWhatsappNumber } = require('../utils/customerWhatsappPhone');
 
 // ── acciones ──────────────────────────────────────────────────────────────
 
@@ -99,7 +100,7 @@ async function actionSendWhatsAppTemplate({ tenant_id, opportunity, actionConfig
   const customer = await Customer.findOne({
     where: { id: opportunity.customer_id, tenant_id },
   });
-  const phone = customer?.phone || customer?.mobile || null;
+  const phone = getCustomerWhatsappNumber(customer);
   if (!phone) return null;
 
   // Habeas data activo (ver services/legal/consent.service.js): el

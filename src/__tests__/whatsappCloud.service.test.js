@@ -202,7 +202,7 @@ describe('updateMessageStatus', () => {
     expect(runWithTenantSchema).toHaveBeenCalledWith('tenant_motos_estrada', expect.any(Function));
     expect(WaMessage.update).toHaveBeenCalledWith(
       { status: 'delivered' },
-      { where: { meta_message_id: 'wamid.ABC' } }
+      { where: { tenant_id: TENANT_ID, meta_message_id: 'wamid.ABC' } }
     );
   });
 
@@ -220,7 +220,12 @@ describe('updateMessageStatus', () => {
   });
 
   it('ignora eventos incompletos', async () => {
-    await waCloud.updateMessageStatus({ metaMessageId: null, status: 'read' });
+    await waCloud.updateMessageStatus({ metaMessageId: null, status: 'read', tenantId: TENANT_ID });
+    expect(WaMessage.update).not.toHaveBeenCalled();
+  });
+
+  it('sin tenant no toca ninguna fila (no hay cruce entre tenants)', async () => {
+    await waCloud.updateMessageStatus({ metaMessageId: 'wamid.ABC', status: 'read', tenantId: null });
     expect(WaMessage.update).not.toHaveBeenCalled();
   });
 });

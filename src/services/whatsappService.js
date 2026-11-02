@@ -13,6 +13,7 @@
 //  • getStatus() → siempre CONNECTED (no hay sesión que mantener).
 
 const logger = require('../config/logger');
+const { normalizeWhatsAppPhone: formatColombianPhone } = require('../utils/customerWhatsappPhone');
 
 // ─── Cloudinary (lazy init) ────────────────────────────────────────────────
 let cloudinary;
@@ -30,19 +31,6 @@ try {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-/**
- * Normaliza el número → "573001234567". Los llamadores ya deberían pasar el
- * número con su indicativo real (ver utils/customerWhatsappPhone.js), así
- * que aquí solo se limpia el formato; "57" solo se antepone como
- * compatibilidad para celulares colombianos de 10 dígitos sin indicativo.
- */
-const formatColombianPhone = (phone) => {
-  const digits = String(phone).replace(/\D/g, '');
-  if (digits.length >= 11) return digits;
-  if (digits.length === 10) return `57${digits}`;
-  return digits;
-};
 
 /** Construye un enlace wa.me con mensaje pre-cargado */
 const buildWaLink = (phone, text) => {
