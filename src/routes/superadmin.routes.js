@@ -534,6 +534,7 @@ router.post(
           });
         })
         .catch((err) => {
+          if (err.code === 'CUTOVER_IN_PROGRESS') return; // otro corte ya lo está haciendo
           console.error(`Error aprovisionando schema para tenant "${tenant.slug}":`, err);
           tenant.update({
             cutover_last_attempt_at: new Date(),
@@ -3064,6 +3065,10 @@ router.post(
 
       res.json({ success: true, slug, schema_name: tenant.schema_name });
     } catch (error) {
+      // El otro corte sigue trabajando: no pisar su estado 'running' con 'failed'.
+      if (error.code === 'CUTOVER_IN_PROGRESS') {
+        return res.status(409).json({ error: error.message });
+      }
       console.error(`Error en cutover manual de "${slug}":`, error);
       await Tenant.update(
         {
@@ -3073,7 +3078,7 @@ router.post(
         },
         { where: { slug } }
       );
-      res.status(500).json({ error: 'Error al cortar el tenant a schema dedicado', details: error.message });
+      res.status(500).json({ error: `Error al cortar el tenant a schema dedicado: ${error.message}`, details: error.message });
     }
   }
 );
