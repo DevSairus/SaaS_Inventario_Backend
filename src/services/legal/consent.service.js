@@ -29,6 +29,7 @@ const { runWithTenantSchema } = require('../../config/tenantContext');
 const { encryptToken, decryptToken } = require('../../utils/metaTokenCrypto');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { deliverWhatsApp, bodyParams, FALLBACK } = require('../whatsappDelivery');
+const { eventTemplate } = require('../waEventTemplates');
 const { getEffectiveModulesForTenantId } = require('../moduleAccess');
 const { habeasDataStandard, VEHICLE_INTAKE_STANDARD } = require('../../data/legal/standardDocuments');
 
@@ -78,9 +79,8 @@ const DEFAULT_SETTINGS = {
     storage_fee: 'la tarifa diaria vigente informada por EL TALLER',
     max_amount_without_approval: 'el valor del presupuesto aprobado por el cliente',
     checklist_items: DEFAULT_INTAKE_CHECKLIST,
-    // Plantilla de WhatsApp (Meta) para el aviso de ingreso fuera de la
-    // ventana de 24h. Parámetros del cuerpo, en orden: {{1}} nombre del
-    // cliente, {{2}} número de OT, {{3}} placa, {{4}} enlace.
+    // Configuración anterior de la plantilla del aviso de ingreso; ahora se
+    // elige en Meta y WhatsApp (waEventTemplates.EVENTS.reception).
     whatsapp_reception_template: '',
   },
   otp: {
@@ -896,17 +896,12 @@ async function notifyVehicleReception({ tenant, order, userId = null }) {
 
   const phone = getCustomerWhatsappNumber(customer);
   if (phone) {
-    const templateName = settings.vehicle_intake.whatsapp_reception_template;
     result.whatsapp = consentWaResult(await deliverWhatsApp({
       tenantId: tenant.id,
       to: phone,
       body: message,
       userId,
-      template: templateName && {
-        name: templateName,
-        language: settings.otp.whatsapp_language || 'es',
-        components: [bodyParams([name || 'cliente', wo.order_number, plate || '-', intakeUrl || trackingUrl])],
-      },
+      template: eventTemplate(tenant, 'reception', [name || 'cliente', wo.order_number, plate || '-', intakeUrl || trackingUrl]),
     }));
   }
 

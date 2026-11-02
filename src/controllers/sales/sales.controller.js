@@ -8,6 +8,7 @@ const { Op } = require('sequelize');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer } = require('../../services/pdfService');
 const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery');
+const { eventTemplate, greetingName } = require('../../services/waEventTemplates');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
@@ -2529,14 +2530,19 @@ const sendWhatsApp = async (req, res) => {
     // PDF crudo (ver comentario ahí).
     const documentUrl = publicDocumentUrl(frontendUrl, isQuote, token);
 
+    const total = `$${Number(sale.total_amount).toLocaleString('es-CO')}`;
     let caption;
     if (isQuote) {
-      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Revisa y aprueba tu cotización aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *${total}*\n\n📄 Revisa y aprueba tu cotización aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
     } else {
-      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Consulta tu documento aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
+      caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *${total}*\n\n📄 Consulta tu documento aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
     }
+    const name = greetingName(sale.customer);
+    const template = isQuote
+      ? eventTemplate(tenant, 'sale_quote', [name, sale.sale_number, total], token)
+      : eventTemplate(tenant, 'sale_document', [name, docLabel, sale.sale_number, total], token);
 
-    const sent = await deliverWhatsApp({ tenantId, to: customerPhone, body: caption, userId: req.user?.id || null });
+    const sent = await deliverWhatsApp({ tenantId, to: customerPhone, body: caption, template, userId: req.user?.id || null });
     res.json({ success: true, ...waResponse(sent), pdfUrl });
   } catch (error) {
     logger.error('Error generando enlace WhatsApp:', error);

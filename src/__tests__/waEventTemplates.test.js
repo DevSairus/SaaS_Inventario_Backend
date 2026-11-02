@@ -1,7 +1,7 @@
 jest.mock('../models', () => ({ WaTemplate: { findOne: jest.fn(), findAll: jest.fn() } }));
 
 const { WaTemplate } = require('../models');
-const { checkTemplate, eventComponents, getEventTemplate, setEventTemplate } = require('../services/waEventTemplates');
+const { checkTemplate, eventComponents, eventTemplate, getEventTemplate, setEventTemplate } = require('../services/waEventTemplates');
 
 const quoteTemplate = (overrides = {}) => ({
   name: 'cotizacion_ot',
@@ -37,12 +37,45 @@ describe('checkTemplate (cotización de OT)', () => {
   });
 });
 
-describe('eventComponents', () => {
+describe('checkTemplate (mensajes sin enlace: citas)', () => {
+  const appointment = (buttons) => quoteTemplate({ components_schema: [
+    { type: 'BODY', text: 'Hola {{1}}, tu cita del {{2}} para {{3}} quedó confirmada.' },
+    ...(buttons ? [{ type: 'BUTTONS', buttons }] : []),
+  ] });
+  test('acepta sin botones o con botones fijos', () => {
+    expect(checkTemplate('appointment_confirmacion', appointment())).toEqual({ buttonIndex: null });
+    expect(checkTemplate('appointment_confirmacion', appointment([{ type: 'QUICK_REPLY', text: 'Ok' }]))).toEqual({ buttonIndex: null });
+  });
+  test('rechaza un botón de URL dinámica que el sistema no sabría llenar', () => {
+    expect(checkTemplate('appointment_confirmacion', appointment([{ type: 'URL', url: 'https://x.com/{{1}}' }])).error).toMatch(/sin botón/);
+  });
+});
+
+describe('eventComponents y eventTemplate', () => {
   test('arma las variables del cuerpo y el token en el botón guardado', () => {
     expect(eventComponents({ button_index: 1 }, ['Ana', 'OT-1', ''], 'tok')).toEqual([
       { type: 'body', parameters: [{ type: 'text', text: 'Ana' }, { type: 'text', text: 'OT-1' }, { type: 'text', text: '-' }] },
       { type: 'button', sub_type: 'url', index: '1', parameters: [{ type: 'text', text: 'tok' }] },
     ]);
+  });
+  test('sin botón guardado no manda componente de botón', () => {
+    expect(eventComponents({ button_index: null }, ['Ana'], 'tok')).toHaveLength(1);
+  });
+  test('null si el evento no tiene plantilla; si la tiene, lista para enviar', () => {
+    expect(eventTemplate({ business_config: {} }, 'sale_quote', ['Ana'], 'tok')).toBeNull();
+    const t = { business_config: { whatsapp_templates: { sale_quote: { name: 'cot', language: 'es', button_index: 0 } } } };
+    expect(eventTemplate(t, 'sale_quote', ['Ana', 'C-1', '$1'], 'tok')).toMatchObject({ name: 'cot', language: 'es' });
+  });
+});
+
+describe('recepción: respeta la configuración anterior de Consentimientos', () => {
+  const legacy = { vehicle_intake: { whatsapp_reception_template: 'vehiculo_recibido' }, otp: { whatsapp_language: 'es_CO' } };
+  test('sin elección en Meta y WhatsApp usa la anterior', () => {
+    expect(getEventTemplate({ business_config: legacy }, 'reception')).toEqual({ name: 'vehiculo_recibido', language: 'es_CO', button_index: null });
+  });
+  test('lo elegido en Meta y WhatsApp manda, incluso "sin plantilla"', () => {
+    expect(getEventTemplate({ business_config: { ...legacy, whatsapp_templates: { reception: null } } }, 'reception')).toBeNull();
+    expect(getEventTemplate({ business_config: { ...legacy, whatsapp_templates: { reception: { name: 'nueva', language: 'es' } } } }, 'reception').name).toBe('nueva');
   });
 });
 
