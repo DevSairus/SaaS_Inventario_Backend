@@ -117,19 +117,26 @@ async function getNextConsecutive(tenantId, branchId, isTest = false, transactio
     throw new Error(`No existe resolución DIAN ${docLabel} ${isTest ? 'de pruebas ' : ''}activa para esta sede.${ownResolutionHint} Regístrala en Ajustes → Facturación Electrónica DIAN → Resoluciones.`);
   }
 
+  // from/to/current_number son BIGINT y pg los devuelve como string: sin
+  // Number(), "6" > "500" da true (comparación lexicográfica) y la
+  // resolución parece agotada con el consecutivo en 6-9, 60-99, etc.
+  const fromNumber = Number(resolution.from_number);
+  const toNumber = Number(resolution.to_number);
+  const currentNumber = Number(resolution.current_number);
+
   // Reintento de una venta que ya tenía número asignado (rechazada o con
   // error en un envío anterior): se reutiliza el mismo consecutivo en vez
   // de tomar uno nuevo — una factura no debe consumir numeración adicional
   // solo porque el intento anterior falló.
   if (existingInvoiceNumber && existingInvoiceNumber.startsWith(resolution.prefix)) {
     const existing = parseInt(existingInvoiceNumber.slice(resolution.prefix.length), 10);
-    if (!Number.isNaN(existing) && existing >= resolution.from_number && existing < resolution.current_number) {
+    if (!Number.isNaN(existing) && existing >= fromNumber && existing < currentNumber) {
       return { consecutive: existing, invoiceNumber: existingInvoiceNumber, resolution };
     }
   }
 
-  if (resolution.current_number > resolution.to_number) {
-    throw new Error(`Se agotó el rango de numeración DIAN (hasta ${resolution.to_number}).`);
+  if (currentNumber > toNumber) {
+    throw new Error(`Se agotó el rango de numeración DIAN (hasta ${toNumber}).`);
   }
 
   const today = new Date().toISOString().split('T')[0];
@@ -137,7 +144,7 @@ async function getNextConsecutive(tenantId, branchId, isTest = false, transactio
     throw new Error(`La resolución DIAN venció el ${resolution.valid_to}.`);
   }
 
-  const consecutive = resolution.current_number;
+  const consecutive = currentNumber;
   await resolution.increment('current_number', { transaction });
 
   return {
