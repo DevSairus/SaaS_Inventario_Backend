@@ -430,9 +430,17 @@ const syncTemplates = async (req, res) => {
     const data = await waOps.syncTemplatesForTenant(req.tenant_id);
     res.json({ success: true, data });
   } catch (error) {
+    const meta = error.response?.data?.error;
+    logger.warn(`[WA Cloud] Sync plantillas tenant=${req.tenant_id}: ${meta?.message || error.message}`);
+    if (error.response?.status === 401 || meta?.code === 190) {
+      return res.status(400).json({
+        success: false,
+        message: 'Meta rechazó el token de WhatsApp (venció o no es válido). Reconecta WhatsApp con un token permanente.',
+      });
+    }
     res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Error al sincronizar plantillas',
+      message: meta?.message || error.message || 'Error al sincronizar plantillas',
     });
   }
 };
