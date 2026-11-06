@@ -16,7 +16,7 @@
 
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
-const { provisionTenantSchema } = require('./provisionTenantSchema');
+const { provisionTenantSchemaDetailed } = require('./provisionTenantSchema');
 const { migrateTenantData } = require('./migrateTenantData');
 const { directDbDialectOptions } = require('./_directDbSsl');
 
@@ -95,10 +95,10 @@ async function cutoverTenant(slug) {
 
 async function runCutoverSteps(sequelize, slug, tenant) {
   console.log(`\n=== 1/3 Aprovisionando schema para "${slug}" ===`);
-  const schemaName = await provisionTenantSchema(slug);
+  const { schemaName, cloned } = await provisionTenantSchemaDetailed(slug);
 
   console.log(`\n=== 2/3 Copiando y verificando datos ===`);
-  await migrateTenantData(slug, tenant.id);
+  await migrateTenantData(slug, tenant.id, { freshSchema: cloned });
 
   // La migración que siembra diagram_templates en el schema nuevo no pone
   // image_path (ver 2026072502-seed-diagram-templates-catalog.js); eso lo

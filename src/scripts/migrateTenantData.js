@@ -164,7 +164,10 @@ const GENERATED_COLUMNS = {
 // al buscar las directas, así que vistas con columna tenant_id (ej.
 // v_product_prices_comparison) no entran acá.
 
-async function migrateTenantData(slug, tenantId) {
+// freshSchema: el schema se acaba de clonar de la plantilla (ver
+// provisionTenantSchema.js) y no tiene filas de tenant -> la limpieza previa
+// de cada tabla (cientos de DELETE contra Neon) no hace nada y se salta.
+async function migrateTenantData(slug, tenantId, { freshSchema = false } = {}) {
   const schemaName = schemaNameFor(slug);
   const sequelize = new Sequelize(DATABASE_URL, {
     dialect: 'postgres',
@@ -221,7 +224,7 @@ async function migrateTenantData(slug, tenantId) {
     // la migración correspondiente UNA vez por schema, no este script, y el
     // INSERT de abajo solo repone filas con tenant_id = este tenant. Un
     // DELETE sin filtro borraría el catálogo global y nunca lo repondría.
-    for (const table of [...ordered].reverse()) {
+    for (const table of freshSchema ? [] : [...ordered].reverse()) {
       if (indirectSet.has(table)) {
         // No tiene tenant_id propio ni acá ni en public -- pero el schema
         // completo pertenece a un solo tenant, así que borrar sin filtro es

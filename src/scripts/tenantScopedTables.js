@@ -31,33 +31,43 @@ const PUBLIC_ONLY_TABLES = new Set([
   'platform_user_tenants',
 ]);
 
+// OJO: estas dos consultas leen pg_catalog directamente, NO information_schema.
+// Las vistas de information_schema (table_constraints, key_column_usage,
+// constraint_column_usage) recorren TODOS los schemas de la base antes de
+// filtrar por 'public', y con cada schema de tenant que se agrega se vuelven
+// más lentas: en local, con 8 schemas, una sola corrida tardó 571 s, y se
+// ejecutan 2 veces por cutover (y en cleanup/rollback/purge).
+
 async function getAllFkEdges(sequelize) {
   // Grafo COMPLETO de FKs en public (no solo entre un set dado): hace falta
-  // para poder caminar hacia arriba desde cualquier tabla hija.
+  // para poder caminar hacia arriba desde cualquier tabla hija. Una fila por
+  // par de columnas (las FKs compuestas se emparejan por posición).
   const [rows] = await sequelize.query(`
-    SELECT
-      tc.table_name AS child_table,
-      kcu.column_name AS child_column,
-      ccu.table_name AS parent_table,
-      ccu.column_name AS parent_column
-    FROM information_schema.table_constraints tc
-    JOIN information_schema.key_column_usage kcu
-      ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-    JOIN information_schema.constraint_column_usage ccu
-      ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-    WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'
+    SELECT DISTINCT
+      child.relname AS child_table,
+      ca.attname AS child_column,
+      parent.relname AS parent_table,
+      pa.attname AS parent_column
+    FROM pg_constraint con
+    JOIN pg_class child ON child.oid = con.conrelid
+    JOIN pg_namespace cn ON cn.oid = child.relnamespace
+    JOIN pg_class parent ON parent.oid = con.confrelid
+    JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+    CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(child_attnum, parent_attnum)
+    JOIN pg_attribute ca ON ca.attrelid = con.conrelid AND ca.attnum = k.child_attnum
+    JOIN pg_attribute pa ON pa.attrelid = con.confrelid AND pa.attnum = k.parent_attnum
+    WHERE con.contype = 'f' AND cn.nspname = 'public' AND pn.nspname = 'public'
   `);
   return rows;
 }
 
 async function getDirectTenantTables(sequelize) {
   const [rows] = await sequelize.query(`
-    SELECT c.table_name
-    FROM information_schema.columns c
-    JOIN information_schema.tables t
-      ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-    WHERE c.table_schema = 'public' AND c.column_name = 'tenant_id'
-      AND t.table_type = 'BASE TABLE'
+    SELECT c.relname AS table_name
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped
+    WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
   `);
   return rows.map((r) => r.table_name).filter((t) => !PUBLIC_ONLY_TABLES.has(t));
 }

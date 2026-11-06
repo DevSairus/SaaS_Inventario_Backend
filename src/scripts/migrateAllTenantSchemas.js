@@ -26,6 +26,7 @@
 require('dotenv').config();
 const { sequelize } = require('../config/database');
 const { provisionTenantSchema } = require('./provisionTenantSchema');
+const { ensureTenantTemplate } = require('./tenantTemplate');
 
 async function migrateAllTenantSchemas() {
   const [tenants] = await sequelize.query(
@@ -42,6 +43,18 @@ async function migrateAllTenantSchemas() {
       results.failed.push({ slug: t.slug, schema: t.schema_name, error: err.message });
       console.error(`[migrateAllTenantSchemas] Error migrando schema de "${t.slug}" (${t.schema_name}):`, err.message);
     }
+  }
+
+  // Plantilla para clonar tenants nuevos (ver tenantTemplate.js). Va al final:
+  // la primera vez corre todas las migraciones (minutos) y no debe retrasar
+  // la puesta al día de los tenants reales. Si falla, los cortes nuevos
+  // siguen funcionando por el camino de migraciones.
+  try {
+    await ensureTenantTemplate();
+    results.template = 'ok';
+  } catch (err) {
+    results.template = `error: ${err.message}`;
+    console.error('[migrateAllTenantSchemas] Error actualizando la plantilla de schemas:', err.message);
   }
 
   return results;

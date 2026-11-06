@@ -118,6 +118,18 @@ async function inheritedMarginFor(tenant_id, categoryId, transaction) {
   return resolveCategory(tree, categoryId).margin;
 }
 
+/**
+ * Igual que inheritedMarginFor pero cargando el árbol una sola vez, para
+ * resolver miles de filas (importación masiva). marginFor(null) = global.
+ */
+async function loadMarginResolver(tenant_id, transaction) {
+  const tree = await loadTree(tenant_id, transaction);
+  return {
+    method: tree.method,
+    marginFor: (categoryId) => resolveCategory(tree, categoryId).margin,
+  };
+}
+
 /** Global + cada categoría con su margen propio y el efectivo (para la UI). */
 async function getMarginOverview(tenant_id) {
   const tree = await loadTree(tenant_id);
@@ -360,6 +372,7 @@ async function applyMarginChange(tenant_id, params) {
 module.exports = {
   MarginError,
   inheritedMarginFor,
+  loadMarginResolver,
   getMarginMethod,
   setMarginMethod,
   getMarginOverview,

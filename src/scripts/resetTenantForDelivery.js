@@ -35,21 +35,23 @@ async function getPhysicalTables(sequelize, schemaName) {
 
 // FKs DENTRO de un solo schema (a diferencia de tenantScopedTables.js, que
 // resuelve el grafo de `public` para el modelo legado multi-tenant-por-fila).
+// pg_catalog y no information_schema: ver el comentario en tenantScopedTables.js.
 async function getFkEdges(sequelize, schemaName) {
   const [rows] = await sequelize.query(
-    `SELECT
-       tc.table_name AS child_table,
-       kcu.column_name AS child_column,
-       ccu.table_name AS parent_table,
-       ccu.column_name AS parent_column
-     FROM information_schema.table_constraints tc
-     JOIN information_schema.key_column_usage kcu
-       ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
-     JOIN information_schema.constraint_column_usage ccu
-       ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
-     WHERE tc.constraint_type = 'FOREIGN KEY'
-       AND tc.table_schema = :schemaName
-       AND ccu.table_schema = :schemaName`,
+    `SELECT DISTINCT
+       child.relname AS child_table,
+       ca.attname AS child_column,
+       parent.relname AS parent_table,
+       pa.attname AS parent_column
+     FROM pg_constraint con
+     JOIN pg_class child ON child.oid = con.conrelid
+     JOIN pg_namespace cn ON cn.oid = child.relnamespace
+     JOIN pg_class parent ON parent.oid = con.confrelid
+     JOIN pg_namespace pn ON pn.oid = parent.relnamespace
+     CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(child_attnum, parent_attnum)
+     JOIN pg_attribute ca ON ca.attrelid = con.conrelid AND ca.attnum = k.child_attnum
+     JOIN pg_attribute pa ON pa.attrelid = con.confrelid AND pa.attnum = k.parent_attnum
+     WHERE con.contype = 'f' AND cn.nspname = :schemaName AND pn.nspname = :schemaName`,
     { replacements: { schemaName } }
   );
   return rows;
