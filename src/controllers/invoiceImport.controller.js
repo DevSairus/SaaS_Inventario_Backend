@@ -7,8 +7,8 @@ const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const taxService = require('../services/taxService');
-const { suggestedSalePrice, isValidMargin, marginRangeMessage } = require('../utils/salePricing');
-const { inheritedMarginFor, getMarginMethod } = require('../services/inventory/productMargin.service');
+const { suggestedSalePrice, impliedMargin, isValidMargin, marginRangeMessage } = require('../utils/salePricing');
+const { inheritedMarginFor, getMarginMethod, loadMarginResolver } = require('../services/inventory/productMargin.service');
 const { bulkUpdateById } = require('../utils/bulkUpdate');
 
 /**
@@ -138,6 +138,18 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
     }
     items_margins[String(idx)] = m;
   }
+  // Precio de venta escrito a mano por línea: { "0": 45000 } (índice original
+  // → precio). Manda sobre el margen: un producto nuevo se crea con él y en
+  // todos queda en la línea de la compra y pasa al producto al RECIBIRLA.
+  const items_sale_prices = {};
+  for (const [idx, raw] of Object.entries(opts.items_sale_prices || {})) {
+    if (raw === null || raw === undefined || raw === '') continue;
+    const price = Math.round(Number(raw) * 100) / 100;
+    if (!Number.isFinite(price) || price <= 0) {
+      throw new InvoiceImportError(`Precio de venta de la línea ${Number(idx) + 1} inválido`, 400);
+    }
+    items_sale_prices[String(idx)] = price;
+  }
 
   const invoiceData = await parseInvoiceXML(xmlContent);
   // Respaldo de la forma de pago cuando el XML no trae PaymentMeans/ID:
@@ -187,6 +199,7 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
         ...item,
         original_index: originalIdx, // para resolver manual_links[idx] tras el filtro
         line_margin: items_margins[String(originalIdx)] ?? null,
+        line_sale_price: items_sale_prices[String(originalIdx)] ?? null,
         tax_percentage: items_tax_overrides[originalIdx] !== undefined
           ? parseFloat(items_tax_overrides[originalIdx])
           : item.tax_percentage,
@@ -254,6 +267,7 @@ const importInvoiceInner = async (req, res) => {
         manual_links: JSON.parse(req.body.manual_links || '{}'),
         new_product_data: JSON.parse(req.body.new_product_data || '{}'),
         items_margins: JSON.parse(req.body.items_margins || '{}'),
+        items_sale_prices: JSON.parse(req.body.items_sale_prices || '{}'),
         payment_form_hint: source.dianDocument?.payment_form || null,
       }
     );
@@ -366,6 +380,13 @@ const previewInvoiceInner = async (req, res) => {
     // nada — solo para sugerirle al frontend con qué producto vincularlo.
     const suggestions = await buildItemSuggestions(invoiceData.items, tenant_id, supplierCandidate?.id);
     const itemsWithSuggestions = invoiceData.items.map((item, idx) => ({ ...item, suggestion: suggestions[idx] }));
+    // Margen con que se crearía un producto nuevo según su categoría (o el
+    // global), para que el modal estime su precio de venta.
+    const marginResolver = await loadMarginResolver(tenant_id);
+    const newProductMargins = {
+      global: marginResolver.marginFor(null),
+      by_category: Object.fromEntries(marginResolver.categoryIds.map((id) => [id, marginResolver.marginFor(id)])),
+    };
 
     res.json({
       success: true,
@@ -377,6 +398,7 @@ const previewInvoiceInner = async (req, res) => {
         items: itemsWithSuggestions,
         totals: invoiceData.totals,
         hasPdf: !!zipData.pdf,
+        new_product_margins: newProductMargins,
         isDuplicate: isDuplicate,
         duplicateInfo: duplicateInfo
       }
@@ -520,10 +542,16 @@ async function loadMatchData(items, tenant_id, supplier_id, { transaction, produ
 async function buildItemSuggestions(items, tenant_id, supplierId) {
   const { mappingByCode, byId, bySku, fuzzyByItem } = await loadMatchData(items, tenant_id, supplierId);
   // margin_pct: margen actual del producto, para mostrarlo en la columna
-  // Margen % del modal (vacío = lo conserva).
+  // Margen % del modal (vacío = lo conserva). Precio actual e impuestos: para
+  // que el modal estime el precio de venta con el margen.
   const pick = (product, match_type) => ({
     product_id: product.id, product_name: product.name, match_type,
     margin_pct: product.profit_margin_percentage === null ? null : Number(product.profit_margin_percentage),
+    base_price: Number(product.base_price) || 0,
+    price_includes_tax: !!product.price_includes_tax,
+    has_tax: product.has_tax,
+    tax_percentage: product.tax_percentage === null ? null : Number(product.tax_percentage),
+    tax_config: product.tax_config || null,
   });
   return items.map((item) => {
     const code = codeOf(item);
@@ -718,6 +746,15 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
         inheritedMargin = marginCache.get(categoryId);
       }
       const itemMargin = ownMargin !== null ? ownMargin : (inheritedMargin ?? 30);
+      const taxProfile = {
+        price_includes_tax: !!overrides.price_includes_tax,
+        has_tax: item.tax_percentage > 0,
+        tax_percentage: item.tax_percentage || 0,
+        tax_config: { iva_status: item.iva_status },
+      };
+      // Precio escrito a mano en el modal: se crea con él y el margen queda
+      // en el que resulta (si cabe en el rango; si no, el de arriba).
+      const fixedMargin = item.line_sale_price ? impliedMargin(item.unit_price, item.line_sale_price, taxProfile, marginMethod) : null;
 
       product = Product.build({
         tenant_id,
@@ -729,14 +766,9 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
         brand: overrides.brand?.trim() || null,
         unit_of_measure: overrides.unit_of_measure || 'unit',
         average_cost: item.unit_price,
-        base_price: suggestedSalePrice(item.unit_price, itemMargin, {
-          price_includes_tax: !!overrides.price_includes_tax,
-          has_tax: item.tax_percentage > 0,
-          tax_percentage: item.tax_percentage || 0,
-          tax_config: { iva_status: item.iva_status },
-        }, marginMethod) ?? 0,
-        profit_margin_percentage: itemMargin,
-        margin_inherited: ownMargin === null && inheritedMargin !== null,
+        base_price: item.line_sale_price || (suggestedSalePrice(item.unit_price, itemMargin, taxProfile, marginMethod) ?? 0),
+        profit_margin_percentage: fixedMargin ?? itemMargin,
+        margin_inherited: fixedMargin === null && ownMargin === null && inheritedMargin !== null,
         current_stock: 0,
         min_stock: 1,
         track_inventory: true,
@@ -810,6 +842,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
     subtotal: item.subtotal,
     total: item.total,
     profit_margin_pct: item.line_margin ?? null,
+    sale_price: item.line_sale_price ?? null,
     isNew: isNew,
     match_type: matchType
   }));
@@ -1023,6 +1056,7 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
     inc_rate: item.inc_rate || 0,
     inc_amount: item.inc_amount || 0,
     profit_margin_pct: item.profit_margin_pct ?? null,
+    sale_price: item.sale_price ?? null,
     subtotal: item.subtotal,
     total: item.total,
     line_total: item.total,

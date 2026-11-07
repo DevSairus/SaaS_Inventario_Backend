@@ -1,6 +1,7 @@
 const logger = require('../../config/logger');
 // backend/src/controllers/sales/sales.controller.js
-const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate, CustomerInteraction } = require('../../models');
+const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate, CustomerInteraction, Project } = require('../../models');
+const { resolveDocumentProject } = require('../../services/projects/projectRef.service');
 const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
@@ -13,6 +14,7 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
 const aiuService = require('../../services/sales/aiu.service');
+const { getOrCreateFinalConsumer } = require('../../services/sales/finalConsumer.service');
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
@@ -325,6 +327,7 @@ const getById = async (req, res) => {
       include: [
         { model: Customer, as: 'customer' },
         { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'], required: false },
+        { model: Project, as: 'project', attributes: ['id', 'code', 'name', 'status'], required: false },
         {
           model: SaleItem,
           as: 'items',
@@ -405,6 +408,7 @@ const create = async (req, res) => {
       global_discount_type = 'fixed',
       global_discount_value = 0,
       quote_valid_until,
+      project_id,
     } = req.body;
 
     if (!['fixed', 'percentage'].includes(global_discount_type)) {
@@ -418,12 +422,14 @@ const create = async (req, res) => {
       return res.status(403).json({ success: false, message: 'No tienes permiso para aplicar descuentos' });
     }
 
-    let finalCustomerId = customer_id;
+    // Sin cliente (ni cliente rápido): CONSUMIDOR FINAL, el predeterminado.
+    let finalCustomerId = customer_id
+      || (customer_data ? null : (await getOrCreateFinalConsumer(tenantId, transaction)).id);
     let customerInfo = {};
     let customerPaymentTerms = null;
 
-    if (customer_id) {
-      const customer = await Customer.findOne({ where: { id: customer_id, tenant_id: tenantId } });
+    if (finalCustomerId) {
+      const customer = await Customer.findOne({ where: { id: finalCustomerId, tenant_id: tenantId }, transaction });
       if (!customer) {
         await transaction.rollback();
         return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
@@ -463,9 +469,6 @@ const create = async (req, res) => {
         customer_department_name: newCustomer.state,
         customer_document_type: newCustomer.document_type,
       };
-    } else {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Debe proporcionar customer_id o customer_data' });
     }
 
     // ── Número de venta: se asigna al CONFIRMAR ───────────────────────────────
@@ -708,6 +711,16 @@ const create = async (req, res) => {
       );
     }
 
+    // Módulo Proyectos: venta/cotización de una obra (cuenta como ingreso del
+    // proyecto al confirmarse; la cotización lo conserva al convertirse).
+    try {
+      const project = await resolveDocumentProject(tenantId, project_id, { transaction });
+      if (project) saleData.project_id = project.id;
+    } catch (e) {
+      await transaction.rollback();
+      return res.status(e.statusCode || 400).json({ success: false, message: e.message });
+    }
+
     const sale = await Sale.create(saleData, { transaction });
 
     // bulkCreate en vez de un .create() por ítem (elimina N+1 — ventas con
@@ -786,18 +799,8 @@ const create = async (req, res) => {
       });
     }
 
-    // ── DIAN: disparar envío asíncrono para facturas (no bloquea response) ──
-    if (document_type === 'factura') {
-      const saleCopy = { ...sale.toJSON(), items: saleItems };
-      setImmediate(async () => {
-        try {
-          const tenant = await Tenant.findByPk(tenantId);
-          await dianService.sendInvoiceToDian(saleCopy, tenant);
-        } catch (err) {
-          logger.error(`[DIAN] Error async al enviar factura ${sale.sale_number}:`, err.message);
-        }
-      });
-    }
+    // Sin envío a la DIAN aquí: create siempre deja un borrador (BORRADOR-…,
+    // sin tipo ni numeración). La factura se transmite al confirmarla (confirm).
 
     const completeSale = await Sale.findByPk(sale.id, {
       include: [
@@ -901,7 +904,16 @@ const update = async (req, res) => {
     }
     if ('customer_id' in updateData) {
       updateData.customer_id = (updateData.customer_id && uuidRegex.test(updateData.customer_id))
-        ? updateData.customer_id : null;
+        ? updateData.customer_id : (await getOrCreateFinalConsumer(tenantId, transaction)).id;
+    }
+    if ('project_id' in updateData) {
+      try {
+        const project = await resolveDocumentProject(tenantId, updateData.project_id, { currentProjectId: sale.project_id, transaction });
+        updateData.project_id = project?.id || null;
+      } catch (e) {
+        await transaction.rollback();
+        return res.status(e.statusCode || 400).json({ success: false, message: e.message });
+      }
     }
     if ('technician_id' in updateData) {
       updateData.technician_id = (updateData.technician_id && uuidRegex.test(updateData.technician_id))
@@ -935,7 +947,7 @@ const update = async (req, res) => {
     }
 
     if (updateData.customer_id) {
-      const customer = await Customer.findOne({ where: { id: updateData.customer_id, tenant_id: tenantId } });
+      const customer = await Customer.findOne({ where: { id: updateData.customer_id, tenant_id: tenantId }, transaction });
       if (customer) {
         updateData.customer_name    = [customer.first_name, customer.last_name].filter(Boolean).join(' ');
         updateData.customer_tax_id  = customer.tax_id;
@@ -1254,6 +1266,15 @@ const confirm = async (req, res) => {
     }
     if (sale.document_type === 'cotizacion' && !['aprobada', 'parcial'].includes(sale.quote_status)) {
       return res.status(409).json({ success: false, message: 'La cotización debe estar aprobada por el cliente antes de convertirla en venta.' });
+    }
+    // Contrato de un proyecto que se factura por cortes de obra: la cotización
+    // queda como contrato y cada corte genera su factura parcial.
+    if (sale.document_type === 'cotizacion' && sale.project_id) {
+      const { ProjectCut } = require('../../models');
+      const cuts = await ProjectCut.count({ where: { tenant_id: tenantId, project_id: sale.project_id, status: { [Op.ne]: 'cancelled' } } });
+      if (cuts) {
+        return res.status(409).json({ success: false, message: 'Esta cotización es el contrato de un proyecto que se factura por cortes de obra: factura desde los cortes del proyecto.' });
+      }
     }
 
     // Requisitos de factura electrónica (compartidos con la facturación de
@@ -2110,12 +2131,14 @@ const getStats = async (req, res) => {
     if (branch_id) pendingWhere.branch_id = branch_id;
     if (where.sale_date) pendingWhere.sale_date = where.sale_date;
     const balanceSql = 'GREATEST(total_amount - COALESCE(returned_amount, 0) - COALESCE(paid_amount, 0), 0)';
+    // Vencido sin la retención de garantía todavía no liberada (facturas parciales de obra).
+    const dueBalanceSql = `GREATEST(${balanceSql} - CASE WHEN retention_released_at IS NULL THEN COALESCE(retention_guarantee_amount, 0) ELSE 0 END, 0)`;
     const [pending] = await Sale.findAll({
       where: pendingWhere,
       attributes: [
         [sequelize.fn('COUNT', sequelize.col('id')), 'pending_count'],
         [sequelize.fn('SUM', sequelize.literal(balanceSql)), 'pending_amount'],
-        [sequelize.fn('SUM', sequelize.literal(`CASE WHEN ${effectiveDueDateSql()} < CURRENT_DATE THEN ${balanceSql} ELSE 0 END`)), 'overdue_amount'],
+        [sequelize.fn('SUM', sequelize.literal(`CASE WHEN ${effectiveDueDateSql()} < CURRENT_DATE THEN ${dueBalanceSql} ELSE 0 END`)), 'overdue_amount'],
         [sequelize.fn('SUM', sequelize.literal(`CASE WHEN ${effectiveDueDateSql()} < CURRENT_DATE THEN 1 ELSE 0 END`)), 'overdue_count'],
       ],
       raw: true

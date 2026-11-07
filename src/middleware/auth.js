@@ -38,6 +38,11 @@ const authMiddleware = (req, res, next) => {
  * Middleware de roles
  * ❗ 403 = autenticado pero sin permisos
  */
+// Rol que, en las rutas que aún usan listas fijas de roles, se comporta como
+// otro. El Líder de inventarios hereda de bodeguero; en lo que ya pasó a
+// permisos por empresa (middleware/requirePermission.js) tiene los suyos.
+const ROLE_INHERITS = { inventory_lead: 'warehouse_keeper' };
+
 const checkRole = (...allowedRoles) => {
   return (req, res, next) => {
     if (!req.user) {
@@ -47,7 +52,7 @@ const checkRole = (...allowedRoles) => {
       });
     }
 
-    if (!allowedRoles.includes(req.user.role)) {
+    if (!allowedRoles.includes(req.user.role) && !allowedRoles.includes(ROLE_INHERITS[req.user.role])) {
       return res.status(403).json({
         success: false,
         code: 'FORBIDDEN',

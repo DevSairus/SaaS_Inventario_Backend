@@ -70,10 +70,12 @@ async function getOrCreatePeriod(tenantId, entryDate, transaction) {
 
 /**
  * Crea un asiento en estado draft con sus líneas.
- * `lines`: [{ account_id, debit, credit, description, third_party_id }]
+ * `lines`: [{ account_id, debit, credit, description, third_party_id, project_id }]
+ * `projectId`: proyecto del documento origen; marca las líneas que no traen
+ * uno propio (dimensión de proyecto, módulo Proyectos).
  * Valida que debe == haber antes de crear.
  */
-async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sourceId, description, lines, createdBy }, transaction) {
+async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sourceId, description, lines, createdBy, projectId }, transaction) {
   const { JournalEntry, JournalEntryLine } = require('../../models');
 
   if (!lines || lines.length < 2) {
@@ -121,6 +123,7 @@ async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sou
       credit: l.credit || 0,
       description: l.description || null,
       third_party_id: l.third_party_id || null,
+      project_id: l.project_id !== undefined ? l.project_id || null : projectId || null,
       line_order: idx,
     })),
     { transaction }
@@ -170,6 +173,7 @@ async function updateDraftEntry(entryId, tenantId, { entryDate, description, bra
       credit: l.credit || 0,
       description: l.description || null,
       third_party_id: l.third_party_id || null,
+      project_id: l.project_id || null,
       line_order: idx,
     })),
     { transaction }
@@ -263,6 +267,7 @@ async function reverseEntry(originalEntryId, tenantId, userId, reason, transacti
     credit: Number(l.debit || 0),
     description: `Reversión — ${l.description || ''}`.trim(),
     third_party_id: l.third_party_id || null,
+    project_id: l.project_id || null,
   }));
 
   const reversalEntry = await createDraftEntry(

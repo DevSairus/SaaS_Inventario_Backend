@@ -59,6 +59,14 @@ async function generateEntryForSource(sourceType, sourceId, tenantId, userId, op
       if (!session) throw Object.assign(new Error('Cierre de caja no encontrado'), { statusCode: 404 });
       return generateCashSessionEntry(session, tenantId, userId, options);
     }
+    case 'project_labor': {
+      const { PayrollPeriod } = require('../../models');
+      const period = await PayrollPeriod.findOne({ where: { id: sourceId, tenant_id: tenantId } });
+      if (!period) throw Object.assign(new Error('Periodo de nómina no encontrado'), { statusCode: 404 });
+      const r = await require('../../services/accounting/projectAccounting.service').postLaborReclass(tenantId, period, userId);
+      if (r.status !== 'posted') throw Object.assign(new Error(r.message), { statusCode: 400 });
+      return r;
+    }
     default:
       throw Object.assign(new Error(`Tipo de origen no soportado: "${sourceType}"`), { statusCode: 400 });
   }

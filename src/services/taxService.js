@@ -43,7 +43,11 @@ function calculateItemTaxes(item, product, context = 'sale', tenantConfig = {}) 
   const declaredStatus = product?.tax_config?.iva_status;
   const hasTax = product?.has_tax !== false && declaredStatus !== 'excluido';
   if (hasTax && declaredStatus !== 'exento') {
-    ivaRate = Number(item.tax_percentage ?? product?.tax_percentage ?? (context === 'sale' ? 19 : 0));
+    // Venta con precio IVA incluido: la tarifa es la del producto, no la de
+    // la línea. Si no, un 0 escrito en la línea dejaba el precio completo
+    // como base y la factura salía sin IVA.
+    const lineRate = context === 'sale' && product?.price_includes_tax ? undefined : item.tax_percentage;
+    ivaRate = Number(lineRate ?? product?.tax_percentage ?? (context === 'sale' ? 19 : 0));
   }
   const ivaStatus = declaredStatus === 'excluido' ? 'excluido' : ivaRate > 0 ? 'gravado' : 'exento';
   // Precio con impuestos incluidos: se extraen IVA e INC juntos para que la

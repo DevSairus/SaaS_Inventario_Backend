@@ -148,7 +148,7 @@ const checkLimits = (resourceType) => {
             where: {
               tenant_id: tenantId,
               role: {
-                [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant', 'user', 'viewer', 'technician']
+                [Op.in]: ['admin', 'manager', 'seller', 'warehouse_keeper', 'inventory_lead', 'accountant', 'user', 'viewer', 'technician']
               },
               is_active: true,
               // Técnicos sin acceso al sistema no cuentan para el límite (D2).

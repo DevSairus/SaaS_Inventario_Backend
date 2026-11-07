@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { requirePermission } = require('../../middleware/requirePermission');
 const adjustmentsController = require('../../controllers/inventory/adjustments.controller');
 const { checkRole } = require('../../middleware/auth');
 
@@ -25,18 +26,18 @@ router.get('/', adjustmentsController.getAdjustments);
 router.get('/:id', adjustmentsController.getAdjustmentById);
 
 // Crear nuevo ajuste
-router.post('/', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.createAdjustment);
+router.post('/', requirePermission('inventory.adjustments.write'), adjustmentsController.createAdjustment);
 
 // Actualizar ajuste (solo draft)
-router.put('/:id', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.updateAdjustment);
+router.put('/:id', requirePermission('inventory.adjustments.write'), adjustmentsController.updateAdjustment);
 
 // Confirmar ajuste (genera movimientos)
-router.patch('/:id/confirm', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.confirmAdjustment);
+router.patch('/:id/confirm', requirePermission('inventory.adjustments.write'), adjustmentsController.confirmAdjustment);
 
 // Cancelar ajuste
-router.patch('/:id/cancel', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.cancelAdjustment);
+router.patch('/:id/cancel', requirePermission('inventory.adjustments.write'), adjustmentsController.cancelAdjustment);
 
 // Eliminar ajuste (solo draft)
-router.delete('/:id', checkRole(...ADJUSTMENTS_WRITE_ROLES), adjustmentsController.deleteAdjustment);
+router.delete('/:id', requirePermission('inventory.adjustments.write'), adjustmentsController.deleteAdjustment);
 
 module.exports = router;

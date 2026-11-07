@@ -34,7 +34,7 @@ const createAdvance = async (req, res) => {
     const tenant_id = req.tenant_id;
     const branch_id = req.branch_id;
     const user_id = req.user_id || req.user?.id;
-    const { customer_id, amount, method, received_date, reference_note, triggers_iva, bank_account_id } = req.body;
+    const { customer_id, amount, method, received_date, reference_note, triggers_iva, bank_account_id, project_id } = req.body;
 
     if (!customer_id) {
       await transaction.rollback();
@@ -68,6 +68,7 @@ const createAdvance = async (req, res) => {
       referenceNote: reference_note,
       triggersIva: triggers_iva,
       cashSessionId: openSession?.id || null,
+      projectId: project_id || null,
     }, transaction);
 
     await transaction.commit();

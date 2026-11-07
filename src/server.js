@@ -151,6 +151,9 @@ const costAlertsRoutes              = require('./routes/inventory/costAlerts.rou
 const orderListsRoutes              = require('./routes/inventory/orderLists.routes');
 const priceAdjustmentsRoutes        = require('./routes/inventory/priceAdjustments.routes');
 const warehousesRoutes              = require('./routes/inventory/warehouses.routes');
+const projectsRoutes                = require('./routes/projects/projects.routes');
+const toolsRoutes                   = require('./routes/tools.routes');
+const solarRoutes                   = require('./routes/solar.routes');
 const branchesRoutes                = require('./routes/branches.routes');
 const stockAlertsRoutes             = require('./routes/stockAlerts.routes');
 const formDraftsRoutes              = require('./routes/formDrafts.routes');
@@ -167,6 +170,10 @@ const invoiceImportRoutes           = require('./routes/invoiceImport.routes');
 const accountingRoutes              = require('./routes/accounting/accounting.routes');
 const aiAssistantRoutes              = require('./routes/ai/aiAssistant.routes');
 const permissionsRoutes             = require('./routes/permissions.routes');
+const rolePermissionsRoutes         = require('./routes/rolePermissions.routes');
+const attachmentsRoutes             = require('./routes/attachments.routes');
+const approvalsRoutes               = require('./routes/approvals.routes');
+const paymentBatchesRoutes          = require('./routes/paymentBatches.routes');
 const vehiclesRoutes                = require('./routes/workshop/vehicles.routes');
 const workOrdersRoutes              = require('./routes/workshop/workOrders.routes');
 const appointmentsRoutes            = require('./routes/workshop/appointments.routes');
@@ -282,6 +289,9 @@ app.use('/api/support', authMiddleware, tenantMiddleware, supportRoutes);
 
 // ── Permisos (sin tenant) ──
 app.use('/api/permissions', authMiddleware, permissionsRoutes);
+app.use('/api/role-permissions', authMiddleware, tenantMiddleware, rolePermissionsRoutes);
+app.use('/api/attachments', authMiddleware, tenantMiddleware, attachmentsRoutes);
+app.use('/api/approvals', authMiddleware, tenantMiddleware, approvalsRoutes);
 
 // ── Taller ──
 app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware, runtRoutes);
@@ -321,6 +331,9 @@ app.use('/api/sales/customer-returns',         authMiddleware, tenantMiddleware,
 app.use('/api/inventory/supplier-returns',     authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), supplierReturnsRoutes);
 app.use('/api/inventory/transfers',            authMiddleware, tenantMiddleware, branchMiddleware, requireModule('inventory'), transfersRoutes);
 app.use('/api/inventory/internal-consumptions',authMiddleware, tenantMiddleware, branchMiddleware, requireModule('inventory'), internalConsumptionsRoutes);
+app.use('/api/projects',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('projects'), projectsRoutes);
+app.use('/api/tools',                          authMiddleware, tenantMiddleware, requireModule('projects'), toolsRoutes);
+app.use('/api/solar',                          authMiddleware, tenantMiddleware, branchMiddleware, requireModule('projects'), solarRoutes);
 
 // ── Ventas (genéricas — después de las específicas) ──
 app.use('/api/sales',                          authMiddleware, tenantMiddleware, branchMiddleware, salesRoutes);
@@ -348,6 +361,7 @@ app.use('/api/crm/whatsapp',                   authMiddleware, tenantMiddleware,
 app.use('/api/accounts-receivable',            authMiddleware, tenantMiddleware, requireModule('receivables'), accountsReceivableRoutes);
 app.use('/api/accounts-payable',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), accountsPayableRoutes);
 app.use('/api/expenses',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), expensesRoutes);
+app.use('/api/payment-batches',                authMiddleware, tenantMiddleware, requireModule('treasury'), paymentBatchesRoutes);
 app.use('/api/cashflow',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashflowRoutes);
 app.use('/api/cash-sessions',                  authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), cashSessionsRoutes);
 app.use('/api/receipts',                       authMiddleware, tenantMiddleware, branchMiddleware, requireModule('treasury'), receiptsRoutes);

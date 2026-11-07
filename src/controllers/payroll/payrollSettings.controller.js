@@ -20,6 +20,7 @@ const ENUM_FIELDS = {
   cesantias_accrual_mode: ['monthly', 'year_end'],
   prima_accrual_mode: ['monthly', 'on_payment'],
   vacaciones_accrual_mode: ['monthly', 'on_payment'],
+  vacation_business_days: ['mon_sat', 'mon_fri'],
   commission_payroll_mode: ['salarial', 'no_salarial', 'no_reportar'],
   pila_presentation_form: ['U', 'S'],
 };

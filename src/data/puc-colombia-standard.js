@@ -34,9 +34,14 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '143501', name: 'Inventario de Mercancías', type: 'activo', parent_code: '1435', accepts_entries: true },
 
   { code: '15', name: 'Propiedades, Planta y Equipo', type: 'activo', parent_code: '1', accepts_entries: false },
+  { code: '1504', name: 'Terrenos', type: 'activo', parent_code: '15', accepts_entries: true },
+  { code: '1516', name: 'Construcciones y Edificaciones', type: 'activo', parent_code: '15', accepts_entries: true },
+  { code: '1520', name: 'Maquinaria y Equipo', type: 'activo', parent_code: '15', accepts_entries: true },
   { code: '1524', name: 'Equipo de Oficina', type: 'activo', parent_code: '15', accepts_entries: true },
   { code: '1528', name: 'Equipo de Computación y Comunicación', type: 'activo', parent_code: '15', accepts_entries: true },
+  { code: '1540', name: 'Flota y Equipo de Transporte', type: 'activo', parent_code: '15', accepts_entries: true },
   { code: '1592', name: 'Depreciación Acumulada (CR)', type: 'activo', parent_code: '15', accepts_entries: true },
+  { code: '159905', name: 'Deterioro acumulado de propiedades, planta y equipo (CR)', type: 'activo', parent_code: '15', accepts_entries: true },
 
   // ══════════════ CLASE 2 — PASIVO ══════════════
   { code: '2', name: 'PASIVO', type: 'pasivo', parent_code: null, accepts_entries: false },
@@ -104,6 +109,8 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '415595', name: 'Ingresos por Servicios (Taller)', type: 'ingreso', parent_code: '41', accepts_entries: true },
   { code: '42', name: 'No Operacionales', type: 'ingreso', parent_code: '4', accepts_entries: false },
   { code: '421005', name: 'Ingresos Financieros', type: 'ingreso', parent_code: '42', accepts_entries: true },
+  { code: '424505', name: 'Utilidad en venta de propiedades, planta y equipo', type: 'ingreso', parent_code: '42', accepts_entries: true },
+  { code: '425050', name: 'Recuperación de deterioro de propiedades, planta y equipo', type: 'ingreso', parent_code: '42', accepts_entries: true },
   { code: '429505', name: 'Ingresos Diversos', type: 'ingreso', parent_code: '42', accepts_entries: true },
 
   // ══════════════ CLASE 5 — GASTOS ══════════════
@@ -135,6 +142,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '513505', name: 'Servicios Públicos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '514505', name: 'Mantenimiento y Reparaciones', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '516005', name: 'Depreciación', type: 'gasto', parent_code: '51', accepts_entries: true },
+  { code: '519905', name: 'Deterioro de propiedades, planta y equipo', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519515', name: 'Transporte, Fletes y Acarreos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519525', name: 'Impuestos Asumidos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519535', name: 'Publicidad y Propaganda (Marketing)', type: 'gasto', parent_code: '51', accepts_entries: true },
@@ -142,12 +150,22 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '519599', name: 'Gastos Diversos', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '53', name: 'No Operacionales', type: 'gasto', parent_code: '5', accepts_entries: false },
   { code: '530505', name: 'Gastos Financieros (Intereses)', type: 'gasto', parent_code: '53', accepts_entries: true },
+  { code: '531015', name: 'Pérdida en venta y retiro de propiedades, planta y equipo', type: 'gasto', parent_code: '53', accepts_entries: true },
 
   // ══════════════ CLASE 6 — COSTOS DE VENTAS ══════════════
   { code: '6', name: 'COSTOS DE VENTAS', type: 'costo', parent_code: null, accepts_entries: false },
   { code: '61', name: 'Costo de Ventas y de Prestación de Servicios', type: 'costo', parent_code: '6', accepts_entries: false },
   { code: '613501', name: 'Costo de Mercancía Vendida', type: 'costo', parent_code: '61', accepts_entries: true },
   { code: '615595', name: 'Costo de Servicios (Taller)', type: 'costo', parent_code: '61', accepts_entries: true },
+
+  // ══════════════ CLASE 7 — COSTOS DE PRODUCCIÓN O DE OPERACIÓN ══════════════
+  // Módulo Proyectos: materiales consumidos en la obra y mano de obra
+  // reclasificada a la obra (ver services/accounting/projectAccounting.service.js).
+  { code: '7', name: 'COSTOS DE PRODUCCIÓN O DE OPERACIÓN', type: 'costo', parent_code: null, accepts_entries: false },
+  { code: '71', name: 'Materia Prima', type: 'costo', parent_code: '7', accepts_entries: false },
+  { code: '710505', name: 'Materiales de Obra (Proyectos)', type: 'costo', parent_code: '71', accepts_entries: true },
+  { code: '72', name: 'Mano de Obra Directa', type: 'costo', parent_code: '7', accepts_entries: false },
+  { code: '720505', name: 'Mano de Obra de Obra (Proyectos)', type: 'costo', parent_code: '72', accepts_entries: true },
 ];
 
 // Mapeo de eventos del sistema -> código de cuenta por defecto.
@@ -162,6 +180,14 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   sale_tax_inc: '249505',               // INC (impoconsumo) generado en la venta
   sale_cogs_product: '613501',          // costo de la mercancía vendida
   sale_cogs_service: '615595',          // costo de servicios de taller
+  // Retención de garantía de las facturas parciales de obra (no vence hasta liberarla)
+  sale_retention_guarantee: '130595',
+
+  // Módulo Proyectos: el material que entra a la bodega de una obra se
+  // consume (sale de inventario a costo de obra) y la nómina repartida por
+  // horas se reclasifica del gasto de personal al costo de la obra.
+  project_material_cost: '710505',
+  project_labor_cost: '720505',
 
   purchase_inventory: '143501',         // compra de mercancía -> inventario
   purchase_payable: '220505',           // compra a crédito -> proveedores
@@ -300,6 +326,13 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   'fixed_asset_depreciation_expense:equipo_computo': '516005',
   'fixed_asset_depreciation_expense:muebles_enseres': '516005',
   'fixed_asset_depreciation_expense:otro': '516005',
+  fixed_asset_disposal_gain: '424505',
+  fixed_asset_disposal_loss: '531015',
+  'fixed_asset_depreciation_expense:construcciones': '516005',
+  'fixed_asset_depreciation_expense:equipo_comunicacion': '516005',
+  fixed_asset_impairment_expense: '519905',
+  fixed_asset_impairment_accumulated: '159905',
+  fixed_asset_impairment_recovery: '425050',
 };
 
 module.exports = { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS };

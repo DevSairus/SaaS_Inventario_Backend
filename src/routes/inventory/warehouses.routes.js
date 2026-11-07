@@ -1,6 +1,7 @@
 // backend/src/routes/inventory/warehouses.routes.js
 const express = require('express');
 const router = express.Router();
+const { requirePermission } = require('../../middleware/requirePermission');
 const { checkRole } = require('../../middleware/auth');
 
 // INV-4: crear, editar o borrar bodegas solo para gerencia y bodeguero.
@@ -83,7 +84,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Crear nueva bodega
-router.post('/', checkRole(...INVENTORY_MASTER_WRITE_ROLES), async (req, res) => {
+router.post('/', requirePermission('inventory.warehouses.write'), async (req, res) => {
   try {
     const { Warehouse } = require('../../models/inventory');
     const { sequelize } = require('../../config/database');
@@ -145,7 +146,7 @@ router.post('/', checkRole(...INVENTORY_MASTER_WRITE_ROLES), async (req, res) =>
 });
 
 // Actualizar bodega
-router.put('/:id', checkRole(...INVENTORY_MASTER_WRITE_ROLES), async (req, res) => {
+router.put('/:id', requirePermission('inventory.warehouses.write'), async (req, res) => {
   try {
     const { Warehouse } = require('../../models/inventory');
     const { sequelize } = require('../../config/database');
@@ -224,7 +225,7 @@ router.put('/:id', checkRole(...INVENTORY_MASTER_WRITE_ROLES), async (req, res) 
 });
 
 // Eliminar bodega (solo si no tiene stock)
-router.delete('/:id', checkRole(...INVENTORY_MASTER_WRITE_ROLES), async (req, res) => {
+router.delete('/:id', requirePermission('inventory.warehouses.write'), async (req, res) => {
   try {
     const { Warehouse } = require('../../models/inventory');
     const { ProductWarehouseStock } = require('../../models/inventory');

@@ -228,6 +228,11 @@ const createSupplier = async (req, res) => {
       retention_config,
       payroll_fund_types,
       pila_code,
+      // Datos bancarios (pagos masivos por archivo plano) y tipo de documento
+      bank_name,
+      account_number,
+      account_type,
+      document_type,
     } = req.body;
 
     // Validar campos requeridos
@@ -282,6 +287,10 @@ const createSupplier = async (req, res) => {
       retention_config: normalizeRetentionConfig(retention_config),
       payroll_fund_types: sanitizeFundTypes(payroll_fund_types),
       pila_code: String(pila_code || '').trim().toUpperCase().slice(0, 10) || null,
+      bank_name: bank_name || null,
+      account_number: String(account_number || '').replace(/\s+/g, '') || null,
+      account_type: account_type || null,
+      document_type: document_type || null,
     });
 
     res.status(201).json({
@@ -323,7 +332,9 @@ const updateSupplier = async (req, res) => {
     }
 
     const tenant_id = req.user.tenant_id;
-    const updateData = req.body;
+    // Copia del body sin identidad ni auditoría: un tenant_id en el body movería
+    // el proveedor a otra empresa.
+    const { id: _id, tenant_id: _tenantId, created_at: _createdAt, updated_at: _updatedAt, ...updateData } = req.body || {};
 
     const supplier = await Supplier.findOne({
       where: { id, tenant_id }
@@ -355,14 +366,15 @@ const updateSupplier = async (req, res) => {
     }
 
     // Campos NOT NULL — si llegan vacíos/undefined se eliminan para no sobrescribir
-    const notNullFields = ['name', 'tenant_id'];
+    const notNullFields = ['name'];
     notNullFields.forEach(field => {
       if (updateData[field] === '' || updateData[field] === undefined || updateData[field] === null) {
         delete updateData[field];
       }
     });
 
-    // Campos opcionales (allowNull: true) — strings vacíos se convierten a null
+    // Campos opcionales (allowNull: true) — strings vacíos se convierten a null.
+    // Un campo que no viene en el body se deja como está (actualización parcial).
     const nullableFields = [
       'code', 'business_name', 'trade_name', 'tax_id', 'email', 'phone', 'mobile',
       'website', 'address', 'city', 'state', 'country', 'postal_code',
@@ -371,7 +383,7 @@ const updateSupplier = async (req, res) => {
       'person_type', 'tax_regime'
     ];
     nullableFields.forEach(field => {
-      if (updateData[field] === '' || updateData[field] === undefined) {
+      if (updateData[field] === '') {
         updateData[field] = null;
       }
     });

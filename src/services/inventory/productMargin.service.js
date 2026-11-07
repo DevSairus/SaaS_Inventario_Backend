@@ -126,6 +126,7 @@ async function loadMarginResolver(tenant_id, transaction) {
   const tree = await loadTree(tenant_id, transaction);
   return {
     method: tree.method,
+    categoryIds: [...tree.byId.keys()],
     marginFor: (categoryId) => resolveCategory(tree, categoryId).margin,
   };
 }

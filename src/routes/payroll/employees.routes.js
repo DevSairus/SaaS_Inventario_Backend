@@ -6,6 +6,9 @@ const employeesController = require('../../controllers/payroll/employees.control
 router.get('/', employeesController.getEmployees);
 router.get('/stats', employeesController.getEmployeeStats);
 router.get('/contracts/expiring', employeesController.getExpiringContracts);
+router.get('/vacations', employeesController.getVacationBooks);
+router.get('/:id/vacations', employeesController.getEmployeeVacationBook);
+router.put('/:id/vacations/opening', employeesController.updateVacationOpening);
 router.get('/:id', employeesController.getEmployeeById);
 router.post('/', employeesController.createEmployee);
 router.put('/:id', employeesController.updateEmployee);

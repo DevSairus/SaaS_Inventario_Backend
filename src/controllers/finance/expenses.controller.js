@@ -1,5 +1,6 @@
 // backend/src/controllers/finance/expenses.controller.js
-const { Expense, Supplier, Branch, User } = require('../../models');
+const { Expense, Supplier, Branch, User, Project } = require('../../models');
+const { resolveDocumentProject } = require('../../services/projects/projectRef.service');
 const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
@@ -45,7 +46,7 @@ const generateExpenseNumber = async (tenant_id, transaction = null) => {
 const getExpenses = async (req, res) => {
   try {
     const {
-      search = '', category, payment_status, branch_id,
+      search = '', category, payment_status, branch_id, project_id,
       start_date, end_date, sort_by = 'expense_date', sort_order = 'DESC',
       page = 1, limit = 20
     } = req.query;
@@ -57,6 +58,7 @@ const getExpenses = async (req, res) => {
     if (category) where.category = category;
     if (payment_status) where.payment_status = payment_status;
     if (branch_id) where.branch_id = branch_id;
+    if (project_id) where.project_id = project_id;
 
     if (search) {
       where[Op.or] = [
@@ -73,7 +75,8 @@ const getExpenses = async (req, res) => {
       include: [
         { model: Supplier, as: 'supplier', attributes: ['id', 'name'] },
         { model: Branch, as: 'branch', attributes: ['id', 'name'] },
-        { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'] }
+        { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'] },
+        { model: Project, as: 'project', attributes: ['id', 'code', 'name'] }
       ],
       order: [[sort_by, sort_order]],
       limit: parseInt(limit),
@@ -101,7 +104,8 @@ const getExpenseById = async (req, res) => {
       include: [
         { model: Supplier, as: 'supplier', attributes: ['id', 'name'] },
         { model: Branch, as: 'branch', attributes: ['id', 'name'] },
-        { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'] }
+        { model: User, as: 'creator', attributes: ['id', 'first_name', 'last_name'] },
+        { model: Project, as: 'project', attributes: ['id', 'code', 'name'] }
       ]
     });
     if (!expense) return res.status(404).json({ success: false, message: 'Gasto no encontrado' });
@@ -168,7 +172,7 @@ const createExpense = async (req, res) => {
       requires_support_document, subtotal, tax_rate, tax_amount,
       inc_rate, inc_amount, iva_status,
       retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount,
-      reteica_rate, reteica_amount,
+      reteica_rate, reteica_amount, project_id,
     } = req.body;
 
     if (!category || !CATEGORIES.includes(category)) {
@@ -185,6 +189,10 @@ const createExpense = async (req, res) => {
     const selectedBankAccountId = paid_now
       ? await resolveSelectedBankAccountId(tenant_id, bank_account_id, payment_method || 'Efectivo', transaction)
       : null;
+
+    // Módulo Proyectos: gasto de una obra (subcontrato, transporte, alquiler...).
+    const project = await resolveDocumentProject(tenant_id, project_id, { transaction })
+      .catch((e) => { throw Object.assign(e, { status: 400 }); });
 
     const expense_number = await generateExpenseNumber(tenant_id, transaction);
 
@@ -245,6 +253,7 @@ const createExpense = async (req, res) => {
       reteica_rate: reteica_rate !== undefined ? parseFloat(reteica_rate) : 0,
       reteica_amount: resolvedReteicaAmount,
       total_retentions: resolvedRetefuenteAmount + resolvedReteivaAmount + resolvedReteicaAmount,
+      project_id: project?.id || null,
     }, { transaction });
 
     await transaction.commit();
@@ -286,11 +295,17 @@ const updateExpense = async (req, res) => {
       requires_support_document, subtotal, tax_rate, tax_amount,
       inc_rate, inc_amount, iva_status,
       retefuente_rate, retefuente_amount, reteiva_rate, reteiva_amount,
-      reteica_rate, reteica_amount,
+      reteica_rate, reteica_amount, project_id,
     } = req.body;
 
     if (category && !CATEGORIES.includes(category)) {
       return res.status(400).json({ success: false, message: 'Categoría inválida' });
+    }
+    let project;
+    try {
+      project = await resolveDocumentProject(tenant_id, project_id, { currentProjectId: expense.project_id });
+    } catch (e) {
+      return res.status(e.statusCode || 400).json({ success: false, message: e.message });
     }
 
     // Igual que en create: si viene subtotal, es la fuente de verdad y
@@ -344,6 +359,7 @@ const updateExpense = async (req, res) => {
       reteica_amount: resolvedReteicaAmount,
       total_retentions: resolvedRetentions,
       payment_status: expensePaymentStatus(resolvedAmounts, expense.paid_amount),
+      ...(project === undefined ? {} : { project_id: project?.id || null }),
     });
 
     res.json({ success: true, message: 'Gasto actualizado', data: expense });
@@ -380,64 +396,25 @@ const registerPayment = async (req, res) => {
     const userId = req.user.id;
     const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
-    if (!amount || parseFloat(amount) <= 0) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
+    // Mismo registro que un lote de pagos (services/payments/documentPayments.service.js).
+    let registered;
+    try {
+      const { registerExpensePayment } = require('../../services/payments/documentPayments.service');
+      registered = await registerExpensePayment({
+        tenantId: tenant_id, userId, expenseId: id, amount, method: payment_method, date: payment_date, notes, bankAccountId: bank_account_id,
+      }, transaction);
+    } catch (e) {
+      if (!transaction.finished) await transaction.rollback();
+      if (e.statusCode || e.status === 400) return res.status(e.statusCode || 400).json({ success: false, message: e.message });
+      throw e;
     }
-
-    const expense = await Expense.findOne({
-      where: { id, tenant_id },
-      lock: transaction.LOCK.UPDATE,
-      transaction
-    });
-    if (!expense) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, message: 'Gasto no encontrado' });
-    }
-
-    // Lo que se le debe al proveedor es el neto de retenciones (ver
-    // utils/expenseAmounts.js); antes se usaba total_amount.
-    const alreadyPaid = parseFloat(expense.paid_amount || 0);
-    const remaining = expenseBalance(expense);
-
-    if (remaining <= 0) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Este gasto ya está pagado en su totalidad' });
-    }
-
-    const effectiveAmount = Math.round(Math.min(parseFloat(amount), remaining) * 100) / 100;
-    const paid_amount = Math.round((alreadyPaid + effectiveAmount) * 100) / 100;
-    const payment_status = expensePaymentStatus(expense, paid_amount);
-
-    const effectiveMethod = payment_method || expense.payment_method || 'Efectivo';
-    const selectedBankAccountId = await resolveSelectedBankAccountId(tenant_id, bank_account_id, effectiveMethod, transaction);
-    const payment = {
-      date: payment_date || new Date(),
-      amount: effectiveAmount,
-      method: effectiveMethod,
-      bank_account_id: selectedBankAccountId,
-      user_id: userId,
-      notes: notes || null
-    };
-    const payment_history = [...(expense.payment_history || []), payment];
-
-    await expense.update(
-      { paid_amount, payment_status, payment_method: payment_method || expense.payment_method, payment_history },
-      { transaction }
-    );
+    const expense = registered.document;
 
     await transaction.commit();
 
     // Asiento del abono (cuentas por pagar vs caja/bancos), no bloqueante --
     // mismo patrón que el asiento del gasto en createExpense.
-    setImmediate(async () => {
-      try {
-        const { generateExpensePaymentEntry } = require('../../services/accounting/autoEntries.service');
-        await generateExpensePaymentEntry(expense, payment, tenant_id, userId);
-      } catch (err) {
-        require('../../config/logger').warn(`[accounting] Error generando asiento de pago de gasto ${expense.id}: ${err.message}`);
-      }
-    });
+    setImmediate(() => registered.afterCommit());
 
     res.json({ success: true, message: 'Pago registrado exitosamente', data: expense });
   } catch (error) {

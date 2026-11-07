@@ -3,9 +3,11 @@ const router = express.Router();
 const permissionsController = require('../controllers/permissions.controller');
 const { authMiddleware } = require('../middleware/auth');
 
-// Middleware de rol admin
+// Estos permisos (tablas permissions/role_permissions) son GLOBALES, de toda
+// la plataforma: solo el superadmin los edita. Cada empresa administra los
+// suyos en /api/role-permissions (routes/rolePermissions.routes.js).
 const requireAdmin = (req, res, next) => {
-  if (!['super_admin', 'admin'].includes(req.user?.role)) {
+  if (req.user?.role !== 'super_admin') {
     return res.status(403).json({ success: false, message: 'Acceso denegado' });
   }
   next();

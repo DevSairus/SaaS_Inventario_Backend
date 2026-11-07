@@ -1,6 +1,7 @@
 const { Employee } = require('../../models');
 const { Op } = require('sequelize');
 const { MAX_LIMIT } = require('../../utils/pagination');
+const vacationBook = require('../../services/payroll/vacationBook.service');
 
 const NULLABLE_FIELDS = [
   'other_names', 'second_surname', 'email', 'phone', 'position', 'cost_center',
@@ -285,6 +286,9 @@ const updateEmployee = async (req, res) => {
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
     const updateData = { ...req.body };
+    // El saldo inicial de vacaciones se guarda con su propio endpoint (valida días y fecha de corte).
+    delete updateData.vacation_opening_days;
+    delete updateData.vacation_opening_date;
 
     const employee = await Employee.findOne({ where: { id, tenant_id } });
     if (!employee) {
@@ -471,6 +475,53 @@ const getEmployeeStats = async (req, res) => {
  * vencidos en vez de "por vencer"). Es solo lectura — no dispara ningún
  * job en segundo plano, ver limitación documentada en el markdown fuente.
  */
+/**
+ * Libro de vacaciones — resumen de todos los empleados (activos por defecto).
+ * GET /payroll/employees/vacations?include_inactive=true&as_of=YYYY-MM-DD
+ */
+const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+
+const getVacationBooks = async (req, res) => {
+  try {
+    const rows = await vacationBook.listBooks(req.user.tenant_id, {
+      includeInactive: req.query.include_inactive === 'true',
+      asOf: isDate(req.query.as_of) ? req.query.as_of : undefined,
+    });
+    res.json({ success: true, data: rows });
+  } catch (error) {
+    console.error('Error en getVacationBooks:', error);
+    res.status(500).json({ success: false, message: 'Error al calcular el libro de vacaciones' });
+  }
+};
+
+/** GET /payroll/employees/:id/vacations — libro de un empleado con sus movimientos. */
+const getEmployeeVacationBook = async (req, res) => {
+  try {
+    const employee = await Employee.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!employee) return res.status(404).json({ success: false, message: 'Empleado no encontrado' });
+    const book = await vacationBook.getEmployeeBook(req.user.tenant_id, employee, isDate(req.query.as_of) ? req.query.as_of : undefined);
+    res.json({ success: true, data: book });
+  } catch (error) {
+    console.error('Error en getEmployeeVacationBook:', error);
+    res.status(500).json({ success: false, message: 'Error al calcular el libro de vacaciones' });
+  }
+};
+
+/** PUT /payroll/employees/:id/vacations/opening { days, date } — vacío para quitarlo. */
+const updateVacationOpening = async (req, res) => {
+  try {
+    const employee = await Employee.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!employee) return res.status(404).json({ success: false, message: 'Empleado no encontrado' });
+    await vacationBook.setOpeningBalance(employee, req.body || {});
+    const book = await vacationBook.getEmployeeBook(req.user.tenant_id, employee);
+    res.json({ success: true, message: 'Saldo inicial guardado', data: book });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+    console.error('Error en updateVacationOpening:', error);
+    res.status(500).json({ success: false, message: 'Error al guardar el saldo inicial' });
+  }
+};
+
 const getExpiringContracts = async (req, res) => {
   try {
     if (!req.user) {
@@ -543,4 +594,7 @@ module.exports = {
   deleteEmployee,
   getEmployeeStats,
   getExpiringContracts,
+  getVacationBooks,
+  getEmployeeVacationBook,
+  updateVacationOpening,
 };

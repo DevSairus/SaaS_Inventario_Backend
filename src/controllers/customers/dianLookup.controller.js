@@ -13,8 +13,8 @@ const { Tenant } = require('../../models');
 const dianKit = require('../../services/dian/dianKitAdapter');
 const logger = require('../../config/logger');
 
-// Mismos schemeID que DOCUMENT_TYPE_OPTIONS en CustomersPage.jsx
-const DOCUMENT_TYPES = ['13', '31', '22', '41', '12', '91'];
+// Mismos schemeID que DOCUMENT_TYPE_OPTIONS (frontend constants/documentTypes.js)
+const DOCUMENT_TYPES = ['13', '31', '22', '41', '12', '91', '48', '47', '42', '21', '50', '11'];
 
 const hasOwnCertificate = (cfg) =>
   !!cfg.certificate_p12_base64 && cfg.certificate_p12_base64 !== '[CONFIGURADO]' &&

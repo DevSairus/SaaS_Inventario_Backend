@@ -95,6 +95,18 @@ router.patch('/fiscal-years/:year/close', fiscalPeriodsCtrl.closeYear);
 router.get('/reports/trial-balance', reportsCtrl.trialBalance);
 router.get('/reports/balance-general', reportsCtrl.balanceGeneral);
 router.get('/reports/income-statement', reportsCtrl.incomeStatement);
+// Resultado contable por proyecto (dimensión de proyecto en las líneas, módulo Proyectos).
+router.get('/reports/projects', async (req, res) => {
+  try {
+    const { projectLedgerSummary } = require('../../services/accounting/projectAccounting.service');
+    const data = await projectLedgerSummary(req.tenant_id, {
+      from: req.query.from, to: req.query.to, projectId: req.query.project_id, includeDrafts: req.query.include_drafts === 'true',
+    });
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Error al generar el resultado por proyecto', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
+  }
+});
 
 // Exportación Excel / PDF de los reportes financieros (Fase 1 del plan de informes contables)
 router.get('/reports/trial-balance/export', reportsCtrl.trialBalanceExport);
@@ -164,12 +176,17 @@ router.post('/opening-balances/:id/payments', openingBalancesCtrl.registerPaymen
 // '/report' y '/run-depreciation' van ANTES de '/:id' para que Express no
 // los capture como si "report"/"run-depreciation" fueran un :id.
 router.get('/fixed-assets/report', fixedAssetsCtrl.report);
+router.get('/fixed-assets/config', fixedAssetsCtrl.config);
+router.get('/fixed-assets/fiscal-report', fixedAssetsCtrl.fiscalReport);
 router.post('/fixed-assets/run-depreciation', fixedAssetsCtrl.runDepreciation);
 router.get('/fixed-assets', fixedAssetsCtrl.list);
 router.get('/fixed-assets/:id', fixedAssetsCtrl.getById);
 router.post('/fixed-assets', fixedAssetsCtrl.create);
 router.put('/fixed-assets/:id', fixedAssetsCtrl.update);
 router.post('/fixed-assets/:id/dispose', fixedAssetsCtrl.dispose);
+router.post('/fixed-assets/:id/change-estimate', fixedAssetsCtrl.changeEstimate);
+router.post('/fixed-assets/:id/impairments', fixedAssetsCtrl.impair);
+router.post('/fixed-assets/:id/usage', fixedAssetsCtrl.usage);
 
 // Créditos y Amortización (Fase 2 del plan de Contabilidad Pitbox).
 // '/report' va ANTES de '/:id' por la misma razón que en fixed-assets.

@@ -16,9 +16,11 @@ const LINK_TTL_SECONDS = 10 * 60;
 
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
-const useCloudinary = () => Boolean(
-  process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET
-);
+// Valores de ejemplo del .env ("your_cloudinary_api_key") cuentan como sin
+// configurar (mismo criterio que attachments/attachmentStorage.js).
+const configured = (v) => Boolean(v) && !/^your[_-]/i.test(v);
+const useCloudinary = () => configured(process.env.CLOUDINARY_CLOUD_NAME)
+  && configured(process.env.CLOUDINARY_API_KEY) && configured(process.env.CLOUDINARY_API_SECRET);
 
 function getCloudinary() {
   const cloudinary = require('cloudinary').v2;

@@ -423,68 +423,25 @@ const registerPayment = async (req, res) => {
     const userId = req.user.id;
     const { amount, payment_method, payment_date, notes, bank_account_id } = req.body;
 
-    if (!amount || parseFloat(amount) <= 0) {
+    // Mismo registro que un lote de pagos (services/payments/documentPayments.service.js).
+    let registered;
+    try {
+      const { registerPurchasePayment } = require('../../services/payments/documentPayments.service');
+      registered = await registerPurchasePayment({
+        tenantId, userId, purchaseId: id, amount, method: payment_method, date: payment_date, notes, bankAccountId: bank_account_id,
+      }, transaction);
+    } catch (e) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'El monto debe ser mayor a 0' });
+      if (e.statusCode) return res.status(e.statusCode).json({ success: false, message: e.message });
+      throw e;
     }
-
-    // SELECT FOR UPDATE: evita que dos pagos concurrentes lean el mismo paid_amount
-    const purchase = await Purchase.findOne({
-      where: { id, tenant_id: tenantId },
-      lock: transaction.LOCK.UPDATE,
-      transaction
-    });
-    if (!purchase) {
-      await transaction.rollback();
-      return res.status(404).json({ success: false, message: 'Compra no encontrada' });
-    }
-    if (purchase.status === 'draft' || purchase.status === 'cancelled') {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'No se puede registrar un pago en una compra en borrador o cancelada' });
-    }
-
-    // Lo que se le debe al proveedor es el neto de retenciones (ver
-    // utils/purchaseAmounts.js); antes se usaba total_amount.
-    const alreadyPaid = parseFloat(purchase.paid_amount || 0);
-    const remaining = purchaseBalance(purchase);
-
-    if (remaining <= 0) {
-      await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'Esta compra ya está pagada en su totalidad' });
-    }
-
-    const effectiveAmount = round2(Math.min(parseFloat(amount), remaining));
-    const paid_amount = round2(alreadyPaid + effectiveAmount);
-    const payment_status = purchasePaymentStatus(purchase, paid_amount);
-
-    const payment = {
-      id: require('crypto').randomUUID(),
-      date: payment_date || new Date(),
-      amount: effectiveAmount,
-      method: payment_method || purchase.payment_method || 'Efectivo',
-      bank_account_id: bank_account_id || null,
-      user_id: userId,
-      notes: notes || null,
-      journal_entry_id: null,
-    };
-    const payment_history = [...(purchase.payment_history || []), payment];
-
-    await purchase.update(
-      { paid_amount, payment_status, payment_method: payment_method || purchase.payment_method, payment_history },
-      { transaction }
-    );
 
     await transaction.commit();
 
     // Asiento del pago (débito proveedores / crédito caja-bancos). No
     // bloqueante: si falla (ej. falta un mapeo), el pago queda registrado y
     // el asiento se puede generar después; se loguea.
-    try {
-      const { recordPurchasePaymentEntries } = require('../../services/inventory/purchasePayments.service');
-      await recordPurchasePaymentEntries(purchase.id, tenantId, userId);
-    } catch (e) {
-      require('../../config/logger').warn(`[accounting] Asiento de pago a proveedor (compra ${id}): ${e.message}`);
-    }
+    await registered.afterCommit();
 
     // 🔔 Verificación automática de alertas de cuentas por pagar
     markPurchaseForAlertCheck(res, id, tenantId);

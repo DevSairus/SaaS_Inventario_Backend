@@ -119,6 +119,12 @@ const PurchaseItem = sequelize.define('PurchaseItem', {
     type: DataTypes.DECIMAL(6, 2),
     allowNull: true
   },
+  // Precio de venta fijado en la línea (migración 2026110706): al recibir
+  // pasa tal cual al producto. NULL = se calcula con el margen.
+  sale_price: {
+    type: DataTypes.DECIMAL(15, 2),
+    allowNull: true
+  },
   batch_number: {
     type: DataTypes.STRING(100),
     allowNull: true

@@ -17,9 +17,14 @@
 //     normal (queda con inventory_movement_id seteado), así que ESOS no
 //     cuentan acá -- solo cuentan los ítems que llegaron aprobados por una
 //     cotización de cliente y aún no pasaron por applyApprovedItems.
+//   - Proyectos vivos (módulo Proyectos): lo reservado en su lista de
+//     materiales y lo que está en la bodega de la obra -- el despacho a la
+//     obra no baja current_stock (ver services/projects/projectStock.service.js).
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { Sale, SaleItem, WorkOrder, WorkOrderItem, Product } = require('../../models');
+const { getEffectiveModulesForTenantId } = require('../moduleAccess');
+const { getProjectCommitments } = require('../projects/projectStock.service');
 
 /**
  * Calcula, para un lote de productos, cuánta cantidad está "en trámite"
@@ -30,18 +35,19 @@ const { Sale, SaleItem, WorkOrder, WorkOrderItem, Product } = require('../../mod
  * @param {object} [opts]
  * @param {string} [opts.excludeSaleId] - no contar la venta que se está editando
  * @param {string} [opts.excludeWorkOrderId] - no contar la OT que se está editando
+ * @param {string} [opts.excludeProjectId] - no contar el proyecto que está reservando
  * @param {import('sequelize').Transaction} [opts.transaction]
- * @returns {Promise<{ [productId: string]: { sales: number, work_orders: number, total: number } }>}
+ * @returns {Promise<{ [productId: string]: { sales: number, work_orders: number, projects: number, total: number } }>}
  */
 async function getInProcessMap(tenantId, productIds, opts = {}) {
   const map = {};
   const ids = Array.from(new Set((productIds || []).filter(Boolean)));
   if (ids.length === 0) return map;
 
-  const { excludeSaleId, excludeWorkOrderId, transaction } = opts;
+  const { excludeSaleId, excludeWorkOrderId, excludeProjectId, transaction } = opts;
 
   const ensure = (productId) => {
-    if (!map[productId]) map[productId] = { sales: 0, work_orders: 0, total: 0 };
+    if (!map[productId]) map[productId] = { sales: 0, work_orders: 0, projects: 0, total: 0 };
     return map[productId];
   };
 
@@ -127,6 +133,20 @@ async function getInProcessMap(tenantId, productIds, opts = {}) {
     const entry = ensure(row.product_id);
     entry.work_orders += qty;
     entry.total += qty;
+  }
+
+  // ── Proyectos: reservado en el BOM + saldo en la bodega de la obra ──────
+  // Solo con el módulo activo: el resto de tenants no paga la consulta.
+  const modules = await getEffectiveModulesForTenantId(tenantId);
+  if (modules.includes('projects')) {
+    const commitments = await getProjectCommitments(tenantId, ids, { excludeProjectId, transaction });
+    for (const [productId, c] of commitments) {
+      const qty = c.reserved + c.on_site;
+      if (qty <= 0) continue;
+      const entry = ensure(productId);
+      entry.projects += qty;
+      entry.total += qty;
+    }
   }
 
   return map;

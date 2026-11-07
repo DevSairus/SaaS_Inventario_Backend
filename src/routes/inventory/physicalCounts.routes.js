@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const { requirePermission } = require('../../middleware/requirePermission');
 const physicalCountsController = require('../../controllers/inventory/physicalCounts.controller');
 const { checkRole } = require('../../middleware/auth');
 const uploadExcelMiddleware = require('../../middleware/uploadProductsExcel');
@@ -24,12 +25,12 @@ router.get('/:id/template', physicalCountsController.downloadTemplate);
 router.get('/:id/report', physicalCountsController.downloadReport);
 
 // Crear sesión
-router.post('/', checkRole(...PHYSICAL_COUNT_WRITE_ROLES), physicalCountsController.createPhysicalCount);
+router.post('/', requirePermission('inventory.physical_counts.write'), physicalCountsController.createPhysicalCount);
 
 // Subir Excel (preview con dry_run=true, aplicar con dry_run=false)
 router.post(
   '/:id/upload',
-  checkRole(...PHYSICAL_COUNT_WRITE_ROLES),
+  requirePermission('inventory.physical_counts.write'),
   uploadExcelMiddleware.single('archivo'),
   physicalCountsController.uploadPhysicalCount
 );

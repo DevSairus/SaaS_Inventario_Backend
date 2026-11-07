@@ -10,14 +10,40 @@
 //   GET    /api/accounting/fixed-assets/:id              → getById (incluye histórico de depreciación)
 //   POST   /api/accounting/fixed-assets                  → create
 //   PUT    /api/accounting/fixed-assets/:id              → update
-//   POST   /api/accounting/fixed-assets/:id/dispose      → dispose (dar de baja)
+//   POST   /api/accounting/fixed-assets/:id/dispose      → dispose (retiro o venta, con asiento)
+//   POST   /api/accounting/fixed-assets/:id/change-estimate → changeEstimate (vida útil / valor residual hacia adelante)
 
-const { FixedAsset, FixedAssetDepreciationEntry, ChartOfAccount, JournalEntry } = require('../../models');
-const { runDepreciationForTenant, lastClosedPeriod } = require('../../services/accounting/fixedAssetDepreciation.service');
+const {
+  FixedAsset, FixedAssetDepreciationEntry, FixedAssetImpairment, FixedAssetUsage, ChartOfAccount, JournalEntry, Tenant,
+} = require('../../models');
+const { FISCAL_MAX_RATES, fiscalReport } = require('../../services/accounting/fixedAssetFiscal.service');
+const {
+  runDepreciationForTenant, lastClosedPeriod, openingFields, openingAccumulated, changeEstimate, disposeAsset,
+  registerImpairment, reverseImpairment, recordUsage,
+} = require('../../services/accounting/fixedAssetDepreciation.service');
 const logger = require('../../config/logger');
 const { parsePagination, buildPagination } = require('../../utils/pagination');
 
-const CATEGORIES = ['vehiculo', 'maquinaria', 'equipo_computo', 'muebles_enseres', 'otro'];
+const CATEGORIES = ['vehiculo', 'maquinaria', 'equipo_computo', 'equipo_comunicacion', 'muebles_enseres', 'construcciones', 'terrenos', 'otro'];
+const METHODS = ['linea_recta', 'saldos_decrecientes', 'unidades_produccion', 'menor_cuantia', 'no_deprecia'];
+const LOW_VALUE_UVT = 50; // activos de menor cuantía (art. 1.2.1.18.7 DUR 1625/2016)
+
+// UVT vigente: la del perfil fiscal del negocio o la del año (retenciones).
+async function uvtOf(tenantId) {
+  const { DEFAULT_UVT_VALUE } = require('../../data/retention-concepts-default');
+  const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'tax_config'] });
+  const own = Number(tenant?.tax_config?.fiscal_profile?.uvt_value);
+  return own > 0 ? own : DEFAULT_UVT_VALUE;
+}
+
+// Deterioro total por activo, en un solo query.
+async function getImpairedByAsset(assetIds) {
+  if (!assetIds.length) return {};
+  const rows = await FixedAssetImpairment.findAll({ where: { fixed_asset_id: assetIds }, attributes: ['fixed_asset_id', 'amount'] });
+  const out = {};
+  for (const r of rows) out[r.fixed_asset_id] = Math.round(((out[r.fixed_asset_id] || 0) + Number(r.amount)) * 100) / 100;
+  return out;
+}
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
 const ACCOUNT_INCLUDES = [
@@ -25,8 +51,8 @@ const ACCOUNT_INCLUDES = [
   { model: ChartOfAccount, as: 'accumulated_depreciation_account', attributes: ['id', 'code', 'name'] },
 ];
 
-function bookValue(asset, accumulatedDepreciation) {
-  return Number(asset.acquisition_cost) - Number(accumulatedDepreciation || 0);
+function bookValue(asset, accumulatedDepreciation, impaired = 0) {
+  return Number(asset.acquisition_cost) - Number(accumulatedDepreciation || 0) - Number(impaired || 0);
 }
 
 // Último accumulated_after por activo, en un solo query (evita N+1 en list/report).
@@ -62,10 +88,11 @@ exports.list = async (req, res) => {
     });
 
     const latestByAsset = await getLatestAccumulatedByAsset(assets.map((a) => a.id));
-
+    const impairedByAsset = await getImpairedByAsset(assets.map((a) => a.id));
     const data = assets.map((a) => {
-      const accumulated = Number(latestByAsset[a.id]?.accumulated_after || 0);
-      return { ...a.toJSON(), accumulated_depreciation: accumulated, book_value: bookValue(a, accumulated) };
+      const accumulated = latestByAsset[a.id] ? Number(latestByAsset[a.id].accumulated_after) : openingAccumulated(a);
+      const impaired = impairedByAsset[a.id] || 0;
+      return { ...a.toJSON(), accumulated_depreciation: accumulated, impaired, book_value: bookValue(a, accumulated, impaired) };
     });
 
     res.json({ success: true, data, pagination: buildPagination(pg, count) });
@@ -84,13 +111,14 @@ exports.report = async (req, res) => {
 
     const assets = await FixedAsset.findAll({ where });
     const latestByAsset = await getLatestAccumulatedByAsset(assets.map((a) => a.id));
+    const impairedByAsset = await getImpairedByAsset(assets.map((a) => a.id));
 
     const byCategory = {};
     const totals = { acquisition_cost: 0, accumulated_depreciation: 0, book_value: 0 };
 
     for (const a of assets) {
-      const accumulated = Number(latestByAsset[a.id]?.accumulated_after || 0);
-      const value = bookValue(a, accumulated);
+      const accumulated = latestByAsset[a.id] ? Number(latestByAsset[a.id].accumulated_after) : openingAccumulated(a);
+      const value = bookValue(a, accumulated, impairedByAsset[a.id] || 0);
       const cost = Number(a.acquisition_cost);
 
       if (!byCategory[a.category]) {
@@ -127,13 +155,18 @@ exports.runDepreciation = async (req, res) => {
 
     const userId = req.user_id || req.user?.id || null;
     const created = await runDepreciationForTenant(req.tenant_id, { targetPeriod: period, userId });
+    const blocked = created.blocked || [];
+    const note = blocked.length
+      ? ` ${blocked.length} activo(s) se detuvieron en un período contable cerrado (${blocked.slice(0, 3).map((b) => `${b.name}: ${b.period}`).join(', ')}): no se depreció ese mes. Si ya está depreciado por fuera, registra su saldo inicial.`
+      : '';
 
     res.json({
       success: true,
       data: created,
-      message: created.length
+      blocked,
+      message: (created.length
         ? `Se generaron ${created.length} entradas de depreciación hasta ${period}.`
-        : `No había depreciación pendiente hasta ${period}.`,
+        : `No había depreciación pendiente hasta ${period}.`) + note,
     });
   } catch (error) {
     logger.error('Error en fixedAssets.controller.js:', error);
@@ -146,7 +179,9 @@ exports.getById = async (req, res) => {
   try {
     const asset = await FixedAsset.findOne({
       where: { id: req.params.id, tenant_id: req.tenant_id },
-      include: ACCOUNT_INCLUDES,
+      include: [...ACCOUNT_INCLUDES,
+        { model: ChartOfAccount, as: 'sale_account', attributes: ['id', 'code', 'name'], required: false },
+        { model: JournalEntry, as: 'disposal_entry', attributes: ['id', 'entry_number', 'status'], required: false }],
     });
     if (!asset) return res.status(404).json({ success: false, message: 'Activo fijo no encontrado' });
 
@@ -156,15 +191,25 @@ exports.getById = async (req, res) => {
       order: [['period', 'ASC']],
     });
 
-    const accumulated = entries.length ? Number(entries[entries.length - 1].accumulated_after) : 0;
+    const accumulated = entries.length ? Number(entries[entries.length - 1].accumulated_after) : openingAccumulated(asset);
+    const impairments = await FixedAssetImpairment.findAll({
+      where: { fixed_asset_id: asset.id },
+      include: [{ model: JournalEntry, as: 'journal_entry', attributes: ['id', 'entry_number', 'status'] }],
+      order: [['impairment_date', 'ASC']],
+    });
+    const impaired = impairments.reduce((s, i) => s + Number(i.amount), 0);
+    const usage = await FixedAssetUsage.findAll({ where: { fixed_asset_id: asset.id }, order: [['period', 'ASC']] });
 
     res.json({
       success: true,
       data: {
         ...asset.toJSON(),
         accumulated_depreciation: accumulated,
-        book_value: bookValue(asset, accumulated),
+        impaired,
+        book_value: bookValue(asset, accumulated, impaired),
         depreciation_entries: entries,
+        impairments,
+        usage,
       },
     });
   } catch (error) {
@@ -179,7 +224,13 @@ exports.create = async (req, res) => {
     const {
       name, category, branch_id, acquisition_cost, acquisition_date, useful_life_months,
       salvage_value, asset_account_id, accumulated_depreciation_account_id,
+      opening_accumulated_depreciation, opening_period, remaining_months,
+      depreciation_method, project_id, total_units, unit_label, fiscal_max_rate, fiscal_opening_accumulated,
+      fiscal_cost, fiscal_salvage_value,
     } = req.body;
+    const cat = category || 'otro';
+    const method = cat === 'terrenos' ? 'no_deprecia' : (depreciation_method || 'linea_recta');
+    if (!METHODS.includes(method)) return res.status(400).json({ success: false, message: 'Método de depreciación inválido' });
 
     if (!name) return res.status(400).json({ success: false, message: 'El nombre es obligatorio' });
     if (category && !CATEGORIES.includes(category)) {
@@ -189,8 +240,21 @@ exports.create = async (req, res) => {
       return res.status(400).json({ success: false, message: 'El costo de adquisición debe ser mayor a 0' });
     }
     if (!acquisition_date) return res.status(400).json({ success: false, message: 'La fecha de adquisición es obligatoria' });
-    if (!useful_life_months || parseInt(useful_life_months, 10) <= 0) {
+    const needsLife = !['no_deprecia', 'menor_cuantia', 'unidades_produccion'].includes(method);
+    if (needsLife && (!useful_life_months || parseInt(useful_life_months, 10) <= 0)) {
       return res.status(400).json({ success: false, message: 'La vida útil (en meses) debe ser mayor a 0' });
+    }
+    if (method === 'unidades_produccion' && !(Number(total_units) > 0)) {
+      return res.status(400).json({ success: false, message: 'Indica las unidades totales que producirá el activo (horas, km o unidades)' });
+    }
+    if (method === 'menor_cuantia') {
+      const limit = LOW_VALUE_UVT * await uvtOf(req.tenant_id);
+      if (parseFloat(acquisition_cost) > limit) {
+        return res.status(400).json({ success: false, message: `Menor cuantía solo aplica a activos de hasta 50 UVT ($ ${Math.round(limit).toLocaleString('es-CO')})` });
+      }
+    }
+    if (fiscal_max_rate !== undefined && fiscal_max_rate !== null && fiscal_max_rate !== '' && !(Number(fiscal_max_rate) >= 0 && Number(fiscal_max_rate) <= 100)) {
+      return res.status(400).json({ success: false, message: 'La tasa fiscal debe estar entre 0 y 100 %' });
     }
     if (!asset_account_id || !accumulated_depreciation_account_id) {
       return res.status(400).json({ success: false, message: 'Debes seleccionar la cuenta del activo y la cuenta de depreciación acumulada' });
@@ -208,25 +272,43 @@ exports.create = async (req, res) => {
     if (!assetAccount) return res.status(404).json({ success: false, message: 'Cuenta del activo no encontrada' });
     if (!accumAccount) return res.status(404).json({ success: false, message: 'Cuenta de depreciación acumulada no encontrada' });
 
+    // Saldo inicial: activo que ya venía depreciándose (otro sistema).
+    const lifeMonths = needsLife ? parseInt(useful_life_months, 10) : (parseInt(useful_life_months, 10) || 1);
+    const opening = method === 'linea_recta' || method === 'saldos_decrecientes'
+      ? openingFields({
+        acquisition_cost, salvage_value: salvage, acquisition_date, useful_life_months: lifeMonths,
+        opening_accumulated_depreciation, opening_period, remaining_months,
+      })
+      : {};
+
     const asset = await FixedAsset.create({
       tenant_id: req.tenant_id,
       branch_id: branch_id || null,
       name,
-      category: category || 'otro',
+      category: cat,
       acquisition_cost: parseFloat(acquisition_cost),
       acquisition_date,
-      useful_life_months: parseInt(useful_life_months, 10),
+      useful_life_months: lifeMonths,
       salvage_value: salvage,
-      depreciation_method: 'linea_recta',
+      depreciation_method: method,
+      project_id: project_id || null,
+      total_units: method === 'unidades_produccion' ? Number(total_units) : null,
+      unit_label: method === 'unidades_produccion' ? (unit_label || 'unidades') : null,
+      fiscal_max_rate: fiscal_max_rate === undefined || fiscal_max_rate === '' || fiscal_max_rate === null ? null : Number(fiscal_max_rate),
+      fiscal_opening_accumulated: fiscal_opening_accumulated === undefined || fiscal_opening_accumulated === '' || fiscal_opening_accumulated === null ? null : Number(fiscal_opening_accumulated),
+      fiscal_cost: fiscal_cost === undefined || fiscal_cost === '' || fiscal_cost === null ? null : Number(fiscal_cost),
+      fiscal_salvage_value: fiscal_salvage_value === undefined || fiscal_salvage_value === '' || fiscal_salvage_value === null ? null : Number(fiscal_salvage_value),
       asset_account_id,
       accumulated_depreciation_account_id,
       status: 'activo',
       created_by: req.user_id || req.user?.id || null,
+      ...opening,
     });
 
     res.status(201).json({ success: true, data: asset });
   } catch (error) {
     logger.error('Error en fixedAssets.controller.js:', error);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
     res.status(500).json({ success: false, message: 'Error al crear el activo fijo', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
 };
@@ -246,6 +328,13 @@ exports.update = async (req, res) => {
     const updates = {};
 
     if (name !== undefined) updates.name = name;
+    if (req.body.project_id !== undefined) updates.project_id = req.body.project_id || null;
+    if (req.body.fiscal_max_rate !== undefined) updates.fiscal_max_rate = req.body.fiscal_max_rate === '' || req.body.fiscal_max_rate === null ? null : Number(req.body.fiscal_max_rate);
+    if (req.body.fiscal_opening_accumulated !== undefined) updates.fiscal_opening_accumulated = req.body.fiscal_opening_accumulated === '' || req.body.fiscal_opening_accumulated === null ? null : Number(req.body.fiscal_opening_accumulated);
+    if (req.body.unit_label !== undefined) updates.unit_label = req.body.unit_label || null;
+    for (const f of ['fiscal_cost', 'fiscal_salvage_value']) {
+      if (req.body[f] !== undefined) updates[f] = req.body[f] === '' || req.body[f] === null ? null : Number(req.body[f]);
+    }
     if (branch_id !== undefined) updates.branch_id = branch_id || null;
     if (category !== undefined) {
       if (!CATEGORIES.includes(category)) {
@@ -274,7 +363,7 @@ exports.update = async (req, res) => {
     if (touchesBase && hasDepreciation) {
       return res.status(409).json({
         success: false,
-        message: 'Este activo ya tiene depreciación generada: no se puede cambiar el costo, la fecha de compra, la vida útil ni el valor residual.',
+        message: 'Este activo ya tiene depreciación generada: el costo y la fecha de compra no se pueden cambiar. Para cambiar la vida útil o el valor residual usa "Cambiar vida útil" (se aplica hacia adelante).',
       });
     }
     if (touchesBase && !hasDepreciation) {
@@ -298,27 +387,103 @@ exports.dispose = async (req, res) => {
   try {
     const asset = await FixedAsset.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id } });
     if (!asset) return res.status(404).json({ success: false, message: 'Activo fijo no encontrado' });
-    if (asset.status === 'dado_de_baja') {
-      return res.status(409).json({ success: false, message: 'El activo ya está dado de baja' });
+    if (req.body.sale_account_id) {
+      const acc = await ChartOfAccount.findOne({ where: { id: req.body.sale_account_id, tenant_id: req.tenant_id } });
+      if (!acc) return res.status(404).json({ success: false, message: 'Cuenta de la venta no encontrada' });
     }
-
-    const { disposal_date, disposal_reason } = req.body;
-    if (!disposal_date) return res.status(400).json({ success: false, message: 'La fecha de baja es obligatoria' });
-
-    // Solo detiene la depreciación futura (el job mensual solo toma
-    // status='activo') -- NO genera el asiento de baja del activo. Ver nota
-    // del plan de Fase 1: se deja como caso aparte a implementar si se
-    // necesita (retiro de activo bruto + depreciación acumulada del
-    // balance, reconocimiento de utilidad/pérdida en venta si aplica).
-    await asset.update({ status: 'dado_de_baja', disposal_date, disposal_reason: disposal_reason || null });
-
+    // Deprecia hasta el día de la baja y genera el asiento de retiro o venta.
+    const result = await disposeAsset(asset, req.body || {}, req.tenant_id, req.user_id || req.user?.id || null);
+    const r = result.result;
     res.json({
       success: true,
-      data: asset,
-      message: 'Activo dado de baja. La depreciación futura queda detenida; el asiento de retiro contable, si se necesita, debe registrarse manualmente.',
+      data: { asset, ...result },
+      message: asset.disposal_type === 'venta'
+        ? `Activo vendido. ${r >= 0 ? 'Utilidad' : 'Pérdida'} de $ ${Math.abs(Math.round(r)).toLocaleString('es-CO')}; asiento ${result.entry?.entry_number || 'en borrador'}.`
+        : `Activo retirado. Pérdida por el valor en libros de $ ${Math.round(result.book_value).toLocaleString('es-CO')}; asiento ${result.entry?.entry_number || 'en borrador'}.`,
     });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
     logger.error('Error en fixedAssets.controller.js:', error);
-    res.status(500).json({ success: false, message: 'Error al dar de baja el activo fijo', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
+    res.status(500).json({ success: false, message: `Error al dar de baja el activo fijo: ${error.message}` });
+  }
+};
+
+// GET /fixed-assets/config — UVT, límite de menor cuantía y tasas fiscales por categoría.
+exports.config = async (req, res) => {
+  try {
+    const uvt = await uvtOf(req.tenant_id);
+    res.json({ success: true, data: { uvt, low_value_limit: LOW_VALUE_UVT * uvt, fiscal_max_rates: FISCAL_MAX_RATES, categories: CATEGORIES, methods: METHODS } });
+  } catch (error) {
+    logger.error('Error en fixedAssets.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener la configuración' });
+  }
+};
+
+// GET /fixed-assets/fiscal-report?year=YYYY — conciliación contable-fiscal.
+exports.fiscalReport = async (req, res) => {
+  try {
+    const year = parseInt(req.query.year, 10) || new Date().getFullYear();
+    res.json({ success: true, data: await fiscalReport(req.tenant_id, year) });
+  } catch (error) {
+    logger.error('Error en fixedAssets.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al generar el reporte fiscal' });
+  }
+};
+
+// POST /fixed-assets/:id/impairments — deterioro de valor con su asiento.
+exports.impair = async (req, res) => {
+  try {
+    const asset = await FixedAsset.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id } });
+    if (!asset) return res.status(404).json({ success: false, message: 'Activo fijo no encontrado' });
+    const userId = req.user_id || req.user?.id || null;
+    // reverse=true: reversión (el valor recuperable volvió a subir).
+    const reverse = req.body?.reverse === true || req.body?.reverse === 'true';
+    const result = reverse
+      ? await reverseImpairment(asset, req.body || {}, req.tenant_id, userId)
+      : await registerImpairment(asset, req.body || {}, req.tenant_id, userId);
+    res.status(201).json({
+      success: true,
+      data: result,
+      message: `${reverse ? 'Reversión' : 'Deterioro'} registrado. Nuevo valor en libros: $ ${Math.round(result.book_value).toLocaleString('es-CO')}; asiento ${result.entry?.entry_number || 'en borrador'}.`,
+    });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+    logger.error('Error en fixedAssets.controller.js:', error);
+    res.status(500).json({ success: false, message: `Error al registrar el deterioro: ${error.message}` });
+  }
+};
+
+// POST /fixed-assets/:id/usage — uso del mes (unidades de producción).
+exports.usage = async (req, res) => {
+  try {
+    const asset = await FixedAsset.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id } });
+    if (!asset) return res.status(404).json({ success: false, message: 'Activo fijo no encontrado' });
+    const row = await recordUsage(asset, req.body || {}, req.tenant_id, req.user_id || req.user?.id || null);
+    res.json({ success: true, data: row, message: 'Uso registrado: se depreciará con el cierre del mes' });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+    logger.error('Error en fixedAssets.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al registrar el uso' });
+  }
+};
+
+// POST /fixed-assets/:id/change-estimate — vida útil restante y/o valor
+// residual, aplicados hacia adelante (lo ya depreciado no cambia).
+exports.changeEstimate = async (req, res) => {
+  try {
+    const asset = await FixedAsset.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id } });
+    if (!asset) return res.status(404).json({ success: false, message: 'Activo fijo no encontrado' });
+    const result = await changeEstimate(asset, req.body || {}, req.user_id || req.user?.id || null);
+    res.json({
+      success: true,
+      data: { asset, ...result },
+      message: result.pending > 0
+        ? `Desde ${result.effective_period} se depreciarán $ ${Math.round(result.monthly).toLocaleString('es-CO')} al mes.`
+        : 'El activo queda totalmente depreciado.',
+    });
+  } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+    logger.error('Error en fixedAssets.controller.js:', error);
+    res.status(500).json({ success: false, message: 'Error al cambiar la estimación' });
   }
 };

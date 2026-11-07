@@ -142,6 +142,26 @@ const JOBS = [
     },
   },
   {
+    // Asientos de consumo de materiales en obra que hayan quedado pendientes
+    // (normalmente se generan al mover el stock; ver projectAccounting.service.js).
+    name: 'project-material-entries',
+    schedule: '15 6 * * *',
+    run: async () => {
+      const { postAllTenantsProjectMaterials } = require('../services/accounting/projectAccounting.service');
+      return postAllTenantsProjectMaterials();
+    },
+  },
+  {
+    // Alertas de sobrecosto de proyectos (módulo Proyectos): también se
+    // evalúan al abrir cada proyecto; esto avisa aunque nadie lo abra.
+    name: 'project-budget-alerts',
+    schedule: '30 6 * * *',
+    run: async () => {
+      const { checkAllProjects } = require('../services/projects/projectAlerts.service');
+      return checkAllProjects();
+    },
+  },
+  {
     name: 'customer-advance-alerts',
     schedule: '10 6 * * *', // 6:10am hora Colombia (después de crm-rewards) -- basta con una vez al día, el disparador es antigüedad en días, no una hora exacta
     run: async () => {

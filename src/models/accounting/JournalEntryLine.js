@@ -11,6 +11,8 @@ const JournalEntryLine = sequelize.define(
     credit: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
     description: { type: DataTypes.STRING(255), allowNull: true },
     third_party_id: { type: DataTypes.UUID, allowNull: true },
+    // Dimensión de proyecto (migración 2026110609).
+    project_id: { type: DataTypes.UUID, allowNull: true },
     line_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     // La tabla tiene created_at NOT NULL (sin updated_at, las líneas son
     // inmutables). Con timestamps:false Sequelize no le pone valor a menos

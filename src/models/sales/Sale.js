@@ -349,6 +349,18 @@ const Sale = sequelize.define('Sale', {
   aiu_profit_amount:     { type: DataTypes.DECIMAL(15, 2), allowNull: true },
   aiu_object:            { type: DataTypes.TEXT, allowNull: true },
   // ─────────────────────────────────────────────────────────────────────
+  // Proyecto al que pertenece (módulo Proyectos, migración 2026110502).
+  // NULL = documento general, igual que antes del módulo.
+  project_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'projects', key: 'id' }
+  },
+  // Factura parcial de un corte de obra (migración 2026110612): la parte
+  // retenida por garantía no vence hasta liberarla (utils/saleAmounts.js).
+  project_cut_id: { type: DataTypes.UUID, allowNull: true },
+  retention_guarantee_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+  retention_released_at: { type: DataTypes.DATE, allowNull: true },
   created_by: {
     type: DataTypes.UUID,
     references: { model: 'users', key: 'id' },

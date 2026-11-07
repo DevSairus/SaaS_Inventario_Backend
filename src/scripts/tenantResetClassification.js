@@ -15,6 +15,12 @@
 const ALWAYS_KEEP = [
   // Estructura organizacional
   'branches', 'warehouses', 'user_branches',
+  // Permisos por empresa (configuración)
+  'tenant_role_permissions',
+  // Reglas de aprobación (configuración)
+  'approval_rules',
+  // Formatos propios de archivo plano de pagos (configuración)
+  'bank_payment_templates',
   // Catálogos/config de inventario que no son "stock" en sí
   'categories', 'price_lists', 'price_list_categories',
   'product_equivalence_groups', 'product_equivalence_group_members',
@@ -22,6 +28,8 @@ const ALWAYS_KEEP = [
   // Contabilidad: la ESTRUCTURA (plan de cuentas) se conserva; los saldos,
   // asientos, periodos y consecutivos van en ALWAYS_WIPE.
   'chart_of_accounts', 'account_mappings',
+  // Cotizador solar: parámetros de precios de la empresa
+  'solar_settings',
   // CRM: definiciones/plantillas, no las interacciones ni oportunidades
   'crm_message_templates', 'crm_pipeline_stages', 'crm_loss_reasons', 'crm_automation_rules',
   'customer_tags',
@@ -77,6 +85,15 @@ const ALWAYS_WIPE = [
   'ensambladora_cotizaciones', 'ensambladora_ventas', 'ensambladora_ordenes_alistamiento',
   'ensambladora_ordenes_entrega', 'ensambladora_ordenes_garantia', 'ensambladora_ordenes_revision',
   'ensambladora_runt_solicitudes', 'ensambladora_audit_logs',
+  // Proyectos (sus bodegas quedan como bodegas normales: warehouses.project_id
+  // es ON DELETE SET NULL)
+  'projects', 'project_budget_lines', 'project_bom_items',
+  // Adjuntos de documentos (los archivos privados quedan huérfanos en Cloudinary)
+  'attachments',
+  'approval_requests', 'approval_tokens',
+  'payment_batches', 'payment_batch_items',
+  'project_time_entries', 'project_labor_allocations', 'project_budget_alerts',
+  'tools', 'tool_assignments', 'tool_events', 'project_material_postings', 'solar_studies', 'project_cuts', 'project_cut_items', 'solar_leads',
 ];
 
 // Casos dudosos: catálogo que puede ser real (el cliente ya lo configuró en

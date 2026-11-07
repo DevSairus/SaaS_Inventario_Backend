@@ -515,6 +515,22 @@ async function crearComprobantes({ period, liquidations, tenantId, userId, t, en
   return { entries, warnings };
 }
 
+// Módulo Proyectos: si el periodo ya se repartió por horas entre obras, la
+// reclasificación contable a las obras se rehace con el comprobante nuevo
+// (ver services/accounting/projectAccounting.service.js). No bloquea.
+async function reclasificarObrasDelPeriodo(tenantId, period, userId) {
+  try {
+    const { ProjectLaborAllocation } = models();
+    if (!ProjectLaborAllocation) return null;
+    const repartido = await ProjectLaborAllocation.count({ where: { tenant_id: tenantId, payroll_period_id: period.id } });
+    if (!repartido) return null;
+    return await require('../accounting/projectAccounting.service').postLaborReclass(tenantId, period, userId);
+  } catch (error) {
+    logger.warn(`[Nómina-Contabilidad] Reclasificación a obras del periodo ${period.id}: ${error.message}`);
+    return null;
+  }
+}
+
 /**
  * Genera los comprobantes contables (en borrador) de un periodo de nómina ya
  * emitido. Idempotente: si el periodo ya tiene comprobantes vigentes, no
@@ -534,6 +550,7 @@ async function generarComprobantesNomina(period, liquidations, tenantId, userId)
 
     const { entries, warnings } = await crearComprobantes({ period, liquidations, tenantId, userId, t });
     await t.commit();
+    await reclasificarObrasDelPeriodo(tenantId, period, userId);
     if (warnings.length) logger.warn(`[Nómina-Contabilidad] Periodo ${period.id}: ${warnings.join(' | ')}`);
     return { entries, warnings, alreadyExisted: false };
   } catch (error) {
@@ -625,6 +642,7 @@ async function regenerarComprobantesPeriodo(tenantId, periodId, userId, reason =
       : { entries: [], warnings: [] };
 
     await t.commit();
+    await reclasificarObrasDelPeriodo(tenantId, period, userId);
     return { entries, warnings, replaced: existing.length };
   } catch (error) {
     if (!t.finished) await t.rollback();
@@ -1247,6 +1265,8 @@ module.exports = {
   generarComprobantesNomina,
   regenerarComprobantesPeriodo,
   liquidacionesAceptadasDelPeriodo,
+  // Reparto de mano de obra por proyecto (services/projects/projectLabor.service.js)
+  getSettings,
   cierreAnualCesantias,
   estadoCesantiasAnuales,
   consignarCesantias,

@@ -2,7 +2,7 @@
 const { Sale, SaleItem, Customer, User, OpeningBalance } = require('../../models');
 const { Op } = require('sequelize');
 const { daysOverdueOf, receivableWhere } = require('../../utils/receivables');
-const { saleBalance } = require('../../utils/saleAmounts');
+const { saleBalance, saleRetentionPending, round2 } = require('../../utils/saleAmounts');
 const { normalizeOpeningBalanceAsSaleRow } = require('../../services/accounting/openingBalanceMerge.helper');
 const { parsePagination, buildPagination } = require('../../utils/pagination');
 const { sequelize } = require('../../config/database');
@@ -87,7 +87,8 @@ const filteredOpeningReceivables = async (req) => {
 const CUSTOMER_INCLUDE = { model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'tax_id', 'email', 'phone'] };
 const RECEIVABLE_ATTRIBUTES = [
   'id', 'sale_number', 'sale_date', 'due_date', 'customer_id', 'customer_name', 'total_amount',
-  'paid_amount', 'returned_amount', 'payment_status', 'payment_method', 'payment_history', 'document_type'
+  'paid_amount', 'returned_amount', 'payment_status', 'payment_method', 'payment_history', 'document_type',
+  'retention_guarantee_amount', 'retention_released_at'
 ];
 
 // Fila de cartera con saldo y días vencidos.
@@ -95,6 +96,8 @@ const toReceivableRow = (invoice, today = new Date()) => {
   // Neto de devoluciones aprobadas (returned_amount).
   const balance = saleBalance(invoice);
   const daysOverdue = daysOverdueOf(invoice, today);
+  // Retención de garantía sin liberar: se debe, pero no está vencida.
+  const retentionPending = saleRetentionPending(invoice);
   return {
     id: invoice.id,
     sale_number: invoice.sale_number,
@@ -110,7 +113,9 @@ const toReceivableRow = (invoice, today = new Date()) => {
     payment_status: invoice.payment_status,
     payment_method: invoice.payment_method,
     days_overdue: Math.max(daysOverdue, 0),
-    is_overdue: daysOverdue > 0,
+    is_overdue: daysOverdue > 0 && balance - retentionPending > 0.005,
+    retention_pending: retentionPending,
+    due_balance: round2(balance - retentionPending),
     payment_history: invoice.payment_history || [],
     document_type: invoice.document_type,
     // Saldo inicial: se abona por /accounting/opening-balances/:id/payments.
@@ -140,7 +145,8 @@ const loadPendingReceivables = async (req) => {
   const invoicesWithDetails = pendingInvoices.map(invoice => {
     const row = toReceivableRow(invoice, today);
     totalReceivable += row.balance;
-    if (row.is_overdue) totalOverdue += row.balance;
+    // Vencido sin la retención de garantía pendiente (se debe, pero no vence).
+    if (row.is_overdue) totalOverdue += row.due_balance;
     return row;
   });
 
@@ -166,7 +172,7 @@ const loadPendingReceivables = async (req) => {
     byCustomer[customerId].paid_amount += parseFloat(invoice.paid_amount);
     byCustomer[customerId].balance += invoice.balance;
     if (invoice.is_overdue) {
-      byCustomer[customerId].overdue_amount += invoice.balance;
+      byCustomer[customerId].overdue_amount += invoice.due_balance;
     }
     byCustomer[customerId].invoices.push(invoice);
   });
@@ -187,6 +193,8 @@ const loadPendingReceivables = async (req) => {
 // la cartera a memoria. Con due_date (fecha) se vence al día siguiente; sin
 // due_date, a los 31 días de la venta.
 const SALE_BALANCE_SQL = `GREATEST(GREATEST("Sale"."total_amount" - COALESCE("Sale"."returned_amount", 0), 0) - COALESCE("Sale"."paid_amount", 0), 0)`;
+// Saldo que vence: sin la retención de garantía todavía no liberada.
+const SALE_DUE_BALANCE_SQL = `GREATEST(${SALE_BALANCE_SQL} - CASE WHEN "Sale"."retention_released_at" IS NULL THEN COALESCE("Sale"."retention_guarantee_amount", 0) ELSE 0 END, 0)`;
 const SALE_OVERDUE_SQL = `(CASE WHEN "Sale"."due_date" IS NOT NULL
   THEN NOW() >= ("Sale"."due_date"::timestamp AT TIME ZONE 'UTC') + INTERVAL '1 day'
   ELSE NOW() >= "Sale"."sale_date" + INTERVAL '31 days' END)`;
@@ -204,7 +212,7 @@ const receivableTotalsByCustomer = async (req) => {
       [sequelize.fn('SUM', sequelize.col('Sale.total_amount')), 'total_amount'],
       [sequelize.fn('SUM', sequelize.fn('COALESCE', sequelize.col('Sale.paid_amount'), 0)), 'paid_amount'],
       [sequelize.literal(`SUM(${SALE_BALANCE_SQL})`), 'balance'],
-      [sequelize.literal(`SUM(CASE WHEN ${SALE_OVERDUE_SQL} THEN ${SALE_BALANCE_SQL} ELSE 0 END)`), 'overdue_amount'],
+      [sequelize.literal(`SUM(CASE WHEN ${SALE_OVERDUE_SQL} THEN ${SALE_DUE_BALANCE_SQL} ELSE 0 END)`), 'overdue_amount'],
       [sequelize.fn('MIN', sequelize.col('Sale.sale_date')), 'first_date'],
     ],
     group: ['Sale.customer_id'],
@@ -236,7 +244,7 @@ const receivableTotalsByCustomer = async (req) => {
     g.total_amount += row.total_amount;
     g.paid_amount += row.paid_amount;
     g.balance += row.balance;
-    if (row.is_overdue) g.overdue_amount += row.balance;
+    if (row.is_overdue) g.overdue_amount += row.due_balance;
     g.first_date = Math.min(g.first_date, new Date(row.sale_date).getTime());
   });
 
@@ -246,7 +254,7 @@ const receivableTotalsByCustomer = async (req) => {
     : [];
   const customerById = new Map(customers.map(c => [c.id, c]));
 
-  const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
   const byCustomer = [...byKey.values()]
     .sort((a, b) => a.first_date - b.first_date)
     .map(({ first_date, ...g }) => ({
@@ -560,19 +568,24 @@ const getAgingReport = async (req, res) => {
       };
 
       totals.total += balance;
+      // La retención de garantía sin liberar no envejece: va a corriente.
+      const retentionPending = saleRetentionPending(invoice);
+      invoiceData.retention_pending = retentionPending;
+      const due = balance - retentionPending;
+      totals.current += retentionPending;
 
       if (daysOverdue <= 30) {
         aging.current.push(invoiceData);
-        totals.current += balance;
+        totals.current += due;
       } else if (daysOverdue <= 60) {
         aging.days_31_60.push(invoiceData);
-        totals.days_31_60 += balance;
+        totals.days_31_60 += due;
       } else if (daysOverdue <= 90) {
         aging.days_61_90.push(invoiceData);
-        totals.days_61_90 += balance;
+        totals.days_61_90 += due;
       } else {
         aging.over_90.push(invoiceData);
-        totals.over_90 += balance;
+        totals.over_90 += due;
       }
     });
 

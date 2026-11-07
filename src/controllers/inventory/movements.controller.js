@@ -1,3 +1,4 @@
+const { weightedAverageCost } = require('../../utils/costResolver');
 const { InventoryMovement, Product, Warehouse } = require('../../models/inventory');
 const { Op } = require('sequelize');
 const { checkAlertsForProduct } = require('../../middleware/autoCheckAlerts.middleware');
@@ -380,9 +381,7 @@ function computeMovement(product, movementData) {
 
   // Si es entrada, actualizar costo promedio (en el mismo UPDATE)
   if (movement_type === 'entrada') {
-    const totalValue = (previous_stock * parseFloat(product.average_cost || 0)) + total_cost;
-    const totalQuantity = previous_stock + parseFloat(quantity);
-    productChanges.average_cost = totalQuantity > 0 ? totalValue / totalQuantity : unit_cost;
+    productChanges.average_cost = weightedAverageCost(previous_stock, product.average_cost, quantity, unit_cost);
   }
 
   return { movement, productChanges };

@@ -424,6 +424,10 @@ const createProduct = async (req, res) => {
       const effectiveTrackInventory = safeProductType === 'service' ? false : track_inventory;
       const initialQuantity = effectiveTrackInventory ? parseFloat(effectiveCurrentStock) || 0 : 0;
       const initialCost = parseFloat(average_cost) || 0;
+      if (initialCost > 0 && !(await require('../../services/tenantPermissions.service').can(req.user.tenant_id, req.user.role, 'inventory.costs.edit'))) {
+        await transaction.rollback();
+        return res.status(403).json({ success: false, code: 'FORBIDDEN', permission: 'inventory.costs.edit', message: 'No tienes permiso para fijar costos de productos. Deja el costo vacío; lo fija la primera compra o un ajuste.' });
+      }
 
       // El producto se crea SIEMPRE en cero -- si trae stock inicial, ese
       // stock entra por un InventoryMovement real (igual que una compra),
@@ -1118,7 +1122,13 @@ const getProductInProcess = async (req, res) => {
       };
     });
 
-    const data = [...ventas, ...workOrders].sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
+    // ── Proyectos: reservado en el BOM y saldo en la bodega de la obra ────
+    const { getEffectiveModulesForTenantId } = require('../../services/moduleAccess');
+    const projects = (await getEffectiveModulesForTenantId(tenantId)).includes('projects')
+      ? await require('../../services/projects/projectStock.service').getProjectCommitmentDocs(tenantId, id)
+      : [];
+
+    const data = [...ventas, ...workOrders, ...projects].sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
 
     res.json({ success: true, data });
   } catch (error) {

@@ -87,6 +87,12 @@ const CustomerAdvance = sequelize.define('CustomerAdvance', {
     type: DataTypes.UUID,
     allowNull: true,
   },
+  // Proyecto del anticipo (migración 2026110612): las facturas parciales del
+  // proyecto lo amortizan en proporción (services/projects/projectCuts.service.js).
+  project_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+  },
   // Devolución de cliente que dejó este saldo a favor: no es dinero nuevo
   // (ya entró con el pago de la venta), Flujo de Caja no lo cuenta.
   customer_return_id: {

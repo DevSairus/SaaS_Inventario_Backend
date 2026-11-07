@@ -4,6 +4,9 @@ const router  = express.Router();
 const customersController = require('../controllers/sales/customers.controller');
 const dianLookup          = require('../controllers/customers/dianLookup.controller');
 const { getAvailableAdvancesForCustomer } = require('../controllers/finance/customerAdvances.controller');
+const thirdPartyImport    = require('../controllers/thirdPartyImport.controller');
+const uploadExcel         = require('../middleware/uploadProductsExcel');
+const { keepTenantContext } = require('../middleware/keepTenantContext');
 
 // ── Consulta DIAN (GetAcquirer) con el certificado propio del tenant ────────
 router.get('/dian-lookup/availability',          dianLookup.getAvailability);
@@ -11,6 +14,10 @@ router.get('/dian-lookup/:documentType/:number', dianLookup.lookup);
 
 // ── Anticipos disponibles del cliente (selector al facturar) ────────────────
 router.get('/:id/advances/available', getAvailableAdvancesForCustomer);
+
+// ── Importación desde Excel (plantilla + carga) ────────────────────────────
+router.get('/import/template', thirdPartyImport.template('customers'));
+router.post('/import', keepTenantContext(uploadExcel.single('archivo')), thirdPartyImport.importFile('customers'));
 
 // ── CRUD de clientes ─────────────────────────────────────────────────────────
 router.get('/',          customersController.getAll);

@@ -6,6 +6,7 @@ const router = express.Router();
 const { checkRole } = require('../middleware/auth');
 const c = require('../controllers/legal/consents.controller');
 const uploadSupport = require('../middleware/uploadSupport');
+const { keepTenantContext } = require('../middleware/keepTenantContext');
 
 // Registrar una autorización firmada en papel o revocar una aceptada
 // cambia la evidencia legal: solo administración.
@@ -25,7 +26,7 @@ router.post('/:id/send-link', c.sendLink);
 router.post('/:id/otp', c.sendOtpCounter);
 router.post('/:id/verify', c.verifyCounter);
 router.post('/:id/cancel', c.cancelRequest);
-router.post('/:id/physical', checkRole(...SENSITIVE_ROLES), uploadSupport.single('document'), c.registerPhysical);
+router.post('/:id/physical', checkRole(...SENSITIVE_ROLES), keepTenantContext(uploadSupport.single('document')), c.registerPhysical);
 router.get('/:id/physical-document', c.getPhysicalDocument);
 router.post('/:id/revoke', checkRole(...SENSITIVE_ROLES), c.revokeRequest);
 

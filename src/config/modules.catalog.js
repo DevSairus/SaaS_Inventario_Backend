@@ -32,6 +32,11 @@ const MODULES_CATALOG = [
   // automático, y de 'treasury' porque el pago al empleado se concilia como
   // egreso.
   { key: 'payroll', label: 'Nómina Electrónica', dependsOn: ['accounting', 'treasury'], reserved: false },
+  // Proyectos (obras: energía solar, instalaciones) -- cada compra, gasto,
+  // venta y traslado puede llevar el proyecto; bodega por proyecto, BOM
+  // desde Excel con reserva y estado de resultados por obra. Usa Tesorería
+  // (gastos) cuando está activa, pero no depende de ella.
+  { key: 'projects', label: 'Proyectos', dependsOn: ['sales', 'inventory'], reserved: false },
 ];
 
 const MODULES_BY_KEY = MODULES_CATALOG.reduce((acc, m) => {

@@ -152,7 +152,9 @@ const Tenant = sequelize.define('Tenant', {
       timezone: 'America/Bogota',
       locale: 'es-CO',
       date_format: 'DD/MM/YYYY',
-      cost_method: 'weighted_average',
+      // El costeo de inventario es siempre promedio ponderado (NIIF para
+      // Pymes, Sección 13): no es configurable. Ver weightedAverageCost en
+      // controllers/inventory/movements.controller.js.
       // % estimado de costo de mano de obra (comisión a técnicos) sobre el
       // ingreso de servicios, usado en reportes cuando la OT aún no ha sido
       // liquidada (no hay commission_percentage real todavía). Ver

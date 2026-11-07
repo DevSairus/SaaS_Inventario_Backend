@@ -62,7 +62,7 @@ exports.getById = async (req, res) => {
   try {
     const entry = await JournalEntry.findOne({
       where: { id: req.params.id, tenant_id: req.tenant_id },
-      include: [{ model: JournalEntryLine, as: 'lines', include: [{ model: ChartOfAccount, as: 'account' }] }],
+      include: [{ model: JournalEntryLine, as: 'lines', include: [{ model: ChartOfAccount, as: 'account' }, { model: require('../../models').Project, as: 'project', attributes: ['id', 'code', 'name'] }] }],
     });
     if (!entry) return res.status(404).json({ success: false, message: 'Asiento no encontrado' });
     const json = entry.toJSON();
@@ -79,6 +79,15 @@ exports.getById = async (req, res) => {
   }
 };
 
+// Proyecto por línea (dimensión de proyecto): debe ser del tenant.
+async function assertLineProjects(tenantId, lines, t) {
+  const ids = [...new Set((lines || []).map((l) => l.project_id).filter(Boolean))];
+  if (!ids.length) return;
+  const { Project } = require('../../models');
+  const found = await Project.count({ where: { id: ids, tenant_id: tenantId }, transaction: t });
+  if (found !== ids.length) throw new Error('Proyecto no encontrado en una de las líneas');
+}
+
 // POST /api/accounting/journal-entries — asiento manual
 exports.create = async (req, res) => {
   const { sequelize } = require('../../config/database');
@@ -90,6 +99,7 @@ exports.create = async (req, res) => {
       return res.status(400).json({ success: false, message: 'entry_date y lines son obligatorios' });
     }
 
+    await assertLineProjects(req.tenant_id, lines, t);
     const entry = await createDraftEntry(
       req.tenant_id,
       {
@@ -124,6 +134,7 @@ exports.update = async (req, res) => {
       return res.status(400).json({ success: false, message: 'entry_date y lines son obligatorios' });
     }
 
+    await assertLineProjects(req.tenant_id, lines, t);
     const entry = await updateDraftEntry(
       req.params.id,
       req.tenant_id,

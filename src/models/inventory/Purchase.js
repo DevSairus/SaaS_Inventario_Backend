@@ -217,6 +217,16 @@ const Purchase = sequelize.define('Purchase', {
     type: DataTypes.JSONB,
     allowNull: true
   },
+  // Aprobación (migración 2026110604): null = no la requiere; pending |
+  // approved | rejected. Ver services/approvals/approvals.service.js.
+  approval_status: { type: DataTypes.STRING(20), allowNull: true },
+  // Proyecto al que pertenece (módulo Proyectos, migración 2026110502).
+  // NULL = documento general, igual que antes del módulo.
+  project_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'projects', key: 'id' }
+  },
   created_by: {
     type: DataTypes.UUID,
     allowNull: true,

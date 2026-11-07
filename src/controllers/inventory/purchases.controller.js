@@ -1,6 +1,6 @@
 const { Purchase, PurchaseItem, Product, Supplier } = require('../../models/inventory');
 const ProductSupplier = require('../../models/inventory/ProductSupplier');
-const { Branch, Warehouse, Tenant } = require('../../models');
+const { Branch, Warehouse, Tenant, Project } = require('../../models');
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const taxService = require('../../services/taxService');
@@ -17,11 +17,22 @@ const { purchaseNetPayable, purchasePaymentStatus, round2 } = require('../../uti
 const { recordPurchasePaymentEntries, newPaymentRecord } = require('../../services/inventory/purchasePayments.service');
 const { isValidMargin, marginRangeMessage } = require('../../utils/salePricing');
 const { getMarginMethod } = require('../../services/inventory/productMargin.service');
+const { resolveDocumentProject } = require('../../services/projects/projectRef.service');
+const approvals = require('../../services/approvals/approvals.service');
+
+// 409 APPROVAL_REQUIRED (services/approvals/approvals.service.js) con su detalle.
+const sendApprovalError = (res, error) => res.status(error.statusCode).json({ success: false, code: error.code, message: error.message, data: error.data });
 
 // Margen de ganancia opcional de una línea de compra (purchase_items.
 // profit_margin_pct): vacío = el producto conserva el suyo. Se aplica al
 // producto al recibir la compra (ver receivePurchase y purchaseCost.service).
 const lineMargin = (v) => (v === null || v === undefined || v === '' ? null : Math.round(Number(v) * 100) / 100);
+// Precio de venta opcional de la línea (purchase_items.sale_price): pasa tal
+// cual al producto al recibir. Vacío o no positivo = se calcula con el margen.
+const linePrice = (v) => {
+  const n = parseFloat(v);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+};
 
 // Mensaje de error si algún margen de línea está fuera de rango para el
 // método de cálculo del negocio; null si todos están bien.
@@ -154,10 +165,11 @@ const getPurchaseById = async (req, res) => {
             {
               model: Product,
               as: 'product',
-              attributes: ['id', 'sku', 'name', 'unit_of_measure', 'profit_margin_percentage']
+              attributes: ['id', 'sku', 'name', 'unit_of_measure', 'profit_margin_percentage', 'base_price', 'price_includes_tax', 'has_tax', 'tax_percentage', 'tax_config']
             }
           ]
-        }
+        },
+        { model: Project, as: 'project', attributes: ['id', 'code', 'name', 'status'] }
       ]
     });
 
@@ -202,6 +214,7 @@ const createPurchase = async (req, res) => {
       warehouse_id,
       requires_support_document,
       applied_retentions,
+      project_id,
     } = req.body;
 
     // Validaciones
@@ -222,6 +235,16 @@ const createPurchase = async (req, res) => {
 
     if (!supplier) {
       throw new Error('Proveedor no encontrado');
+    }
+
+    // Módulo Proyectos: compra de una obra. Sin bodega explícita se recibe en
+    // la bodega del proyecto, que es donde cuenta como material de la obra.
+    let project;
+    try {
+      project = await resolveDocumentProject(tenant_id, project_id, { transaction: t });
+    } catch (e) {
+      await t.rollback();
+      return res.status(e.statusCode || 400).json({ success: false, message: e.message });
     }
 
     // Resolver plazo de pago: el que venga explícito en el body, si no, el
@@ -314,6 +337,7 @@ const createPurchase = async (req, res) => {
         discount_percentage,
         discount_amount: item_discount,
         profit_margin_pct: lineMargin(item.profit_margin_pct),
+        sale_price: linePrice(item.sale_price),
         subtotal: item_subtotal_after_discount,
         total: item_total,
         notes: item.notes || null
@@ -374,7 +398,8 @@ const createPurchase = async (req, res) => {
       reference,
       notes,
       internal_notes,
-      warehouse_id,
+      warehouse_id: warehouse_id || project?.warehouse_id || null,
+      project_id: project?.id || null,
       // Retenciones (Fase C) — agregadas por tipo + detalle por concepto
       ...taxService.purchaseRetentionFields(retentions),
       tax_breakdown,
@@ -410,7 +435,7 @@ const createPurchase = async (req, res) => {
             {
               model: Product,
               as: 'product',
-              attributes: ['id', 'sku', 'name', 'unit_of_measure', 'profit_margin_percentage']
+              attributes: ['id', 'sku', 'name', 'unit_of_measure', 'profit_margin_percentage', 'base_price', 'price_includes_tax', 'has_tax', 'tax_percentage', 'tax_config']
             }
           ]
         }
@@ -496,12 +521,30 @@ const updatePurchase = async (req, res) => {
       warehouse_id,
       requires_support_document,
       applied_retentions,
+      project_id,
     } = req.body;
 
     const marginError = await lineMarginsError(tenant_id, items || []);
     if (marginError) {
       await t.rollback();
       return res.status(400).json({ success: false, message: marginError });
+    }
+
+    let project;
+    try {
+      project = await resolveDocumentProject(tenant_id, project_id, { currentProjectId: purchase.project_id, transaction: t });
+    } catch (e) {
+      await t.rollback();
+      return res.status(e.statusCode || 400).json({ success: false, message: e.message });
+    }
+    const projectFields = project === undefined ? {} : { project_id: project?.id || null };
+    // Editar una compra pendiente o aprobada anula la aprobación: el monto,
+    // el proveedor o el proyecto pueden haber cambiado.
+    if (purchase.approval_status) {
+      await approvals.invalidate(tenant_id, 'purchase', purchase.id, t);
+      projectFields.approval_status = null;
+      projectFields.approved_by = null;
+      projectFields.approved_at = null;
     }
 
     // Si se proporcionan items, recalcular totales
@@ -562,6 +605,7 @@ const updatePurchase = async (req, res) => {
           discount_percentage,
           discount_amount: item_discount,
           profit_margin_pct: lineMargin(item.profit_margin_pct),
+          sale_price: linePrice(item.sale_price),
           subtotal: item_subtotal_after_discount,
           total: item_total,
           notes: item.notes || null
@@ -624,6 +668,7 @@ const updatePurchase = async (req, res) => {
         notes:                    notes                    !== undefined ? (notes           || null) : purchase.notes,
         internal_notes:           internal_notes           !== undefined ? (internal_notes  || null) : purchase.internal_notes,
         warehouse_id:             warehouse_id             ?? purchase.warehouse_id,
+        ...projectFields,
         requires_support_document: requires_support_document !== undefined ? !!requires_support_document : purchase.requires_support_document,
         // Retenciones (Fase C) — agregadas por tipo + detalle por concepto
         ...taxService.purchaseRetentionFields(retentions),
@@ -676,6 +721,7 @@ const updatePurchase = async (req, res) => {
         notes:                  notes                  !== undefined ? (notes           || null) : purchase.notes,
         internal_notes:         internal_notes         !== undefined ? (internal_notes  || null) : purchase.internal_notes,
         warehouse_id:           warehouse_id           ?? purchase.warehouse_id,
+        ...projectFields,
         requires_support_document: requires_support_document !== undefined ? !!requires_support_document : purchase.requires_support_document,
         ...retentionFields,
       }, { transaction: t });
@@ -737,6 +783,15 @@ const confirmPurchase = async (req, res) => {
         success: false,
         message: 'Solo se pueden confirmar compras en estado borrador'
       });
+    }
+
+    // Reglas de aprobación de la empresa (por monto/proyecto): sin aprobar,
+    // no se confirma. Sin reglas que apliquen, no cambia nada.
+    try {
+      await approvals.assertApproved(req, 'purchase', purchase);
+    } catch (e) {
+      if (e.code === 'APPROVAL_REQUIRED' || e.statusCode) return sendApprovalError(res, e);
+      throw e;
     }
 
     // Lo que se le debe al proveedor: total - retenciones.
@@ -878,6 +933,18 @@ function buildReceiptPortion(purchase, receivedNow, previousReceipts, isFinal) {
  * su asiento por el valor de lo recibido.
  */
 const receivePurchase = async (req, res) => {
+  // Recibir directo desde borrador se salta la confirmación: la aprobación se
+  // exige aquí también (fuera de la transacción de la recepción, que bloquea
+  // la fila de la compra).
+  try {
+    const draft = await Purchase.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id, status: 'draft' } });
+    if (draft) await approvals.assertApproved(req, 'purchase', draft);
+  } catch (e) {
+    if (e.code === 'APPROVAL_REQUIRED' || e.statusCode) return sendApprovalError(res, e);
+    console.error('Error verificando aprobación en receivePurchase:', e);
+    return res.status(500).json({ success: false, message: 'Error al recibir compra' });
+  }
+
   const t = await sequelize.transaction();
 
   try {
@@ -1018,6 +1085,7 @@ const receivePurchase = async (req, res) => {
         newCost: landedCost.get(purchaseItem.id) || parseFloat(purchaseItem.unit_cost) || 0,
         // Margen escrito en la línea (XML, Excel o a mano): pasa al producto.
         margin: lineMargin(purchaseItem.profit_margin_pct),
+        salePrice: linePrice(purchaseItem.sale_price),
       })),
       { tenant_id, date: purchase.purchase_date, sourceType: 'purchase', sourceId: purchase.id, sourceNumber: purchase.purchase_number },
       t
@@ -1566,7 +1634,7 @@ const resolveProductCodes = async (req, res) => {
     if (!codes.length) return res.json({ success: true, data: { products: {} } });
     const upper = codes.map((c) => c.toUpperCase());
     const attributes = ['id', 'sku', 'barcode', 'name', 'is_active', 'tax_percentage', 'has_tax', 'tax_config',
-      'profit_margin_percentage', 'last_purchase_cost', 'average_cost'];
+      'profit_margin_percentage', 'last_purchase_cost', 'average_cost', 'base_price', 'price_includes_tax'];
 
     const found = await Product.findAll({
       where: {

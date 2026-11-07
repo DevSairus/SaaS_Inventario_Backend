@@ -8,6 +8,7 @@ const Branch = require('./Branch');
 const UserBranch = require('./UserBranch');
 const Permission = require('./auth/Permission');
 const RolePermission = require('./auth/RolePermission');
+const TenantRolePermission = require('./auth/TenantRolePermission');
 
 // Contabilidad
 const ChartOfAccount = require('./accounting/ChartOfAccount');
@@ -18,10 +19,13 @@ const AccountMapping = require('./accounting/AccountMapping');
 const AccountMappingAudit = require('./accounting/AccountMappingAudit');
 const AccountMigration = require('./accounting/AccountMigration');
 const FormDraft = require('./common/FormDraft');
+const Attachment = require('./common/Attachment');
 const { IcaMunicipality, IcaActivity, IcaSettlement } = require('./tax/IcaModels');
 const OpeningBalance = require('./accounting/OpeningBalance');
 const FixedAsset = require('./accounting/FixedAsset');
 const FixedAssetDepreciationEntry = require('./accounting/FixedAssetDepreciationEntry');
+const FixedAssetUsage = require('./accounting/FixedAssetUsage');
+const FixedAssetImpairment = require('./accounting/FixedAssetImpairment');
 const Loan = require('./accounting/Loan');
 const LoanInstallment = require('./accounting/LoanInstallment');
 const BankAccount = require('./accounting/BankAccount');
@@ -164,6 +168,32 @@ const EnsambladoraRuntSolicitud = require('./ensambladora/EnsambladoraRuntSolici
 const EnsambladoraCotizacion = require('./ensambladora/EnsambladoraCotizacion');
 // ✅ NUEVO - Módulo Ensambladora (auditoría de acciones sobre garantía/alistamiento/etc)
 const EnsambladoraAuditLog = require('./ensambladora/EnsambladoraAuditLog');
+
+// Módulo Proyectos (Fase 1: proyectos, presupuesto, BOM, estado de resultados)
+const Project = require('./projects/Project');
+const ProjectBudgetLine = require('./projects/ProjectBudgetLine');
+const ProjectBomItem = require('./projects/ProjectBomItem');
+const ProjectTimeEntry = require('./projects/ProjectTimeEntry');
+const ProjectLaborAllocation = require('./projects/ProjectLaborAllocation');
+const ProjectBudgetAlert = require('./projects/ProjectBudgetAlert');
+const ProjectCut = require('./projects/ProjectCut');
+const ProjectCutItem = require('./projects/ProjectCutItem');
+// Herramientas (Fase 3): hoja de vida, asignaciones con acta, eventos
+const Tool = require('./tools/Tool');
+const ToolAssignment = require('./tools/ToolAssignment');
+const ToolEvent = require('./tools/ToolEvent');
+// Cotizador solar (Fase 3)
+const SolarSetting = require('./solar/SolarSetting');
+const SolarStudy = require('./solar/SolarStudy');
+const SolarLead = require('./solar/SolarLead');
+// Motor de aprobaciones (Fase 2): órdenes de compra por monto/proyecto
+const ApprovalRule = require('./approvals/ApprovalRule');
+const ApprovalRequest = require('./approvals/ApprovalRequest');
+const ApprovalToken = require('./approvals/ApprovalToken');
+// Lotes de pago a proveedores con archivo plano del banco (Fase 2)
+const PaymentBatch = require('./finance/PaymentBatch');
+const PaymentBatchItem = require('./finance/PaymentBatchItem');
+const BankPaymentTemplate = require('./finance/BankPaymentTemplate');
 
 // ✅ NUEVO - Catálogo normalizado de vehículos (Fase 6)
 const VehicleBrand = require('./workshop/VehicleBrand');
@@ -415,11 +445,16 @@ Branch.hasMany(FixedAsset, { foreignKey: 'branch_id', as: 'fixed_assets' });
 FixedAsset.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
 FixedAsset.belongsTo(ChartOfAccount, { foreignKey: 'asset_account_id', as: 'asset_account' });
 FixedAsset.belongsTo(ChartOfAccount, { foreignKey: 'accumulated_depreciation_account_id', as: 'accumulated_depreciation_account' });
+FixedAsset.belongsTo(ChartOfAccount, { foreignKey: 'sale_account_id', as: 'sale_account' });
+FixedAsset.belongsTo(JournalEntry, { foreignKey: 'disposal_journal_entry_id', as: 'disposal_entry' });
 FixedAsset.belongsTo(User, { foreignKey: 'created_by', as: 'created_by_user' });
 
 FixedAsset.hasMany(FixedAssetDepreciationEntry, { foreignKey: 'fixed_asset_id', as: 'depreciation_entries' });
 FixedAssetDepreciationEntry.belongsTo(FixedAsset, { foreignKey: 'fixed_asset_id', as: 'fixed_asset' });
 FixedAssetDepreciationEntry.belongsTo(JournalEntry, { foreignKey: 'journal_entry_id', as: 'journal_entry' });
+FixedAsset.hasMany(FixedAssetUsage, { foreignKey: 'fixed_asset_id', as: 'usage' });
+FixedAsset.hasMany(FixedAssetImpairment, { foreignKey: 'fixed_asset_id', as: 'impairments' });
+FixedAssetImpairment.belongsTo(JournalEntry, { foreignKey: 'journal_entry_id', as: 'journal_entry' });
 Tenant.hasMany(FixedAssetDepreciationEntry, { foreignKey: 'tenant_id', as: 'fixed_asset_depreciation_entries' });
 FixedAssetDepreciationEntry.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 
@@ -1014,15 +1049,121 @@ PayrollPayment.belongsTo(BankAccount, { foreignKey: 'bank_account_id', as: 'bank
 PayrollPayment.hasMany(PayrollDocument, { foreignKey: 'payment_id', as: 'documents' });
 PayrollDocument.belongsTo(PayrollPayment, { foreignKey: 'payment_id', as: 'payment' });
 
+// Proyectos ↔ cliente / cotización / bodega / responsable; presupuesto y BOM.
+// Los documentos que llevan project_id (compras, gastos, ventas, traslados,
+// bodegas, pedidos) se consultan por esa columna, sin asociación inversa.
+Project.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Project.belongsTo(Sale, { foreignKey: 'quote_id', as: 'quote' });
+Project.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'warehouse' });
+Project.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Project.belongsTo(User, { foreignKey: 'manager_id', as: 'manager' });
+Project.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+Project.belongsTo(User, { foreignKey: 'closed_by', as: 'closer' });
+Project.hasMany(ProjectBudgetLine, { foreignKey: 'project_id', as: 'budget_lines', onDelete: 'CASCADE' });
+ProjectBudgetLine.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ProjectBudgetLine.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Project.hasMany(ProjectBomItem, { foreignKey: 'project_id', as: 'bom_items', onDelete: 'CASCADE' });
+ProjectBomItem.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ProjectBomItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
+Transfer.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+// Quién creó, envió, recibió y cerró el traslado (detalle del traslado).
+Transfer.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+Transfer.belongsTo(User, { foreignKey: 'sent_by', as: 'sender' });
+Transfer.belongsTo(User, { foreignKey: 'received_by', as: 'receiver' });
+Transfer.belongsTo(User, { foreignKey: 'closed_by', as: 'closer' });
+Purchase.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+Expense.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+Sale.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+SupplierOrderList.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+
+Attachment.belongsTo(User, { foreignKey: 'uploaded_by', as: 'uploader' });
+ApprovalRule.belongsTo(User, { foreignKey: 'approver_user_id', as: 'approver' });
+ApprovalRule.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ApprovalRequest.belongsTo(User, { foreignKey: 'requested_by', as: 'requester' });
+ApprovalRequest.belongsTo(User, { foreignKey: 'decided_by', as: 'decider' });
+ApprovalRequest.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ApprovalToken.belongsTo(ApprovalRequest, { foreignKey: 'request_id', as: 'request' });
+ApprovalToken.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+PaymentBatch.hasMany(PaymentBatchItem, { foreignKey: 'batch_id', as: 'items', onDelete: 'CASCADE' });
+PaymentBatchItem.belongsTo(PaymentBatch, { foreignKey: 'batch_id', as: 'batch' });
+PaymentBatch.belongsTo(BankAccount, { foreignKey: 'bank_account_id', as: 'bankAccount' });
+PaymentBatch.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+PaymentBatch.belongsTo(User, { foreignKey: 'approved_by', as: 'approver' });
+PaymentBatch.belongsTo(User, { foreignKey: 'paid_by', as: 'payer' });
+ProjectTimeEntry.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ProjectTimeEntry.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+ProjectTimeEntry.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+ProjectLaborAllocation.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ProjectLaborAllocation.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+ProjectLaborAllocation.belongsTo(PayrollPeriod, { foreignKey: 'payroll_period_id', as: 'period' });
+Project.hasMany(ProjectBudgetAlert, { foreignKey: 'project_id', as: 'budget_alerts' });
+JournalEntryLine.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+Project.hasMany(ProjectCut, { foreignKey: 'project_id', as: 'cuts' });
+ProjectCut.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ProjectCut.hasMany(ProjectCutItem, { foreignKey: 'cut_id', as: 'items' });
+ProjectCutItem.belongsTo(ProjectCut, { foreignKey: 'cut_id', as: 'cut' });
+ProjectCut.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+ProjectCut.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+ProjectCut.belongsTo(User, { foreignKey: 'approved_user_id', as: 'approver' });
+SolarSetting.belongsTo(Product, { foreignKey: 'panel_product_id', as: 'panel_product' });
+SolarSetting.belongsTo(Product, { foreignKey: 'inverter_product_id', as: 'inverter_product' });
+SolarStudy.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+SolarStudy.belongsTo(Sale, { foreignKey: 'quote_id', as: 'quote' });
+SolarStudy.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+SolarStudy.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+SolarLead.belongsTo(SolarStudy, { foreignKey: 'study_id', as: 'study' });
+SolarLead.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+Tool.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+Tool.belongsTo(FixedAsset, { foreignKey: 'fixed_asset_id', as: 'fixed_asset' });
+Tool.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+Tool.hasMany(ToolAssignment, { foreignKey: 'tool_id', as: 'assignments' });
+Tool.hasMany(ToolEvent, { foreignKey: 'tool_id', as: 'events' });
+ToolAssignment.belongsTo(Tool, { foreignKey: 'tool_id', as: 'tool' });
+ToolAssignment.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+ToolAssignment.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+ToolAssignment.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ToolAssignment.belongsTo(User, { foreignKey: 'delivered_by', as: 'deliverer' });
+ToolAssignment.belongsTo(User, { foreignKey: 'received_by', as: 'receiver' });
+ToolEvent.belongsTo(Tool, { foreignKey: 'tool_id', as: 'tool' });
+ToolEvent.belongsTo(Supplier, { foreignKey: 'supplier_id', as: 'supplier' });
+ToolEvent.belongsTo(Project, { foreignKey: 'project_id', as: 'project' });
+ToolEvent.belongsTo(ToolAssignment, { foreignKey: 'assignment_id', as: 'assignment' });
+ToolEvent.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+
 // Debe correr DESPUÉS de que todos los modelos/asociaciones ya se registraron
 // en sequelize.models -- de lo contrario los hooks no se agregan a ninguno.
 // Sin esto, tenantMiddleware marca el schema del tenant en el contexto pero
 // ninguna query de Sequelize lo termina usando (ver comentario en
 // src/config/registerTenantSchemaHooks.js).
+// Módulo Proyectos: asiento de consumo de materiales al mover stock en bodegas de obra.
+require('../services/accounting/projectAccounting.service').registerProjectMaterialHook(InventoryMovement);
+
 registerTenantSchemaHooks(sequelize);
 
 module.exports = {
   sequelize,
+  SolarLead,
+  ProjectCut,
+  ProjectCutItem,
+  SolarSetting,
+  SolarStudy,
+  Tool,
+  ToolAssignment,
+  ToolEvent,
+  ProjectBudgetAlert,
+  ProjectTimeEntry,
+  ProjectLaborAllocation,
+  PaymentBatch,
+  PaymentBatchItem,
+  BankPaymentTemplate,
+  ApprovalRule,
+  ApprovalRequest,
+  ApprovalToken,
+  Attachment,
+  TenantRolePermission,
+  Project,
+  ProjectBudgetLine,
+  ProjectBomItem,
   Tenant,
   User,
   Branch,
@@ -1122,6 +1263,8 @@ module.exports = {
   OpeningBalance,
   FixedAsset,
   FixedAssetDepreciationEntry,
+  FixedAssetUsage,
+  FixedAssetImpairment,
   Loan,
   ExogenaFormatConfig,
   ExogenaConceptMapping,

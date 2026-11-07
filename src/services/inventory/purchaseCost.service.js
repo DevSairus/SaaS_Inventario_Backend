@@ -19,7 +19,7 @@
 
 const CostAlert = require('../../models/inventory/CostAlert');
 const Tenant = require('../../models/auth/Tenant');
-const { suggestedSalePrice, normalizeMarginMethod } = require('../../utils/salePricing');
+const { suggestedSalePrice, impliedMargin, normalizeMarginMethod } = require('../../utils/salePricing');
 
 const DEFAULT_VARIATION_THRESHOLD = 10;
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -42,7 +42,10 @@ async function getCostSettings(tenant_id, transaction) {
 // marginOverride: margen escrito en la línea de la compra (purchase_items.
 // profit_margin_pct). Pasa a ser el margen propio del producto y el precio se
 // calcula con él; null = el producto conserva el suyo.
-function planPurchaseCost(product, newCost, date, { threshold, marginMethod }, { sourceType, sourceId = null, sourceNumber = null }, marginOverride = null) {
+// salePriceOverride: precio de venta escrito en la línea (purchase_items.
+// sale_price). Pasa tal cual (también si baja: lo decidió el usuario) y el
+// margen queda en el que resulta de ese precio sobre el costo.
+function planPurchaseCost(product, newCost, date, { threshold, marginMethod }, { sourceType, sourceId = null, sourceNumber = null }, marginOverride = null, salePriceOverride = null) {
   const cost = parseFloat(newCost);
   if (!product || !Number.isFinite(cost) || cost <= 0) return null;
 
@@ -59,8 +62,19 @@ function planPurchaseCost(product, newCost, date, { threshold, marginMethod }, {
 
   let suggestedPrice = null;
   let priceHeld = false;
-  if (margin > 0) suggestedPrice = suggestedSalePrice(cost, margin, product, marginMethod);
-  if (suggestedPrice !== null) {
+  const fixedPrice = salePriceOverride === null || salePriceOverride === undefined ? NaN : parseFloat(salePriceOverride);
+  if (Number.isFinite(fixedPrice) && fixedPrice > 0) {
+    suggestedPrice = round2(fixedPrice);
+    updates.base_price = suggestedPrice;
+    const implied = impliedMargin(cost, suggestedPrice, product, marginMethod);
+    if (implied !== null) {
+      updates.profit_margin_percentage = implied;
+      updates.margin_inherited = false;
+    }
+  } else if (margin > 0) {
+    suggestedPrice = suggestedSalePrice(cost, margin, product, marginMethod);
+  }
+  if (suggestedPrice !== null && updates.base_price === undefined) {
     if (currentPrice > 0 && suggestedPrice < currentPrice - 0.005) {
       priceHeld = true;
     } else {
@@ -130,8 +144,8 @@ const PRODUCT_COST_SCALE = { last_purchase_cost: 2, base_price: 2, profit_margin
 
 /**
  * Igual que llamar registerPurchaseCost por cada entrada, en orden, con las
- * escrituras en bloque. `entries`: [{ product, newCost, margin? }] (margin:
- * margen de la línea de la compra, ver planPurchaseCost; las instancias se
+ * escrituras en bloque. `entries`: [{ product, newCost, margin?, salePrice? }]
+ * (margen y precio de venta de la línea de la compra, ver planPurchaseCost; las instancias se
  * actualizan en memoria). Un producto repetido deja, como antes, solo su
  * última alerta activa y las anteriores resueltas como reemplazadas.
  */
@@ -143,8 +157,8 @@ async function registerPurchaseCostsBatch(entries, { tenant_id, date, sourceType
   const settings = await getCostSettings(tenant_id, transaction);
   const changed = new Set();
   const alerts = [];
-  for (const { product, newCost, margin = null } of entries) {
-    const plan = planPurchaseCost(product, newCost, date, settings, { sourceType, sourceId, sourceNumber }, margin);
+  for (const { product, newCost, margin = null, salePrice = null } of entries) {
+    const plan = planPurchaseCost(product, newCost, date, settings, { sourceType, sourceId, sourceNumber }, margin, salePrice);
     if (!plan) continue;
     for (const [col, value] of Object.entries(plan.updates)) {
       product.setDataValue(col, PRODUCT_COST_SCALE[col] !== undefined ? roundNumeric(value, PRODUCT_COST_SCALE[col]) : value);

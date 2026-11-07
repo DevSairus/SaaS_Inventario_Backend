@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { checkRole } = require('../middleware/auth');
+const { requirePermission } = require('../middleware/requirePermission');
 const accountsPayableController = require('../controllers/inventory/accountsPayable.controller');
 
 // Obtener resumen de cuentas por pagar
@@ -42,7 +43,7 @@ router.get(
 // Registrar un abono a proveedor
 router.post(
   '/:id/payments',
-  checkRole('admin', 'manager', 'accountant'),
+  requirePermission('payables.pay'),
   accountsPayableController.registerPayment
 );
 

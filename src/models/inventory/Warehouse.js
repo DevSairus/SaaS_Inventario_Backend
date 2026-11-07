@@ -61,6 +61,13 @@ const Warehouse = sequelize.define('Warehouse', {
     defaultValue: false,
     comment: 'Bodega que se asigna automáticamente en OT/ventas cuando no se especifica una para la sede (branch_id). Máximo una por sede.'
   },
+  // Proyecto al que pertenece (módulo Proyectos, migración 2026110502).
+  // NULL = documento general, igual que antes del módulo.
+  project_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'projects', key: 'id' }
+  },
   is_active: {
     type: DataTypes.BOOLEAN,
     defaultValue: true

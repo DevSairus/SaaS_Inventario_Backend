@@ -45,6 +45,8 @@ const PayrollSetting = sequelize.define('PayrollSetting', {
   //   on_payment: sin provisión; el pago va directo al gasto
   prima_accrual_mode: { type: DataTypes.STRING(12), allowNull: false, defaultValue: 'monthly', validate: { isIn: [['monthly', 'on_payment']] } },
   vacaciones_accrual_mode: { type: DataTypes.STRING(12), allowNull: false, defaultValue: 'monthly', validate: { isIn: [['monthly', 'on_payment']] } },
+  // Días hábiles para contar vacaciones (migración 2026110616): 'mon_sat' (CST) o 'mon_fri' si no se trabaja el sábado.
+  vacation_business_days: { type: DataTypes.STRING(8), allowNull: false, defaultValue: 'mon_sat', validate: { isIn: [['mon_sat', 'mon_fri']] } },
   // Exoneración Art. 114-1 E.T.: el empleador no aporta salud (8.5%), SENA
   // ni ICBF por los trabajadores que devenguen menos de 10 SMLMV.
   employer_exonerated_114_1: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },

@@ -29,6 +29,13 @@ const TransferItem = sequelize.define('TransferItem', {
   unit_cost: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false
+  },
+  // Despacho de materiales de un proyecto: línea del BOM de la que salió
+  // (si el traslado se cancela, la cantidad vuelve a quedar reservada).
+  project_bom_item_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'project_bom_items', key: 'id' }
   }
 }, {
   tableName: 'transfer_items',

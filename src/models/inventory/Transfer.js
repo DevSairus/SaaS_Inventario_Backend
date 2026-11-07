@@ -65,6 +65,17 @@ const Transfer = sequelize.define('Transfer', {
     type: DataTypes.TEXT,
     allowNull: true
   },
+  // Cierre (migración 2026110603): recibido y conciliado; ya no se edita ni anula.
+  closed_at: { type: DataTypes.DATE, allowNull: true },
+  closed_by: { type: DataTypes.UUID, allowNull: true },
+  closing_notes: { type: DataTypes.TEXT, allowNull: true },
+  // Proyecto al que pertenece (módulo Proyectos, migración 2026110502).
+  // NULL = documento general, igual que antes del módulo.
+  project_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'projects', key: 'id' }
+  },
   created_by: {
     type: DataTypes.UUID,
     allowNull: true,

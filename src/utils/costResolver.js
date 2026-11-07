@@ -60,4 +60,28 @@ function resolveLandedPurchaseUnitCost(purchaseItem, purchase, { ivaToCost = fal
   return landedLineTotal / quantity;
 }
 
-module.exports = { resolveUnitCost, resolveLandedPurchaseUnitCost };
+/**
+ * Costo promedio ponderado después de una entrada (único método de costeo del
+ * sistema: NIIF para Pymes, Sección 13).
+ *
+ *   nuevo promedio = (stock anterior × promedio anterior + cantidad × costo) / stock nuevo
+ *
+ * Con stock anterior en cero o negativo (productos que permiten vender sin
+ * existencias), las unidades faltantes ya salieron al costo que había y no
+ * tienen valor que promediar: el nuevo promedio es el costo de la entrada.
+ * Antes la fórmula restaba ese stock negativo y daba promedios absurdos
+ * (−5 a $100 + 10 a $200 = $300 en vez de $200).
+ * Una entrada sin costo (bonificación, muestra) con stock positivo sí diluye
+ * el promedio, como debe ser; sin stock previo deja el promedio que había.
+ */
+function weightedAverageCost(previousStock, previousAverage, quantity, unitCost) {
+  const prev = parseFloat(previousStock) || 0;
+  const avg = parseFloat(previousAverage) || 0;
+  const qty = parseFloat(quantity) || 0;
+  const cost = parseFloat(unitCost) || 0;
+  if (prev <= 0) return cost > 0 ? cost : avg;
+  const totalQuantity = prev + qty;
+  return totalQuantity > 0 ? (prev * avg + qty * cost) / totalQuantity : avg;
+}
+
+module.exports = { weightedAverageCost, resolveUnitCost, resolveLandedPurchaseUnitCost };

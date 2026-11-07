@@ -34,7 +34,7 @@ const httpError = (status, message) => Object.assign(new Error(message), { statu
  */
 async function createCustomerAdvanceRecord({
   tenantId, branchId, userId, customerId, amount, method, bankAccountId,
-  receivedDate, referenceNote, triggersIva = false, cashSessionId = null,
+  receivedDate, referenceNote, triggersIva = false, cashSessionId = null, projectId = null,
 }, transaction) {
   const value = Math.round(parseFloat(amount) * 100) / 100;
   if (!customerId) throw httpError(400, 'El cliente es obligatorio para registrar un anticipo');
@@ -42,6 +42,15 @@ async function createCustomerAdvanceRecord({
 
   const customer = await Customer.findOne({ where: { id: customerId, tenant_id: tenantId }, attributes: ['id'], transaction });
   if (!customer) throw httpError(404, 'Cliente no encontrado');
+
+  // Anticipo de un proyecto (módulo Proyectos): debe ser del mismo cliente.
+  if (projectId) {
+    const { Project } = require('../../models');
+    const project = await Project.findOne({ where: { id: projectId, tenant_id: tenantId }, attributes: ['id', 'customer_id', 'status'], transaction });
+    if (!project) throw httpError(400, 'Proyecto no encontrado');
+    if (project.customer_id && project.customer_id !== customerId) throw httpError(400, 'El proyecto es de otro cliente');
+    if (['closed', 'cancelled'].includes(project.status)) throw httpError(400, 'El proyecto está cerrado');
+  }
 
   const methodLabel = advanceMethodLabel(method);
   const selectedBankAccountId = await resolveSelectedBankAccountId(tenantId, bankAccountId, methodLabel, transaction);
@@ -66,6 +75,7 @@ async function createCustomerAdvanceRecord({
     cash_session_id: cashSessionId,
     reference_note: referenceNote || null,
     triggers_iva: !!triggersIva,
+    project_id: projectId || null,
     status: 'active',
     created_by: userId,
   }, { transaction });

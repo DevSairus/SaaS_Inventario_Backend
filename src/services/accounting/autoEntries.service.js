@@ -126,6 +126,27 @@ async function reverseSourceEntries(sourceType, sourceId, tenantId, userId, reas
  * para algún evento, el asiento no se genera (se loguea el warning) — no
  * bloquea la venta. Revisar logs periódicamente mientras se afina el mapeo.
  */
+// ── Dimensión de proyecto (módulo Proyectos) ──
+// Lo que sale de la bodega de una obra ya se llevó a costo de obra cuando
+// entró a esa bodega (asiento de consumo, projectAccounting.service.js): la
+// venta desde ahí no vuelve a registrar costo de venta, ni su devolución lo
+// reversa.
+async function isProjectWarehouse(tenantId, warehouseId, t) {
+  if (!warehouseId) return false;
+  const { Warehouse } = require('../../models');
+  const w = await Warehouse.findOne({ where: { id: warehouseId, tenant_id: tenantId }, attributes: ['project_id'], transaction: t });
+  return Boolean(w?.project_id);
+}
+
+// Proyecto de una nota crédito/débito: el suyo o el de la venta que afecta.
+async function projectOfNote(noteSale, tenantId, t) {
+  if (noteSale.project_id) return noteSale.project_id;
+  if (!noteSale.reference_sale_id) return null;
+  const { Sale } = require('../../models');
+  const ref = await Sale.findOne({ where: { id: noteSale.reference_sale_id, tenant_id: tenantId }, attributes: ['project_id'], transaction: t });
+  return ref?.project_id || null;
+}
+
 const LEGACY_CONFIRM_NOTE = 'Pago registrado al confirmar la venta';
 
 /**
@@ -252,7 +273,7 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
         { iva: 'IVA generado', inc: 'Impuesto nacional al consumo (INC) generado' });
 
       // Costo de venta / inventario (solo productos, requiere unit_cost en los items)
-      if (productCogs > 0) {
+      if (productCogs > 0 && !(await isProjectWarehouse(tenantId, sale.warehouse_id, t))) {
         const cogsAccount = await getMappedAccountId(tenantId, 'sale_cogs_product', t);
         const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
         lines.push({ account_id: cogsAccount, debit: productCogs, credit: 0, description: 'Costo de mercancía vendida' });
@@ -266,6 +287,7 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
           entryDate: sale.sale_date || sale.createdAt || new Date(),
           sourceType: 'sale',
           sourceId: sale.id,
+          projectId: sale.project_id || null,
           description: `Venta ${sale.sale_number || sale.id}`,
           lines,
           createdBy: userId,
@@ -568,6 +590,7 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
           entryDate: options.portion?.entry_date || purchase.purchase_date || purchase.createdAt || new Date(),
           sourceType: 'purchase',
           sourceId: purchase.id,
+          projectId: purchase.project_id || null,
           description: `Compra ${purchase.purchase_number || purchase.id}${label}`,
           lines,
           createdBy: userId,
@@ -710,6 +733,7 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
           entryDate: expense.expense_date || expense.createdAt || new Date(),
           sourceType: 'expense',
           sourceId: expense.id,
+          projectId: expense.project_id || null,
           description: `Gasto ${expense.expense_number || expense.id} — ${expense.description}`,
           lines,
           createdBy: userId,
@@ -961,7 +985,7 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
       }
 
       // Reversión de costo de venta / inventario, solo lo que vuelve a stock
-      if (cogsReturned > 0) {
+      if (cogsReturned > 0 && !(await isProjectWarehouse(tenantId, sale.warehouse_id, t))) {
         const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
         const cogsAccount = await getMappedAccountId(tenantId, 'sale_cogs_product', t);
         lines.push({ account_id: inventoryAccount, debit: cogsReturned, credit: 0, description: 'Reingreso a inventario por devolución' });
@@ -980,6 +1004,7 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
           entryDate: customerReturn.approved_at || new Date(),
           sourceType: 'customer_return',
           sourceId: customerReturn.id,
+          projectId: sale.project_id || null,
           description: `Devolución de cliente ${customerReturn.return_number} — venta ${sale.sale_number || sale.id}`,
           lines,
           createdBy: userId,
@@ -1073,6 +1098,7 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
           entryDate: noteSale.sale_date || noteSale.createdAt || new Date(),
           sourceType: 'credit_note',
           sourceId: noteSale.id,
+          projectId: await projectOfNote(noteSale, tenantId, t),
           description: `Nota crédito ${noteSale.sale_number || noteSale.id}`,
           lines,
           createdBy: userId,
@@ -1152,6 +1178,7 @@ async function generateDebitNoteEntry(noteSale, items, tenantId, userId) {
           entryDate: noteSale.sale_date || noteSale.createdAt || new Date(),
           sourceType: 'debit_note',
           sourceId: noteSale.id,
+          projectId: await projectOfNote(noteSale, tenantId, t),
           description: `Nota débito ${noteSale.sale_number || noteSale.id}`,
           lines,
           createdBy: userId,
@@ -1292,6 +1319,7 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
           entryDate: supplierReturn.approved_at || new Date(), // fecha de aprobación (ver devolución de cliente)
           sourceType: 'supplier_return',
           sourceId: supplierReturn.id,
+          projectId: purchase.project_id || null,
           description: `Devolución a proveedor ${supplierReturn.return_number} — compra ${purchase.purchase_number || purchase.id}`,
           lines,
           createdBy: userId,
@@ -1642,6 +1670,7 @@ async function generateDepreciationEntry(asset, period, amount, tenantId, userId
           entryDate: lastDayOfPeriod(period),
           sourceType: 'fixed_asset_depreciation',
           sourceId: asset.id,
+          projectId: asset.project_id || null,
           description: `Depreciación ${period} — ${asset.name}`,
           lines,
           createdBy: userId,
@@ -1656,6 +1685,142 @@ async function generateDepreciationEntry(asset, period, amount, tenantId, userId
       throw error;
     }
   }, `depreciación ${asset.id} (${period})`, options);
+}
+
+/**
+ * Asiento de baja de un activo fijo (`source_type: 'fixed_asset_disposal'`),
+ * por retiro o por venta:
+ *   Débito  depreciación acumulada (lo depreciado hasta la baja)
+ *   Débito  cuenta de la venta (caja, bancos o cuenta por cobrar), si se vendió
+ *   Crédito cuenta del activo (costo de compra)
+ *   Diferencia → utilidad (crédito) o pérdida (débito) en venta y retiro de
+ *   propiedades, planta y equipo (mapeos fixed_asset_disposal_gain/_loss).
+ * El IVA de la venta, si aplica, va en la factura de venta, no aquí.
+ */
+async function generateFixedAssetDisposalEntry(asset, { date, accumulated, impaired = 0, saleAmount = 0, saleAccountId = null }, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const r2 = (n) => Math.round(Number(n) * 100) / 100;
+      const cost = r2(asset.acquisition_cost);
+      const acc = r2(accumulated);
+      const sale = r2(saleAmount);
+      const imp = r2(impaired);
+      const result = r2(sale + acc + imp - cost); // > 0 utilidad, < 0 pérdida
+      const kind = sale > 0 ? 'Venta' : 'Retiro';
+      const lines = [];
+      if (acc > 0) lines.push({ account_id: asset.accumulated_depreciation_account_id, debit: acc, credit: 0, description: `Depreciación acumulada — ${asset.name}` });
+      if (imp > 0) {
+        const impAccount = await getMappedAccountId(tenantId, 'fixed_asset_impairment_accumulated', t);
+        lines.push({ account_id: impAccount, debit: imp, credit: 0, description: `Deterioro acumulado — ${asset.name}` });
+      }
+      if (sale > 0) lines.push({ account_id: saleAccountId, debit: sale, credit: 0, description: `${kind} de ${asset.name}` });
+      if (result < 0) {
+        const lossAccount = await getMappedAccountId(tenantId, 'fixed_asset_disposal_loss', t);
+        lines.push({ account_id: lossAccount, debit: -result, credit: 0, description: `Pérdida en ${kind.toLowerCase()} — ${asset.name}` });
+      }
+      lines.push({ account_id: asset.asset_account_id, debit: 0, credit: cost, description: `${kind} — ${asset.name}` });
+      if (result > 0) {
+        const gainAccount = await getMappedAccountId(tenantId, 'fixed_asset_disposal_gain', t);
+        lines.push({ account_id: gainAccount, debit: 0, credit: result, description: `Utilidad en venta — ${asset.name}` });
+      }
+
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: asset.branch_id,
+          entryDate: date,
+          sourceType: 'fixed_asset_disposal',
+          sourceId: asset.id,
+          description: `${kind} del activo fijo — ${asset.name}`,
+          lines,
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `baja de activo ${asset.id}`, options);
+}
+
+/**
+ * Asiento de deterioro de un activo fijo (`source_type: 'fixed_asset_impairment'`):
+ * gasto por deterioro contra deterioro acumulado (mapeos
+ * fixed_asset_impairment_expense / fixed_asset_impairment_accumulated).
+ */
+async function generateImpairmentEntry(asset, { date, amount, reason }, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const expense = await getMappedAccountId(tenantId, 'fixed_asset_impairment_expense', t);
+      const accumulatedImp = await getMappedAccountId(tenantId, 'fixed_asset_impairment_accumulated', t);
+      const desc = `Deterioro — ${asset.name}${reason ? ` (${reason})` : ''}`;
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: asset.branch_id,
+          entryDate: date,
+          sourceType: 'fixed_asset_impairment',
+          sourceId: asset.id,
+          description: desc,
+          projectId: asset.project_id || null,
+          lines: [
+            { account_id: expense, debit: amount, credit: 0, description: desc },
+            { account_id: accumulatedImp, debit: 0, credit: amount, description: `Deterioro acumulado — ${asset.name}` },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `deterioro de activo ${asset.id}`, options);
+}
+
+/**
+ * Asiento de reversión de deterioro (`source_type: 'fixed_asset_impairment'`):
+ * deterioro acumulado contra ingreso por recuperación (mapeo
+ * fixed_asset_impairment_recovery).
+ */
+async function generateImpairmentReversalEntry(asset, { date, amount, reason }, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const accumulatedImp = await getMappedAccountId(tenantId, 'fixed_asset_impairment_accumulated', t);
+      const recovery = await getMappedAccountId(tenantId, 'fixed_asset_impairment_recovery', t);
+      const desc = `Reversión de deterioro — ${asset.name}${reason ? ` (${reason})` : ''}`;
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: asset.branch_id,
+          entryDate: date,
+          sourceType: 'fixed_asset_impairment',
+          sourceId: asset.id,
+          description: desc,
+          projectId: asset.project_id || null,
+          lines: [
+            { account_id: accumulatedImp, debit: amount, credit: 0, description: `Deterioro acumulado — ${asset.name}` },
+            { account_id: recovery, debit: 0, credit: amount, description: desc },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `reversión de deterioro ${asset.id}`, options);
 }
 
 /**
@@ -1793,7 +1958,11 @@ async function generateInternalConsumptionEntry(consumption, tenantId, userId, o
     const t = await sequelize.transaction();
     try {
       const totalCost = Number(consumption.total_cost || 0);
-      if (totalCost <= 0) return null;
+      if (totalCost <= 0) { await t.rollback(); return null; }
+      // Material de la bodega de una obra: ya se llevó a costo de obra cuando
+      // entró a esa bodega (asiento de consumo, projectAccounting.service.js).
+      // Registrarlo como instalado/consumido solo mueve el kárdex.
+      if (await isProjectWarehouse(tenantId, consumption.warehouse_id, t)) { await t.rollback(); return null; }
 
       const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
       const expenseAccount = await getMappedAccountId(tenantId, 'internal_consumption_expense', t);
@@ -1971,6 +2140,9 @@ module.exports = {
   generateAdvanceReassignmentEntry,
   generateSaleRetentionEntry,
   generateDepreciationEntry,
+  generateFixedAssetDisposalEntry,
+  generateImpairmentEntry,
+  generateImpairmentReversalEntry,
   generateLoanPaymentEntry,
   generateAdjustmentEntry,
   generateInternalConsumptionEntry,

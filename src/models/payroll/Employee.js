@@ -139,6 +139,16 @@ const Employee = sequelize.define('Employee', {
     type: DataTypes.DATEONLY,
     allowNull: true,
   },
+  // Libro de vacaciones (migración 2026110615): saldo de días pendientes a una
+  // fecha de corte — ver services/payroll/vacationBook.service.js.
+  vacation_opening_days: {
+    type: DataTypes.DECIMAL(7, 2),
+    allowNull: true,
+  },
+  vacation_opening_date: {
+    type: DataTypes.DATEONLY,
+    allowNull: true,
+  },
   // Fecha de fin pactada del contrato (solo aplica a contract_type '2'
   // Término fijo) — base para el listado de alertas de vencimiento (ver
   // getExpiringContracts en employees.controller.js). Null para el resto

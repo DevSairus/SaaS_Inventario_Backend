@@ -18,7 +18,7 @@ const { sequelize } = require('../../config/database');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const {
   SupplierOrderList, SupplierOrderListItem, Supplier, Product,
-  Purchase, PurchaseItem, Tenant, User,
+  Purchase, PurchaseItem, Tenant, User, Project,
 } = require('../../models');
 const ProductSupplier = require('../../models/inventory/ProductSupplier');
 
@@ -88,13 +88,16 @@ async function nextListNumber(tenant_id, transaction) {
   return `PED-${String(n).padStart(6, '0')}`;
 }
 
-async function findOrCreateOpenList(tenant_id, supplier_id, user_id, transaction) {
+// Una lista abierta por proveedor y proyecto: los faltantes de una obra
+// (services/projects/projectBom.service.js) van en su propia lista, aparte
+// del pedido general (project_id NULL) que se arma desde alertas y fichas.
+async function findOrCreateOpenList(tenant_id, supplier_id, user_id, transaction, { project_id = null, notes = null } = {}) {
   const existing = await SupplierOrderList.findOne({
-    where: { tenant_id, supplier_id, status: 'open' }, transaction, lock: transaction.LOCK.UPDATE,
+    where: { tenant_id, supplier_id, project_id, status: 'open' }, transaction, lock: transaction.LOCK.UPDATE,
   });
   if (existing) return existing;
   const list_number = await nextListNumber(tenant_id, transaction);
-  return SupplierOrderList.create({ tenant_id, supplier_id, list_number, status: 'open', created_by: user_id }, { transaction });
+  return SupplierOrderList.create({ tenant_id, supplier_id, project_id, notes, list_number, status: 'open', created_by: user_id }, { transaction });
 }
 
 async function loadList(tenant_id, id, { transaction, taxAttributes = false } = {}) {
@@ -113,6 +116,7 @@ async function loadList(tenant_id, id, { transaction, taxAttributes = false } = 
       { model: User, as: 'orderer', attributes: userAttributes },
       { model: User, as: 'creator', attributes: userAttributes },
       { model: User, as: 'canceller', attributes: userAttributes },
+      { model: Project, as: 'project', attributes: ['id', 'code', 'name', 'status', 'warehouse_id'] },
     ],
     order: [[{ model: SupplierOrderListItem, as: 'items' }, 'created_at', 'ASC']],
     transaction,
@@ -144,7 +148,7 @@ const sendError = (res, error, fallback, where) => {
 const getOrderLists = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { status = 'open', supplier_id, search } = req.query;
+    const { status = 'open', supplier_id, project_id, search } = req.query;
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
 
@@ -152,6 +156,7 @@ const getOrderLists = async (req, res) => {
     if (status === 'history') where.status = { [Op.in]: ['ordered', 'cancelled'] };
     else if (status && status !== 'all') where.status = status;
     if (supplier_id) where.supplier_id = supplier_id;
+    if (project_id) where.project_id = project_id;
 
     // search: número de lista o nombre del proveedor.
     const items = itemsTable();
@@ -169,6 +174,7 @@ const getOrderLists = async (req, res) => {
         { model: User, as: 'orderer', attributes: userAttributes },
         { model: User, as: 'creator', attributes: userAttributes },
         { model: User, as: 'canceller', attributes: userAttributes },
+        { model: Project, as: 'project', attributes: ['id', 'code', 'name'] },
       ],
       attributes: {
         include: [
@@ -602,6 +608,11 @@ const getPurchaseDraft = async (req, res) => {
         supplier_id: list.supplier_id,
         supplier_name: list.supplier?.business_name || list.supplier?.name || '',
         notes: list.notes || '',
+        // Pedido de una obra: la compra queda del proyecto y, si la obra
+        // tiene bodega, se recibe allá (cuenta como material del proyecto).
+        project_id: list.project_id || null,
+        project: list.project ? { id: list.project.id, code: list.project.code, name: list.project.name } : null,
+        warehouse_id: list.project?.warehouse_id || null,
         items: list.items.map((i) => ({
           product_id: i.product_id,
           name: i.product.name,
@@ -859,6 +870,7 @@ const getPublicOrderListPdf = async (req, res) => {
 
 module.exports = {
   suggestQuantity,
+  findOrCreateOpenList,
   getOrderLists,
   getOrderListsStats,
   getPendingProducts,

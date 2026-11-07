@@ -81,7 +81,34 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
     return Object.values(differences).some((v) => Math.abs(Number(v || 0)) > 0.01);
   });
 
+  // Módulo Proyectos: periodos de nómina repartidos entre obras que no tienen
+  // la reclasificación contable (p. ej. se repartieron antes de generar el
+  // comprobante de nómina). Sin filtro de sede: el reparto es de toda la empresa.
+  const { ProjectLaborAllocation, PayrollPeriod } = require('../../models');
+  const laborPeriods = ProjectLaborAllocation
+    ? await ProjectLaborAllocation.findAll({
+      where: { tenant_id: tenantId, period_end: { [Op.between]: [from, to] } },
+      attributes: ['payroll_period_id', [require('sequelize').fn('SUM', require('sequelize').col('amount')), 'amount']],
+      group: ['payroll_period_id'],
+      raw: true,
+    })
+    : [];
+  const periodsById = laborPeriods.length
+    ? new Map((await PayrollPeriod.findAll({ where: { id: laborPeriods.map((p) => p.payroll_period_id) }, attributes: ['id', 'start_date', 'end_date'], raw: true })).map((p) => [p.id, p]))
+    : new Map();
+
   const sourcesToCheck = [
+    ...laborPeriods.map((p) => {
+      const period = periodsById.get(p.payroll_period_id) || {};
+      return {
+        source_type: 'project_labor',
+        source_id: p.payroll_period_id,
+        label: `Reparto de nómina a obras ${period.start_date || ''} a ${period.end_date || ''}`,
+        date: period.end_date,
+        amount: Number(p.amount),
+        branch_id: null,
+      };
+    }),
     ...sales.map((s) => ({
       source_type: 'sale',
       source_id: s.id,

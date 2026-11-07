@@ -7,11 +7,12 @@
 
 const express = require('express');
 const router = express.Router();
+const { requirePermission } = require('../../middleware/requirePermission');
 const ctrl = require('../../controllers/inventory/priceAdjustments.controller');
 const { checkRole } = require('../../middleware/auth');
 
 const PRICE_ADJUSTMENT_WRITE_ROLES = ['admin', 'manager', 'super_admin'];
-const write = checkRole(...PRICE_ADJUSTMENT_WRITE_ROLES);
+const write = requirePermission('inventory.price_adjustments.write');
 
 router.get('/', ctrl.list);
 router.get('/product/:productId', ctrl.productHistory);

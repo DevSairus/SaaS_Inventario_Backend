@@ -3,6 +3,8 @@ const { PayrollNovedad, PayrollPeriod, Employee } = require('../../models');
 const { Op } = require('sequelize');
 const { DIAN_CATEGORY_MAP, CATEGORIAS_HORAS_EXTRA, validarTopeHorasExtra } = require('../../services/payroll/payrollService');
 const { getEmployeesActiveInPeriod } = require('../../services/payroll/payrollPeriodEmissionService');
+const { suggestNovedad: suggest, commissionsMonthlyAverage } = require('../../services/payroll/novedadSuggest.service');
+const { getSettings: getPayrollSettings } = require('../../services/payroll/payrollAccountingService');
 
 /**
  * Lista las novedades de un periodo (todas, o filtradas por empleado).
@@ -240,7 +242,33 @@ const copyNovedadesFromPreviousPeriod = async (req, res) => {
   }
 };
 
+/**
+ * POST /payroll/novedades/suggest — días y valor sugeridos mientras se
+ * captura una novedad (ver services/payroll/novedadSuggest.service.js).
+ * body: { employee_id, payroll_period_id, dian_category, subtype, values, source }
+ */
+const suggestNovedad = async (req, res) => {
+  try {
+    const tenantId = req.user.tenant_id;
+    const { employee_id: employeeId, payroll_period_id: periodId, dian_category: category, subtype, values, source } = req.body || {};
+    if (!employeeId || !category) return res.json({ success: true, data: { values: {}, detail: null, warnings: [] } });
+    const employee = await Employee.findOne({ where: { id: employeeId, tenant_id: tenantId } });
+    if (!employee) return res.status(404).json({ success: false, message: 'Empleado no encontrado' });
+    const period = periodId ? await PayrollPeriod.findOne({ where: { id: periodId, tenant_id: tenantId } }) : null;
+    const settings = await getPayrollSettings(tenantId);
+    const commissionsAvg = category === 'Vacaciones'
+      ? await commissionsMonthlyAverage(tenantId, employee.id, period?.end_date)
+      : 0;
+    const data = suggest({ employee, period, settings, commissionsAvg }, { category, subtype, values: values || {}, source });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error en suggestNovedad:', error);
+    res.status(500).json({ success: false, message: 'Error al calcular la novedad' });
+  }
+};
+
 module.exports = {
+  suggestNovedad,
   getNovedades,
   createNovedad,
   deleteNovedad,

@@ -39,7 +39,7 @@ const C = {
   white: '#ffffff',
 };
 
-const DOC_TYPES = { '13': 'CC', '31': 'NIT', '12': 'TI', '11': 'RC', '21': 'TE', '22': 'CE', '41': 'Pasaporte', '42': 'Doc. extranjero', '47': 'PEP', '91': 'NUIP' };
+const DOC_TYPES = { '13': 'CC', '31': 'NIT', '12': 'TI', '11': 'RC', '21': 'TE', '22': 'CE', '41': 'Pasaporte', '42': 'Doc. extranjero', '47': 'PEP', '48': 'PPT', '50': 'NIT extranjero', '91': 'NUIP' };
 const METHODS = {
   cash: 'Efectivo', efectivo: 'Efectivo', transfer: 'Transferencia', transferencia: 'Transferencia',
   credit_card: 'Tarjeta crédito', debit_card: 'Tarjeta débito', tarjeta: 'Tarjeta', check: 'Cheque',

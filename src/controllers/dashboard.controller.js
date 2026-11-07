@@ -11,7 +11,7 @@ const { shouldHideRemisiones, economicSalesWhere, workOrderRemisionSqlCondition,
 // INVENTORY_VALUE_ROLES de DashboardPage.jsx) y en getSuggestions() más
 // abajo -- se centraliza acá para que getAlerts() también lo respete.
 const ALERT_CATEGORY_ROLES = {
-  inventory: ['admin', 'manager', 'seller', 'warehouse_keeper', 'accountant'],
+  inventory: ['admin', 'manager', 'seller', 'warehouse_keeper', 'inventory_lead', 'accountant'],
   payables: ['admin', 'manager', 'accountant'],
   advances: ['admin', 'manager', 'accountant', 'seller'],
 };
@@ -801,7 +801,7 @@ exports.getSuggestions = async (req, res) => {
       });
     }
 
-    if (outOfStockCount > 0 && canSee(['admin', 'manager', 'warehouse_keeper', 'seller'])) {
+    if (outOfStockCount > 0 && canSee(['admin', 'manager', 'warehouse_keeper', 'inventory_lead', 'seller'])) {
       suggestions.push({
         id: 'out_of_stock',
         title: `Reabastecer ${outOfStockCount} producto${outOfStockCount > 1 ? 's' : ''} agotado${outOfStockCount > 1 ? 's' : ''}`,

@@ -466,7 +466,29 @@ const consentLimiter = rateLimit({
   },
 });
 
+/**
+ * Simulador solar público (/public/solar/:slug/...). Sin autenticación y
+ * pensado para ir incrustado en sitios web: navegar y calcular es generoso;
+ * dejar datos y leer facturas (OCR, que cuesta CPU) es mucho más limitado.
+ */
+const solarLimiter = (prefix, windowMs, max, message) => rateLimit({
+  windowMs,
+  max,
+  store: makeStore(prefix),
+  keyGenerator: ipKey,
+  handler: (req, res) => {
+    logger.warn('Solar simulator rate limit exceeded', { ip: req.ip, path: req.path });
+    res.status(429).json({ success: false, message, retryAfter: 60 });
+  },
+});
+const solarPublicLimiter = solarLimiter('solar-public', 15 * 60 * 1000, 150, 'Demasiadas consultas. Intenta de nuevo en unos minutos');
+const solarLeadLimiter = solarLimiter('solar-lead', 60 * 60 * 1000, 10, 'Ya recibimos varias solicitudes desde tu conexión. Intenta más tarde o escríbenos directamente');
+const solarOcrLimiter = solarLimiter('solar-ocr', 60 * 60 * 1000, 6, 'Llegaste al límite de facturas leídas por ahora: escribe tu consumo a mano');
+
 module.exports = {
+  solarPublicLimiter,
+  solarLeadLimiter,
+  solarOcrLimiter,
   consentLimiter,
   generalLimiter,
   authLimiter,

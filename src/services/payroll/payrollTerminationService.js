@@ -38,12 +38,11 @@
  *  - Prima: proporcional al semestre en curso (Ene-Jun / Jul-Dic) desde
  *    su inicio (o `hire_date` si ingresó a mitad de semestre) hasta el
  *    retiro.
- *  - Vacaciones: causación simplificada a 15 días "comerciales" (base 360)
- *    por año completo trabajado, sin descontar licencias no remuneradas o
- *    incapacidades del tiempo base -- y sin distinguir hábiles/calendario.
- *    Días ya disfrutados/compensados se restan sumando TODAS las
- *    PayrollNovedad de dian_category='Vacaciones' que ya tenga el
- *    empleado en cualquier periodo anterior.
+ *  - Vacaciones: saldo del libro de vacaciones a la fecha de retiro
+ *    (vacationBook.service.js): 15 días por 360 días comerciales desde el
+ *    ingreso o desde el saldo inicial, sin causar licencias no remuneradas
+ *    ni días no remunerados, menos lo disfrutado/compensado. Sin distinguir
+ *    hábiles/calendario.
  *  - Indemnización y Bonificación por retiro NO se calculan: dependen de
  *    la causa del retiro (justa causa o no, tipo de contrato, antigüedad)
  *    y de negociaciones propias del caso -- se reciben como monto ya
@@ -66,7 +65,6 @@ const { generatePayrollEntry } = require('../accounting/autoEntries.service');
 const logger = require('../../config/logger');
 
 const PORCENTAJE_INTERESES_CESANTIAS = 12; // Ley 52/1975 -- 12% anual sobre cesantías causadas
-const DIAS_VACACIONES_POR_ANIO = 15; // CST Art. 186 -- 15 días hábiles por año, ver aproximación en el comentario de arriba
 
 /* ──────────────────────────────────────────────────────────
  * Helpers de fechas (ISO 'YYYY-MM-DD', aritmética en UTC -- mismo criterio
@@ -143,35 +141,27 @@ function calcularPrimaProporcional(employee) {
 }
 
 /* ──────────────────────────────────────────────────────────
- * 4. Vacaciones pendientes -- causadas desde el ingreso, menos las ya
- *    disfrutadas/compensadas en cualquier periodo anterior (sumadas desde
- *    las PayrollNovedad ya guardadas, dian_category='Vacaciones').
+ * 4. Vacaciones pendientes -- saldo del libro de vacaciones a la fecha
+ *    de retiro (ver vacationBook.service.js).
  * ────────────────────────────────────────────────────────── */
 async function calcularVacacionesPendientes(tenantId, employee) {
-  const diasTotalesVinculacion = diasComerciales(employee.hire_date, employee.termination_date);
-  const diasCausados = (diasTotalesVinculacion / 360) * DIAS_VACACIONES_POR_ANIO;
-
-  const novedadesVacaciones = await PayrollNovedad.findAll({
-    where: { tenant_id: tenantId, employee_id: employee.id, dian_category: 'Vacaciones' },
-    attributes: ['payload'],
-  });
-
-  let diasYaTomados = 0;
-  for (const row of novedadesVacaciones) {
-    const p = row.payload || {};
-    for (const c of (p.comunes || [])) diasYaTomados += Number(c.cantidad) || 0;
-    for (const c of (p.compensadas || [])) diasYaTomados += Number(c.cantidad) || 0;
-  }
-
-  const diasPendientes = Math.max(0, diasCausados - diasYaTomados);
+  // Mismo cálculo del libro de vacaciones a la fecha de retiro: saldo inicial
+  // (si lo tiene), días causados sin licencias no remuneradas ni días no
+  // remunerados, menos lo disfrutado/compensado.
+  const { getEmployeeBook } = require('./vacationBook.service');
+  const book = await getEmployeeBook(tenantId, employee, employee.termination_date, { forSettlement: true });
+  const diasPendientes = Math.max(0, book.disponibles);
   const salario = Number(employee.base_salary);
   // Tasa diaria sobre la misma convención de 30 días/mes que usa el resto
   // del módulo para el Básico (PAYROLL_CONSTANTS.DIAS_MES_COMERCIAL).
   const valor = (salario / PAYROLL_CONSTANTS.DIAS_MES_COMERCIAL) * diasPendientes;
 
   return {
-    diasCausados: Math.round(diasCausados * 100) / 100,
-    diasYaTomados,
+    saldoInicial: book.saldo_inicial,
+    fechaSaldoInicial: book.fecha_saldo_inicial,
+    diasCausados: book.causados,
+    diasNoCausan: book.dias_no_causan,
+    diasYaTomados: Math.round((book.disfrutados + book.compensados) * 100) / 100,
     diasPendientes: Math.round(diasPendientes * 100) / 100,
     valor: Math.round(valor),
   };
@@ -216,7 +206,7 @@ async function calcularLiquidacionDefinitiva(tenantId, employee, { indemnizacion
 
   const notasLimitaciones = [
     'Cesantías/intereses asumen que los años anteriores ya fueron consignados al fondo (obligación al 14 de febrero) -- si el retiro es antes de esa fecha del año en curso, revise el año anterior a mano.',
-    'Vacaciones: causación aproximada (15 días comerciales/año desde el ingreso, sin descontar incapacidades/licencias no remuneradas del tiempo base).',
+    'Vacaciones: según el libro de vacaciones (15 días por 360 días comerciales desde el ingreso o desde el saldo inicial, sin causar licencias no remuneradas ni días no remunerados). Revise el saldo inicial del empleado si entró antes de llevar la nómina en Pitbox.',
   ];
   if (!Number(indemnizacion) && !Number(bonifRetiro)) {
     notasLimitaciones.push('No se incluyó indemnización ni bonificación por retiro -- si el retiro fue sin justa causa o hay una negociación de por medio, calcúlelas aparte e inclúyalas antes de emitir.');
