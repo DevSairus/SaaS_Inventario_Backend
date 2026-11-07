@@ -702,6 +702,12 @@ const convertQuoteToWorkOrder = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Esta cotización ya fue convertida a una Orden de Trabajo' });
     }
+    const { contractLockReason } = require('../../services/projects/projectCuts.service');
+    const contractLock = await contractLockReason(tenant_id, sale, transaction);
+    if (contractLock) {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: contractLock });
+    }
     if (!sale.vehicle_plate) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'La cotización no tiene datos de vehículo; no se puede convertir a OT' });

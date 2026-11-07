@@ -265,10 +265,15 @@ async function getProjectDocuments(tenantId, project) {
   if (project.warehouse_id) {
     transferWhere[Op.or].push({ to_warehouse_id: project.warehouse_id }, { from_warehouse_id: project.warehouse_id });
   }
-  const [sales, purchases, expenses, transfers, orderLists] = await Promise.all([
+  // Lazy: projectCuts.service no depende de este, pero así no hay ciclo si algún día lo hace.
+  const { contractProgress } = require('./projectCuts.service');
+  const salesWhere = project.quote_id
+    ? { tenant_id: tenantId, [Op.or]: [{ project_id: project.id }, { id: project.quote_id }] }
+    : { tenant_id: tenantId, project_id: project.id };
+  const [sales, purchases, expenses, transfers, orderLists, contract] = await Promise.all([
     Sale.findAll({
-      where: { tenant_id: tenantId, project_id: project.id },
-      attributes: ['id', 'sale_number', 'document_type', 'status', 'quote_status', 'sale_date', 'total_amount', 'tax_amount', 'customer_name', 'payment_status'],
+      where: salesWhere,
+      attributes: ['id', 'sale_number', 'document_type', 'status', 'quote_status', 'sale_date', 'total_amount', 'tax_amount', 'customer_name', 'payment_status', 'project_cut_id'],
       order: [['sale_date', 'DESC']], limit,
     }),
     Purchase.findAll({
@@ -297,9 +302,11 @@ async function getProjectDocuments(tenantId, project) {
       include: [{ model: Supplier, as: 'supplier', attributes: ['id', 'name', 'business_name'] }],
       order: [['created_at', 'DESC']], limit,
     }),
+    contractProgress(tenantId, project),
   ]);
   return {
     sales,
+    contract,
     purchases,
     expenses,
     transfers: transfers.map((tr) => ({

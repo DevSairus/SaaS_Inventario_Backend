@@ -25,6 +25,7 @@ const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 const { daysOverdueOf, pendingReceivableWhere, draftSaleWhere, effectiveDueDateSql } = require('../../utils/receivables');
 const { searchMatch } = require('../../utils/searchText');
 const { createCustomerAdvanceRecord, afterAdvanceCommitted, splitExcess } = require('../../services/finance/customerAdvance.service');
+const { contractLockReason } = require('../../services/projects/projectCuts.service');
 
 // Descuento GLOBAL de la venta/cotización (independiente de discount_amount,
 // que es la suma de los descuentos por línea) -- 'fixed' es un monto fijo
@@ -859,6 +860,11 @@ const update = async (req, res) => {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Solo se pueden editar ventas en borrador' });
     }
+    const contractLock = await contractLockReason(tenantId, sale);
+    if (contractLock) {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: contractLock });
+    }
 
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const { items, customer_data, ...rest } = req.body;
@@ -1264,17 +1270,14 @@ const confirm = async (req, res) => {
     if (finalDocType === 'cotizacion') {
       return res.status(400).json({ success: false, message: 'Una cotización no se confirma como venta. Compártela con el cliente y, cuando la apruebe, conviértela en remisión o factura.' });
     }
-    if (sale.document_type === 'cotizacion' && !['aprobada', 'parcial'].includes(sale.quote_status)) {
-      return res.status(409).json({ success: false, message: 'La cotización debe estar aprobada por el cliente antes de convertirla en venta.' });
-    }
     // Contrato de un proyecto que se factura por cortes de obra: la cotización
     // queda como contrato y cada corte genera su factura parcial.
-    if (sale.document_type === 'cotizacion' && sale.project_id) {
-      const { ProjectCut } = require('../../models');
-      const cuts = await ProjectCut.count({ where: { tenant_id: tenantId, project_id: sale.project_id, status: { [Op.ne]: 'cancelled' } } });
-      if (cuts) {
-        return res.status(409).json({ success: false, message: 'Esta cotización es el contrato de un proyecto que se factura por cortes de obra: factura desde los cortes del proyecto.' });
-      }
+    const contractLock = await contractLockReason(tenantId, sale);
+    if (contractLock) {
+      return res.status(409).json({ success: false, message: contractLock });
+    }
+    if (sale.document_type === 'cotizacion' && !['aprobada', 'parcial'].includes(sale.quote_status)) {
+      return res.status(409).json({ success: false, message: 'La cotización debe estar aprobada por el cliente antes de convertirla en venta.' });
     }
 
     // Requisitos de factura electrónica (compartidos con la facturación de
@@ -1676,6 +1679,8 @@ const cancel = async (req, res) => {
 
     if (!sale) return res.status(404).json({ success: false, message: 'Venta no encontrada' });
     if (sale.status === 'cancelled') return res.status(400).json({ success: false, message: 'La venta ya está cancelada' });
+    const contractLock = await contractLockReason(tenantId, sale);
+    if (contractLock) return res.status(409).json({ success: false, message: contractLock });
     const { lifecycleBlocker } = require('../../services/sales/remisionInvoicing.service');
     const invoicingBlocker = lifecycleBlocker(sale);
     if (invoicingBlocker) return res.status(400).json({ success: false, message: invoicingBlocker });
@@ -2092,6 +2097,8 @@ const deleteById = async (req, res) => {
     if (sale.status !== 'draft') {
       return res.status(400).json({ success: false, message: 'Solo se pueden eliminar ventas en borrador' });
     }
+    const contractLock = await contractLockReason(tenantId, sale);
+    if (contractLock) return res.status(409).json({ success: false, message: contractLock });
     await sale.destroy();
     res.json({ success: true, message: 'Venta eliminada exitosamente' });
   } catch (error) {
@@ -2662,7 +2669,8 @@ async function getPublicSaleBody(saleId, res) {
       sale_number: sale.sale_number,
       document_type: sale.document_type,
       status: sale.status,
-      quote_status: sale.quote_status,
+      // El cliente ve "aprobada"; los estados del contrato son internos.
+      quote_status: ['contratada', 'facturada', 'cerrada'].includes(sale.quote_status) ? 'aprobada' : sale.quote_status,
       quote_valid_until: sale.quote_valid_until,
       pdf_url: `${backendUrl}/api/public/pdf/${sale.share_token}`,
       customer_name: sale.customer_name,
@@ -2830,6 +2838,11 @@ const setQuoteStatus = async (req, res) => {
     if (sale.document_type !== 'cotizacion' || sale.status !== 'draft') {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: 'Solo se puede responder una cotización vigente' });
+    }
+    const contractLock = await contractLockReason(req.tenant_id, sale, transaction);
+    if (contractLock) {
+      await transaction.rollback();
+      return res.status(409).json({ success: false, message: contractLock });
     }
 
     const user = req.user || {};

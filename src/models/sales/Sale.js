@@ -215,11 +215,16 @@ const Sale = sequelize.define('Sale', {
   },
   // ── Ciclo de vida de cotizaciones (document_type='cotizacion') ───────
   quote_status: {
-    type: DataTypes.ENUM('borrador', 'enviada', 'aprobada', 'parcial', 'rechazada', 'vencida'),
+    type: DataTypes.ENUM('borrador', 'enviada', 'aprobada', 'parcial', 'rechazada', 'vencida', 'contratada', 'facturada', 'cerrada'),
     allowNull: true,
     defaultValue: null,
-    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza (total o por ítem) desde /cotizacion/:token. "parcial" = aprobó algunos ítems y rechazó otros.',
+    comment: 'Solo aplica a document_type=cotizacion. El cliente aprueba/rechaza (total o por ítem) desde /cotizacion/:token. "parcial" = aprobó algunos ítems y rechazó otros. contratada/facturada/cerrada = contrato de un proyecto facturado por cortes (ver projectCuts.service).',
   },
+  // Cierre del contrato (cotización de un proyecto facturado por cortes).
+  contract_closed_at:         { type: DataTypes.DATE, allowNull: true },
+  contract_closed_by:         { type: DataTypes.UUID, allowNull: true },
+  contract_close_reason:      { type: DataTypes.TEXT, allowNull: true },
+  contract_unexecuted_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
   quote_approved_by_name:     { type: DataTypes.STRING, allowNull: true },
   quote_approved_by_document: { type: DataTypes.STRING, allowNull: true },
   quote_approved_ip:          { type: DataTypes.STRING, allowNull: true },

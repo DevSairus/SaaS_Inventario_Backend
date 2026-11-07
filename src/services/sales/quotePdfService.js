@@ -52,6 +52,9 @@ function publicQuoteUrl(sale) {
 }
 
 const generateQuotePDFBuffer = async (sale, tenant) => {
+  // Contrato de un proyecto facturado por cortes: hacia el cliente es una
+  // cotización aprobada (contratada/facturada/cerrada son estados internos).
+  const quoteStatus = ['contratada', 'facturada', 'cerrada'].includes(sale.quote_status) ? 'aprobada' : sale.quote_status;
   const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
   const chunks = [];
   const done = new Promise((resolve, reject) => {
@@ -154,10 +157,10 @@ const generateQuotePDFBuffer = async (sale, tenant) => {
 
   // Estado
   cx = card(2, 'ESTADO');
-  const st = QUOTE_STATUS[sale.quote_status] || QUOTE_STATUS.borrador;
+  const st = QUOTE_STATUS[quoteStatus] || QUOTE_STATUS.borrador;
   doc.roundedRect(cx, y + 24, cardW - 20, 20, 10).fill(st.color);
   doc.font('Helvetica-Bold').fontSize(7.5).fillColor(white).text(st.label, cx, y + 30, { width: cardW - 20, align: 'center', lineBreak: false });
-  if (sale.quote_responded_at && ['aprobada', 'parcial', 'rechazada'].includes(sale.quote_status)) {
+  if (sale.quote_responded_at && ['aprobada', 'parcial', 'rechazada'].includes(quoteStatus)) {
     doc.font('Helvetica').fontSize(7).fillColor(darkGray)
       .text(`${sale.quote_approved_by_name || ''}`, cx, y + 52, { width: cardW - 20, align: 'center', ellipsis: true, lineBreak: false })
       .text(fmtDay(sale.quote_responded_at), cx, y + 63, { width: cardW - 20, align: 'center', lineBreak: false });
@@ -216,7 +219,7 @@ const generateQuotePDFBuffer = async (sale, tenant) => {
   let lineNo = 0;
   // approval_status nace en 'aprobado' por defecto: solo se muestra cuando
   // el cliente ya respondió la cotización.
-  const anyResponded = ['aprobada', 'parcial', 'rechazada'].includes(sale.quote_status);
+  const anyResponded = ['aprobada', 'parcial', 'rechazada'].includes(quoteStatus);
   rows.forEach(({ item, comboHeader, component }) => {
     if (comboHeader) {
       const nextY = ensureSpace(y, 18);
@@ -351,10 +354,10 @@ const generateQuotePDFBuffer = async (sale, tenant) => {
 
   /* ══ ACEPTACIÓN ════════════════════════════════════════════════ */
   y = ensureSpace(y + 22, 96);
-  const responded = ['aprobada', 'parcial', 'rechazada'].includes(sale.quote_status);
+  const responded = ['aprobada', 'parcial', 'rechazada'].includes(quoteStatus);
   if (responded) {
     doc.roundedRect(MARGIN, y, INNER_W, 50, 6).fillAndStroke(tint(st.color, 0.9), tint(st.color, 0.6));
-    const verb = sale.quote_status === 'rechazada' ? 'Rechazada' : sale.quote_status === 'parcial' ? 'Aprobada parcialmente' : 'Aprobada';
+    const verb = quoteStatus === 'rechazada' ? 'Rechazada' : quoteStatus === 'parcial' ? 'Aprobada parcialmente' : 'Aprobada';
     doc.font('Helvetica-Bold').fontSize(9.5).fillColor(st.color)
       .text(`${verb} por ${sale.quote_approved_by_name || 'el cliente'}`, MARGIN + 14, y + 12, { width: INNER_W - 28 });
     doc.font('Helvetica').fontSize(7.5).fillColor(darkGray).text(

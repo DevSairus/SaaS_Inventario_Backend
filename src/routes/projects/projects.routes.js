@@ -45,6 +45,7 @@ router.post('/:id/cuts/:cutId/link-draft', billing, cuts.linkDraft);
 router.post('/:id/cuts/:cutId/finalize', billing, cuts.finalize);
 router.get('/:id/cuts/:cutId/acta', pnl, cuts.acta);
 router.post('/:id/retention/release', billing, cuts.releaseRetention);
+router.post('/:id/contract/close', billing, cuts.closeContract);
 router.get('/:id/documents', ctrl.getDocuments);
 
 router.post('/:id/budget', manage, ctrl.addBudgetLine);

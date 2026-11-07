@@ -40,6 +40,9 @@ const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
 
 const COUNTED = ['approved', 'invoicing', 'invoiced']; // cortes que ya cuentan como ejecutado
 const OPEN = ['draft', 'approved', 'invoicing'];
+// Estados de la cotización-contrato: admite cortes / ya terminó.
+const CONTRACT_BILLABLE = ['aprobada', 'parcial', 'contratada'];
+const CONTRACT_DONE = ['facturada', 'cerrada'];
 const SIGNATURE_MAX = 400 * 1024;
 
 // ── Contrato ──────────────────────────────────────────────────────────
@@ -248,6 +251,9 @@ async function billingSummary(tenantId, project) {
       quote_id: contract.quote.id,
       quote_number: contract.quote.quote_number || contract.quote.sale_number,
       quote_status: contract.quote.quote_status,
+      closed_at: contract.quote.contract_closed_at,
+      close_reason: contract.quote.contract_close_reason,
+      unexecuted_amount: contract.quote.contract_unexecuted_amount === null ? null : num(contract.quote.contract_unexecuted_amount),
       total: contract.total,
       subtotal: contract.subtotal,
       aiu: contract.aiu,
@@ -323,8 +329,14 @@ async function saveCut(tenantId, userId, project, cutId, body) {
       throw httpError(409, 'Los cortes se hacen con el proyecto aprobado o en ejecución');
     }
     const { ctx, contract } = await cutContext(tenantId, project, { excludeCutId: cut?.id, transaction: t });
-    if (!['aprobada', 'parcial'].includes(contract.quote.quote_status)) {
-      throw httpError(409, `El contrato (cotización ${contract.quote.quote_number || contract.quote.sale_number}) debe estar aprobado por el cliente`);
+    const contractNo = contract.quote.quote_number || contract.quote.sale_number;
+    if (CONTRACT_DONE.includes(contract.quote.quote_status)) {
+      throw httpError(409, contract.quote.quote_status === 'facturada'
+        ? `El contrato ${contractNo} ya se facturó completo: un mayor valor requiere otrosí o una cotización adicional`
+        : `El contrato ${contractNo} está cerrado: no admite más cortes`);
+    }
+    if (!CONTRACT_BILLABLE.includes(contract.quote.quote_status)) {
+      throw httpError(409, `El contrato (cotización ${contractNo}) debe estar aprobado por el cliente`);
     }
     const calc = computeCut(body, ctx);
     if (!(calc.direct_amount > 0)) throw httpError(400, 'El corte no tiene avance nuevo: aumenta el acumulado de alguna línea');
@@ -467,6 +479,101 @@ async function postRetentionEntry(tenantId, sale, project, amount, userId, { rel
   }), `retención de garantía ${sale.id}`);
 }
 
+// ── Ciclo de vida del contrato ───────────────────────────────────────
+/** Avance del contrato (por valor directo, igual que la pestaña de cortes); null si no hay contrato vigente. */
+async function contractProgress(tenantId, project) {
+  if (!project.quote_id) return null;
+  let contract;
+  try { contract = await loadContract(tenantId, project); } catch { return null; }
+  const [executed, invoicedCuts] = await Promise.all([
+    executedByLine(tenantId, project.id),
+    ProjectCut.count({ where: { tenant_id: tenantId, project_id: project.id, status: 'invoiced' } }),
+  ]);
+  const contractDirect = contract.lines.reduce((s, l) => s + l.qty_contract * l.unit_price, 0);
+  const executedDirect = contract.lines.reduce((s, l) => s + num(executed.get(l.sale_item_id)) * l.unit_price, 0);
+  return {
+    quote_id: contract.quote.id,
+    quote_status: contract.quote.quote_status,
+    invoiced_cuts: invoicedCuts,
+    progress_pct: contractDirect > 0 ? Math.round((executedDirect / contractDirect) * 10000) / 100 : 0,
+    unexecuted_amount: contract.quote.contract_unexecuted_amount === null ? null : num(contract.quote.contract_unexecuted_amount),
+  };
+}
+
+/**
+ * Tras facturar un corte: la cotización pasa a 'contratada' y, si los cortes
+ * ya cubren todo lo contratado, a 'facturada' (contrato terminado).
+ */
+async function contractComplete(tenantId, project, contract, transaction) {
+  const executed = await executedByLine(tenantId, project.id, { transaction });
+  return contract.lines.every((l) => num(executed.get(l.sale_item_id)) >= l.qty_contract - 0.0001);
+}
+
+async function markContractProgress(tenantId, project, transaction) {
+  const contract = await loadContract(tenantId, project, transaction);
+  const quote = contract.quote;
+  if (CONTRACT_DONE.includes(quote.quote_status)) return quote;
+  const complete = await contractComplete(tenantId, project, contract, transaction);
+  await Sale.update(complete
+    ? { quote_status: 'facturada', contract_closed_at: new Date(), contract_unexecuted_amount: 0 }
+    : { quote_status: 'contratada' },
+  { where: { id: quote.id, tenant_id: tenantId }, transaction });
+  return quote;
+}
+
+/**
+ * Cierra a mano el contrato con saldo sin ejecutar (obra terminada antes,
+ * alcance reducido). No admite más cortes; lo ya facturado no cambia.
+ */
+async function closeContract(tenantId, userId, project, body) {
+  const reason = String(body.reason || '').trim().slice(0, 1000);
+  if (!reason) throw httpError(400, 'Indica el motivo del cierre del contrato');
+  return sequelize.transaction(async (t) => {
+    await Project.findByPk(project.id, { transaction: t, lock: t.LOCK.UPDATE });
+    const contract = await loadContract(tenantId, project, t);
+    const quote = contract.quote;
+    const contractNo = quote.quote_number || quote.sale_number;
+    if (CONTRACT_DONE.includes(quote.quote_status)) throw httpError(409, `El contrato ${contractNo} ya está ${quote.quote_status === 'facturada' ? 'facturado completo' : 'cerrado'}`);
+    if (!CONTRACT_BILLABLE.includes(quote.quote_status)) throw httpError(409, `La cotización ${contractNo} no está aprobada: no es un contrato que cerrar`);
+    const open = await ProjectCut.findOne({ where: { tenant_id: tenantId, project_id: project.id, status: OPEN }, transaction: t });
+    if (open) throw httpError(409, `Termina o cancela primero el corte ${open.cut_no}`);
+    if (await contractComplete(tenantId, project, contract, t)) {
+      // Nada sin ejecutar: queda facturado completo, no "cerrado con saldo".
+      await markContractProgress(tenantId, project, t);
+      return { quote_id: quote.id, quote_status: 'facturada', unexecuted_amount: 0 };
+    }
+    const invoiced = await ProjectCut.sum('total_amount', { where: { tenant_id: tenantId, project_id: project.id, status: 'invoiced' }, transaction: t });
+    const unexecuted = round2(Math.max(contract.total - num(invoiced), 0));
+    await Sale.update({
+      quote_status: 'cerrada',
+      contract_closed_at: new Date(),
+      contract_closed_by: userId,
+      contract_close_reason: reason,
+      contract_unexecuted_amount: unexecuted,
+    }, { where: { id: quote.id, tenant_id: tenantId }, transaction: t });
+    logger.info(`[project-cuts] Contrato ${contractNo} cerrado (${project.code}); sin ejecutar ${unexecuted}`);
+    return { quote_id: quote.id, quote_status: 'cerrada', unexecuted_amount: unexecuted };
+  });
+}
+
+/**
+ * Motivo por el que una cotización no se puede editar, eliminar, responder ni
+ * convertir: es el contrato de un proyecto que ya se factura por cortes
+ * (editarla borraría sus líneas y con ellas las de los cortes). null si no aplica.
+ */
+async function contractLockReason(tenantId, sale, transaction) {
+  if (sale.document_type !== 'cotizacion') return null;
+  if (['contratada', ...CONTRACT_DONE].includes(sale.quote_status)) {
+    return 'Esta cotización es el contrato de un proyecto que se factura por cortes de obra: se gestiona desde la pestaña "Cortes y facturación" del proyecto.';
+  }
+  const project = await Project.findOne({ where: { tenant_id: tenantId, quote_id: sale.id }, attributes: ['id'], transaction });
+  if (!project) return null;
+  const cuts = await ProjectCut.count({ where: { tenant_id: tenantId, project_id: project.id, status: { [Op.ne]: 'cancelled' } }, transaction });
+  return cuts
+    ? 'Esta cotización es el contrato de un proyecto que se factura por cortes de obra: factura desde los cortes del proyecto.'
+    : null;
+}
+
 /** Cierra el corte cuando la factura ya quedó confirmada (y los anticipos aplicados). */
 async function finalizeInvoice(tenantId, userId, project, cutId) {
   const result = await sequelize.transaction(async (t) => {
@@ -490,6 +597,7 @@ async function finalizeInvoice(tenantId, userId, project, cutId) {
       advance_amount: appliedAdvance,
       net_amount: round2(num(sale.total_amount) - appliedAdvance - retention),
     }, { transaction: t });
+    await markContractProgress(tenantId, project, t);
     return { cut, sale, retention };
   });
   if (!result.already && result.retention > 0) {
@@ -535,5 +643,5 @@ async function getCutForActa(tenantId, project, cutId) {
 
 module.exports = {
   computeCut, billingSummary, previewCut, saveCut, deleteCut, approveCut, invoicePayload, linkDraft, finalizeInvoice,
-  releaseRetention, getCutForActa, loadContract,
+  releaseRetention, getCutForActa, loadContract, closeContract, contractLockReason, contractProgress,
 };

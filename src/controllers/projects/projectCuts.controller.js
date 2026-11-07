@@ -67,6 +67,17 @@ module.exports = {
     logAudit(req, 'retention_release', project, r);
     res.json({ success: true, message: `Retención de garantía liberada: ${r.invoices} factura(s), $ ${Math.round(r.amount).toLocaleString('es-CO')} ya se pueden cobrar`, data: r });
   }),
+  closeContract: handle('closeContract', 'Error cerrando el contrato', async (req, res, project) => {
+    const r = await svc.closeContract(req.user.tenant_id, req.user.id, project, req.body || {});
+    logAudit(req, 'contract_close', project, { ...r, reason: req.body?.reason });
+    res.json({
+      success: true,
+      message: r.quote_status === 'facturada'
+        ? 'El contrato ya estaba facturado completo: queda como facturado'
+        : `Contrato cerrado: quedan $ ${Math.round(r.unexecuted_amount).toLocaleString('es-CO')} sin ejecutar`,
+      data: r,
+    });
+  }),
   acta: handle('acta', 'Error generando el acta', async (req, res, project) => {
     const data = await svc.getCutForActa(req.user.tenant_id, project, req.params.cutId);
     const tenant = await Tenant.findByPk(req.user.tenant_id, { attributes: ['company_name', 'tax_id', 'logo_url', 'primary_color'] });
