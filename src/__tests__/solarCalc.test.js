@@ -95,4 +95,20 @@ describe('cotizador solar: factura de energía', () => {
     expect(r.history_kwh).toBeUndefined();
     expect(r.monthly_kwh).toBe(300);
   });
+  test('EPM multiservicio con columnas mezcladas: el consumo sale del renglón facturado', () => {
+    const text = [
+      'Dirección prestación servicio: CR 54 CL 36 -69 (INTERIOR 501 ) Municipio: Itagüí - Antioquia',
+      'Lectura actual Lectura anterior constante consumo Meta periodo: 129,99 kWh',
+      '14.611 - 14.466 X 1 = 0kWh 55,33 kWh Consumo en investigación',
+      'Energía oct-26 145 960,340 $ 139.249,30',
+      'Gas 8,592 m3 $ 33.553,35 Prec M3-Kwh 298,92',
+      'Acueducto 9 m3 $ 70.890,48',
+      'Energía 145 Kwh $ 129.350,19',
+    ].join('\n');
+    const r = parseEnergyBill(text);
+    expect(r.monthly_kwh).toBe(145);
+    expect(r.address).toBe('CR 54 CL 36 -69 (INTERIOR 501 )');
+    expect(r.city).toBe('Itagüí');
+    expect(r.tariff_kwh).toBe(892.07);
+  });
 });

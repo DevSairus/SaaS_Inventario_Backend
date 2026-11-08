@@ -23,6 +23,8 @@ const OPERATORS = ['ELECTRIFICADORA', 'ENEL', 'CODENSA', 'EPM', 'EMCALI', 'ELECT
 const MONTHS = 'ENE|FEB|MAR|ABR|MAY|JUN|JUL|AGO|SEP|SET|OCT|NOV|DIC';
 const titleCase = (s) => s.toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 const toInt = (s) => parseInt(String(s).replace(/[.,]/g, ''), 10);
+// kWh: "14.611" son miles, "55,33" o "129,99" son decimales (se descartan).
+const toKwh = (s) => toInt(String(s).replace(/[.,]\d{1,2}$/, ''));
 
 function parseEnergyBill(text) {
   const r = {};
@@ -68,8 +70,14 @@ function parseEnergyBill(text) {
 
   // Consumo del periodo. El OCR suele partir "kWh" ("kW h", "KW-H") o ponerlo
   // en la línea siguiente; el demo original aceptaba cualquier número + kWh.
+  // Primero los renglones facturados: el OCR de PDFs a varias columnas mezcla
+  // en una línea textos vecinos ("consumo … Meta periodo: 129,99 kWh").
   const KWH = 'K\\s?W\\s?[-/]?\\s?H';
   const kwhPatterns = [
+    // Resumen EPM: "Energía 145 Kwh $ 129.350,19"
+    new RegExp(`ENERG[IÍ]A[ \\t]+([0-9][0-9.,]{1,8})[ \\t]*${KWH}[ \\t]*\\$`, 'i'),
+    // Renglón facturado EPM: "Energía oct-26 145 960,340 $ 139.249,30"
+    new RegExp(`ENERG[IÍ]A[ \\t]+(?:${MONTHS})[A-Z]*[-/ ]?\\d{0,4}[ \\t]+([0-9][0-9.]*)[ \\t]+[0-9][0-9.,]*[ \\t]+\\$`, 'i'),
     new RegExp(`CONSUMO[^0-9\\n]*([0-9][0-9.,]{1,8})\\s*${KWH}`, 'i'),
     new RegExp(`ENERG[IÍ]A[^0-9\\n]{0,40}?([0-9][0-9.,]{1,8})\\s*${KWH}`, 'i'),
     /TOTAL\s+CONSUMO[^0-9\n]*([0-9][0-9.,]{1,8})(?!\s*M3)/i,
@@ -78,7 +86,7 @@ function parseEnergyBill(text) {
   for (const p of kwhPatterns) {
     const m = raw.match(p);
     if (m) {
-      const v = toInt(m[1]);
+      const v = toKwh(m[1]);
       if (v > 50 && v < 500000) { r.monthly_kwh = v; break; }
     }
   }
