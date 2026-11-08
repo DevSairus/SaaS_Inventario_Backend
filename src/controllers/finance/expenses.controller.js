@@ -379,7 +379,26 @@ const deleteExpense = async (req, res) => {
     if (parseFloat(expense.paid_amount || 0) > 0) {
       return res.status(400).json({ success: false, message: 'No se puede eliminar un gasto con pagos registrados' });
     }
+    // Documento Soporte ya enviado o aceptado: la DIAN lo tiene, borrar el
+    // gasto lo dejaría huérfano. Uno rechazado no tiene validez y no bloquea.
+    const { SupportDocument } = require('../../models');
+    const supportDoc = await SupportDocument.findOne({
+      where: { tenant_id, expense_id: id, dian_status: ['pending', 'sending', 'accepted'] },
+      attributes: ['support_document_number', 'dian_status'],
+    });
+    if (supportDoc) {
+      return res.status(400).json({
+        success: false,
+        message: supportDoc.dian_status === 'accepted'
+          ? `El gasto tiene el Documento Soporte ${supportDoc.support_document_number || ''} aceptado por la DIAN: no se puede eliminar. Si no correspondía, anúlalo con una Nota de Ajuste por el valor total.`
+          : 'El gasto tiene un Documento Soporte en trámite ante la DIAN: consulta su estado antes de eliminarlo.',
+      });
+    }
     await expense.destroy();
+    // Su asiento (borrador → se anula; contabilizado → asiento de reversión),
+    // igual que al cancelar una venta. No bloquea si no hay contabilidad.
+    const { reverseSourceEntries } = require('../../services/accounting/autoEntries.service');
+    await reverseSourceEntries('expense', id, tenant_id, req.user.id, `Gasto ${expense.expense_number || ''} eliminado`.trim());
     res.json({ success: true, message: 'Gasto eliminado' });
   } catch (error) {
     console.error('Error eliminando gasto:', error);
