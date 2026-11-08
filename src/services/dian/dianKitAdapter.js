@@ -331,6 +331,7 @@ function splitPersonName(fullName) {
 }
 
 function buildCounterpartyData(counterparty, sale) {
+  if (isNonResidentSeller(counterparty)) return buildNonResidentSellerData(counterparty);
   const cityCode = counterparty?.cityCode || sale?.customer_city_code || '11001';
   const address = {
     street: counterparty?.address || sale?.customer_address || 'Sin direccion',
@@ -400,6 +401,68 @@ function buildCounterpartyData(counterparty, sale) {
     // cualquier cliente/proveedor sin correo registrado.
     ...((counterparty?.email || sale?.customer_email) && { email: counterparty?.email || sale?.customer_email }),
   };
+}
+
+// ── Vendedor no residente (Documento Soporte, CustomizationID 11) ─────────
+// Proveedor del exterior (p. ej. un SaaS de EE. UU.): el Anexo Técnico pide
+// solo CityName (texto libre), AddressLine y Country (alfa-2 de la tabla
+// 16.4.1) en la dirección (DSAJ08b), CompanyID con su tipo real (DSAJ25b: 50,
+// 42...) y sin DV (DSAJ24 solo aplica a residentes). @dian-kit exige todos los
+// campos de dirección y no conoce la operación 11, así que se arma con
+// marcadores y se corrige el XML en applyNonResidentSeller().
+function isNonResidentSeller(seller) {
+  return Boolean(seller?.countryCode) && String(seller.countryCode).toUpperCase() !== 'CO';
+}
+
+function buildNonResidentSellerData(seller) {
+  const { countryByCode } = require('../../data/countries-dian');
+  const countryCode = String(seller.countryCode).toUpperCase();
+  const address = {
+    street: seller.address || 'Sin direccion',
+    cityCode: '00000', // marcador: se quita del XML
+    cityName: seller.city,
+    departmentCode: '00', // marcador: se quita del XML
+    departmentName: '-', // marcador: se quita del XML
+    countryCode,
+    countryName: countryByCode(countryCode)?.name || seller.countryName || countryCode,
+  };
+  const schemeID = seller.schemeID || '50';
+  const number = cleanId(seller.nit);
+  const isNatural = seller.personType === 'natural';
+  return {
+    name: seller.name,
+    identification: { number, type: schemeID },
+    personType: isNatural ? '2' : '1',
+    ...(isNatural && { person: splitPersonName(seller.name) }),
+    fiscalResponsibilities: [mapFiscalResponsibility('R-99-PN')],
+    taxInfo: {
+      registrationName: seller.name,
+      companyId: { number, type: schemeID },
+      taxLevelCode: 'R-99-PN',
+      taxScheme: { code: '01' },
+      address,
+    },
+    address,
+    ...(seller.email && { email: seller.email }),
+  };
+}
+
+/** Corrige el XML (ya simplificado) para un vendedor no residente. */
+function applyNonResidentSeller(xml, seller) {
+  const block = xml.match(/<cac:AccountingSupplierParty>[\s\S]*?<\/cac:AccountingSupplierParty>/);
+  if (!block) return xml;
+  const schemeID = seller.schemeID || '50';
+  const fixed = block[0]
+    // Sin código de municipio, código postal ni departamento (DSAJ08b).
+    .replace(/<cbc:ID>[^<]*<\/cbc:ID>(\s*<cbc:CityName>)/, '$1')
+    .replace(/<cbc:PostalZone>[^<]*<\/cbc:PostalZone>/, '')
+    .replace(/<cbc:CountrySubentity>[^<]*<\/cbc:CountrySubentity>/, '')
+    .replace(/<cbc:CountrySubentityCode>[^<]*<\/cbc:CountrySubentityCode>/, '')
+    // Tipo de identificación real y sin DV (simplifySupplierParty fuerza "31").
+    .replace(/<cbc:CompanyID([^>]*)>/, (m, attrs) => `<cbc:CompanyID${attrs.replace(/\s*schemeID="[^"]*"/, '').replace(/schemeName="[^"]*"/, `schemeName="${schemeID}"`)}>`);
+  return xml
+    .replace(block[0], fixed)
+    .replace(/<cbc:CustomizationID>10<\/cbc:CustomizationID>/, '<cbc:CustomizationID>11</cbc:CustomizationID>');
 }
 
 /**
@@ -786,6 +849,18 @@ function computeCuds(doc, cfg) {
  * Supplier.document_type viene explícito (captura manual), tiene prioridad.
  */
 function buildSellerFromSupplier(supplier) {
+  if (supplier.country_code && String(supplier.country_code).toUpperCase() !== 'CO') {
+    return {
+      name: supplier.business_name || supplier.name,
+      nit: supplier.tax_id,
+      schemeID: supplier.document_type || (supplier.person_type === 'natural' ? '42' : '50'),
+      personType: supplier.person_type,
+      countryCode: String(supplier.country_code).toUpperCase(),
+      city: supplier.city,
+      address: supplier.address,
+      email: supplier.email,
+    };
+  }
   const { resolveCity } = require('../../data/divipola-colombia');
   const schemeID = supplier.document_type || (supplier.person_type === 'natural' ? '13' : '31');
   const resolved = supplier.city_code ? resolveCity(supplier.city_code) : null;
@@ -822,6 +897,18 @@ function buildSellerFromSupplier(supplier) {
  * controller antes de llegar acá.
  */
 function buildSellerFromAdHoc(adHoc) {
+  if (adHoc.country_code && String(adHoc.country_code).toUpperCase() !== 'CO') {
+    return {
+      name: adHoc.name,
+      nit: adHoc.tax_id,
+      schemeID: adHoc.document_type || (adHoc.person_type === 'natural' ? '42' : '50'),
+      personType: adHoc.person_type,
+      countryCode: String(adHoc.country_code).toUpperCase(),
+      city: adHoc.city,
+      address: adHoc.address,
+      email: adHoc.email,
+    };
+  }
   const { resolveCity } = require('../../data/divipola-colombia');
   const schemeID = adHoc.document_type || (adHoc.person_type === 'natural' ? '13' : '31');
   const resolved = adHoc.city_code ? resolveCity(adHoc.city_code) : null;
@@ -1001,6 +1088,7 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
   // Reduce el vendedor al set mínimo de elementos que exige la DIAN para
   // Documento Soporte -- ver comentario de simplifySupplierParty() arriba.
   unsignedXml = simplifySupplierParty(unsignedXml);
+  if (isNonResidentSeller(seller)) unsignedXml = applyNonResidentSeller(unsignedXml, seller);
   const { signedXml } = await signXml({
     xml: unsignedXml,
     certificate: kit.config.certificateData,
@@ -1241,6 +1329,7 @@ async function createSupportDocumentAdjustment(tenant, {
   // oficial de una Nota de Ajuste con retenciones declaradas, así que se
   // omite por completo en vez de adivinar dónde sí iría.
   unsignedXml = simplifySupplierParty(unsignedXml);
+  if (isNonResidentSeller(seller)) unsignedXml = applyNonResidentSeller(unsignedXml, seller);
   unsignedXml = simplifyCustomerParty(unsignedXml);
 
   const { signedXml } = await signXml({

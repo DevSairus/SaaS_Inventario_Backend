@@ -17,6 +17,15 @@ const REQUIRED_FIELDS = [
   { key: 'person_type', label: 'tipo de persona del proveedor (natural/jurídica)' },
   { key: 'city_code', label: 'ciudad del proveedor (código DIVIPOLA)' },
 ];
+// Vendedor del exterior (no residente): la ciudad va en texto libre y no hay
+// código DIVIPOLA (Anexo Técnico DS, reglas DSAJ08b/DSAJ10 con CustomizationID 11).
+const FOREIGN_REQUIRED_FIELDS = [
+  REQUIRED_FIELDS[0],
+  REQUIRED_FIELDS[1],
+  { key: 'city', label: 'ciudad del proveedor' },
+];
+
+const isForeign = (s) => Boolean(s?.country_code) && String(s.country_code).toUpperCase() !== 'CO';
 
 class DianSupplierIncompleteError extends Error {
   constructor(missingFields, supplierId) {
@@ -36,7 +45,8 @@ class DianSupplierIncompleteError extends Error {
  */
 function checkReadiness(supplierOrAdHoc) {
   if (!supplierOrAdHoc) return { ready: false, missing: REQUIRED_FIELDS };
-  const missing = REQUIRED_FIELDS.filter(f => !supplierOrAdHoc[f.key]);
+  const fields = isForeign(supplierOrAdHoc) ? FOREIGN_REQUIRED_FIELDS : REQUIRED_FIELDS;
+  const missing = fields.filter(f => !String(supplierOrAdHoc[f.key] ?? '').trim());
   return { ready: missing.length === 0, missing };
 }
 
@@ -47,4 +57,4 @@ function assertReadiness(supplierOrAdHoc) {
   }
 }
 
-module.exports = { checkReadiness, assertReadiness, DianSupplierIncompleteError, REQUIRED_FIELDS };
+module.exports = { checkReadiness, assertReadiness, DianSupplierIncompleteError, REQUIRED_FIELDS, isForeign };

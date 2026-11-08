@@ -233,6 +233,8 @@ const createSupplier = async (req, res) => {
       account_number,
       account_type,
       document_type,
+      city_code,
+      country_code,
     } = req.body;
 
     // Validar campos requeridos
@@ -291,6 +293,10 @@ const createSupplier = async (req, res) => {
       account_number: String(account_number || '').replace(/\s+/g, '') || null,
       account_type: account_type || null,
       document_type: document_type || null,
+      // Antes no se guardaba al crear (solo al editar): el proveedor creado
+      // desde el Documento Soporte quedaba sin ciudad y fallaba la validación.
+      city_code: city_code || null,
+      country_code: country_code ? String(country_code).trim().toUpperCase().slice(0, 2) : null,
     });
 
     res.status(201).json({
