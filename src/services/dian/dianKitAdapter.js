@@ -241,7 +241,29 @@ function buildTaxTotalsForLine(item) {
     });
   }
 
+  // Línea sin ningún impuesto (excluida de IVA y sin INC/ICA): no lleva
+  // TaxTotal, pero el schema de @dian-kit exige al menos uno por línea
+  // ("lines.N.taxTotals: expected array to have >=1 items"). Se pasa uno de
+  // relleno marcado y stripTaxPlaceholders() lo quita del XML antes de firmar.
+  if (totals.length === 0) {
+    totals.push({
+      taxAmount: 0,
+      subtotals: [{ taxableAmount: 0, taxAmount: 0, percent: 0, taxScheme: { code: '01', name: NO_TAX_MARK } }],
+    });
+  }
+
   return totals;
+}
+
+const NO_TAX_MARK = 'PITBOX-SIN-IMPUESTO';
+
+/** Quita del XML los TaxTotal de relleno de buildTaxTotalsForLine(). */
+function stripTaxPlaceholders(xml) {
+  if (!xml.includes(NO_TAX_MARK)) return xml;
+  return xml.replace(
+    new RegExp(`\\s*<cac:TaxTotal>(?:(?!<cac:TaxTotal>)[\\s\\S])*?${NO_TAX_MARK}[\\s\\S]*?<\\/cac:TaxTotal>`, 'g'),
+    ''
+  );
 }
 
 /**
@@ -661,7 +683,7 @@ async function createDocumentWithItemCodes(kit, kind, input, items, extraPatch) 
     ...(kind !== 'invoice' && { billingReference: input.billingReference, discrepancyResponse: input.discrepancyResponse }),
   });
   return kit.processDocument(doc, (d, uuid, ssc) => {
-    let xml = injectItemCodes(opts.build(d, uuid, ssc), items);
+    let xml = injectItemCodes(stripTaxPlaceholders(opts.build(d, uuid, ssc)), items);
     if (extraPatch) xml = extraPatch(xml);
     return xml;
   });
@@ -1087,7 +1109,7 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
     );
   // Reduce el vendedor al set mínimo de elementos que exige la DIAN para
   // Documento Soporte -- ver comentario de simplifySupplierParty() arriba.
-  unsignedXml = simplifySupplierParty(unsignedXml);
+  unsignedXml = stripTaxPlaceholders(simplifySupplierParty(unsignedXml));
   if (isNonResidentSeller(seller)) unsignedXml = applyNonResidentSeller(unsignedXml, seller);
   const { signedXml } = await signXml({
     xml: unsignedXml,
@@ -1328,7 +1350,7 @@ async function createSupportDocumentAdjustment(tenant, {
   // compra/gasto ajustado tenía retefuente/reteIVA/reteICA. No hay ejemplo
   // oficial de una Nota de Ajuste con retenciones declaradas, así que se
   // omite por completo en vez de adivinar dónde sí iría.
-  unsignedXml = simplifySupplierParty(unsignedXml);
+  unsignedXml = stripTaxPlaceholders(simplifySupplierParty(unsignedXml));
   if (isNonResidentSeller(seller)) unsignedXml = applyNonResidentSeller(unsignedXml, seller);
   unsignedXml = simplifyCustomerParty(unsignedXml);
 
