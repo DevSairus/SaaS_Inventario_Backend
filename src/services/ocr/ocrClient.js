@@ -25,7 +25,9 @@ function isConfigured() {
  */
 async function extractText({ buffer, filename, mimeType, documentId = 'pitbox' }) {
   if (!isConfigured()) throw httpError(503, 'La lectura de facturas no está disponible en este momento: ingresa los datos a mano');
-  const url = `${process.env.OCR_SERVICE_URL.replace(/\/$/, '')}/ocr/extract-base64`;
+  // Railway entrega el dominio sin esquema: si falta, se asume https
+  const base = process.env.OCR_SERVICE_URL.trim().replace(/\/+$/, '');
+  const url = `${/^https?:\/\//i.test(base) ? base : `https://${base}`}/ocr/extract-base64`;
   let res;
   try {
     res = await fetch(url, {
