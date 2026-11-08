@@ -2,7 +2,7 @@
 const AdmZip = require('adm-zip');
 const { nextPurchaseNumber } = require('../services/inventory/purchaseNumber.service');
 const { parseInvoiceXML, validateParsedData } = require('../services/invoiceXmlParser');
-const { Purchase, PurchaseItem, Product, Supplier, ProductSupplier } = require('../models/inventory');
+const { Purchase, PurchaseItem, Product, Supplier, ProductSupplier, Warehouse } = require('../models/inventory');
 const { sequelize } = require('../config/database');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../config/tenantContext');
@@ -219,7 +219,8 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
       item.total = item.subtotal + (Number(item.tax_amount) || 0) + (Number(item.inc_amount) || 0);
     });
 
-    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, manual_links, new_product_data);
+    const warehouseId = await defaultImportWarehouseId(tenant_id, branch_id, transaction);
+    const processedItems = await processInvoiceItems(filteredItems, tenant_id, supplier.id, transaction, profit_margin, manual_links, new_product_data, warehouseId);
     const purchase = await createPurchaseFromInvoice(
       { ...invoiceData, xmlContent: invoiceData.xmlContent || xmlContent },
       supplier,
@@ -617,7 +618,18 @@ async function findOrCreateSupplier(supplierData, tenant_id, transaction) {
   return supplier;
 }
 
-async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = null, manualLinks = {}, newProductData = {}) {
+// Bodega de los productos nuevos: la por defecto de la sede (la misma en la
+// que se recibe la compra importada, ver purchases.controller receive) o, sin
+// sede, la principal de la empresa. Nunca una bodega de proyecto.
+async function defaultImportWarehouseId(tenant_id, branch_id, transaction) {
+  const order = [['is_default', 'DESC'], ['is_main', 'DESC'], ['created_at', 'ASC']];
+  const base = { tenant_id, project_id: null, is_active: true };
+  const wh = (branch_id && await Warehouse.findOne({ where: { ...base, branch_id }, order, attributes: ['id'], transaction }))
+    || await Warehouse.findOne({ where: base, order, attributes: ['id'], transaction });
+  return wh?.id || null;
+}
+
+async function processInvoiceItems(items, tenant_id, supplier_id, transaction, profit_margin = null, manualLinks = {}, newProductData = {}, warehouseId = null) {
   // manual_links llega con claves string ("0", "1"...) porque viene de JSON.parse
   // sobre un objeto armado en el frontend con índices originales del array.
   const linkOf = (item) => manualLinks[String(item.original_index)];
@@ -763,6 +775,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
         barcode: overrides.barcode?.trim() || newSku,  // por defecto, código de barras = mismo SKU
         name: overrides.name?.trim() || item.name,
         category_id: categoryId,
+        warehouse_id: warehouseId,
         brand: overrides.brand?.trim() || null,
         unit_of_measure: overrides.unit_of_measure || 'unit',
         average_cost: item.unit_price,
