@@ -111,8 +111,9 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
   }
   const supplier_name_override = opts.supplier_name?.trim() || null;
   const removed_items = opts.removed_items || [];
-  const shipping_cost = parseFloat(opts.shipping_cost) || 0;
-  const discount_amount = parseFloat(opts.discount_amount) || 0;
+  // Sin valor del modal (carga masiva desde el registro DIAN) se toman el
+  // descuento y los cargos globales que trae el XML; ver más abajo.
+  const given = (v) => v !== undefined && v !== null && v !== '';
   // Override de IVA por ítem: { "0": 19, "1": 0, "2": 5 } (índice original → porcentaje)
   const items_tax_overrides = opts.items_tax_overrides || {};
   // Decisiones del usuario en el modal para ítems sin mapeo exacto por código:
@@ -160,6 +161,14 @@ async function importInvoiceFromXml(xmlContent, { tenant_id, user_id, branch_id 
   if (!validation.isValid) {
     throw new InvoiceImportError('Datos de factura inválidos', 400, { errors: validation.errors });
   }
+  // Descuento global / flete: lo que decidió el usuario en el modal (que se
+  // pre-carga con lo del XML) o, sin modal, lo que trae la factura.
+  const shipping_cost = given(opts.shipping_cost)
+    ? (parseFloat(opts.shipping_cost) || 0)
+    : (Number(invoiceData.totals?.global_charge) || 0);
+  const discount_amount = given(opts.discount_amount)
+    ? (parseFloat(opts.discount_amount) || 0)
+    : (Number(invoiceData.totals?.global_discount) || 0);
 
   const transaction = await sequelize.transaction();
   try {
@@ -469,6 +478,13 @@ async function findSupplierCandidate(supplierData, tenant_id) {
 // en memoria en el mismo orden de siempre -- lo que crea o vincula un ítem lo
 // ven los siguientes, igual que antes -- y las escrituras van en bloque al final.
 
+// Costo unitario neto del descuento de la línea (subtotal / cantidad).
+const netUnitCostOf = (item) => {
+  const qty = Number(item.quantity) || 0;
+  const sub = Number(item.subtotal);
+  return qty > 0 && Number.isFinite(sub) && sub > 0 ? Math.round((sub / qty) * 10000) / 10000 : Number(item.unit_price) || 0;
+};
+
 const codeOf = (item) => (item.sku && !item.sku.startsWith('TEMP-') ? item.sku : null);
 const namePattern = (item) => `%${item.name}%`;
 
@@ -758,6 +774,9 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
         inheritedMargin = marginCache.get(categoryId);
       }
       const itemMargin = ownMargin !== null ? ownMargin : (inheritedMargin ?? 30);
+      // Costo real de la unidad: neto del descuento de la línea (unit_price
+      // es el precio de lista de la factura).
+      const netUnitCost = netUnitCostOf(item);
       const taxProfile = {
         price_includes_tax: !!overrides.price_includes_tax,
         has_tax: item.tax_percentage > 0,
@@ -766,7 +785,7 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
       };
       // Precio escrito a mano en el modal: se crea con él y el margen queda
       // en el que resulta (si cabe en el rango; si no, el de arriba).
-      const fixedMargin = item.line_sale_price ? impliedMargin(item.unit_price, item.line_sale_price, taxProfile, marginMethod) : null;
+      const fixedMargin = item.line_sale_price ? impliedMargin(netUnitCost, item.line_sale_price, taxProfile, marginMethod) : null;
 
       product = Product.build({
         tenant_id,
@@ -778,8 +797,8 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
         warehouse_id: warehouseId,
         brand: overrides.brand?.trim() || null,
         unit_of_measure: overrides.unit_of_measure || 'unit',
-        average_cost: item.unit_price,
-        base_price: item.line_sale_price || (suggestedSalePrice(item.unit_price, itemMargin, taxProfile, marginMethod) ?? 0),
+        average_cost: netUnitCost,
+        base_price: item.line_sale_price || (suggestedSalePrice(netUnitCost, itemMargin, taxProfile, marginMethod) ?? 0),
         profit_margin_percentage: fixedMargin ?? itemMargin,
         margin_inherited: fixedMargin === null && ownMargin === null && inheritedMargin !== null,
         current_stock: 0,
@@ -848,6 +867,8 @@ async function processInvoiceItems(items, tenant_id, supplier_id, transaction, p
     unit_of_measure: product.unit_of_measure || 'unit',
     quantity: item.quantity,
     unit_cost: item.unit_price,
+    discount_percentage: Number(item.discount_percentage) || 0,
+    discount_amount: Number(item.discount_amount) || 0,
     tax_percentage: item.tax_percentage,
     tax_amount: item.tax_amount,
     inc_rate: Number(item.inc_rate) || 0,
@@ -1064,6 +1085,8 @@ async function createPurchaseFromInvoice(invoiceData, supplier, items, tenant_id
     unit_of_measure: item.unit_of_measure || 'unit',
     quantity: item.quantity,
     unit_cost: item.unit_cost,
+    discount_percentage: item.discount_percentage || 0,
+    discount_amount: item.discount_amount || 0,
     tax_rate: item.tax_percentage,
     tax_amount: item.tax_amount,
     inc_rate: item.inc_rate || 0,

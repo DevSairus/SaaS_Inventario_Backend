@@ -197,7 +197,8 @@ function parseDIANFormat(xml) {
   // Totales
   const monetaryTotal = getField(invoice, 'legalmonetarytotal', 'totalmonetario');
   const totals = parseTotals(monetaryTotal, getField);
-  
+  Object.assign(totals, documentAllowances(invoice, items, totals, getField));
+
   console.log('💰 Totales:', totals);
   console.log('📦 Items count:', items.length);
 
@@ -352,6 +353,34 @@ function extractLineTaxes(taxTotals, getField) {
   return out;
 }
 
+// Descuentos y cargos UBL (cac:AllowanceCharge), de línea o de documento:
+// ChargeIndicator false = descuento, true = cargo (flete, recargo...).
+// Devuelve las sumas y el % cuando hay un único descuento con
+// MultiplierFactorNumeric (o se deduce de Amount/BaseAmount).
+const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+function extractAllowanceCharges(nodes, getField) {
+  const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  const num = (v) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0; };
+  const out = { discount: 0, charge: 0, discount_percent: null, discount_base: 0, discounts: 0 };
+  for (const ac of asList(nodes)) {
+    const isCharge = String(extractText(getField(ac, 'chargeindicator')) || '').trim().toLowerCase() === 'true';
+    const amount = num(extractText(getField(ac, 'amount')));
+    if (!amount) continue;
+    if (isCharge) { out.charge += amount; continue; }
+    const base = num(extractText(getField(ac, 'baseamount')));
+    const pct = num(extractText(getField(ac, 'multiplierfactornumeric')));
+    out.discount += amount;
+    out.discount_base += base;
+    out.discounts += 1;
+    out.discount_percent = pct || (base > 0 ? (amount / base) * 100 : null);
+  }
+  if (out.discounts !== 1) out.discount_percent = null; // varios descuentos: el % se calcula sobre el total
+  out.discount = round2(out.discount);
+  out.charge = round2(out.charge);
+  return out;
+}
+
 function parseItems(invoiceLines, getField) {
   if (!invoiceLines) {
     console.log('⚠️  No se encontraron invoiceLines');
@@ -422,10 +451,38 @@ function parseItems(invoiceLines, getField) {
     // Subtotal de la línea (antes de impuestos)
     const lineExtensionAmount = parseFloat(extractText(getField(line, 'lineextensionamount', 'subtotal')) || 0);
     console.log('Line extension amount:', lineExtensionAmount);
-    
+
     // Impuestos por tributo (IVA / INC / otros), ver extractLineTaxes.
     const taxes = extractLineTaxes(getField(line, 'taxtotal', 'impuesto'), getField);
-    const subtotal = lineExtensionAmount || (unitPrice * quantity);
+
+    // Descuentos/cargos de la línea. Según el anexo DIAN, LineExtensionAmount
+    // ya viene NETO (cantidad × precio − descuentos + cargos), pero hay
+    // emisores que lo reportan BRUTO y solo restan el descuento en la base
+    // del IVA. Antes se ignoraban: la compra entraba al precio de lista.
+    // El neto se calcula y se usa LineExtensionAmount solo si cuadra con él.
+    const ac = extractAllowanceCharges(getField(line, 'allowancecharge'), getField);
+    let subtotal = lineExtensionAmount || (unitPrice * quantity);
+    let discountAmount = 0;
+    let discountPercentage = 0;
+    if (ac.discount > 0 || ac.charge > 0) {
+      const gross = unitPrice > 0
+        ? round2(unitPrice * quantity)
+        : round2(ac.discount_base || (lineExtensionAmount + ac.discount - ac.charge));
+      const expectedNet = round2(gross - ac.discount + ac.charge);
+      subtotal = lineExtensionAmount > 0 && Math.abs(lineExtensionAmount - expectedNet) <= 1
+        ? lineExtensionAmount
+        : expectedNet;
+      // Un cargo de línea sube el precio unitario (la compra no tiene cargo
+      // por línea); el descuento queda en discount_percentage/discount_amount,
+      // con el precio de lista en unit_price (subtotal = qty × precio − desc.).
+      if (quantity > 0 && ac.charge > 0) unitPrice = (gross + ac.charge) / quantity;
+      const grossWithCharges = round2(unitPrice * quantity);
+      discountAmount = Math.max(0, round2(grossWithCharges - subtotal));
+      discountPercentage = discountAmount > 0
+        ? round2(ac.charge === 0 && ac.discount_percent ? ac.discount_percent : (grossWithCharges > 0 ? discountAmount / grossWithCharges * 100 : 0))
+        : 0;
+      console.log('Descuento línea:', discountAmount, `(${discountPercentage}%)`, 'Cargo:', ac.charge, 'Neto:', subtotal);
+    }
     const taxAmount = taxes.iva ? taxes.iva.amount : 0;
     const taxPercentage = taxes.iva
       ? (taxes.iva.percent || (subtotal > 0 ? Math.round(taxAmount / subtotal * 10000) / 100 : 0))
@@ -448,6 +505,8 @@ function parseItems(invoiceLines, getField) {
       sku: sku || `TEMP-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
       quantity: quantity,
       unit_price: unitPrice,
+      discount_percentage: discountPercentage,
+      discount_amount: discountAmount,
       tax_percentage: taxPercentage,
       tax_amount: taxAmount,
       iva_status: ivaStatus,
@@ -520,11 +579,59 @@ function parseTotals(monetaryTotal, getField) {
   }
   
   console.log('Subtotal:', subtotal, 'Tax:', tax, 'Total:', total);
-  
+
+  const amountOf = (key) => parseFloat(extractText(getField(monetaryTotal, key)) || 0) || 0;
+
   return {
     subtotal: subtotal,
     tax: tax,
-    total: total || (subtotal + tax)
+    total: total || (subtotal + tax),
+    allowance_total: amountOf('allowancetotalamount'),
+    charge_total: amountOf('chargetotalamount'),
+    prepaid: amountOf('prepaidamount'),
+    rounding: amountOf('payableroundingamount'),
+  };
+}
+
+/**
+ * Descuentos y cargos GLOBALES (cac:AllowanceCharge en la raíz de la factura).
+ * Llegan a la compra como descuento global (discount_amount) y como flete
+ * (shipping_cost). Varios emisores repiten en la raíz los descuentos que ya
+ * aplicaron por línea (solo informativo): se cuadra contra PayableAmount
+ * para no restarlos dos veces. Sin nodos en la raíz pero con
+ * AllowanceTotalAmount, se usa ese total si cuadra.
+ * Los totales subtotal/tax/inc se recalculan desde las líneas (netas).
+ */
+function documentAllowances(invoice, items, totals, getField) {
+  const ac = extractAllowanceCharges(getField(invoice, 'allowancecharge'), getField);
+  const itemsNet = round2(items.reduce((s, i) => s + (Number(i.subtotal) || 0), 0));
+  const itemsTax = round2(items.reduce((s, i) => s + (Number(i.tax_amount) || 0), 0));
+  const itemsInc = round2(items.reduce((s, i) => s + (Number(i.inc_amount) || 0), 0));
+  const lineDiscount = round2(items.reduce((s, i) => s + (Number(i.discount_amount) || 0), 0));
+  const itemsTotal = itemsNet + itemsTax + itemsInc;
+
+  let discount = ac.discount || totals.allowance_total || 0;
+  let charge = ac.charge || totals.charge_total || 0;
+  const payable = Number(totals.total) || 0;
+  if (payable > 0 && (discount > 0 || charge > 0)) {
+    // Lo que suman las líneas + cargos − descuentos debe dar el total a pagar
+    // (más anticipos, menos redondeo).
+    const target = payable + (totals.prepaid || 0) - (totals.rounding || 0);
+    const fits = (d, c) => Math.abs(itemsTotal - d + c - target) <= 1;
+    if (!fits(discount, charge)) {
+      if (fits(0, charge)) discount = 0;            // descuento ya aplicado en las líneas
+      else if (fits(discount, 0)) charge = 0;
+      else if (fits(0, 0)) { discount = 0; charge = 0; }
+    }
+  }
+
+  return {
+    subtotal: itemsNet,
+    tax: itemsTax,
+    inc: itemsInc,
+    line_discount: lineDiscount,
+    global_discount: round2(discount),
+    global_charge: round2(charge),
   };
 }
 

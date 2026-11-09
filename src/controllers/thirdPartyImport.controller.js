@@ -40,7 +40,10 @@ const importFile = (entity) => async (req, res) => {
     });
     res.json({ success: true, data });
   } catch (error) {
-    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+    if (error.statusCode) {
+      console.warn(`Importación de ${entity} rechazada (${error.statusCode}) archivo="${req.file?.originalname}": ${error.message}`);
+      return res.status(error.statusCode).json({ success: false, message: error.message });
+    }
     console.error(`Error importando ${entity}:`, error);
     res.status(500).json({ success: false, message: `Error al importar: ${error.message}` });
   }
