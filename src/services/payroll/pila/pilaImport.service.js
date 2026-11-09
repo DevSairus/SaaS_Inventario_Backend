@@ -47,8 +47,8 @@ function parseTxt(buffer) {
 
 async function parseXlsx(buffer) {
   const ExcelJS = require('exceljs');
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buffer);
+  const { loadXlsx } = require('../../../utils/loadXlsx');
+  const wb = await loadXlsx(buffer);
   const ws = wb.worksheets[0];
   const val = (v) => {
     if (v == null) return '';

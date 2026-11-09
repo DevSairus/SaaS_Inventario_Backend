@@ -16,6 +16,7 @@
 'use strict';
 
 const ExcelJS = require('exceljs');
+const { loadXlsx } = require('../../utils/loadXlsx');
 const { Op } = require('sequelize');
 const { cellToText, parseLocaleNumber } = require('../../utils/excelCell');
 const { DIVIPOLA_CITIES, DIVIPOLA_DEPARTMENTS_BY_CODE } = require('../../data/divipola-colombia');
@@ -243,8 +244,7 @@ async function buildTemplate(entity) {
 
 // ── Lectura y validación ────────────────────────────────────────────────
 async function readRows(entity, buffer) {
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buffer);
+  const wb = await loadXlsx(buffer);
   const ws = wb.getWorksheet(ENTITIES[entity].sheet) || wb.worksheets[0];
   if (!ws) return { fields: new Set(), ignored: [], rows: [] };
   const map = headerMap(entity);

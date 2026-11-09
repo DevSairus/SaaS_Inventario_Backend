@@ -15,6 +15,7 @@
 // sobre la primera línea. Ancho fijo real (columnas por posición de
 // caracter) queda fuera de alcance salvo que aparezca un caso real.
 const ExcelJS = require('exceljs');
+const { loadXlsx } = require('../../utils/loadXlsx');
 const crypto = require('crypto');
 const { readXlsxRows, excelSerialToISO } = require('../../utils/xlsxLite');
 
@@ -90,8 +91,7 @@ function cellToValue(value) {
 
 async function parseExcelMatrix(buffer) {
   try {
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer);
+    const workbook = await loadXlsx(buffer);
     const sheet = workbook.worksheets[0];
     if (!sheet) return [];
     const matrix = [];

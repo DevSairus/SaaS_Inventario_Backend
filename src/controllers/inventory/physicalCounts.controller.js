@@ -14,6 +14,7 @@
 'use strict';
 
 const ExcelJS = require('exceljs');
+const { loadXlsx } = require('../../utils/loadXlsx');
 const { Op } = require('sequelize');
 const logger = require('../../config/logger');
 const audit = require('../../utils/audit');
@@ -325,8 +326,7 @@ const downloadTemplate = async (req, res) => {
 
 // ── Lectura tolerante del Excel subido ──────────────────────────────────────
 async function readCountRows(buffer) {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
+  const workbook = await loadXlsx(buffer);
   const sheet = workbook.worksheets[0];
   if (!sheet) return { headers: [], rows: [] };
 

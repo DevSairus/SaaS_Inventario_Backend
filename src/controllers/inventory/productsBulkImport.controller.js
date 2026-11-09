@@ -1,4 +1,5 @@
 const ExcelJS = require('exceljs');
+const { loadXlsx } = require('../../utils/loadXlsx');
 const { Op } = require('sequelize');
 const { Product, Category, ProductEquivalenceGroup, ProductEquivalenceGroupMember, InventoryMovement, Warehouse } = require('../../models/inventory');
 const { sequelize } = require('../../config/database');
@@ -109,8 +110,7 @@ class UnionFind {
 // ignoredColumns: encabezados que no corresponden a ningún campo (se reportan
 // para que el usuario sepa que esa columna no se cargó).
 async function readExcelRows(buffer) {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
+  const workbook = await loadXlsx(buffer);
   const sheet = workbook.worksheets[0];
   if (!sheet) return { fields: new Set(), ignoredColumns: [], rows: [] };
 
