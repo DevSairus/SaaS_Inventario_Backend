@@ -10,14 +10,27 @@ const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
 
+const {
+  tenantTimeZone, wallTimeToInstant, localDateStr, localTimeStr, weekdayOf, localDayRange, formatDateTimeEs,
+} = require('../../utils/tenantTime');
+
 const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']; // Date#getDay(): 0=domingo
 
-function dateStrOf(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+// El horario del taller (business_hours, franjas, fechas bloqueadas) está en
+// la hora local del tenant; el servidor corre en UTC.
+async function timeZoneOf(tenant_id) {
+  return tenantTimeZone(await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'] }));
 }
-function timeStrOf(date) {
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+
+function countBySlot(appointments) {
+  const counts = {};
+  for (const a of appointments) {
+    const key = a.scheduled_at.toISOString();
+    counts[key] = (counts[key] || 0) + 1;
+  }
+  return counts;
 }
+
 function toMinutes(hhmm) {
   const [h, m] = hhmm.split(':').map(Number);
   return h * 60 + m;
@@ -29,7 +42,7 @@ function minutesToHHMM(min) {
 // Franjas candidatas de un día según business_hours -- un solo rango por
 // día (sin partir en almuerzo, MVP simple). No mira disponibilidad todavía.
 function generateSlotsForDay(config, dateStr) {
-  const weekday = WEEKDAY_KEYS[new Date(`${dateStr}T00:00:00`).getDay()];
+  const weekday = WEEKDAY_KEYS[weekdayOf(dateStr)];
   const ranges = config.business_hours?.[weekday] || [];
   const slots = [];
   for (const range of ranges) {
@@ -43,10 +56,6 @@ function generateSlotsForDay(config, dateStr) {
   return slots;
 }
 
-function formatDateEs(date) {
-  return new Date(date).toLocaleString('es-CO', { dateStyle: 'long', timeStyle: 'short' });
-}
-
 // Franjas de un día con su ocupación -- función pura (sin BD), compartida por
 // la reserva pública y por el staff:
 //  - mode 'public': solo dentro de la ventana de reserva del taller
@@ -56,7 +65,7 @@ function formatDateEs(date) {
 //    descarta lo que ya pasó. Horario, fechas bloqueadas y capacidad
 //    aplican igual en ambos modos.
 // `counts`: { [scheduled_at ISO]: citas activas en esa franja }.
-function buildDaySlots({ config, date, counts, now = new Date(), mode = 'public' }) {
+function buildDaySlots({ config, date, counts, now = new Date(), mode = 'public', timeZone }) {
   const isBlocked = (config.blocked_dates || []).some(b => b.date === date);
   if (isBlocked) return { open: false, slots: [], reason: 'blocked' };
 
@@ -71,7 +80,7 @@ function buildDaySlots({ config, date, counts, now = new Date(), mode = 'public'
     : new Date(now.getTime() + config.advance_booking_days * 86400000);
 
   const slots = slotTimes.map(time => {
-    const dt = new Date(`${date}T${time}:00`);
+    const dt = wallTimeToInstant(date, time, timeZone);
     const booked = counts[dt.toISOString()] || 0;
     const withinWindow = dt >= minAllowed && (!maxAllowed || dt <= maxAllowed);
     return {
@@ -93,26 +102,20 @@ async function computeAvailability({ tenant_id, branch_id, date, mode = 'public'
   // igual puede agendar/reagendar con su horario configurado.
   if (mode === 'public' && !config.is_public_booking_enabled) return { open: false, slots: [] };
 
-  const dayStart = new Date(`${date}T00:00:00`);
-  const dayEnd = new Date(`${date}T23:59:59`);
+  const timeZone = await timeZoneOf(tenant_id);
   const existing = await WorkshopAppointment.findAll({
     where: {
       tenant_id, branch_id,
       status: { [Op.in]: ['pendiente', 'confirmada'] },
-      scheduled_at: { [Op.between]: [dayStart, dayEnd] },
+      scheduled_at: { [Op.between]: localDayRange(date, timeZone) },
       // Al reagendar, la propia cita no ocupa cupo (si se deja a la misma
       // hora, o se mueve dentro del mismo día).
       ...(excludeAppointmentId ? { id: { [Op.ne]: excludeAppointmentId } } : {}),
     },
     attributes: ['scheduled_at'],
   });
-  const counts = {};
-  for (const a of existing) {
-    const key = a.scheduled_at.toISOString();
-    counts[key] = (counts[key] || 0) + 1;
-  }
 
-  return buildDaySlots({ config, date, counts, mode });
+  return buildDaySlots({ config, date, counts: countBySlot(existing), mode, timeZone });
 }
 
 // ── Resolución de tenant SIN token previo (primera vez que aparece el
@@ -238,14 +241,15 @@ async function createAppointmentBody({ tenant_id, branch_id, body, source, res }
     return res.status(400).json({ success: false, message: 'Fecha inválida' });
   }
 
-  const dateStr = dateStrOf(dt);
+  const timeZone = await timeZoneOf(tenant_id);
+  const dateStr = localDateStr(dt, timeZone);
   const isBlocked = (config.blocked_dates || []).some(b => b.date === dateStr);
   if (isBlocked) {
     return res.status(400).json({ success: false, message: 'Esa fecha no está disponible' });
   }
 
   const validSlotTimes = generateSlotsForDay(config, dateStr);
-  if (!validSlotTimes.includes(timeStrOf(dt))) {
+  if (!validSlotTimes.includes(localTimeStr(dt, timeZone))) {
     return res.status(400).json({ success: false, message: 'Esa franja no está dentro del horario disponible' });
   }
 
@@ -494,7 +498,7 @@ const list = async (req, res) => {
     const { date, from_date, to_date, status } = req.query;
     const where = { tenant_id, branch_id: req.branch_id };
     if (status) where.status = status;
-    if (date) where.scheduled_at = { [Op.between]: [new Date(`${date}T00:00:00`), new Date(`${date}T23:59:59`)] };
+    if (date) where.scheduled_at = { [Op.between]: localDayRange(date, await timeZoneOf(tenant_id)) };
     else if (from_date && to_date) where.scheduled_at = { [Op.between]: [new Date(from_date), new Date(to_date)] };
 
     const appointments = await WorkshopAppointment.findAll({ where, order: [['scheduled_at', 'ASC']] });
@@ -588,15 +592,17 @@ const cancelAppointment = async (req, res) => {
 // Mensajes construidos server-side. Preferimos WhatsApp Cloud API si el
 // tenant la tiene conectada; si no, caen a un link wa.me click-to-send
 // -- mismo patrón que sales.controller.js#sendWhatsApp.
+const formatDateEs = (tenant, date) => formatDateTimeEs(date, tenantTimeZone(tenant));
+
 const MESSAGE_BUILDERS = {
   confirmacion: (a, tenant) =>
-    `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* quedó *confirmada* para el ${formatDateEs(a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
+    `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* quedó *confirmada* para el ${formatDateEs(tenant, a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
   recordatorio: (a, tenant) =>
-    `Hola ${a.customer_name}! Te recordamos tu cita en *${tenant.company_name}* el ${formatDateEs(a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
+    `Hola ${a.customer_name}! Te recordamos tu cita en *${tenant.company_name}* el ${formatDateEs(tenant, a.scheduled_at)}.\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
   reagendamiento: (a, tenant) =>
-    `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* fue *reagendada* para el ${formatDateEs(a.scheduled_at)}.${a.previous_scheduled_at ? `\n(Antes: ${formatDateEs(a.previous_scheduled_at)})` : ''}\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
+    `Hola ${a.customer_name}! Tu cita en *${tenant.company_name}* fue *reagendada* para el ${formatDateEs(tenant, a.scheduled_at)}.${a.previous_scheduled_at ? `\n(Antes: ${formatDateEs(tenant, a.previous_scheduled_at)})` : ''}\n\n🚗 Placa: ${a.vehicle_plate || 'N/A'}\n\n¡Te esperamos!`,
   cancelacion: (a, tenant) =>
-    `Hola ${a.customer_name}, tu cita en *${tenant.company_name}* del ${formatDateEs(a.scheduled_at)} fue *cancelada*.${a.cancelled_reason ? `\nMotivo: ${a.cancelled_reason}` : ''}\n\nSi deseas, puedes agendar una nueva cita cuando quieras.`,
+    `Hola ${a.customer_name}, tu cita en *${tenant.company_name}* del ${formatDateEs(tenant, a.scheduled_at)} fue *cancelada*.${a.cancelled_reason ? `\nMotivo: ${a.cancelled_reason}` : ''}\n\nSi deseas, puedes agendar una nueva cita cuando quieras.`,
 };
 
 const sendAppointmentWhatsApp = async (req, res) => {
@@ -709,25 +715,19 @@ const rescheduleAppointment = async (req, res) => {
       await transaction.rollback();
       return res.status(409).json({ success: false, message: 'La sede no tiene horario de citas configurado' });
     }
-    const dateStr = dateStrOf(dt);
-    const dayStart = new Date(`${dateStr}T00:00:00`);
-    const dayEnd = new Date(`${dateStr}T23:59:59`);
+    const timeZone = await timeZoneOf(tenant_id);
+    const dateStr = localDateStr(dt, timeZone);
     const existing = await WorkshopAppointment.findAll({
       where: {
         tenant_id, branch_id: appointment.branch_id,
         status: { [Op.in]: ['pendiente', 'confirmada'] },
-        scheduled_at: { [Op.between]: [dayStart, dayEnd] },
+        scheduled_at: { [Op.between]: localDayRange(dateStr, timeZone) },
         id: { [Op.ne]: appointment.id },
       },
       attributes: ['scheduled_at'],
       transaction,
     });
-    const counts = {};
-    for (const a of existing) {
-      const key = a.scheduled_at.toISOString();
-      counts[key] = (counts[key] || 0) + 1;
-    }
-    const day = buildDaySlots({ config, date: dateStr, counts, mode: 'staff' });
+    const day = buildDaySlots({ config, date: dateStr, counts: countBySlot(existing), mode: 'staff', timeZone });
     const slot = day.slots.find(s => s.scheduled_at === dt.toISOString());
     if (!day.open || !slot) {
       await transaction.rollback();

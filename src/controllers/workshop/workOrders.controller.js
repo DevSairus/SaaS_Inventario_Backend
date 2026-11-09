@@ -27,6 +27,7 @@ const { isBlockedByAccountOwnership } = require('../../middleware/checkAccountOw
 const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
 const { buildWaLink } = require('../../services/whatsappService');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
+const { tenantTimeZone, wallTimeToInstant, localDateStr } = require('../../utils/tenantTime');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -510,33 +511,11 @@ const create = async (req, res) => {
 // cashflow.controller.js) y se ajusta luego en la OT si hace falta. Si ya
 // pasaron las 18:00 locales, se promete para mañana a la misma hora -- una
 // fecha ya vencida al crear la OT la pintaría atrasada desde el primer minuto.
-const QUICK_PROMISE_HOUR = 18;
-const DEFAULT_TIMEZONE = 'America/Bogota';
-
-// 'YYYY-MM-DD' + hora local de `timeZone` -> instante (Date). Se calcula el
-// desfase real de la zona en ese momento con Intl en vez de asumir UTC-5.
-function localWallTimeToInstant(dateStr, hour, timeZone) {
-  const guess = new Date(`${dateStr}T${String(hour).padStart(2, '0')}:00:00Z`);
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat('en-US', {
-      timeZone, hourCycle: 'h23',
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', second: '2-digit',
-    }).formatToParts(guess).map(p => [p.type, p.value])
-  );
-  const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
-  return new Date(guess.getTime() - (asUtc - guess.getTime()));
-}
+const QUICK_PROMISE_TIME = '18:00';
 
 function defaultQuickPromisedAt(tenant, now = new Date()) {
-  let timeZone = tenant?.business_config?.timezone || DEFAULT_TIMEZONE;
-  try {
-    new Intl.DateTimeFormat('en-CA', { timeZone });
-  } catch {
-    timeZone = DEFAULT_TIMEZONE; // zona mal configurada: no tumbar la OT por eso
-  }
-  const today = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
-  const promised = localWallTimeToInstant(today, QUICK_PROMISE_HOUR, timeZone);
+  const timeZone = tenantTimeZone(tenant);
+  const promised = wallTimeToInstant(localDateStr(now, timeZone), QUICK_PROMISE_TIME, timeZone);
   return promised > now ? promised : new Date(promised.getTime() + 24 * 60 * 60 * 1000);
 }
 
