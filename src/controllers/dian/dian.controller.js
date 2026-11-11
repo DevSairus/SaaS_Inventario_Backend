@@ -142,11 +142,9 @@ const updateConfig = async (req, res) => {
       ...(certificate_password && certificate_password !== '[CONFIGURADO]' && { certificate_password }),
     };
 
-    // Modo simulación (demo, no envía a la DIAN): solo lo activa un super admin.
+    // Modo simulación (demo, no envía a la DIAN): al activarlo se crean las
+    // resoluciones de simulación (prefijos SIM*) que falten.
     const enteringSimulation = updated.environment === 'simulation' && current.environment !== 'simulation';
-    if (enteringSimulation && !(req.is_super_admin || req.user?.role === 'super_admin')) {
-      return fail(res, 'Solo un super administrador puede activar el modo simulación', 403);
-    }
 
     await tenant.update({ dian_config: updated });
 

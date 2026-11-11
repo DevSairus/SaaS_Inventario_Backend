@@ -398,6 +398,9 @@ router.post(
           address: req.body.address,
           is_active: true,
           plan_id: plan.id,
+          // Arranca en modo simulación DIAN (demo, no envía a la DIAN) hasta
+          // que la empresa configure su certificado y pase a pruebas/producción.
+          dian_config: { environment: 'simulation' },
           modules_enabled: req.body.modules_enabled || [],
           modules_disabled: req.body.modules_disabled || [],
         },
@@ -489,6 +492,10 @@ router.post(
         },
         { transaction }
       );
+
+      // 3d. Resoluciones de simulación DIAN (prefijos SIM*) para la sede
+      // principal -- la empresa arranca en modo simulación (ver arriba).
+      await require('../services/dian/dianSimulation').ensureSimulationResolutions(tenant.id, { transaction });
 
       // 4. Crear admin
       if (req.body.admin_email && req.body.admin_password) {
