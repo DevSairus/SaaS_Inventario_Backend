@@ -230,6 +230,10 @@ async function generatePayrollDocumentPDF(res, payrollDocument, employee, period
   doc.font('Helvetica').fontSize(6.5).fillColor(gray)
     .text('Representación gráfica del Documento Soporte de Pago de Nómina Electrónica — Resolución DIAN 000013 de 2021.', MARGIN, y, { width: INNER_W, align: 'center' });
 
+  // Modo simulación DIAN (demo): marca de agua en todas las páginas.
+  const sim = require('./dianSimulation');
+  if (sim.isSimulatedDocument(payrollDocument)) sim.drawSimulationWatermark(doc);
+
   doc.end();
 
   if (bufferMode) return bufferPromise;

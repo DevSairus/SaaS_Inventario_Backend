@@ -10,12 +10,14 @@ const logger = require('../../config/logger');
 const { assertReadiness: assertCustomerDianReadiness } = require('./customerDianReadiness');
 const { collapseComboLinesForDian } = require('../../utils/comboLines');
 const { dianPaymentMeans } = require('../sales/paymentTerms.service');
+const { withSimulation, isSimulation, simulationConfig, ensureSimulationResolutions } = require('./dianSimulation');
 
 /* ──────────────────────────────────────────────────────────
  * Extrae configuración DIAN del tenant y valida campos
  * ────────────────────────────────────────────────────────── */
 function extractDianConfig(tenant) {
-  const cfg = tenant.dian_config || {};
+  // Modo simulación: lo que falte se completa con datos de demostración.
+  const cfg = simulationConfig(tenant);
   const required = [
     'nit', 'dv', 'company_name',
     'software_id', 'software_pin', 'software_provider_nit',
@@ -96,11 +98,22 @@ async function getNextConsecutive(tenantId, branchId, isTest = false, transactio
     throw new Error('No se puede generar el consecutivo DIAN sin una sede (branch_id) definida.');
   }
 
-  const resolution = await DianResolution.findOne({
+  const findResolution = () => DianResolution.findOne({
     where: { tenant_id: tenantId, branch_id: branchId, is_active: true, is_test: isTest, document_type: documentType },
     transaction,
     lock: transaction ? transaction.LOCK.UPDATE : undefined,
   });
+  let resolution = await findResolution();
+
+  // Modo simulación: si la sede no tiene resolución, se crean las de
+  // simulación (prefijos SIM*) en vez de fallar — ver dianSimulation.js.
+  if (!resolution) {
+    const { Tenant } = require('../../models');
+    const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'dian_config'], transaction });
+    if (isSimulation(tenant) && await ensureSimulationResolutions(tenantId, { transaction, branchId })) {
+      resolution = await findResolution();
+    }
+  }
 
   const docLabel = {
     invoice: 'de facturación',
@@ -191,6 +204,7 @@ async function refreshCustomerSnapshot(sale, transaction) {
  * sendInvoiceToDian – Función principal
  * ────────────────────────────────────────────────────────── */
 async function sendInvoiceToDian(sale, tenant) {
+  tenant = withSimulation(tenant); // modo simulación: datos/certificado de demo (dianSimulation.js)
   const { Sale, DianEvent } = require('../../models');
   const transaction = await sequelize.transaction();
 
@@ -311,7 +325,8 @@ async function sendInvoiceToDian(sale, tenant) {
     // electrónico aceptado (Resolución 000042/2020). No bloquea la
     // respuesta al usuario: un problema de correo no debe hacer parecer que
     // la factura no se envió a la DIAN.
-    if (accepted) {
+    // Simulación: sin correo al adquiriente (el documento no existe ante la DIAN).
+    if (accepted && !isSimulation(tenant)) {
       setImmediate(async () => {
         try {
           const { Sale: SaleModel } = require('../../models');
@@ -359,6 +374,7 @@ async function sendInvoiceToDian(sale, tenant) {
  * checkInvoiceStatus – Re-consulta estado en DIAN
  * ────────────────────────────────────────────────────────── */
 async function checkInvoiceStatus(sale, tenant) {
+  tenant = withSimulation(tenant); // modo simulación: datos/certificado de demo (dianSimulation.js)
   const { Sale, DianEvent } = require('../../models');
   const dianCfg = extractDianConfig(tenant);
   const environment = dianCfg.environment || 'test';
@@ -397,6 +413,7 @@ async function checkInvoiceStatus(sale, tenant) {
  * _sendNoteToDian — NC y ND
  * ────────────────────────────────────────────────────────── */
 async function _sendNoteToDian(note, tenant, isDebit = false) {
+  tenant = withSimulation(tenant); // modo simulación: datos/certificado de demo (dianSimulation.js)
   const { Sale, DianEvent } = require('../../models');
   const transaction = await sequelize.transaction();
   const docLabel = isDebit ? 'ND' : 'NC';
@@ -620,7 +637,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
 
     // Mismo requisito de entrega al comprador que las facturas (ver
     // sendInvoiceToDian) — también aplica a notas crédito/débito.
-    if (accepted && saleId) {
+    if (accepted && saleId && !isSimulation(tenant)) {
       setImmediate(async () => {
         try {
           const freshNote = await Sale.findByPk(saleId, {
@@ -723,6 +740,7 @@ async function sendDebitNoteToDian(sale, tenant) {
  * que arman ese payload desde cada modelo.
  * ────────────────────────────────────────────────────────── */
 async function sendSupportDocumentToDian({ tenant, sourceType, sourceId, branchId, items, seller, retentions, userId }) {
+  tenant = withSimulation(tenant); // modo simulación: datos/certificado de demo (dianSimulation.js)
   const { SupportDocument, DianEvent } = require('../../models');
 
   if (!['purchase', 'expense'].includes(sourceType)) {
@@ -974,6 +992,7 @@ async function sendSupportDocumentForExpense(expenseId, tenant, userId, adHocSel
  * que checkInvoiceStatus pero sobre support_documents.
  * ────────────────────────────────────────────────────────── */
 async function checkSupportDocumentStatus(sourceType, sourceId, tenant) {
+  tenant = withSimulation(tenant); // modo simulación: datos/certificado de demo (dianSimulation.js)
   const { SupportDocument, DianEvent } = require('../../models');
   const sourceColumn = sourceType === 'purchase' ? 'purchase_id' : 'expense_id';
 
@@ -1027,6 +1046,7 @@ async function checkSupportDocumentStatus(sourceType, sourceId, tenant) {
  *   a partir del mismo proveedor del Documento Soporte original.
  * ────────────────────────────────────────────────────────── */
 async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, seller, tenant, retentions) {
+  tenant = withSimulation(tenant); // modo simulación: datos/certificado de demo (dianSimulation.js)
   const { SupportDocumentAdjustment, DianEvent } = require('../../models');
   const transaction = await sequelize.transaction();
 

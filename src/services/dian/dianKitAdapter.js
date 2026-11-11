@@ -15,6 +15,7 @@ const logger = require('../../config/logger');
 const { escXml } = require('./dianXmlBuilder');
 const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
 const { dianPaymentMeans } = require('../sales/paymentTerms.service');
+const { isSimulation, simulationConfig, simulatedResponse } = require('./dianSimulation');
 
 // Inicializar dependencias de Node para xadesjs/xmldsigjs/xml-core
 // IMPORTANTE: debe ejecutarse ANTES de cualquier uso de DianKit
@@ -43,11 +44,13 @@ const _kitCache = new Map();
  * Cachea la instancia para evitar recargar el certificado en cada llamada.
  */
 function getKit(tenant) {
-  const cfg = tenant.dian_config || {};
+  // Simulación: datos y certificado de demostración para lo que falte (ver dianSimulation.js).
+  const cfg = simulationConfig(tenant);
   // La clave incluye el entorno: los envíos de prueba fuerzan habilitación
   // (ver dianAutoTestService#forceTestEnvironment) aunque el tenant ya esté
   // en producción, y no deben reutilizar el kit de producción ni pisarlo.
-  const cacheKey = `${tenant.id}:${cfg.environment === 'production' ? 'production' : 'test'}`;
+  const envKey = cfg.environment === 'production' ? 'production' : (isSimulation(cfg) ? 'simulation' : 'test');
+  const cacheKey = `${tenant.id}:${envKey}`;
   if (_kitCache.has(cacheKey)) return _kitCache.get(cacheKey);
 
   initDeps();
@@ -1374,6 +1377,11 @@ async function createSupportDocumentAdjustment(tenant, {
  */
 async function sendToDian(tenant, { signedXml, invoiceNumber, cufe, testSetId: testSetIdOverride }) {
   const cfg = tenant.dian_config || {};
+  // Simulación (demo): nunca sale hacia la DIAN.
+  if (isSimulation(cfg)) {
+    logger.info(`[DIAN] SIMULACIÓN — ${invoiceNumber} no se envía a la DIAN`);
+    return simulatedResponse(invoiceNumber, cufe);
+  }
   // Prioriza el test_set_id propio de la resolución (ej. una habilitación de
   // Documento Soporte separada de la de facturación) sobre el global — mismo
   // criterio que ya aplica a technical_key en createInvoice().
@@ -1498,6 +1506,7 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe, testSetId: t
  */
 async function getStatusByCufe(tenant, cufe) {
   const cfg = tenant.dian_config || {};
+  if (isSimulation(cfg)) return simulatedResponse(null, cufe);
 
   // Igual que sendToDian()/getNumberingRange(): la IP del backend (Railway)
   // no está en la whitelist de la DIAN, así que si hay un dian-service
@@ -1574,6 +1583,9 @@ function parseNumberingRanges(rawXml) {
  */
 async function getNumberingRange(tenant) {
   const cfg = tenant.dian_config || {};
+  if (isSimulation(cfg)) {
+    throw new Error('Modo simulación: no se consulta la DIAN. Las resoluciones de simulación (prefijos SIM*) se crean solas.');
+  }
 
   // Si hay servicio DIAN remoto, usarlo (necesario porque la IP de Railway
   // no está en whitelist de la DIAN). OJO: el microservicio remoto reenvía
@@ -1642,6 +1654,9 @@ async function getNumberingRange(tenant) {
  */
 async function lookupAcquirer(tenant, { identificationType, identificationNumber }) {
   const cfg = tenant.dian_config || {};
+  if (isSimulation(cfg)) {
+    return { found: false, receiverName: '', receiverEmail: '', statusCode: 'SIM', message: 'Consulta a la DIAN no disponible en modo simulación' };
+  }
 
   const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
   let response;
@@ -1674,6 +1689,9 @@ async function lookupAcquirer(tenant, { identificationType, identificationNumber
  */
 async function getXmlByDocumentKey(tenant, cufe) {
   const cfg = tenant.dian_config || {};
+  if (isSimulation(cfg)) {
+    return { found: false, xml: null, code: 'SIM', message: 'Consulta a la DIAN no disponible en modo simulación' };
+  }
   const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
   if (dianServiceUrls.length) {
     return callRemoteDianService(dianServiceUrls, '/api/dian/get-xml-by-document-key', { config: cfg, cufe });

@@ -216,7 +216,7 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
     doc.font('Helvetica').fontSize(6.8).fillColor(C.muted)
       .text(`Res. DIAN N° ${r.resolution_number}${r.resolution_date ? ` del ${day(r.resolution_date)}` : ''}`, RX, doc.y + 5, { width: RW, align: 'right' })
       .text(`Rango ${r.prefix || ''}${r.from_number} a ${r.prefix || ''}${r.to_number}${months ? ` · vigencia ${months} meses` : ''}`, RX, doc.y + 1, { width: RW, align: 'right' });
-    if (r.is_test) doc.fillColor(C.amber).text('Resolución de pruebas (habilitación)', RX, doc.y + 1, { width: RW, align: 'right' });
+    if (r.is_test) doc.fillColor(C.amber).text(require('../dian/dianSimulation').isSimulatedDocument(sale) ? 'Resolución de SIMULACIÓN (demo)' : 'Resolución de pruebas (habilitación)', RX, doc.y + 1, { width: RW, align: 'right' });
   }
   y = Math.max(leftBottom, doc.y) + 22;
 
@@ -619,7 +619,7 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
       const BW = W - QR - 20;
       doc.rect(BX, y, BW, QR).fillAndStroke(C.soft, C.line);
       doc.rect(BX, y, 3, QR).fill(brand);
-      label('Documento validado por la DIAN', BX + 18, y + 14);
+      label(require('../dian/dianSimulation').isSimulatedDocument(sale) ? 'Simulación — no enviado a la DIAN' : 'Documento validado por la DIAN', BX + 18, y + 14);
       doc.font('Helvetica-Bold').fontSize(11.5).fillColor(C.ink).text('FACTURA ELECTRÓNICA DE VENTA', BX + 18, y + 28, { width: BW - 36 });
       doc.font('Helvetica').fontSize(8.2).fillColor(C.muted)
         .text(`Fecha de validación · ${day(sale.dian_accepted_at || sale.sale_date)}`, BX + 18, y + 47, { width: BW - 36 });
@@ -654,6 +654,10 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
       .text(footer, M - 3, PAGE_H - 30, { width: W - 60, lineBreak: false })
       .text(String(i + 1).padStart(2, '0'), M + W - 57, PAGE_H - 30, { width: 60, align: 'right', lineBreak: false });
   }
+
+  // Modo simulación DIAN (demo): marca de agua en todas las páginas.
+  const sim = require('../dian/dianSimulation');
+  if (sim.isSimulatedDocument(sale)) sim.drawSimulationWatermark(doc);
 
   doc.end();
   return done;

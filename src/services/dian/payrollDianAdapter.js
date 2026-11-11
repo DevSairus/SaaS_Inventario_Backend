@@ -37,6 +37,7 @@ const { signXml } = require('@dian-kit/core');
 const logger = require('../../config/logger');
 const dianApiService = require('./dianApiService');
 const { getKit } = require('./dianKitAdapter');
+const { withSimulation, isSimulation, simulatedResponse } = require('./dianSimulation');
 const { buildPayrollXml, buildPayrollAdjustmentXml } = require('./payrollXmlBuilder');
 
 /**
@@ -72,6 +73,7 @@ async function signPayrollXml(unsignedXml, certificateData, signingTime) {
  * @param {object} params.numbering
  */
 async function submitPayrollDocument({ tenant, employee, period, liquidation, numbering }) {
+  tenant = withSimulation(tenant); // modo simulación (dianSimulation.js)
   const cfg = tenant.dian_config || {};
 
   const built = buildPayrollXml({ tenant, employee, period, liquidation, numbering });
@@ -84,7 +86,8 @@ async function submitPayrollDocument({ tenant, employee, period, liquidation, nu
   const kit = getKit(tenant);
   const signedXml = await signPayrollXml(built.xml, kit.config.certificateData, new Date());
 
-  const dianResponse = await dianApiService.sendNominaSync({
+  // Simulación: no sale hacia la DIAN.
+  const dianResponse = isSimulation(cfg) ? simulatedResponse(built.numeroDocumento, built.cune) : await dianApiService.sendNominaSync({
     xmlContent: signedXml,
     nit: cfg.nit,
     documentNumber: built.numeroDocumento,
@@ -122,6 +125,7 @@ async function submitPayrollDocument({ tenant, employee, period, liquidation, nu
 async function submitPayrollAdjustmentDocument({
   tenant, employee, period, liquidation, numbering, adjustmentType, predecessor,
 }) {
+  tenant = withSimulation(tenant); // modo simulación (dianSimulation.js)
   const cfg = tenant.dian_config || {};
 
   const built = buildPayrollAdjustmentXml({
@@ -131,7 +135,8 @@ async function submitPayrollAdjustmentDocument({
   const kit = getKit(tenant);
   const signedXml = await signPayrollXml(built.xml, kit.config.certificateData, new Date());
 
-  const dianResponse = await dianApiService.sendNominaSync({
+  // Simulación: no sale hacia la DIAN.
+  const dianResponse = isSimulation(cfg) ? simulatedResponse(built.numeroDocumento, built.cune) : await dianApiService.sendNominaSync({
     xmlContent: signedXml,
     nit: cfg.nit,
     documentNumber: built.numeroDocumento,
@@ -158,6 +163,7 @@ async function submitPayrollAdjustmentDocument({
  */
 async function getPayrollDocumentStatus({ cune, tenant }) {
   const cfg = tenant.dian_config || {};
+  if (isSimulation(cfg)) return simulatedResponse(null, cune);
   return dianApiService.getStatus({
     cufe: cune, // GetStatus acepta el trackId genérico; para nómina se pasa el CUNE en el mismo parámetro
     p12Base64: cfg.certificate_p12_base64,

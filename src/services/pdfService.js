@@ -700,7 +700,7 @@ const generateSalePDF = async (res, sale, tenant) => {
       doc.font('Helvetica-Bold').fontSize(7).fillColor(gray).text(cufeLabel, cufeX, qrY);
       doc.font('Helvetica').fontSize(6.5).fillColor(black).text(sale.cufe, cufeX, qrY + 10, { width: cufeW });
       doc.font('Helvetica').fontSize(6.5).fillColor(gray)
-        .text(`Documento validado por la DIAN — ${docType.title}`, cufeX, qrY + 38, { width: cufeW });
+        .text(`${require('./dian/dianSimulation').isSimulatedDocument(sale) ? 'Simulación — no enviado a la DIAN' : 'Documento validado por la DIAN'} — ${docType.title}`, cufeX, qrY + 38, { width: cufeW });
       if (sale.dian_accepted_at) {
         doc.text(`Fecha validación: ${formatDate(sale.dian_accepted_at)}`, cufeX, qrY + 50, { width: cufeW });
       }
@@ -710,6 +710,10 @@ const generateSalePDF = async (res, sale, tenant) => {
 
     /* ── ACENTO INFERIOR ────────────────────────────────────── */
     doc.rect(0, doc.page.height - 5, PAGE_W, 5).fill(red);
+
+    // Modo simulación DIAN (demo): marca de agua en todas las páginas.
+    const sim = require('./dian/dianSimulation');
+    if (sim.isSimulatedDocument(sale)) sim.drawSimulationWatermark(doc);
 
     doc.end();
     if (bufferMode) return await bufferPromise;

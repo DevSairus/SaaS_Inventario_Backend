@@ -21,6 +21,7 @@ const logger = require('../../config/logger');
 const { Purchase, Sale, Supplier, Customer, Tenant, RadianEvent, User } = require('../../models');
 const { signXml } = require('../dian/dianSignerService');
 const dianApiService = require('../dian/dianApiService');
+const { isSimulation, simulationConfig, simulatedResponse } = require('../dian/dianSimulation');
 const { buildEventXml } = require('./radianXmlBuilder');
 const { addBusinessDays, isWithinBusinessDeadline } = require('./businessDays');
 // Contado/crédito decidido al emitir la factura (sales.payment_form)
@@ -62,7 +63,8 @@ async function sendRadianEvent({
 }) {
   const user = userId ? await User.findByPk(userId, { attributes: ['id', 'first_name', 'last_name', 'cedula'] }) : null;
   const tenant = await Tenant.findByPk(tenantId);
-  const cfg = tenant.dian_config || {};
+  // Modo simulación: datos/certificado de demo y sin envío a la DIAN (dianSimulation.js).
+  const cfg = simulationConfig(tenant);
   assertDianConfig(cfg);
 
   const priorCount = await RadianEvent.count({ where: { tenant_id: tenantId, event_code: eventCode, direction: 'emitted' } });
@@ -116,7 +118,7 @@ async function sendRadianEvent({
       invoiceNumber: applicationResponseId,
     });
 
-    const result = await dianApiService.sendEventUpdateStatus({
+    const result = isSimulation(cfg) ? simulatedResponse(applicationResponseId, cude) : await dianApiService.sendEventUpdateStatus({
       signedXml,
       nit: cfg.nit,
       documentNumber: applicationResponseId,

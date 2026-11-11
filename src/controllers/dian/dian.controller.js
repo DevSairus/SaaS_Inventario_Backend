@@ -142,7 +142,17 @@ const updateConfig = async (req, res) => {
       ...(certificate_password && certificate_password !== '[CONFIGURADO]' && { certificate_password }),
     };
 
+    // Modo simulación (demo, no envía a la DIAN): solo lo activa un super admin.
+    const enteringSimulation = updated.environment === 'simulation' && current.environment !== 'simulation';
+    if (enteringSimulation && !(req.is_super_admin || req.user?.role === 'super_admin')) {
+      return fail(res, 'Solo un super administrador puede activar el modo simulación', 403);
+    }
+
     await tenant.update({ dian_config: updated });
+
+    if (enteringSimulation) {
+      await require('../../services/dian/dianSimulation').ensureSimulationResolutions(tenant.id);
+    }
 
     // La instancia de DianKit (certificado cargado, ambiente, NIT, etc.) se
     // cachea en memoria por tenant — si no se invalida acá, los envíos

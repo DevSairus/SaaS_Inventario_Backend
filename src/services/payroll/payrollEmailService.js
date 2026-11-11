@@ -37,6 +37,10 @@ function buildEmailHtml(payrollDocument, employee, tenant) {
  * caller (fire-and-forget) solo tenga que loguear y seguir.
  */
 async function sendPayrollDocumentEmail(payrollDocument, employee, period, tenant) {
+  // Modo simulación (demo): el documento no existe ante la DIAN, no se envía.
+  if (payrollDocument.dian_response?.simulated || require('../dian/dianSimulation').isSimulation(tenant)) {
+    return { sent: false, reason: 'simulation' };
+  }
   if (!employee.email || !employee.email.trim()) {
     logger.warn(`[Nómina] Documento ${payrollDocument.payroll_document_number}: empleado ${employee.id} sin correo registrado, no se envía comprobante.`);
     return { sent: false, reason: 'no_employee_email' };
