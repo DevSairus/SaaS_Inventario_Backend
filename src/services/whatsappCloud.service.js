@@ -395,19 +395,23 @@ async function purgeDemoConversations({ tenantId, schemaName }) {
   }
 }
 
-async function findOrCreateConversation({ tenantId, schemaName, phone, name, customerId }) {
-  const waPhone = normalizePhone(phone);
+// `inbound`: el número viene de Meta (wa_id), que ya es internacional completo;
+// no se le antepone 57 aunque tenga 10 dígitos (p. ej. Belice o Islandia).
+async function findOrCreateConversation({ tenantId, schemaName, phone, name, customerId, inbound = false }) {
+  const waPhone = inbound ? String(phone || '').replace(/\D/g, '') : normalizePhone(phone);
   const run = async () => {
     const { WaConversation } = require('../models');
-    // Chats guardados antes con el número sin indicativo: se pasan al número
-    // completo, que es como Meta entrega las respuestas.
-    const rawPhone = String(phone || '').replace(/\D/g, '');
-    if (rawPhone && rawPhone !== waPhone) {
+    // Chats guardados antes con el número colombiano sin indicativo: se pasan
+    // al número completo, que es como Meta entrega las respuestas. La clave
+    // vieja sale del número ya normalizado (los envíos llegan aquí con el 57
+    // puesto), no de lo que escribió el llamador.
+    const legacyPhone = /^57\d{10}$/.test(waPhone) ? waPhone.slice(2) : null;
+    if (legacyPhone) {
       const exists = await WaConversation.count({ where: { tenant_id: tenantId, wa_contact_phone: waPhone } });
       if (!exists) {
         await WaConversation.update(
           { wa_contact_phone: waPhone },
-          { where: { tenant_id: tenantId, wa_contact_phone: rawPhone } },
+          { where: { tenant_id: tenantId, wa_contact_phone: legacyPhone } },
         );
       }
     }
@@ -766,7 +770,8 @@ async function ingestInboundWhatsApp({
   if (!tenant) return null;
 
   const { type, body, mediaId, mimeType, filename } = extractInboundText(message);
-  const phone = normalizePhone(contactPhone || message?.from);
+  // wa_id de Meta: ya es el número internacional completo (sin anteponer 57).
+  const phone = String(contactPhone || message?.from || '').replace(/\D/g, '');
   if (!phone) return null;
 
   let mediaUrl = null;
@@ -818,6 +823,7 @@ async function ingestInboundWhatsApp({
     phone,
     name: contactName,
     customerId,
+    inbound: true,
   });
 
   const msg = await appendMessage({

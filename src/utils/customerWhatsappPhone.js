@@ -14,7 +14,9 @@
  */
 function normalizeWhatsAppPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
-  return digits.length === 10 ? `57${digits}` : digits;
+  // Solo números colombianos (celular 3XX o fijo 60X): un número extranjero de
+  // 10 dígitos con su indicativo (Belice 501, Guyana 592...) queda igual.
+  return /^(3\d{9}|60\d{8})$/.test(digits) ? `57${digits}` : digits;
 }
 
 /** @param {{ mobile?: string, mobile_country_code?: string, phone?: string }} customer */

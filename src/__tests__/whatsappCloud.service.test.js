@@ -211,6 +211,24 @@ describe('findOrCreateConversation', () => {
     }));
   });
 
+  it('también unifica cuando el envío ya llega con el 57 (caso de los envíos)', async () => {
+    WaConversation.count.mockResolvedValue(0);
+    await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '573166876163' });
+    expect(WaConversation.update).toHaveBeenCalledWith(
+      { wa_contact_phone: '573166876163' },
+      { where: { tenant_id: TENANT_ID, wa_contact_phone: '3166876163' } },
+    );
+  });
+
+  it('un número entrante de 10 dígitos con su indicativo no recibe el 57', async () => {
+    WaConversation.count.mockResolvedValue(0);
+    await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '5016001234', inbound: true });
+    expect(WaConversation.update).not.toHaveBeenCalled();
+    expect(WaConversation.findOrCreate).toHaveBeenCalledWith(expect.objectContaining({
+      where: { tenant_id: TENANT_ID, wa_contact_phone: '5016001234' },
+    }));
+  });
+
   it('si ya existe el chat con indicativo no toca el viejo', async () => {
     WaConversation.count.mockResolvedValue(1);
     await waCloud.findOrCreateConversation({ tenantId: TENANT_ID, phone: '3166876163' });

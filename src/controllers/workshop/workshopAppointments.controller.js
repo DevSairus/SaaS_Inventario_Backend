@@ -8,7 +8,7 @@ const {
 } = require('../../models');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../../config/tenantContext');
-const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery');
+const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
 
 const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']; // Date#getDay(): 0=domingo
 
@@ -613,12 +613,16 @@ const sendAppointmentWhatsApp = async (req, res) => {
     const tenant = await Tenant.findByPk(tenant_id);
     const message = MESSAGE_BUILDERS[type](appointment, tenant);
 
-    const sent = await deliverWhatsApp({
-      tenantId: tenant_id,
-      to: appointment.customer_phone,
-      body: message,
-      userId: req.user?.id || null,
-    });
+    // Cita sin un teléfono utilizable: como antes, wa.me sin número para que
+    // el asesor elija el contacto (la confirmación/cancelación ya se hizo).
+    const sent = String(appointment.customer_phone || '').replace(/\D/g, '')
+      ? await deliverWhatsApp({
+        tenantId: tenant_id,
+        to: appointment.customer_phone,
+        body: message,
+        userId: req.user?.id || null,
+      })
+      : { channel: 'wa_me', waLink: `https://wa.me/?text=${encodeURIComponent(message)}`, reason: FALLBACK.NOT_CONNECTED };
     if (type === 'recordatorio') await appointment.update({ reminder_sent_at: new Date() });
     res.json({ success: true, ...waResponse(sent) });
   } catch (error) {

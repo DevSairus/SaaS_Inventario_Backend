@@ -23,6 +23,7 @@ describe('normalizeWhatsAppPhone', () => {
   test('respeta números que ya traen indicativo', () => {
     expect(normalizeWhatsAppPhone('+57 316-687-6163')).toBe('573166876163');
     expect(normalizeWhatsAppPhone('+1 (305) 555-0100')).toBe('13055550100');
+    expect(normalizeWhatsAppPhone('+501 600 1234')).toBe('5016001234');
   });
   test('vacío queda vacío', () => {
     expect(normalizeWhatsAppPhone(null)).toBe('');
