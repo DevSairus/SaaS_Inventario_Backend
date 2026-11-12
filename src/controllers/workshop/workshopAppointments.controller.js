@@ -8,7 +8,7 @@ const {
 } = require('../../models');
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../../config/tenantContext');
-const whatsappService = require('../../services/whatsappService');
+const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
 
 const WEEKDAY_KEYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']; // Date#getDay(): 0=domingo
 
@@ -613,37 +613,21 @@ const sendAppointmentWhatsApp = async (req, res) => {
     const tenant = await Tenant.findByPk(tenant_id);
     const message = MESSAGE_BUILDERS[type](appointment, tenant);
 
-    let channel = 'wa_me';
-    let conversation_id = null;
-    try {
-      const waCloud = require('../../services/whatsappCloud.service');
-      const status = await waCloud.getWhatsAppStatus(tenant_id);
-      if (status.operational) {
-        const sent = await waCloud.sendTextFromTenant({
-          tenantId: tenant_id,
-          to: appointment.customer_phone,
-          body: message,
-          userId: req.user?.id || null,
-          source: 'api',
-        });
-        channel = 'cloud_api';
-        conversation_id = sent.conversation_id;
-      }
-    } catch (cloudErr) {
-      logger.warn('[WhatsApp] Cloud fallback a wa.me cita:', cloudErr.message);
-    }
-
+    // Cita sin un teléfono utilizable: como antes, wa.me sin número para que
+    // el asesor elija el contacto (la confirmación/cancelación ya se hizo).
+    const sent = String(appointment.customer_phone || '').replace(/\D/g, '')
+      ? await deliverWhatsApp({
+        tenantId: tenant_id,
+        to: appointment.customer_phone,
+        body: message,
+        userId: req.user?.id || null,
+      })
+      : { channel: 'wa_me', waLink: `https://wa.me/?text=${encodeURIComponent(message)}`, reason: FALLBACK.NOT_CONNECTED };
     if (type === 'recordatorio') await appointment.update({ reminder_sent_at: new Date() });
-
-    if (channel === 'cloud_api') {
-      return res.json({ success: true, channel, conversation_id, message: 'Mensaje enviado por WhatsApp Cloud API.' });
-    }
-
-    const result = await whatsappService.sendText(appointment.customer_phone, message);
-    res.json({ success: true, channel, waLink: result.waLink });
+    res.json({ success: true, ...waResponse(sent) });
   } catch (error) {
     logger.error('Error generando WhatsApp de cita:', error);
-    res.status(500).json({ success: false, message: 'Error al generar el enlace de WhatsApp' });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Error al generar el enlace de WhatsApp' });
   }
 };
 

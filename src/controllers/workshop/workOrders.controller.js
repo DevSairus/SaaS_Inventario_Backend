@@ -24,6 +24,9 @@ const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/ca
 const woPayments = require('../../services/workshop/workOrderPayments.service');
 const { normalizePlate, cleanPlate, findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
 const { isBlockedByAccountOwnership } = require('../../middleware/checkAccountOwnership');
+const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
+const { buildWaLink } = require('../../services/whatsappService');
+const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -2291,6 +2294,25 @@ const markAllQuoteNotificationsSeen = async (req, res) => {
   }
 };
 
+// La ronda ya quedó guardada (y la transacción cerrada): nada de WhatsApp
+// puede tumbar la respuesta. Sin celular queda el wa.me sin destinatario
+// para que el asesor elija el contacto.
+async function quoteWhatsApp({ tenantId, customer, message, userId }) {
+  const phone = getCustomerWhatsappNumber(customer);
+  const waMe = (reason) => ({
+    channel: 'wa_me', whatsapp_url: buildWaLink(phone, message), conversation_id: null, fallback_reason: reason,
+  });
+  if (!phone) return waMe('no_phone');
+  try {
+    const sent = await deliverWhatsApp({ tenantId, to: phone, body: message, userId: userId || null });
+    const { waLink, ...rest } = waResponse(sent);
+    return { ...rest, whatsapp_url: waLink || null, conversation_id: sent.conversation_id || null };
+  } catch (err) {
+    logger.warn(`[WhatsApp] Cotización OT tenant=${tenantId}: ${err.message}`);
+    return waMe(FALLBACK.ERROR);
+  }
+}
+
 const sendQuoteRequest = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
@@ -2350,44 +2372,14 @@ const sendQuoteRequest = async (req, res) => {
     }
 
     const customer = await Customer.findOne({ where: { id: order.customer_id }, transaction });
-    const phone = customer?.mobile || customer?.phone || '';
-    const cleanPhone = phone.replace(/\D/g, '');
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
     const itemsSummary = presentComboLines(pendingItems, i => ({ product_name: i.product_name, quantity: i.quantity, total: i.total }))
       .map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
     const message = `Hola! Tenemos una cotización pendiente de tu aprobación para la orden ${order.order_number}:\n${itemsSummary}\n\nRevísala y apruébala aquí:\n${shareUrl}`;
-    const whatsappText = encodeURIComponent(message);
-    const whatsappUrl = cleanPhone
-      ? `https://wa.me/${cleanPhone}?text=${whatsappText}`
-      : `https://wa.me/?text=${whatsappText}`;
 
     await transaction.commit();
-
-    // Preferir Cloud API si el tenant tiene WhatsApp conectado; si no, wa.me
-    // (mismo patrón que sendWhatsApp/sales.controller.js#sendWhatsApp).
-    let channel = 'wa_me';
-    let conversation_id = null;
-    if (phone) {
-      try {
-        const waCloud = require('../../services/whatsappCloud.service');
-        const status = await waCloud.getWhatsAppStatus(tenant_id);
-        if (status.operational) {
-          const sent = await waCloud.sendTextFromTenant({
-            tenantId: tenant_id,
-            to: phone,
-            body: message,
-            userId: req.user?.id || null,
-            source: 'api',
-          });
-          channel = 'cloud_api';
-          conversation_id = sent.conversation_id;
-        }
-      } catch (cloudErr) {
-        logger.warn('[WhatsApp] Cloud fallback a wa.me cotización OT:', cloudErr.message);
-      }
-    }
 
     res.status(201).json({
       success: true,
@@ -2395,9 +2387,7 @@ const sendQuoteRequest = async (req, res) => {
       data: {
         quote_request_id: quoteRequest.id,
         share_url: shareUrl,
-        whatsapp_url: channel === 'cloud_api' ? null : whatsappUrl,
-        channel,
-        conversation_id,
+        ...await quoteWhatsApp({ tenantId: tenant_id, customer, message, userId: req.user?.id }),
         items_count: pendingItems.length,
       },
     });
@@ -2444,46 +2434,16 @@ const resendQuoteRequest = async (req, res) => {
     }
 
     const customer = await Customer.findOne({ where: { id: order.customer_id } });
-    const phone = customer?.mobile || customer?.phone || '';
-    const cleanPhone = phone.replace(/\D/g, '');
 
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
     const itemsSummary = presentComboLines(items, i => ({ product_name: i.product_name, quantity: i.quantity, total: i.total }))
       .map(i => `• ${i.product_name} (${i.quantity} x ${i.total})`).join('\n');
     const message = `Hola! Recordatorio: sigue pendiente tu aprobación para la orden ${order.order_number}:\n${itemsSummary}\n\nRevísala y apruébala aquí:\n${shareUrl}`;
-    const whatsappText = encodeURIComponent(message);
-    const whatsappUrl = cleanPhone
-      ? `https://wa.me/${cleanPhone}?text=${whatsappText}`
-      : `https://wa.me/?text=${whatsappText}`;
 
     // No se toca `status` ni `quote_request_id` de los ítems -- sigue siendo
     // la misma ronda, solo se refresca `sent_at` para reflejar el reenvío.
     await quoteRequest.update({ sent_at: new Date() });
-
-    // Preferir Cloud API si el tenant tiene WhatsApp conectado; si no, wa.me
-    // (mismo patrón que sendQuoteRequest/sendWhatsApp).
-    let channel = 'wa_me';
-    let conversation_id = null;
-    if (phone) {
-      try {
-        const waCloud = require('../../services/whatsappCloud.service');
-        const status = await waCloud.getWhatsAppStatus(tenant_id);
-        if (status.operational) {
-          const sent = await waCloud.sendTextFromTenant({
-            tenantId: tenant_id,
-            to: phone,
-            body: message,
-            userId: req.user?.id || null,
-            source: 'api',
-          });
-          channel = 'cloud_api';
-          conversation_id = sent.conversation_id;
-        }
-      } catch (cloudErr) {
-        logger.warn('[WhatsApp] Cloud fallback a wa.me reenvío cotización OT:', cloudErr.message);
-      }
-    }
 
     res.json({
       success: true,
@@ -2491,9 +2451,7 @@ const resendQuoteRequest = async (req, res) => {
       data: {
         quote_request_id: quoteRequest.id,
         share_url: shareUrl,
-        whatsapp_url: channel === 'cloud_api' ? null : whatsappUrl,
-        channel,
-        conversation_id,
+        ...await quoteWhatsApp({ tenantId: tenant_id, customer, message, userId: req.user?.id }),
         items_count: items.length,
       },
     });
@@ -3477,9 +3435,6 @@ const getPaymentHistory = async (req, res) => {
 
 // ── PDF GENERATION ───────────────────────────────────────────────────────────
 const { generatePaymentReceiptBuffer, generateIntakeFormBuffer, generateWorkOrderPDFBuffer, generateTechSheetBuffer } = require('../../services/workshopPdfService');
-const whatsappService = require('../../services/whatsappService');
-const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
-
 async function getOrderWithTenant(id, tenant_id) {
   const { WorkOrderDiagnosisMark, DiagramTemplate } = require('../../models');
   const order = await WorkOrder.findOne({
@@ -3772,7 +3727,7 @@ const generateShareToken = async (req, res) => {
       where: { id: req.params.id, tenant_id: req.user.tenant_id },
       attributes: WO_SAFE_ATTRS,
       include: [
-        { model: Customer, as: 'customer', attributes: ['first_name', 'phone', 'mobile'] },
+        { model: Customer, as: 'customer', attributes: ['first_name', 'phone', 'mobile', 'mobile_country_code'] },
       ],
     });
     if (!order) return res.status(404).json({ success: false, message: 'Orden no encontrada' });
@@ -3793,16 +3748,10 @@ const generateShareToken = async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
 
-    const whatsappText = encodeURIComponent(
-      `Hola! Puedes consultar el estado de tu orden de trabajo ${order.order_number} aquí:\n${shareUrl}`
+    const whatsappUrl = buildWaLink(
+      getCustomerWhatsappNumber(order.customer),
+      `Hola! Puedes consultar el estado de tu orden de trabajo ${order.order_number} aquí:\n${shareUrl}`,
     );
-
-    // Usar el teléfono del cliente registrado (mobile tiene prioridad sobre phone)
-    const customerPhone = order.customer?.mobile || order.customer?.phone || '';
-    const cleanPhone = customerPhone.replace(/\D/g, '');
-    const whatsappUrl = cleanPhone
-      ? `https://wa.me/${cleanPhone}?text=${whatsappText}`
-      : `https://wa.me/?text=${whatsappText}`;
 
     res.json({
       success: true,
@@ -4100,44 +4049,11 @@ const sendWhatsApp = async (req, res) => {
     const shareUrl = `${frontendUrl}/ot/${token}`;
     const message  = `Hola! Te compartimos el estado de tu Orden de Trabajo *${order.order_number}*.\nPuedes consultarla en tiempo real aquí:\n${shareUrl}`;
 
-    try {
-      const waCloud = require('../../services/whatsappCloud.service');
-      const status = await waCloud.getWhatsAppStatus(tenant_id);
-      if (status.operational) {
-        const sent = await waCloud.sendTextFromTenant({
-          tenantId: tenant_id,
-          to: phone,
-          body: message,
-          userId: req.user?.id || null,
-          source: 'api',
-        });
-        logger.info(`[WhatsApp] Cloud API OT ${order.order_number} enviado a ${phone}`);
-        return res.json({
-          success: true,
-          channel: 'cloud_api',
-          shareUrl,
-          conversation_id: sent.conversation_id,
-          message: `Orden enviada por WhatsApp Cloud API a ${phone}.`,
-        });
-      }
-    } catch (cloudErr) {
-      logger.warn('[WhatsApp] Cloud fallback a wa.me OT:', cloudErr.message);
-    }
-
-    // Genera enlace wa.me (no envía automáticamente)
-    const result = await whatsappService.sendText(phone, message);
-
-    logger.info(`[WhatsApp] wa.me OT ${order.order_number} generado para ${phone}`);
-    res.json({
-      success: true,
-      channel: 'wa_me',
-      waLink:   result.waLink,   // El frontend abre este enlace
-      shareUrl,
-      message: `Enlace listo para enviar a ${phone}. Haz clic en "Abrir WhatsApp".`,
-    });
+    const sent = await deliverWhatsApp({ tenantId: tenant_id, to: phone, body: message, userId: req.user?.id || null });
+    res.json({ success: true, ...waResponse(sent), shareUrl });
   } catch (error) {
     logger.error('[WhatsApp] Error generando enlace OT:', error.message, error.stack);
-    res.status(500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
+    res.status(error.status || 500).json({ success: false, message: error.message || 'Error al generar enlace de WhatsApp' });
   }
 }
 module.exports = { list, getById, create, update, changeStatus, revertStatus, addItem, updateItem, removeItem, addCombo, updateCombo, removeCombo, generateSale, uploadPhotos, deletePhoto, productivity, generatePDF, updateChecklist, getReport, generateShareToken, getPublicOrder, sendWhatsApp, registerPayment, getPaymentHistory, sendQuoteRequest, resendQuoteRequest, applyApprovedItems, respondQuoteRequest, getPendingQuoteNotifications, markQuoteNotificationSeen, markAllQuoteNotificationsSeen, getWorkshopQuotes, listWorkshopQuoteRows, listDiagnosisMarks, addDiagnosisMark, updateDiagnosisMark, removeDiagnosisMark, generateItemsFromMarks, convertQuoteToWorkOrder, quickCreate };

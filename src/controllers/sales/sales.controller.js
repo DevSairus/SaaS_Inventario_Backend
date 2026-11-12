@@ -7,7 +7,7 @@ const { sequelize } = require('../../config/database');
 const { Op } = require('sequelize');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { generateSalePDF, generateSalePDFBuffer, generatePaymentReceiptPDF, generatePaymentReceiptPDFBuffer } = require('../../services/pdfService');
-const whatsappService = require('../../services/whatsappService');
+const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { createMovement } = require('../inventory/movements.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
@@ -2536,42 +2536,11 @@ const sendWhatsApp = async (req, res) => {
       caption = `Hola! Aquí tienes tu ${docLabel} *${sale.sale_number}* de *${tenant.company_name}*.\nTotal: *$${Number(sale.total_amount).toLocaleString('es-CO')}*\n\n📄 Consulta tu documento aquí:\n${documentUrl}\n\nCualquier duda estamos a tu servicio. 😊`;
     }
 
-    // Preferir Cloud API si el tenant tiene WhatsApp conectado; si no, wa.me
-    try {
-      const waCloud = require('../../services/whatsappCloud.service');
-      const status = await waCloud.getWhatsAppStatus(tenantId);
-      if (status.operational) {
-        const sent = await waCloud.sendTextFromTenant({
-          tenantId,
-          to: customerPhone,
-          body: caption,
-          userId: req.user?.id || null,
-          source: 'api',
-        });
-        return res.json({
-          success: true,
-          channel: 'cloud_api',
-          pdfUrl,
-          conversation_id: sent.conversation_id,
-          message: `Documento enviado por WhatsApp Cloud API a ${customerPhone}.`,
-        });
-      }
-    } catch (cloudErr) {
-      logger.warn('WhatsApp Cloud fallback a wa.me:', cloudErr.message);
-    }
-
-    const result = await whatsappService.sendText(customerPhone, caption);
-
-    res.json({
-      success: true,
-      channel: 'wa_me',
-      waLink:  result.waLink,
-      pdfUrl,
-      message: `Enlace listo para ${customerPhone}. Se abrirá WhatsApp con el mensaje.`,
-    });
+    const sent = await deliverWhatsApp({ tenantId, to: customerPhone, body: caption, userId: req.user?.id || null });
+    res.json({ success: true, ...waResponse(sent), pdfUrl });
   } catch (error) {
     logger.error('Error generando enlace WhatsApp:', error);
-    res.status(500).json({ success: false, message: 'Error al generar enlace de WhatsApp' });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Error al generar enlace de WhatsApp' });
   }
 };
 
