@@ -4,7 +4,7 @@ const { sequelize } = require('../../config/database');
 const { DiagramTemplate, DiagramTemplateSetting } = require('../../models');
 const { Op } = require('sequelize');
 
-const VEHICLE_TYPES = ['automovil', 'camioneta', 'motocicleta', 'camion', 'otro'];
+const { VEHICLE_TYPES } = require('../../constants/vehicleTypes');
 
 // Lista el catálogo disponible para el tenant: los diagramas de la
 // biblioteca compartida (tenant_id = NULL) más los propios del taller,

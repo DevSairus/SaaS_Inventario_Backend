@@ -1,6 +1,7 @@
 // backend/src/models/workshop/Vehicle.js
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../../config/database');
+const { VEHICLE_TYPES } = require('../../constants/vehicleTypes');
 
 const Vehicle = sequelize.define('Vehicle', {
   id: {
@@ -29,10 +30,10 @@ const Vehicle = sequelize.define('Vehicle', {
   // sistemas mecánicos aplican (ver propuesta de diagramas interactivos).
   // Sin este campo no hay forma de saber si un vehículo es carro o moto.
   vehicle_type: {
-    type: DataTypes.ENUM('automovil', 'camioneta', 'motocicleta', 'camion', 'otro'),
+    type: DataTypes.ENUM(...VEHICLE_TYPES),
     allowNull: false,
     defaultValue: 'automovil',
-    comment: 'Tipo de vehículo: automovil, camioneta, motocicleta, camion, otro'
+    comment: 'Tipo de vehículo: ver constants/vehicleTypes.js'
   },
   brand: {
     type: DataTypes.STRING(100),

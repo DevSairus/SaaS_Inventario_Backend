@@ -4,7 +4,7 @@ const { sequelize } = require('../../config/database');
 
 // Mismos valores que Vehicle.vehicle_type -- en BD es STRING (ver migración
 // 2026092501), la lista válida se impone acá.
-const VEHICLE_TYPES = ['automovil', 'camioneta', 'motocicleta', 'camion', 'otro'];
+const { VEHICLE_TYPES } = require('../../constants/vehicleTypes');
 
 // Tipo de mantenimiento con su intervalo, por tenant y tipo de vehículo --
 // ver 00 - Documentación/plan-portal-mantenimiento-vehiculo.md sección 3.1.

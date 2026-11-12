@@ -509,7 +509,29 @@ const getByPlate = async (req, res) => {
   }
 };
 
+// GET /workshop/vehicles/catalog?vehicle_type=motocicleta
+// Marcas y líneas sugeridas del catálogo global para un tipo de vehículo
+// (ver services/workshop/vehicleCatalog.service.js). Sin tipo -> todas las
+// clases que la empresa atiende (business_config.vehicle_types).
+const getCatalog = async (req, res) => {
+  try {
+    const { sequelize } = require('../../config/database');
+    const { catalogForVehicleType } = require('../../services/workshop/vehicleCatalog.service');
+    const { VEHICLE_TYPES } = require('../../constants/vehicleTypes');
+    const type = String(req.query.vehicle_type || '');
+    if (!VEHICLE_TYPES.includes(type)) {
+      return res.status(400).json({ success: false, message: 'Tipo de vehículo no válido' });
+    }
+    const data = await catalogForVehicleType(sequelize, type);
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.json({ success: true, data });
+  } catch (err) {
+    logger.error('Error al obtener catálogo de vehículos:', err);
+    res.status(500).json({ success: false, message: 'Error al obtener el catálogo de marcas y líneas' });
+  }
+};
+
 module.exports = {
-  list, getById, getByPlate, create, update, getHistory, remove,
+  list, getById, getByPlate, create, update, getHistory, remove, getCatalog,
   getMaintenance, getReminders, getPortalLink, sendPortalWhatsApp, getLabel, getPublicVehiclePortal,
 };

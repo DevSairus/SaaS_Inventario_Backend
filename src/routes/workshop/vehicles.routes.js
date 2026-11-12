@@ -6,6 +6,8 @@ router.get('/', ctrl.list);
 // Búsqueda exacta por placa (sin espacios/guiones) -- modal de OT rápida.
 // Va antes de '/:id' para que 'by-plate' no se tome como id.
 router.get('/by-plate/:plate', ctrl.getByPlate);
+// Catálogo global de marcas/líneas por tipo de vehículo (antes de '/:id').
+router.get('/catalog', ctrl.getCatalog);
 router.get('/:id', ctrl.getById);
 router.get('/:id/history', ctrl.getHistory);
 // Portal del vehículo / mantenimientos (plan-portal-mantenimiento-vehiculo.md)

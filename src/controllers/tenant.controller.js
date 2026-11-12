@@ -140,7 +140,15 @@ const updateTenantConfig = async (req, res) => {
         else delete updates.pdf_config.quote_validity_days;
       }
     }
-    if (business_config !== undefined) updates.business_config = { ...(tenant.business_config || {}), ...business_config };
+    if (business_config !== undefined) {
+      updates.business_config = { ...(tenant.business_config || {}), ...business_config };
+      // Tipos de vehículo que atiende la empresa (constants/vehicleTypes.js):
+      // filtran el tipo y el catálogo de marcas/líneas al crear vehículos.
+      if (business_config && 'vehicle_types' in business_config) {
+        const { sanitizeVehicleTypes } = require('../constants/vehicleTypes');
+        updates.business_config.vehicle_types = sanitizeVehicleTypes(business_config.vehicle_types) || [];
+      }
+    }
     if (features !== undefined) {
       // Ocultar remisiones (ver utils/remisionVisibility.js):
       // - Activarlo: el admin, desde Configuración. Desde ahí la sección deja

@@ -4,6 +4,7 @@ const { getCurrentSchema } = require('../../config/tenantContext');
 const { Product, ProductVehicleApplication } = require('../../models/inventory');
 const VehicleBrand = require('../../models/workshop/VehicleBrand');
 const VehicleLine = require('../../models/workshop/VehicleLine');
+const { VEHICLE_TYPES } = require('../../constants/vehicleTypes');
 
 // GET /products/:id/vehicle-applications
 const getProductVehicleApplications = async (req, res) => {
@@ -45,7 +46,7 @@ const addVehicleApplication = async (req, res) => {
 
     if (!brand || !line) return res.status(400).json({ success: false, message: 'Marca y línea son requeridos' });
 
-    const validTypes = ['automovil', 'camioneta', 'motocicleta', 'camion', 'otro'];
+    const validTypes = VEHICLE_TYPES;
     const safeType = vehicle_type && validTypes.includes(vehicle_type) ? vehicle_type : null;
 
     // Buscar o crear en catálogo normalizado
@@ -111,7 +112,7 @@ const updateVehicleApplication = async (req, res) => {
     if (engine !== undefined) updateData.engine = engine?.trim() || null;
     if (notes !== undefined) updateData.notes = notes?.trim() || null;
     if (vehicle_type !== undefined) {
-      const validTypes = ['automovil', 'camioneta', 'motocicleta', 'camion', 'otro'];
+      const validTypes = VEHICLE_TYPES;
       updateData.vehicle_type = validTypes.includes(vehicle_type) ? vehicle_type : null;
     }
 

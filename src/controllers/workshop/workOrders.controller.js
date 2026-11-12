@@ -570,7 +570,12 @@ const quickCreate = async (req, res) => {
       // una vez (ver utils/customerWhatsappPhone.js).
       mobile,
       tax_id: String(new_customer.tax_id || '').trim() || null,
+      // Correo opcional (facturas, recordatorios).
+      email: String(new_customer.email || '').trim().toLowerCase() || null,
     };
+    if (newCustomerData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newCustomerData.email)) {
+      return res.status(400).json({ success: false, message: 'El correo del cliente no es válido' });
+    }
   }
   if (mileage_in === undefined || mileage_in === null || String(mileage_in).trim() === '') {
     return res.status(400).json({ success: false, message: 'El kilometraje de ingreso es requerido' });
@@ -619,12 +624,16 @@ const quickCreate = async (req, res) => {
     let vehicle = await findVehicleByPlate(tenant_id, plate, { transaction });
     let vehicleCreated = false;
     if (!vehicle) {
-      // Solo la placa (+ propietario); vehicle_type queda en el default del
-      // modelo. El resto se completa desde la ficha del vehículo.
+      // Solo la placa (+ propietario); el tipo es el primero que atiende la
+      // empresa (un taller de motos no deja motos como 'automovil'). El resto
+      // se completa desde la ficha del vehículo.
+      const { tenantVehicleTypes } = require('../../constants/vehicleTypes');
+      const tenantCfg = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'], transaction });
       vehicle = await Vehicle.create({
         tenant_id,
         plate: plateToSave,
         customer_id: customer.id,
+        vehicle_type: tenantVehicleTypes(tenantCfg?.business_config)[0],
       }, { transaction });
       vehicleCreated = true;
     }
