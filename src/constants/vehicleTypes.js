@@ -35,4 +35,20 @@ function sanitizeVehicleTypes(list) {
   return VEHICLE_TYPES.filter((t) => valid.includes(t));
 }
 
-module.exports = { VEHICLE_TYPES, CATALOG_CLASS_BY_TYPE, CATALOG_CLASSES, tenantVehicleTypes, sanitizeVehicleTypes };
+// Medidor de uso: kilómetros (odómetro) u horas (horómetro). Cuatrimotos y
+// UTV usan horas por defecto; cada vehículo puede cambiarlo (vehicles.meter_unit).
+// Las lecturas van en las mismas columnas (mileage_in/out, current_mileage,
+// interval_km): solo cambia la unidad con que se leen.
+const METER_UNITS = ['km', 'h'];
+const HOURS_DEFAULT_TYPES = ['cuatrimoto', 'utv'];
+const defaultMeterUnit = (vehicleType) => (HOURS_DEFAULT_TYPES.includes(vehicleType) ? 'h' : 'km');
+const meterUnitOf = (vehicle) => (METER_UNITS.includes(vehicle?.meter_unit) ? vehicle.meter_unit : defaultMeterUnit(vehicle?.vehicle_type));
+const sanitizeMeterUnit = (unit, vehicleType) => (METER_UNITS.includes(unit) ? unit : defaultMeterUnit(vehicleType));
+// Lectura con su unidad para PDF y tiquetes: "12.500 km" / "350 h".
+const formatMeter = (value, unit) => (value == null || value === '' ? null
+  : `${Number(value).toLocaleString('es-CO')} ${unit === 'h' ? 'h' : 'km'}`);
+const meterLabel = (unit) => (unit === 'h' ? 'Horas' : 'Km');
+
+module.exports = {
+  METER_UNITS, HOURS_DEFAULT_TYPES, defaultMeterUnit, meterUnitOf, sanitizeMeterUnit, formatMeter, meterLabel,
+  VEHICLE_TYPES, CATALOG_CLASS_BY_TYPE, CATALOG_CLASSES, tenantVehicleTypes, sanitizeVehicleTypes };

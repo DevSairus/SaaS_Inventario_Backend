@@ -22,6 +22,7 @@ const { amountInWords } = require('../../utils/numberToWords');
 const { saleBalance } = require('../../utils/saleAmounts');
 const { taxLinesFromItems } = require('../taxService');
 const { loadContext, buildDianQrContent, DOC_TYPES, METHODS } = require('../sales/salePremiumPdfService');
+const { formatMeter, defaultMeterUnit } = require('../../constants/vehicleTypes');
 
 const n = (v) => Number(v) || 0;
 const COP = (v) => new Intl.NumberFormat('es-CO', { style: 'currency', currency: 'COP', maximumFractionDigits: 0 }).format(n(v));
@@ -104,7 +105,7 @@ async function buildSaleTicket(sale, tenant) {
   if (address) blocks.push(text(address, { size: 'sm' }));
   if (sale.vehicle_plate) {
     const vehicle = [sale.vehicle_plate, [sale.vehicle_brand, sale.vehicle_model].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
-    blocks.push(text(`Vehículo: ${vehicle}${sale.mileage ? ` · ${Number(sale.mileage).toLocaleString('es-CO')} km` : ''}`, { size: 'sm' }));
+    blocks.push(text(`Vehículo: ${vehicle}${sale.mileage ? ` · ${formatMeter(sale.mileage, defaultMeterUnit(sale.vehicle_type))}` : ''}`, { size: 'sm' }));
   }
   if (ctx.workOrder) blocks.push(text(`Orden de trabajo ${ctx.workOrder.order_number}`, { size: 'sm' }));
   if (isInvoice && sale.remision_number) blocks.push(text(`Remisión ${sale.remision_number}`, { size: 'sm' }));

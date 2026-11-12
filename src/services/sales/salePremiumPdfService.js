@@ -25,6 +25,7 @@ const { groupComboLines, collapseComboLinesForDian } = require('../../utils/comb
 const { amountInWords } = require('../../utils/numberToWords');
 const { saleBalance } = require('../../utils/saleAmounts');
 const { taxLinesFromItems } = require('../taxService');
+const { formatMeter, defaultMeterUnit } = require('../../constants/vehicleTypes');
 
 const C = {
   ink: '#111827',
@@ -294,7 +295,7 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
       { k: 'Color', v: sale.vehicle_color || sv?.color },
       { k: 'N° VIN / Chasis', v: sv?.vin },
       { k: 'N° Motor', v: sv?.engine_number },
-      { k: 'Kilometraje', v: sale.mileage ? `${Number(sale.mileage).toLocaleString('es-CO')} km` : null },
+      { k: defaultMeterUnit(sale.vehicle_type) === 'h' ? 'Horómetro' : 'Kilometraje', v: sale.mileage ? formatMeter(sale.mileage, defaultMeterUnit(sale.vehicle_type)) : null },
     ].filter(f => f.v);
     section('Ficha técnica del vehículo');
     drawGrid(vFields, vFields.length >= 4 ? 4 : vFields.length);

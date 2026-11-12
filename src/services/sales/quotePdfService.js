@@ -9,6 +9,7 @@ const PDFDocument = require('pdfkit');
 const QRCode = require('qrcode');
 const { groupComboLines, collapseComboLinesForDian } = require('../../utils/comboLines');
 const { taxLinesFromItems } = require('../taxService');
+const { formatMeter, defaultMeterUnit } = require('../../constants/vehicleTypes');
 const {
   downloadImage, downloadImageWithTimeout, toJpgUrl, drawDiagnosisSection, formatCurrency,
 } = require('../pdfService');
@@ -146,7 +147,7 @@ const generateQuotePDFBuffer = async (sale, tenant) => {
     ['Válida hasta', sale.quote_valid_until ? fmtDay(String(sale.quote_valid_until).slice(0, 10)) : '—'],
     sale.vehicle_plate ? ['Placa', sale.vehicle_plate] : null,
     vehicle ? ['Vehículo', vehicle] : null,
-    sale.mileage ? ['Kilometraje', Number(sale.mileage).toLocaleString('es-CO')] : null,
+    sale.mileage ? [defaultMeterUnit(sale.vehicle_type) === 'h' ? 'Horómetro' : 'Kilometraje', formatMeter(sale.mileage, defaultMeterUnit(sale.vehicle_type))] : null,
     sale.technician_name ? ['Asesor', sale.technician_name] : null,
   ].filter(Boolean).slice(0, 4);
   details.forEach(([label, value], i) => {

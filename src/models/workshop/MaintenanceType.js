@@ -27,6 +27,14 @@ const MaintenanceType = sequelize.define('MaintenanceType', {
     allowNull: false,
     validate: { isIn: [VEHICLE_TYPES] },
   },
+  // Unidad de interval_km: 'km' u 'h' (horas de uso, cuatrimotos/UTV). Solo
+  // aplica a vehículos con esa misma unidad de medidor.
+  interval_unit: {
+    type: DataTypes.STRING(2),
+    allowNull: false,
+    defaultValue: 'km',
+    validate: { isIn: [['km', 'h']] },
+  },
   interval_km: {
     type: DataTypes.INTEGER,
     allowNull: true,
@@ -60,7 +68,7 @@ const MaintenanceType = sequelize.define('MaintenanceType', {
     // Sin ninguno de los dos no hay forma de calcular el "próximo".
     hasSomeInterval() {
       if (!this.interval_km && !this.interval_months) {
-        throw new Error('Debes indicar un intervalo en km, en meses o ambos');
+        throw new Error('Debes indicar un intervalo de uso (km u horas), en meses o ambos');
       }
     },
   },

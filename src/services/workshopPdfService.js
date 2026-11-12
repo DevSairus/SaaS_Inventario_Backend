@@ -5,6 +5,7 @@ const http  = require('http');
 const fs    = require('fs');
 const path  = require('path');
 const { groupComboLines } = require('../utils/comboLines');
+const { meterUnitOf, meterLabel, formatMeter } = require('../constants/vehicleTypes');
 
 /* ── helpers ─────────────────────────────────────────────── */
 const COP = n =>
@@ -372,7 +373,7 @@ const generateIntakeForm = async (res, order, tenant) => {
       ['Modelo',    v.model || '—'],
       ['Año',       v.year || '—'],
       ['Color',     v.color || '—'],
-      ['Km ingreso', order.mileage_in ? `${Number(order.mileage_in).toLocaleString('es-CO')} km` : '—'],
+      [`${meterLabel(meterUnitOf(order.vehicle))} ingreso`, formatMeter(order.mileage_in || null, meterUnitOf(order.vehicle)) || '—'],
     ].forEach(([lbl, val], i) => {
       const ry = y + 20 + i * 15;
       doc.font('Helvetica').fontSize(7.5).fillColor(C.gray).text(lbl, MARGIN + 10, ry, { width: 70 });
@@ -580,8 +581,8 @@ const generateWorkOrderPDF = async (res, order, tenant) => {
       ['Placa', v.plate || '—'],
       ['Marca / Modelo', `${v.brand || '—'} ${v.model || ''}`.trim()],
       ['Año / Color', [v.year, v.color].filter(Boolean).join(' · ') || '—'],
-      ['Km ingreso', order.mileage_in ? `${Number(order.mileage_in).toLocaleString('es-CO')} km` : '—'],
-      ['Km salida',  order.mileage_out ? `${Number(order.mileage_out).toLocaleString('es-CO')} km` : '—'],
+      [`${meterLabel(meterUnitOf(order.vehicle))} ingreso`, formatMeter(order.mileage_in || null, meterUnitOf(order.vehicle)) || '—'],
+      [`${meterLabel(meterUnitOf(order.vehicle))} salida`, formatMeter(order.mileage_out || null, meterUnitOf(order.vehicle)) || '—'],
     ].forEach(([lbl, val], i) => {
       doc.font('Helvetica').fontSize(7.5).fillColor(C.gray).text(lbl, MARGIN + 10, y + 20 + i * 14, { width: 80 });
       doc.font('Helvetica-Bold').fontSize(8).fillColor(C.dark).text(val, MARGIN + 92, y + 20 + i * 14, { width: half - 100 });
@@ -1011,8 +1012,8 @@ const generateTechSheetPDF = async (res, order, tenant) => {
       ['Placa', v.plate || '—'],
       ['Marca / Modelo', `${v.brand || '—'} ${v.model || ''}`.trim()],
       ['Año / Color', [v.year, v.color].filter(Boolean).join(' · ') || '—'],
-      ['Km ingreso', order.mileage_in ? `${Number(order.mileage_in).toLocaleString('es-CO')} km` : '—'],
-      ['Km salida',  order.mileage_out ? `${Number(order.mileage_out).toLocaleString('es-CO')} km` : '—'],
+      [`${meterLabel(meterUnitOf(order.vehicle))} ingreso`, formatMeter(order.mileage_in || null, meterUnitOf(order.vehicle)) || '—'],
+      [`${meterLabel(meterUnitOf(order.vehicle))} salida`, formatMeter(order.mileage_out || null, meterUnitOf(order.vehicle)) || '—'],
     ].forEach(([lbl, val], i) => {
       doc.font('Helvetica').fontSize(7.5).fillColor(C.gray).text(lbl, MARGIN + 10, y + 20 + i * 14, { width: 80 });
       doc.font('Helvetica-Bold').fontSize(8).fillColor(C.dark).text(val, MARGIN + 92, y + 20 + i * 14, { width: half - 100 });

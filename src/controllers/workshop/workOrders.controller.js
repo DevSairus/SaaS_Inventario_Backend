@@ -235,7 +235,7 @@ const list = async (req, res) => {
       where,
       attributes: WO_SAFE_ATTRS,
       include: [
-        { model: Vehicle,  as: 'vehicle',    attributes: ['id', 'plate', 'brand', 'model', 'year', 'color'] },
+        { model: Vehicle,  as: 'vehicle',    attributes: ['id', 'plate', 'brand', 'model', 'year', 'color', 'vehicle_type', 'meter_unit'] },
         { model: Customer, as: 'customer',   attributes: ['id', 'first_name', 'last_name', 'business_name', 'phone'] },
         { model: User,     as: 'technician', attributes: ['id', 'first_name', 'last_name'] },
       ],
@@ -581,11 +581,11 @@ const quickCreate = async (req, res) => {
     }
   }
   if (mileage_in === undefined || mileage_in === null || String(mileage_in).trim() === '') {
-    return res.status(400).json({ success: false, message: 'El kilometraje de ingreso es requerido' });
+    return res.status(400).json({ success: false, message: 'El kilometraje (u horómetro) de ingreso es requerido' });
   }
   const km = Number(mileage_in);
   if (!Number.isFinite(km) || km < 0) {
-    return res.status(400).json({ success: false, message: 'El kilometraje debe ser un número válido (0 o mayor)' });
+    return res.status(400).json({ success: false, message: 'La lectura del medidor debe ser un número válido (0 o mayor)' });
   }
   const mileage = Math.round(km);
 
@@ -630,13 +630,15 @@ const quickCreate = async (req, res) => {
       // Solo la placa (+ propietario); el tipo es el primero que atiende la
       // empresa (un taller de motos no deja motos como 'automovil'). El resto
       // se completa desde la ficha del vehículo.
-      const { tenantVehicleTypes } = require('../../constants/vehicleTypes');
+      const { tenantVehicleTypes, defaultMeterUnit } = require('../../constants/vehicleTypes');
       const tenantCfg = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'], transaction });
+      const vehicleType = tenantVehicleTypes(tenantCfg?.business_config)[0];
       vehicle = await Vehicle.create({
         tenant_id,
         plate: plateToSave,
         customer_id: customer.id,
-        vehicle_type: tenantVehicleTypes(tenantCfg?.business_config)[0],
+        vehicle_type: vehicleType,
+        meter_unit: defaultMeterUnit(vehicleType),
       }, { transaction });
       vehicleCreated = true;
     }
@@ -735,6 +737,7 @@ const convertQuoteToWorkOrder = async (req, res) => {
         customer_id: sale.customer_id || null,
         plate,
         vehicle_type: sale.vehicle_type || 'automovil',
+        meter_unit: require('../../constants/vehicleTypes').defaultMeterUnit(sale.vehicle_type),
         brand: sale.vehicle_brand || null,
         model: sale.vehicle_model || null,
         year: sale.vehicle_year || null,
@@ -3806,7 +3809,7 @@ async function getPublicOrderBody(orderId, res) {
         {
           model: Vehicle,
           as: 'vehicle',
-          attributes: ['plate', 'brand', 'model', 'year', 'color', 'fuel_type'],
+          attributes: ['plate', 'brand', 'model', 'year', 'color', 'fuel_type', 'vehicle_type', 'meter_unit'],
         },
         {
           model: Customer,

@@ -5,6 +5,7 @@ const https = require('https');
 const http = require('http');
 const QRCode = require('qrcode');
 const { groupComboLines, collapseComboLinesForDian } = require('../utils/comboLines');
+const { meterLabel, defaultMeterUnit } = require('../constants/vehicleTypes');
 
 const DOCUMENT_TYPES = {
   factura:      { title: 'FACTURA',       numberLabel: 'FACTURA No.'        },
@@ -286,7 +287,7 @@ const generateSalePDF = async (res, sale, tenant) => {
           vy += doc.heightOfString(vehicleDesc, { width: VW }) + 2;
         }
         if (sale.mileage) {
-          const kmLine = `Km: ${sale.mileage.toLocaleString('es-CO')}`;
+          const kmLine = `${meterLabel(defaultMeterUnit(sale.vehicle_type))}: ${Number(sale.mileage).toLocaleString('es-CO')}`;
           doc.font('Helvetica').fontSize(8).fillColor(gray);
           doc.text(kmLine, VX, vy, { width: VW });
           vy += doc.heightOfString(kmLine, { width: VW }) + 2;

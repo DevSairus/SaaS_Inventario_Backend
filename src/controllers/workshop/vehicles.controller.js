@@ -7,6 +7,7 @@ const { searchMatch } = require('../../utils/searchText');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { resolveRecordSchemaByToken } = require('../../utils/publicTokenResolver');
 const { resolveVehicleMaintenance } = require('../../services/workshop/maintenance.service');
+const { sanitizeMeterUnit } = require('../../constants/vehicleTypes');
 const QRCode = require('qrcode');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { buildWaLink } = require('../../services/whatsappService');
@@ -72,7 +73,7 @@ const create = async (req, res) => {
     const tenant_id = req.user.tenant_id;
     const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
             soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
-            fuel_type, current_mileage, customer_id, notes, vehicle_type } = req.body;
+            fuel_type, current_mileage, customer_id, notes, vehicle_type, meter_unit } = req.body;
 
     if (!plate) return res.status(400).json({ success: false, message: 'La placa es requerida' });
 
@@ -80,6 +81,8 @@ const create = async (req, res) => {
       tenant_id, plate: plate.toUpperCase().trim(),
       brand, model,
       vehicle_type: vehicle_type || 'automovil',
+      // km u horas (horómetro); sin elegir, según el tipo.
+      meter_unit: sanitizeMeterUnit(meter_unit, vehicle_type || 'automovil'),
       year: year ? parseInt(year) || null : null,
       color, vin, engine, engine_number, ownership_card,
       soat_number, soat_expiry: soat_expiry || null,
@@ -108,11 +111,12 @@ const update = async (req, res) => {
 
     const { plate, brand, model, year, color, vin, engine, engine_number, ownership_card,
             soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
-            fuel_type, current_mileage, customer_id, notes, is_active, vehicle_type } = req.body;
+            fuel_type, current_mileage, customer_id, notes, is_active, vehicle_type, meter_unit } = req.body;
     await vehicle.update({
       plate: plate?.toUpperCase().trim() || vehicle.plate,
       brand, model,
       vehicle_type: vehicle_type || vehicle.vehicle_type,
+      ...(meter_unit !== undefined ? { meter_unit: sanitizeMeterUnit(meter_unit, vehicle_type || vehicle.vehicle_type) } : {}),
       year: year ? parseInt(year) || null : null,
       color, vin, engine, engine_number, ownership_card,
       soat_number, soat_expiry, tecnomecanica_number, tecnomecanica_expiry,
@@ -362,7 +366,7 @@ const getLabel = async (req, res) => {
 // (nombre, teléfono, documento), ni precios, ni notas internas, ni VIN /
 // número de motor -- solo lo necesario para la hoja de vida.
 const VEHICLE_PUBLIC_ATTRS = [
-  'plate', 'brand', 'model', 'year', 'color', 'vehicle_type', 'fuel_type',
+  'plate', 'brand', 'model', 'year', 'color', 'vehicle_type', 'fuel_type', 'meter_unit',
   'current_mileage', 'soat_expiry', 'tecnomecanica_expiry',
 ];
 
@@ -429,6 +433,7 @@ async function getPublicVehiclePortalBody(vehicleId, res) {
           name: u.name,
           status: u.status,
           interval_km: u.interval_km,
+          interval_unit: u.interval_unit,
           interval_months: u.interval_months,
           next_due_mileage: u.next_due_mileage ?? null,
           next_due_date: u.next_due_date ?? null,
@@ -494,7 +499,9 @@ const getCatalog = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Tipo de vehículo no válido' });
     }
     const data = await catalogForVehicleType(sequelize, type);
-    res.set('Cache-Control', 'private, max-age=3600');
+    // Sin caché del navegador: el catálogo crece con migraciones y una lista
+    // vieja guardada una hora escondía las marcas nuevas.
+    res.set('Cache-Control', 'no-store');
     res.json({ success: true, data });
   } catch (err) {
     logger.error('Error al obtener catálogo de vehículos:', err);

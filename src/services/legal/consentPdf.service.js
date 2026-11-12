@@ -9,6 +9,7 @@
 const PDFDocument = require('pdfkit');
 const { drawHeader, createBufferStream, C } = require('../workshopPdfService');
 const { customerDisplayName, maskEmail, maskPhone } = require('./consent.service');
+const { formatMeter } = require('../../constants/vehicleTypes');
 
 const MARGIN = 40;
 
@@ -160,7 +161,7 @@ function drawIntakeSummary(doc, snapshot, y) {
   const lines = [
     ['Orden', snapshot.order_number],
     ['Vehículo', [v.plate, v.brand, v.model, v.year, v.color].filter(Boolean).join(' · ')],
-    ['Km ingreso', snapshot.mileage_in != null ? `${Number(snapshot.mileage_in).toLocaleString('es-CO')} km` : '—'],
+    [snapshot.meter_unit === 'h' ? 'Horas ingreso' : 'Km ingreso', formatMeter(snapshot.mileage_in, snapshot.meter_unit) || '—'],
     ['Combustible', snapshot.fuel_label || '—'],
     ['Elementos', (snapshot.items || []).filter((i) => i.value !== 'unset')
       .map((i) => `${i.label}: ${i.value === 'ok' ? 'OK' : i.value === 'bad' ? 'Con novedad' : 'N/A'}`).join(' · ') || '—'],

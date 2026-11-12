@@ -15,11 +15,19 @@
 
 const { Op } = require('sequelize');
 const { MaintenanceType, VehicleMaintenanceRecord, Vehicle, WorkOrder, WorkOrderItem } = require('../../models');
+const { meterUnitOf } = require('../../constants/vehicleTypes');
 
 // Margen del semáforo "próximo" -- constante de código a propósito (el plan
 // no pide configurarlo por tenant en esta fase).
 const SOON_KM = 500;
 const SOON_DAYS = 15;
+// Mismo margen y tope de uso diario en horas (horómetro de cuatrimotos/UTV).
+const SOON_BY_UNIT = { km: SOON_KM, h: 10 };
+const MAX_PER_DAY_BY_UNIT = { km: 1500, h: 24 };
+
+// El intervalo de uso de un tipo solo aplica a vehículos con su misma unidad
+// (un "cada 5.000 km" no sirve para un horómetro); el de meses aplica siempre.
+const usageIntervalFor = (type, unit) => ((type.interval_unit || 'km') === unit ? type.interval_km : null);
 
 // Minúsculas y sin tildes: "Cambio de ACEITE" / "aceité" matchean "aceite".
 function normalize(text) {
@@ -75,9 +83,10 @@ async function generateRecordsForDeliveredOrder(orderId, tenant_id) {
 
   const vehicle = await Vehicle.findOne({
     where: { id: order.vehicle_id, tenant_id },
-    attributes: ['id', 'vehicle_type'],
+    attributes: ['id', 'vehicle_type', 'meter_unit'],
   });
   if (!vehicle) return 0;
+  const unit = meterUnitOf(vehicle);
 
   const types = await MaintenanceType.findAll({
     where: { tenant_id, vehicle_type: vehicle.vehicle_type, is_active: true },
@@ -106,7 +115,7 @@ async function generateRecordsForDeliveredOrder(orderId, tenant_id) {
     work_order_id: order.id,
     performed_at,
     mileage_at_service: mileage,
-    next_due_mileage: mileage != null && t.interval_km ? mileage + t.interval_km : null,
+    next_due_mileage: mileage != null && usageIntervalFor(t, unit) ? mileage + usageIntervalFor(t, unit) : null,
     next_due_date: t.interval_months ? addMonths(performed_at, t.interval_months) : null,
   })), { ignoreDuplicates: true });
 
@@ -146,7 +155,7 @@ const utcDay = (d) => d.toISOString().slice(0, 10);
  * @returns {null | { km_per_day, estimated_km, last_reading: {date, km}, readings, span_days }}
  *   null si no hay datos suficientes para una estimación confiable.
  */
-function estimateUsage(readings, today = new Date()) {
+function estimateUsage(readings, today = new Date(), maxPerDay = USAGE_MAX_KM_PER_DAY) {
   const todayStart = startOfDay(today);
   const since = new Date(todayStart.getTime() - USAGE_WINDOW_DAYS * DAY_MS);
 
@@ -171,7 +180,7 @@ function estimateUsage(readings, today = new Date()) {
   if (spanDays < USAGE_MIN_SPAN_DAYS || deltaKm <= 0) return null;
 
   const kmPerDay = deltaKm / spanDays;
-  if (kmPerDay > USAGE_MAX_KM_PER_DAY) return null;
+  if (kmPerDay > maxPerDay) return null;
 
   const daysSinceLast = Math.max(0, Math.round((todayStart - last.date) / DAY_MS));
   return {
@@ -198,7 +207,8 @@ async function loadMileageReadings(vehicle) {
   return readings;
 }
 
-function computeStatus(record, currentMileage, usage = null) {
+function computeStatus(record, currentMileage, usage = null, unit = 'km') {
+  const soon = SOON_BY_UNIT[unit] ?? SOON_KM;
   // El km del vehículo puede venir atrasado (generateSale no lo actualiza):
   // nunca asumir que está por debajo del km al que se hizo el servicio.
   const knownKm = Math.max(currentMileage || 0, record.mileage_at_service || 0) || null;
@@ -222,7 +232,7 @@ function computeStatus(record, currentMileage, usage = null) {
   let status = 'al_dia';
   if ((km_remaining != null && km_remaining <= 0) || (days_remaining != null && days_remaining <= 0)) {
     status = 'vencido';
-  } else if ((km_remaining != null && km_remaining <= SOON_KM) || (days_remaining != null && days_remaining <= SOON_DAYS)) {
+  } else if ((km_remaining != null && km_remaining <= soon) || (days_remaining != null && days_remaining <= SOON_DAYS)) {
     status = 'proximo';
   }
   return { status, km_remaining, days_remaining, km_estimated, estimated_km_due_date };
@@ -253,20 +263,22 @@ async function resolveVehicleMaintenance(vehicle) {
     loadMileageReadings(vehicle),
   ]);
 
-  const usage = estimateUsage(readings);
+  const unit = meterUnitOf(vehicle);
+  const usage = estimateUsage(readings, new Date(), MAX_PER_DAY_BY_UNIT[unit]);
 
   const upcoming = types.map(t => {
     const last = records.find(r => r.maintenance_type_id === t.id);
     const base = {
       maintenance_type_id: t.id,
       name: t.name,
-      interval_km: t.interval_km,
+      interval_km: usageIntervalFor(t, unit),
+      interval_unit: unit,
       interval_months: t.interval_months,
     };
     if (!last) return { ...base, status: 'sin_historial', last: null };
     return {
       ...base,
-      ...computeStatus(last, vehicle.current_mileage, usage),
+      ...computeStatus(last, vehicle.current_mileage, usage, unit),
       next_due_mileage: last.next_due_mileage,
       next_due_date: last.next_due_date,
       last: {
@@ -279,6 +291,7 @@ async function resolveVehicleMaintenance(vehicle) {
   }).sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status]);
 
   return {
+    meter_unit: unit,
     usage,
     upcoming,
     records: records.map(r => ({

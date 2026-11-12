@@ -9,6 +9,7 @@ const { MaintenanceType } = require('../../models');
 const logger = require('../../config/logger');
 
 const { VEHICLE_TYPES } = MaintenanceType;
+const { sanitizeMeterUnit } = require('../../constants/vehicleTypes');
 
 // Entero positivo o null ("" / 0 / basura = sin ese intervalo).
 function toPositiveIntOrNull(value) {
@@ -51,7 +52,7 @@ const list = async (req, res) => {
 const create = async (req, res) => {
   try {
     const tenant_id = req.user.tenant_id;
-    const { name, vehicle_type, interval_km, interval_months, match_keywords } = req.body;
+    const { name, vehicle_type, interval_km, interval_unit, interval_months, match_keywords } = req.body;
     if (!name || !name.trim())
       return res.status(400).json({ success: false, message: 'El nombre es requerido' });
     if (!VEHICLE_TYPES.includes(vehicle_type))
@@ -66,6 +67,8 @@ const create = async (req, res) => {
       name: name.trim(),
       vehicle_type,
       interval_km: toPositiveIntOrNull(interval_km),
+      // Sin unidad: horas en cuatrimotos/UTV, km en el resto.
+      interval_unit: sanitizeMeterUnit(interval_unit, vehicle_type),
       interval_months: toPositiveIntOrNull(interval_months),
       match_keywords: keywords,
     });
@@ -87,7 +90,7 @@ const update = async (req, res) => {
     const type = await MaintenanceType.findOne({ where: { id: req.params.id, tenant_id } });
     if (!type) return res.status(404).json({ success: false, message: 'Tipo de mantenimiento no encontrado' });
 
-    const { name, vehicle_type, interval_km, interval_months, match_keywords, is_active } = req.body;
+    const { name, vehicle_type, interval_km, interval_unit, interval_months, match_keywords, is_active } = req.body;
     if (name !== undefined && !String(name).trim())
       return res.status(400).json({ success: false, message: 'El nombre es requerido' });
     if (vehicle_type !== undefined && !VEHICLE_TYPES.includes(vehicle_type))
@@ -104,6 +107,7 @@ const update = async (req, res) => {
       ...(name !== undefined ? { name: String(name).trim() } : {}),
       ...(vehicle_type !== undefined ? { vehicle_type } : {}),
       ...(interval_km !== undefined ? { interval_km: toPositiveIntOrNull(interval_km) } : {}),
+      ...(interval_unit !== undefined ? { interval_unit: sanitizeMeterUnit(interval_unit, vehicle_type || type.vehicle_type) } : {}),
       ...(interval_months !== undefined ? { interval_months: toPositiveIntOrNull(interval_months) } : {}),
       ...(keywords ? { match_keywords: keywords } : {}),
       ...(is_active !== undefined ? { is_active: !!is_active } : {}),

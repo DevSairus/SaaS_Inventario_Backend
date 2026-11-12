@@ -97,6 +97,14 @@ const Vehicle = sequelize.define('Vehicle', {
     type: DataTypes.ENUM('gasolina', 'diesel', 'gas', 'hibrido', 'electrico', 'otro'),
     defaultValue: 'gasolina'
   },
+  // Unidad del medidor: 'km' (odómetro) u 'h' (horómetro, cuatrimotos/UTV).
+  // current_mileage y las lecturas de las OT quedan en esta unidad.
+  meter_unit: {
+    type: DataTypes.STRING(2),
+    allowNull: false,
+    defaultValue: 'km',
+    validate: { isIn: [['km', 'h']] },
+  },
   current_mileage: {
     type: DataTypes.INTEGER,
     allowNull: true,

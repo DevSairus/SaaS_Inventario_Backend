@@ -295,6 +295,7 @@ async function buildIntakeSnapshot(order, settings) {
     received_at: order.received_at,
     vehicle: { plate: v.plate || null, brand: v.brand || null, model: v.model || null, year: v.year || null, color: v.color || null },
     mileage_in: order.mileage_in ?? null,
+    meter_unit: require('../../constants/vehicleTypes').meterUnitOf(v),
     fuel_level: typeof checklist.fuel_level === 'number' ? checklist.fuel_level : null,
     fuel_label: typeof checklist.fuel_level === 'number' ? FUEL_LABELS[checklist.fuel_level] || null : null,
     items,
