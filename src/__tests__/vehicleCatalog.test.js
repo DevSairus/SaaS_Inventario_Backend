@@ -36,6 +36,10 @@ describe('data/vehicleCatalog.json', () => {
     const bajaj = catalog.brands.find((b) => b.brand === 'BAJAJ');
     expect(bajaj.lines.motocarro).toContain('RE 4S');
     expect(catalog.brands.find((b) => b.brand === 'MERCEDES-BENZ').lines.liviano.length).toBeGreaterThan(100);
+    const canAm = catalog.brands.find((b) => b.brand === 'CAN-AM');
+    expect(canAm.lines.moto).toContain('SPYDER RT');
+    expect(canAm.lines.cuatrimoto).toContain('OUTLANDER 570');
+    expect(canAm.lines.utv).toContain('MAVERICK X3');
   });
 });
 
