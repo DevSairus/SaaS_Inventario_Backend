@@ -42,6 +42,8 @@ const getWhatsAppStatus = async (req, res) => {
  * prueba). Alternativa a Embedded Signup para producción y para validar el
  * flujo antes de tener la WABA definitiva.
  */
+const NO_COEXISTENCE_NOTE = 'Meta lo tiene solo en la API de la nube (sin coexistencia): la app WhatsApp Business del celular no puede usar este número.';
+
 const connectWithToken = async (req, res) => {
   if (!ensureCanManageConnection(req, res)) return;
   try {
@@ -66,9 +68,10 @@ const connectWithToken = async (req, res) => {
 
     res.json({
       success: true,
-      message: data.own_token_is_permanent
+      message: (data.own_token_is_permanent
         ? 'WhatsApp conectado con token permanente. No hay que reconectar periódicamente.'
-        : 'WhatsApp conectado. Ojo: este token expira, para producción usa un System User.',
+        : 'WhatsApp conectado. Ojo: este token expira, para producción usa un System User.')
+        + (data.wa_coexistence ? '' : ` ${NO_COEXISTENCE_NOTE}`),
       data,
     });
   } catch (error) {
@@ -102,7 +105,9 @@ const completeEmbeddedSignup = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'WhatsApp conectado (coexistencia). El número sigue usable en WhatsApp Business App.',
+      message: data.wa_coexistence
+        ? 'WhatsApp conectado (coexistencia). El número sigue usable en WhatsApp Business App.'
+        : `WhatsApp conectado. ${NO_COEXISTENCE_NOTE}`,
       data,
     });
   } catch (error) {

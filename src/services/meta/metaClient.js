@@ -265,7 +265,7 @@ async function listWabaPhoneNumbers(wabaId, accessToken) {
   const { data } = await axios.get(`${GRAPH_BASE_URL}/${wabaId}/phone_numbers`, {
     params: {
       access_token: accessToken,
-      fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status',
+      fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status,platform_type,is_on_biz_app',
     },
     timeout: 15000,
   });
@@ -276,7 +276,7 @@ async function getPhoneNumberDetails(phoneNumberId, accessToken) {
   const { data } = await axios.get(`${GRAPH_BASE_URL}/${phoneNumberId}`, {
     params: {
       access_token: accessToken,
-      fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status',
+      fields: 'id,display_phone_number,verified_name,quality_rating,code_verification_status,platform_type,is_on_biz_app',
     },
     timeout: 15000,
   });
