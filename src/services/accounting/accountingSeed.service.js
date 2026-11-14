@@ -236,6 +236,48 @@ async function ensureIcaMappings(tenantId, transaction) {
 }
 
 /**
+ * Ajuste al peso (5.1): cuentas 429581 (a favor) y 529581 (en contra) y sus dos
+ * mapeos. Idempotente; no toca un mapeo que el contador ya cambió (p. ej. a 519581).
+ */
+const ROUNDING_MAPPINGS = [
+  { event: 'rounding_adjustment_income', code: '429581', name: 'Ajuste al peso', type: 'ingreso', parent: '42' },
+  { event: 'rounding_adjustment_expense', code: '529581', name: 'Ajuste al peso', type: 'gasto', parent: '52' },
+];
+
+async function ensureRoundingAdjustmentMappings(tenantId, transaction) {
+  const { ChartOfAccount, AccountMapping } = require('../../models');
+
+  const existing = await AccountMapping.findAll({ where: { tenant_id: tenantId, event_type: ROUNDING_MAPPINGS.map((m) => m.event) }, transaction });
+  const existingEventTypes = new Set(existing.map((m) => m.event_type));
+  const missing = ROUNDING_MAPPINGS.filter((m) => !existingEventTypes.has(m.event));
+  if (missing.length === 0) {
+    return { created: false, reason: 'El tenant ya tiene el mapeo de ajuste al peso' };
+  }
+
+  for (const m of missing) {
+    let account = await ChartOfAccount.findOne({ where: { tenant_id: tenantId, code: m.code }, transaction });
+    if (!account) {
+      // La clase 52 no venía en el catálogo base: se crea si falta.
+      let parent = await ChartOfAccount.findOne({ where: { tenant_id: tenantId, code: m.parent }, transaction });
+      if (!parent) {
+        const root = await ChartOfAccount.findOne({ where: { tenant_id: tenantId, code: m.parent.slice(0, 1) }, transaction });
+        parent = await ChartOfAccount.create(
+          { tenant_id: tenantId, code: m.parent, name: 'Operacionales de Ventas', account_type: m.type, parent_id: root?.id || null, level: 2, accepts_entries: false, is_active: true },
+          { transaction }
+        );
+      }
+      account = await ChartOfAccount.create(
+        { tenant_id: tenantId, code: m.code, name: m.name, account_type: m.type, parent_id: parent.id, level: 4, accepts_entries: true, is_active: true },
+        { transaction }
+      );
+    }
+    await AccountMapping.create({ tenant_id: tenantId, event_type: m.event, account_id: account.id }, { transaction });
+  }
+
+  return { created: true, reason: `${missing.length} mapeo(s) de ajuste al peso creados` };
+}
+
+/**
  * Reconciliación idempotente, corrible en cualquier momento (no depende de
  * migration bookkeeping): garantiza que un tenant tenga plan de cuentas +
  * mappings por defecto. Se corre automáticamente al arrancar el servidor
@@ -277,6 +319,7 @@ async function ensureAccountingSeeded(tenantId, transaction) {
     fixed_asset_depreciation: await ensureFixedAssetDepreciationMappings(tenantId, transaction),
     retention_payable: await ensureRetentionPayableMappings(tenantId, transaction),
     ica: await ensureIcaMappings(tenantId, transaction),
+    rounding_adjustment: await ensureRoundingAdjustmentMappings(tenantId, transaction),
   };
 
   return { created: Object.values(steps).some((s) => s.created), steps };
@@ -289,4 +332,5 @@ module.exports = {
   ensureFixedAssetDepreciationMappings,
   ensureRetentionPayableMappings,
   ensureIcaMappings,
+  ensureRoundingAdjustmentMappings,
 };

@@ -18,6 +18,9 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '110505', name: 'Caja General', type: 'activo', parent_code: '1105', accepts_entries: true },
   { code: '1110', name: 'Bancos', type: 'activo', parent_code: '11', accepts_entries: false },
   { code: '111005', name: 'Bancos - Moneda Nacional', type: 'activo', parent_code: '1110', accepts_entries: true },
+  { code: '111010', name: 'Bancos - Moneda Extranjera', type: 'activo', parent_code: '1110', accepts_entries: true },
+  { code: '1120', name: 'Cuentas de Ahorro', type: 'activo', parent_code: '11', accepts_entries: false },
+  { code: '112005', name: 'Cuentas de Ahorro - Bancos', type: 'activo', parent_code: '1120', accepts_entries: true },
 
   { code: '13', name: 'Deudores', type: 'activo', parent_code: '1', accepts_entries: false },
   { code: '1305', name: 'Clientes', type: 'activo', parent_code: '13', accepts_entries: false },
@@ -112,6 +115,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '424505', name: 'Utilidad en venta de propiedades, planta y equipo', type: 'ingreso', parent_code: '42', accepts_entries: true },
   { code: '425050', name: 'Recuperación de deterioro de propiedades, planta y equipo', type: 'ingreso', parent_code: '42', accepts_entries: true },
   { code: '429505', name: 'Ingresos Diversos', type: 'ingreso', parent_code: '42', accepts_entries: true },
+  { code: '429581', name: 'Ajuste al peso', type: 'ingreso', parent_code: '42', accepts_entries: true },
 
   // ══════════════ CLASE 5 — GASTOS ══════════════
   { code: '5', name: 'GASTOS', type: 'gasto', parent_code: null, accepts_entries: false },
@@ -148,6 +152,8 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '519535', name: 'Publicidad y Propaganda (Marketing)', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519540', name: 'Útiles, Papelería y Fotocopias', type: 'gasto', parent_code: '51', accepts_entries: true },
   { code: '519599', name: 'Gastos Diversos', type: 'gasto', parent_code: '51', accepts_entries: true },
+  { code: '52', name: 'Operacionales de Ventas', type: 'gasto', parent_code: '5', accepts_entries: false },
+  { code: '529581', name: 'Ajuste al peso', type: 'gasto', parent_code: '52', accepts_entries: true },
   { code: '53', name: 'No Operacionales', type: 'gasto', parent_code: '5', accepts_entries: false },
   { code: '530505', name: 'Gastos Financieros (Intereses)', type: 'gasto', parent_code: '53', accepts_entries: true },
   { code: '531015', name: 'Pérdida en venta y retiro de propiedades, planta y equipo', type: 'gasto', parent_code: '53', accepts_entries: true },
@@ -214,6 +220,12 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
 
   // Diferencias de cierre de caja: sobrante -> ingreso diverso, faltante -> gasto diverso.
   // La cuenta de caja/bancos que se ajusta reutiliza sale_cash_account / sale_bank_account.
+  // Ajuste al peso (5.1): descuadres de hasta 1 peso en asientos automáticos y
+  // aproximación al mil en liquidaciones de impuestos. A favor -> ingreso;
+  // en contra -> gasto (529581, o 519581 si el contador lo lleva en administración).
+  rounding_adjustment_income: '429581',
+  rounding_adjustment_expense: '529581',
+
   cash_session_surplus: '429505',
   cash_session_shortage: '519599',
 

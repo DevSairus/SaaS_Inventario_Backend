@@ -27,9 +27,12 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const logger = require('../../config/logger');
+const { validateSignature } = require('../../utils/signature');
 const {
-  Project, ProjectCut, ProjectCutItem, Sale, SaleItem, Customer, CustomerAdvance, User,
+  Project, ProjectCut, ProjectCutItem, Sale, SaleItem, Customer, CustomerAdvance, User, Tenant,
 } = require('../../models');
+const { tenantAiuConfig } = require('../sales/aiu.service');
+const { aiuOf, parseAiu, aiuColumns, ivaRateOf, aiuLabel } = require('./projectAiu');
 
 const httpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const num = (v) => Number(v) || 0;
@@ -43,7 +46,6 @@ const OPEN = ['draft', 'approved', 'invoicing'];
 // Estados de la cotización-contrato: admite cortes / ya terminó.
 const CONTRACT_BILLABLE = ['aprobada', 'parcial', 'contratada'];
 const CONTRACT_DONE = ['facturada', 'cerrada'];
-const SIGNATURE_MAX = 400 * 1024;
 
 // ── Contrato ──────────────────────────────────────────────────────────
 async function loadContract(tenantId, project, transaction) {
@@ -78,7 +80,8 @@ async function loadContract(tenantId, project, transaction) {
       sku: i.product_sku || null,
       qty_contract: round4(num(i.quantity)),
       unit_price: round4((num(i.subtotal) / num(i.quantity)) * factor),
-      tax_pct: aiu ? 0 : num(i.tax_percentage),
+      // Con AIU el IVA va solo sobre la U: computeCut ignora el IVA de la línea.
+      tax_pct: num(i.tax_percentage),
       amount_contract: round2(num(i.subtotal) * factor),
     }));
   return {
@@ -155,7 +158,7 @@ function computeCut(input, ctx) {
     const qtyThis = round4(cumulative - prev);
     items.push({
       sale_item_id: l.sale_item_id, description: l.description, qty_contract: l.qty_contract, qty_previous: prev,
-      qty_cumulative: cumulative, qty_this: qtyThis, unit_price: l.unit_price, tax_pct: l.tax_pct,
+      qty_cumulative: cumulative, qty_this: qtyThis, unit_price: l.unit_price, tax_pct: ctx.aiu ? 0 : l.tax_pct,
       amount: round2(qtyThis * l.unit_price),
     });
   }
@@ -188,6 +191,7 @@ function computeCut(input, ctx) {
 
   return {
     items,
+    aiu: ctx.aiu ? { admin_pct: ctx.aiu.admin_pct, unforeseen_pct: ctx.aiu.unforeseen_pct, profit_pct: ctx.aiu.profit_pct } : null,
     direct_amount: direct,
     aiu_amount: aiuAmount,
     subtotal,
@@ -202,17 +206,35 @@ function computeCut(input, ctx) {
   };
 }
 
-async function cutContext(tenantId, project, { excludeCutId, transaction } = {}) {
+/**
+ * AIU del corte (1.6): lo que llegue en el body; si no, el que ya tiene el
+ * corte; si es nuevo, el del proyecto. Un concepto en 0 no aplica.
+ */
+function resolveCutAiu(body, project, cut, taxConfig) {
+  const cfg = tenantAiuConfig(taxConfig);
+  const base = cut ? aiuOf(cut) : aiuOf(project);
+  const parsed = parseAiu(body || {}, {
+    fallback: base || aiuOf(project) || cfg,
+    tenantEnabled: cfg.enabled,
+    wasEnabled: Boolean(base || aiuOf(project)),
+  });
+  const aiu = parsed === undefined ? base : parsed;
+  return aiu ? { ...aiu, iva_rate: ivaRateOf(taxConfig) } : null;
+}
+
+async function cutContext(tenantId, project, { excludeCutId, transaction, aiuBody, cut = null } = {}) {
   const contract = await loadContract(tenantId, project, transaction);
-  const [previous, advances] = await Promise.all([
+  const [previous, advances, tenant] = await Promise.all([
     executedByLine(tenantId, project.id, { excludeCutId, transaction }),
     projectAdvances(tenantId, project, transaction),
+    Tenant.findByPk(tenantId, { attributes: ['id', 'tax_config'], transaction }),
   ]);
+  const aiu = resolveCutAiu(aiuBody, project, cut, tenant?.tax_config || {});
   return {
     contract,
     advances,
     ctx: {
-      lines: contract.lines, previous, aiu: contract.aiu, retentionPct: num(project.retention_pct),
+      lines: contract.lines, previous, aiu, retentionPct: num(project.retention_pct),
       advanceReceived: advances.received, advanceAvailable: advances.available, contractTotal: contract.total,
     },
   };
@@ -258,6 +280,9 @@ async function billingSummary(tenantId, project) {
       subtotal: contract.subtotal,
       aiu: contract.aiu,
     } : null,
+    // AIU del proyecto: con el que arranca cada corte nuevo.
+    project_aiu: aiuOf(project),
+    project_aiu_label: aiuLabel(aiuOf(project)),
     contract_error: contractError,
     lines,
     progress_pct: contractDirect > 0 ? Math.round((executedDirect / contractDirect) * 10000) / 100 : 0,
@@ -287,7 +312,8 @@ async function loadCut(tenantId, project, cutId, { transaction, lock } = {}) {
 
 /** Vista previa del cálculo (sin guardar). */
 async function previewCut(tenantId, project, body, cutId = null) {
-  const { ctx, advances, contract } = await cutContext(tenantId, project, { excludeCutId: cutId });
+  const cut = cutId ? await loadCut(tenantId, project, cutId) : null;
+  const { ctx, advances, contract } = await cutContext(tenantId, project, { excludeCutId: cutId, aiuBody: body, cut });
   return { ...computeCut(body, ctx), advances, contract_total: contract.total, retention_pct: num(project.retention_pct) };
 }
 
@@ -328,7 +354,7 @@ async function saveCut(tenantId, userId, project, cutId, body) {
     if (!['approved', 'in_progress', 'on_hold', 'completed'].includes(project.status)) {
       throw httpError(409, 'Los cortes se hacen con el proyecto aprobado o en ejecución');
     }
-    const { ctx, contract } = await cutContext(tenantId, project, { excludeCutId: cut?.id, transaction: t });
+    const { ctx, contract } = await cutContext(tenantId, project, { excludeCutId: cut?.id, transaction: t, aiuBody: body, cut });
     const contractNo = contract.quote.quote_number || contract.quote.sale_number;
     if (CONTRACT_DONE.includes(contract.quote.quote_status)) {
       throw httpError(409, contract.quote.quote_status === 'facturada'
@@ -342,6 +368,7 @@ async function saveCut(tenantId, userId, project, cutId, body) {
     if (!(calc.direct_amount > 0)) throw httpError(400, 'El corte no tiene avance nuevo: aumenta el acumulado de alguna línea');
     const values = {
       ...cutFields(body),
+      ...aiuColumns(calc.aiu),
       direct_amount: calc.direct_amount, aiu_amount: calc.aiu_amount, subtotal: calc.subtotal, tax_amount: calc.tax_amount,
       total_amount: calc.total_amount, advance_amount: calc.advance_amount, retention_amount: calc.retention_amount,
       net_amount: calc.net_amount, progress_pct: calc.progress_pct,
@@ -378,10 +405,7 @@ async function approveCut(tenantId, userId, project, cutId, body) {
   assertProjectOpen(project);
   const name = String(body.approved_by_name || '').trim().slice(0, 200);
   if (!name) throw httpError(400, 'Indica quién aprueba el corte por parte del cliente');
-  const signature = body.approved_signature || null;
-  if (signature && (typeof signature !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature) || signature.length > SIGNATURE_MAX)) {
-    throw httpError(400, 'Firma inválida');
-  }
+  const signature = validateSignature(body.approved_signature);
   return sequelize.transaction(async (t) => {
     const cut = await loadCut(tenantId, project, cutId, { transaction: t, lock: true });
     if (cut.status !== 'draft') throw httpError(409, 'Solo se aprueba un corte en borrador');
@@ -399,7 +423,8 @@ async function invoicePayload(tenantId, project, cutId) {
   const cut = await loadCut(tenantId, project, cutId);
   if (!['approved', 'invoicing'].includes(cut.status)) throw httpError(409, 'Aprueba el corte antes de facturarlo');
   if (!project.customer_id) throw httpError(400, 'El proyecto no tiene cliente');
-  const { ctx, advances, contract } = await cutContext(tenantId, project, { excludeCutId: cut.id });
+  // El AIU es el que quedó guardado en el corte aprobado.
+  const { ctx, advances, contract } = await cutContext(tenantId, project, { excludeCutId: cut.id, cut });
   const items = cut.items.map((i) => ({ sale_item_id: i.sale_item_id, qty_cumulative: num(i.qty_cumulative) }));
   // Lo que no está en el corte queda en su acumulado anterior.
   const calc = computeCut({ items }, ctx);
@@ -435,12 +460,12 @@ async function invoicePayload(tenantId, project, cutId) {
       unit_price: i.unit_price,
       tax_percentage: i.tax_pct,
     })),
-    ...(contract.aiu ? {
+    ...(calc.aiu ? {
       aiu_enabled: true,
-      aiu_admin_pct: contract.aiu.admin_pct,
-      aiu_unforeseen_pct: contract.aiu.unforeseen_pct,
-      aiu_profit_pct: contract.aiu.profit_pct,
-      aiu_object: contract.aiu.object || `Avance de obra ${project.code} — corte ${cut.cut_no}`,
+      aiu_admin_pct: calc.aiu.admin_pct,
+      aiu_unforeseen_pct: calc.aiu.unforeseen_pct,
+      aiu_profit_pct: calc.aiu.profit_pct,
+      aiu_object: contract.aiu?.object || `Avance de obra ${project.code} — corte ${cut.cut_no}`,
     } : {}),
   };
   // A crédito: nada pagado al confirmar; los anticipos se aplican después.

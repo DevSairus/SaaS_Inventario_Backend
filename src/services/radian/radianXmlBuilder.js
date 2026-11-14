@@ -65,19 +65,35 @@
 'use strict';
 
 const { escXml, getColombiaDateTime } = require('../dian/dianXmlBuilder');
+
+// DV del NIT (módulo 11) — mismo algoritmo que dianKitAdapter#computeNitCheckDigit,
+// sin cargar @dian-kit para un cálculo de seis líneas.
+function computeNitCheckDigit(nit) {
+  const weights = [3, 7, 13, 17, 19, 23, 29, 37, 41, 43, 47, 53, 59, 67, 71];
+  const digits = String(nit).replace(/\D/g, '').split('').reverse();
+  const sum = digits.reduce((acc, d, i) => acc + Number(d) * weights[i], 0);
+  const mod = sum % 11;
+  return mod < 2 ? mod : 11 - mod;
+}
 const { buildRadianCude } = require('./radianCude');
 
 // Texto del literal de respuesta por código de evento — el Anexo exige que
-// Description sea el literal exacto, no una descripción libre (ver §8 del
-// plan). Solo se confirmó contra el índice de secciones del Anexo FE 1.9
-// (título de cada sección, no el cuerpo XML de ejemplo) — MEJOR ESFUERZO
-// para los cinco, igual de "sin verificar" que el resto de este builder.
+// Description sea el literal exacto. 030/031/033/034 CONFIRMADOS contra la
+// tabla 13.3.1 "Eventos de un Documento Electrónico" de la Caja de
+// herramientas FE v1.9 (Anexo Tecnico/Tablas Referenciadas) y los XML de
+// ejemplo oficiales (Ejemplificaciones/XMLs de ejemplo/Eventos RADIAN).
+// El 032 no se cambia: la tabla dice "Recibo del bien o prestación del
+// servicio", el XML de ejemplo "…y/o…" y el cuerpo del Anexo "…y prestación
+// de servicio" -- se conserva el de la tabla, que es el que ya se usa. Si
+// la DIAN lo rechazara por la descripción, RADIAN_032_DESCRIPTION permite
+// cambiarlo desde las variables de entorno sin desplegar código (p. ej.
+// "Recibo del bien y/o prestación del servicio", el del XML de ejemplo).
 const EVENT_DESCRIPTION = {
-  '030': 'Acuse de recibo',
-  '032': 'Recibo del bien o prestación del servicio',
-  '031': 'Reclamo',
+  '030': 'Acuse de recibo de Factura Electrónica de Venta',
+  '032': (process.env.RADIAN_032_DESCRIPTION || '').trim() || 'Recibo del bien o prestación del servicio',
+  '031': 'Reclamo de la Factura Electrónica de Venta',
   '033': 'Aceptación expresa',
-  '034': 'Aceptación tácita',
+  '034': 'Aceptación Tácita',
   // Fase 4 — CONFIRMADO contra el Anexo RADIAN v1.0, numeral 13.2.1 ("Eventos
   // de un Documento Electrónico"), pág. 357: es la tabla que el propio Anexo
   // cita como fuente del literal exacto de cbc:Description (§6.2.3, pág. 40:
@@ -102,44 +118,58 @@ const EVENT_DESCRIPTION = {
 // §5.4 del plan: solo 030 y 032 lo llevan.
 const EVENTS_WITH_ISSUER_PARTY = new Set(['030', '032']);
 
-// Rol de "nosotros" (ownNit) frente a la factura referenciada, para el CUDE
-// (ver radianCude.js): 030-033 los emitimos como adquirentes; el resto los
-// emitimos como el emisor original de esa factura (o su tenedor legítimo,
-// que en Pitbox es la misma parte — ver radianService.js).
-const EVENT_ROLE = {
-  '030': 'acquirer', '032': 'acquirer', '031': 'acquirer', '033': 'acquirer',
-  '034': 'issuer',
-  '036': 'issuer', '037': 'issuer', '038': 'issuer', '039': 'issuer', '040': 'issuer',
-  '041': 'issuer', '042': 'issuer', '043': 'issuer', '044': 'issuer',
-  '045': 'issuer', '046': 'issuer',
+
+// Concepto del reclamo (031): tabla 13.3.12 "Concepto de Reclamo @listID"
+// de la Caja de herramientas FE v1.9. Va como atributos de
+// cbc:ResponseCode (listID = código, name = significado), igual que el XML
+// de ejemplo oficial — obligatorio: la DIAN rechaza el 031 si listID no
+// está en la tabla (regla AAH10).
+const CLAIM_REASONS = {
+  '01': 'Documento con inconsistencias',
+  '02': 'Mercancía no entregada',
+  '03': 'Mercancía entregada parcialmente',
+  '04': 'Servicio no prestado',
 };
 
-// ⚠️ TEXTO SIN VERIFICAR — el 034 exige una cbc:Note con una declaración
-// jurada específica (Anexo FE 1.9 §6.5.5.7, con 3 variantes según quién la
-// emite: directo, mandatario, o mandato con persona natural comerciante —
-// ver §2 del plan). No tengo acceso al PDF de ese Anexo en este entorno
-// (solo está el Anexo RADIAN en 00 - Documentación/, no el de Factura
-// Electrónica v1.9) — el texto de abajo es una reconstrucción de mejor
-// esfuerzo a partir de la cita parcial que sí quedó en el plan, NO el
-// literal exacto. Es una declaración BAJO GRAVEDAD DE JURAMENTO con efecto
-// legal real (habilita la factura para circular como título valor) —
-// **no usar en producción sin verificar el texto exacto contra el PDF
-// oficial y sin revisión legal/contable previa**.
-const DECLARATION_NOTE_TEMPLATES = {
-  direct: '[PENDIENTE VERIFICAR TEXTO EXACTO — Anexo FE 1.9 §6.5.5.7] Manifiesto bajo la gravedad de juramento que transcurridos tres (3) días hábiles siguientes a la fecha de recibo de la factura electrónica de venta, no se presentó ante el emisor o su representante ningún reclamo respecto de su contenido.',
-  mandatario: '[PENDIENTE VERIFICAR TEXTO EXACTO — Anexo FE 1.9 §6.5.5.7] Manifiesto bajo la gravedad de juramento, actuando como mandatario, que transcurridos tres (3) días hábiles siguientes a la fecha de recibo de la factura electrónica de venta, no se presentó reclamo alguno respecto de su contenido.',
-  mandato_persona_natural: '[PENDIENTE VERIFICAR TEXTO EXACTO — Anexo FE 1.9 §6.5.5.7] Manifiesto bajo la gravedad de juramento, en virtud del mandato conferido por persona natural comerciante, que transcurridos tres (3) días hábiles siguientes a la fecha de recibo de la factura electrónica de venta, no se presentó reclamo alguno respecto de su contenido.',
-};
+// Declaración jurada del 034 — texto LITERAL del Anexo FE v1.9 (Res. 000165
+// de 2023), numeral 6.5.5.7, nota 1 "persona natural o jurídica sin
+// mandatario". Se llena con el número y el CUDE del Recibo del bien (032)
+// que emitió el cliente, y con su razón social y NIT. Las notas 2 y 3
+// (mandatario / mandato con persona natural comerciante) piden datos del
+// mandatario y del mandante que Pitbox no captura: no se soportan todavía.
+function tacitAcceptanceNote({ receiptNumber, receiptCude, buyerName, buyerNit }) {
+  return `Manifiesto bajo la gravedad de juramento que transcurridos 3 días hábiles contados desde la creación del Recibo de bienes y servicios ${receiptNumber} con CUDE ${receiptCude}, el adquirente ${buyerName} identificado con NIT ${buyerNit} no manifestó expresamente la aceptación o rechazo de la referida factura, ni reclamó en contra de su contenido.`;
+}
 
-function partyNitXml(tagName, nit, name) {
+// NIT/documento sin DV ni separadores ("900123456-8" → "900123456"): es lo
+// que va en CompanyID y, por tanto, en el CUDE.
+function cleanPartyId(id, docType) {
+  const s = String(id || '').trim();
+  if (docType === '31') return s.split('-')[0].replace(/\D/g, '');
+  return s.replace(/\s/g, '');
+}
+
+// SenderParty / ReceiverParty — Anexo FE 1.9 §6.5.4 (AAF01-AAF20 y
+// AAG01-AAG..): PartyTaxScheme con RegistrationName, CompanyID (+
+// schemeAgencyID "195", schemeAgencyName, schemeID = DV si es NIT,
+// schemeName = tipo de documento, schemeVersionID = tipo de persona,
+// tabla 13.2.3: 1 jurídica / 2 natural) y TaxScheme. Mismo formato que los
+// XML de ejemplo oficiales. Antes iba PartyIdentification/PartyName, que no
+// es la estructura del Anexo (y el CUDE se calcula sobre estos CompanyID).
+function partyXml(tagName, { id, name, docType = '31', dv }) {
+  const isNit = docType === '31';
+  const dvAttr = isNit ? ` schemeID="${escXml(String(dv ?? computeNitCheckDigit(id)))}"` : '';
+  const personType = isNit ? '1' : '2';
   return `
     <cac:${tagName}>
-      <cac:PartyIdentification>
-        <cbc:ID>${escXml(nit)}</cbc:ID>
-      </cac:PartyIdentification>
-      <cac:PartyName>
-        <cbc:Name>${escXml(name || '')}</cbc:Name>
-      </cac:PartyName>
+      <cac:PartyTaxScheme>
+        <cbc:RegistrationName>${escXml(name || '')}</cbc:RegistrationName>
+        <cbc:CompanyID${dvAttr} schemeAgencyID="195" schemeName="${escXml(docType)}" schemeAgencyName="CO, DIAN (Dirección de Impuestos y Aduanas Nacionales)" schemeVersionID="${personType}">${escXml(id)}</cbc:CompanyID>
+        <cac:TaxScheme>
+          <cbc:ID>01</cbc:ID>
+          <cbc:Name>IVA</cbc:Name>
+        </cac:TaxScheme>
+      </cac:PartyTaxScheme>
     </cac:${tagName}>`;
 }
 
@@ -158,9 +188,14 @@ function partyNitXml(tagName, nit, name) {
  * @param {string} p.counterpartyName
  * @param {string} [p.issuerFirstName] - Requerido solo en 030/032
  * @param {string} [p.issuerFamilyName]
+ * @param {string} [p.issuerIdNumber] - 030/032: documento de quien recibió
+ * @param {string} [p.issuerIdType] - 030/032: tipo de documento (tabla 13.2.1; 13 = cédula)
+ * @param {string} [p.issuerJobTitle] - 030/032, opcional
+ * @param {string} [p.issuerDepartment] - 030/032, opcional
  * @param {string} [p.claimReasonCode] - Solo 031 (reclamo)
  * @param {string} [p.claimReasonText] - Solo 031, texto libre del motivo (va en cbc:Note)
- * @param {'direct'|'mandatario'|'mandato_persona_natural'} [p.declarantType] - Solo 034
+ * @param {string} [p.receiptNumber] - Solo 034: número del 032 que emitió el cliente
+ * @param {string} [p.receiptCude] - Solo 034: CUDE de ese 032
  * @param {string} [p.extraNote] - Fase 4 (036-046): detalle estructurado
  *   pero legible del evento (endosatario, motivo de limitación, datos del
  *   mandatario, monto pagado...) — el Anexo no publica un esquema de
@@ -174,11 +209,12 @@ function buildEventXml({
   eventCode,
   applicationResponseId,
   invoiceNumber, invoiceCufe,
-  ownNit, ownName,
-  counterpartyNit, counterpartyName,
+  ownNit, ownName, ownDv,
+  counterpartyNit, counterpartyName, counterpartyDocType = '31',
   issuerFirstName, issuerFamilyName,
+  issuerIdNumber, issuerIdType = '13', issuerJobTitle, issuerDepartment,
   claimReasonCode, claimReasonText,
-  declarantType = 'direct',
+  receiptNumber, receiptCude,
   extraNote,
   softwarePin,
   environment = 'test',
@@ -190,26 +226,50 @@ function buildEventXml({
   const { date: issueDate, time: issueTime } = getColombiaDateTime();
   const profileExecutionID = environment === 'production' ? '1' : '2';
   const responseCode = eventCode;
-  const role = EVENT_ROLE[eventCode];
+  const ownId = cleanPartyId(ownNit, '31');
+  const counterpartyId = cleanPartyId(counterpartyNit, counterpartyDocType);
 
+  // Anexo FE 1.9 §11.5 / §11.5.2 (XPath): NitFE = SenderParty/CompanyID
+  // ("quien genera el evento") y DocAdq = ReceiverParty/CompanyID ("quien
+  // recibe el ApplicationResponse"). Nosotros siempre somos el SenderParty,
+  // así que el orden es fijo para TODOS los eventos. Antes, en 030-033
+  // (Compras) iba primero el NIT del proveedor y el CUDE no coincidía con el
+  // que recalcula la DIAN. Hash verificado contra el ejemplo §11.5.1.
   const cude = buildRadianCude({
     applicationResponseId,
     issueDate, issueTime,
-    nitEmisorFactura: role === 'acquirer' ? counterpartyNit : ownNit,
-    nitAdquiriente: role === 'acquirer' ? ownNit : counterpartyNit,
+    nitEmisorFactura: ownId,
+    nitAdquiriente: counterpartyId,
     responseCode,
     referencedDocumentId: invoiceNumber,
     documentTypeCode: '01',
     softwarePin,
   });
 
-  const issuerPartyXml = EVENTS_WITH_ISSUER_PARTY.has(eventCode) ? `
+  // 030/032: persona que recibió la factura / el bien o servicio. Anexo FE
+  // 1.9 §6.5.5.3 y §6.5.5.5 (AAH11-AAH19): ID con @schemeName (tipo de
+  // documento, tabla 13.2.1) y FirstName/FamilyName son obligatorios;
+  // @schemeID (DV) solo si es NIT; JobTitle/OrganizationDepartment
+  // opcionales. Mismo orden que los XML de ejemplo oficiales.
+  let issuerPartyXml = '';
+  if (EVENTS_WITH_ISSUER_PARTY.has(eventCode)) {
+    const idNumber = String(issuerIdNumber || '').trim();
+    const idType = String(issuerIdType || '13').trim();
+    if (!idNumber || !String(issuerFirstName || '').trim() || !String(issuerFamilyName || '').trim()) {
+      throw new Error(`El evento ${eventCode} exige el documento, nombres y apellidos de quien recibió${eventCode === '032' ? ' el bien o servicio' : ' la factura'}.`);
+    }
+    const dvAttr = idType === '31' ? ` schemeID="${computeNitCheckDigit(idNumber)}"` : '';
+    issuerPartyXml = `
     <cac:IssuerParty>
       <cac:Person>
-        <cbc:FirstName>${escXml(issuerFirstName)}</cbc:FirstName>
-        <cbc:FamilyName>${escXml(issuerFamilyName)}</cbc:FamilyName>
+        <cbc:ID${dvAttr} schemeName="${escXml(idType)}">${escXml(idNumber)}</cbc:ID>
+        <cbc:FirstName>${escXml(String(issuerFirstName).trim())}</cbc:FirstName>
+        <cbc:FamilyName>${escXml(String(issuerFamilyName).trim())}</cbc:FamilyName>${issuerJobTitle ? `
+        <cbc:JobTitle>${escXml(issuerJobTitle)}</cbc:JobTitle>` : ''}${issuerDepartment ? `
+        <cbc:OrganizationDepartment>${escXml(issuerDepartment)}</cbc:OrganizationDepartment>` : ''}
       </cac:Person>
-    </cac:IssuerParty>` : '';
+    </cac:IssuerParty>`;
+  }
 
   // El 031 (Reclamo) necesita expresar el motivo — el Anexo no publica un
   // catálogo cerrado de códigos localizable en las secciones revisadas (ver
@@ -221,11 +281,24 @@ function buildEventXml({
   let headerNoteXml = '';
   if (extraNote) {
     headerNoteXml = `\n  <cbc:Note>${escXml(extraNote)}</cbc:Note>`;
-  } else if (eventCode === '031' && (claimReasonCode || claimReasonText)) {
-    headerNoteXml = `\n  <cbc:Note>${escXml([claimReasonCode, claimReasonText].filter(Boolean).join(' - '))}</cbc:Note>`;
+  } else if (eventCode === '031' && claimReasonText) {
+    headerNoteXml = `\n  <cbc:Note>${escXml(claimReasonText)}</cbc:Note>`;
   } else if (eventCode === '034') {
-    const template = DECLARATION_NOTE_TEMPLATES[declarantType] || DECLARATION_NOTE_TEMPLATES.direct;
-    headerNoteXml = `\n  <cbc:Note>${escXml(template)}</cbc:Note>`;
+    if (!receiptNumber || !receiptCude) {
+      throw new Error('El 034 requiere el número y el CUDE del Recibo del bien (032) que emitió el cliente.');
+    }
+    const note = tacitAcceptanceNote({ receiptNumber, receiptCude, buyerName: counterpartyName, buyerNit: counterpartyId });
+    headerNoteXml = `\n  <cbc:Note>${escXml(note)}</cbc:Note>`;
+  }
+
+  // 031: el concepto del reclamo va en atributos de ResponseCode (tabla 13.3.12).
+  let responseCodeAttrs = '';
+  if (eventCode === '031') {
+    const reasonName = CLAIM_REASONS[claimReasonCode];
+    if (!reasonName) {
+      throw new Error(`Concepto de reclamo no válido: "${claimReasonCode || ''}". Use 01, 02, 03 o 04.`);
+    }
+    responseCodeAttrs = ` name="${escXml(reasonName)}" listID="${claimReasonCode}"`;
   }
 
   const xml = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
@@ -251,11 +324,11 @@ function buildEventXml({
   <cbc:UUID schemeName="CUDE-SHA384">${cude}</cbc:UUID>
   <cbc:IssueDate>${issueDate}</cbc:IssueDate>
   <cbc:IssueTime>${issueTime}</cbc:IssueTime>${headerNoteXml}
-  ${partyNitXml('SenderParty', ownNit, ownName)}
-  ${partyNitXml('ReceiverParty', counterpartyNit, counterpartyName)}
+  ${partyXml('SenderParty', { id: ownId, name: ownName, docType: '31', dv: ownDv || undefined })}
+  ${partyXml('ReceiverParty', { id: counterpartyId, name: counterpartyName, docType: counterpartyDocType })}
   <cac:DocumentResponse>
     <cac:Response>
-      <cbc:ResponseCode>${responseCode}</cbc:ResponseCode>
+      <cbc:ResponseCode${responseCodeAttrs}>${responseCode}</cbc:ResponseCode>
       <cbc:Description>${escXml(EVENT_DESCRIPTION[eventCode])}</cbc:Description>
     </cac:Response>${issuerPartyXml}
     <cac:DocumentReference>
@@ -269,4 +342,4 @@ function buildEventXml({
   return { xml, cude, issueDate, issueTime };
 }
 
-module.exports = { buildEventXml };
+module.exports = { buildEventXml, CLAIM_REASONS, tacitAcceptanceNote };

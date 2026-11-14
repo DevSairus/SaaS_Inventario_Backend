@@ -26,9 +26,15 @@ function generatedByName(req) {
 // ── Lógica de datos compartida entre el endpoint JSON y los exports ──
 
 async function fetchTrialBalance(req) {
-  const { from, to, branch_id } = req.query;
+  const { from, to, branch_id, third_party_id } = req.query;
   if (!from || !to) {
     const err = new Error('from y to son obligatorios (YYYY-MM-DD)');
+    err.statusCode = 400;
+    throw err;
+  }
+  // 5.3 — filtro opcional por tercero: solo cuenta las líneas de ese tercero.
+  if (third_party_id && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(third_party_id))) {
+    const err = new Error('third_party_id inválido');
     err.statusCode = 400;
     throw err;
   }
@@ -48,9 +54,10 @@ async function fetchTrialBalance(req) {
        AND e.status = 'posted'
        AND e.entry_date BETWEEN :from AND :to
        AND (:branchId::uuid IS NULL OR e.branch_id = :branchId::uuid)
+       AND (:thirdPartyId::uuid IS NULL OR l.third_party_id = :thirdPartyId::uuid)
      GROUP BY a.id, a.code, a.name, a.account_type
      ORDER BY a.code ASC`,
-    { replacements: { tenantId: req.tenant_id, from, to, branchId: branch_id || null }, type: QueryTypes.SELECT }
+    { replacements: { tenantId: req.tenant_id, from, to, branchId: branch_id || null, thirdPartyId: third_party_id || null }, type: QueryTypes.SELECT }
   );
 
   const totals = rows.reduce(
@@ -58,7 +65,7 @@ async function fetchTrialBalance(req) {
     { debit: 0, credit: 0 }
   );
 
-  return { accounts: rows, totals, branch_id: branch_id || null, from, to };
+  return { accounts: rows, totals, branch_id: branch_id || null, third_party_id: third_party_id || null, from, to };
 }
 
 // GET /api/accounting/reports/trial-balance?from=&to=&branch_id=

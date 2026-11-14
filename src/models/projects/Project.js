@@ -51,6 +51,11 @@ const Project = sequelize.define('Project', {
   // Retención de garantía de las facturas parciales, % antes de IVA (migración 2026110612)
   retention_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 0 },
   retention_released_at: { type: DataTypes.DATE, allowNull: true },
+  // AIU del proyecto, valor por defecto de cada corte (migración 2026111403)
+  aiu_enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  aiu_admin_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_unforeseen_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_profit_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
   closed_at: { type: DataTypes.DATE, allowNull: true },
   closed_by: { type: DataTypes.UUID, allowNull: true },
   created_by: { type: DataTypes.UUID, allowNull: true },

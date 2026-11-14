@@ -7,6 +7,7 @@
 // super_admin porque cambia un valor que afecta a toda la liquidación —
 // mismo criterio inline que usa branch.js para detectar admin de tenant.
 const { PayrollSetting, Supplier } = require('../../models');
+const { legalWeeklyHours } = require('../../services/payroll/jornada');
 
 const PERCENTAGE_FIELDS = [
   'heds_percentage', 'hens_percentage', 'hrns_percentage',
@@ -69,6 +70,7 @@ const updatePayrollSettings = async (req, res) => {
     }
 
     const updates = {};
+    let jornadaWarning = null;
     for (const field of PERCENTAGE_FIELDS) {
       if (req.body[field] === undefined) continue;
       const value = Number(req.body[field]);
@@ -94,7 +96,21 @@ const updatePayrollSettings = async (req, res) => {
       if (h !== null && (!Number.isFinite(h) || h <= 0 || h > 48)) {
         return res.status(400).json({ success: false, message: 'La jornada semanal debe estar entre 1 y 48 horas' });
       }
+      // Se acepta (la PILA reporta la jornada real de la empresa), pero se
+      // avisa: el valor de la hora extra siempre usa como máximo la legal.
+      const legalMax = legalWeeklyHours();
+      if (h !== null && h > legalMax) {
+        jornadaWarning = `La jornada de ${h} h supera la máxima legal vigente (${legalMax} h, Ley 2101 de 2021): se reporta así en la PILA, pero el valor de la hora extra y los recargos se calcula con ${legalMax} h.`;
+      }
       updates.weekly_hours = h;
+    }
+    // Horas ordinarias por día para la planilla de obra (Fase 4, req. 1.1).
+    if (req.body.daily_hours !== undefined) {
+      const d = req.body.daily_hours === '' || req.body.daily_hours === null ? null : Number(req.body.daily_hours);
+      if (d !== null && (!Number.isFinite(d) || d <= 0 || d > 12)) {
+        return res.status(400).json({ success: false, message: 'Las horas ordinarias por día deben estar entre 1 y 12' });
+      }
+      updates.daily_hours = d;
     }
     if (req.body.employer_exonerated_114_1 !== undefined) {
       updates.employer_exonerated_114_1 = !!req.body.employer_exonerated_114_1;
@@ -116,7 +132,12 @@ const updatePayrollSettings = async (req, res) => {
     });
     await settings.update(updates);
 
-    res.json({ success: true, message: 'Configuración actualizada', data: settings });
+    res.json({
+      success: true,
+      message: jornadaWarning ? `Configuración actualizada. ${jornadaWarning}` : 'Configuración actualizada',
+      warning: jornadaWarning || undefined,
+      data: settings,
+    });
   } catch (error) {
     console.error('Error en updatePayrollSettings:', error);
     res.status(500).json({

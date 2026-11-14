@@ -17,6 +17,11 @@ const ProjectCut = sequelize.define('ProjectCut', {
   notes: { type: DataTypes.TEXT, allowNull: true },
   direct_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
   aiu_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
+  // AIU de este corte (copia editable del proyecto; migración 2026111403)
+  aiu_enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  aiu_admin_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_unforeseen_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
+  aiu_profit_pct: { type: DataTypes.DECIMAL(5, 2), allowNull: true },
   subtotal: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
   tax_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },
   total_amount: { type: DataTypes.DECIMAL(15, 2), allowNull: false, defaultValue: 0 },

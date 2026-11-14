@@ -30,11 +30,24 @@ const Customer = sequelize.define('Customer', {
   trade_name: {
     type: DataTypes.STRING(255),
   },
+  // 3.2 — revisión contable pendiente al crear (migración 2026111105).
+  accounting_setup_status: {
+    type: DataTypes.STRING(12), allowNull: false, defaultValue: 'configured',
+    validate: { isIn: [['pending', 'configured']] },
+  },
+  accounting_setup_at: { type: DataTypes.DATE, allowNull: true },
+  accounting_setup_by: { type: DataTypes.UUID, allowNull: true },
   tax_id: {
     type: DataTypes.STRING(50),
   },
   email: {
     type: DataTypes.STRING(255),
+  },
+  additional_emails: {
+    type: DataTypes.JSONB,
+    allowNull: false,
+    defaultValue: [],
+    comment: 'Correos adicionales a los que se envía la factura electrónica (además de `email`, el principal).',
   },
   phone: {
     type: DataTypes.STRING(50),

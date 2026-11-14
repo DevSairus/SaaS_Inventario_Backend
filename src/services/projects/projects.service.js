@@ -15,6 +15,14 @@ const {
   Purchase, Expense, Transfer, SupplierOrderList, Supplier,
 } = require('../../models');
 const { getWarehouseBalance } = require('./projectStock.service');
+const { initialProjectAiu, parseAiu, aiuColumns, aiuOf } = require('./projectAiu');
+const { tenantAiuConfig } = require('../sales/aiu.service');
+
+async function tenantTaxConfig(tenantId, transaction) {
+  const { Tenant } = require('../../models');
+  const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'tax_config'], transaction });
+  return tenant?.tax_config || {};
+}
 
 const httpError = (statusCode, message, extra) => Object.assign(new Error(message), { statusCode }, extra || {});
 const num = (v) => Number(v) || 0;
@@ -149,10 +157,13 @@ async function createProject(req, body) {
       }
     }
     await validateRefs(tenantId, data, t);
+    // AIU del proyecto (1.6): el del formulario, o el de la cotización si es AIU.
+    const aiu = initialProjectAiu(body, quote, await tenantTaxConfig(tenantId, t));
 
     const code = await nextProjectCode(tenantId, t);
     const project = await Project.create({
       ...data,
+      ...aiuColumns(aiu),
       tenant_id: tenantId,
       branch_id: data.branch_id || req.branch_id || null,
       code,
@@ -171,6 +182,11 @@ async function updateProject(req, project, body) {
   if (['closed', 'cancelled'].includes(project.status)) throw httpError(400, 'El proyecto está cerrado o cancelado: no se puede editar');
   const data = pickFields(body);
   await validateRefs(req.user.tenant_id, data, null);
+  // AIU del proyecto: valor por defecto de los cortes nuevos (los ya hechos guardan el suyo).
+  const cfg = tenantAiuConfig(await tenantTaxConfig(req.user.tenant_id));
+  const current = aiuOf(project);
+  const aiu = parseAiu(body, { fallback: current || cfg, tenantEnabled: cfg.enabled, wasEnabled: Boolean(current) });
+  if (aiu !== undefined) Object.assign(data, aiuColumns(aiu));
   await project.update(data);
   // La bodega sigue el nombre del proyecto.
   if (project.warehouse_id && (data.name || data.city !== undefined || data.site_address !== undefined)) {

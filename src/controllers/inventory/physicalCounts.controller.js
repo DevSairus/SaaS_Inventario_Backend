@@ -21,17 +21,24 @@ const audit = require('../../utils/audit');
 const { sequelize } = require('../../config/database');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const {
-  Product, Category, Warehouse, PhysicalCount, PhysicalCountItem,
+  Product, Category, Warehouse, WarehouseLocation, PhysicalCount, PhysicalCountItem,
   InventoryAdjustment
 } = require('../../models/inventory');
+const { categoryFamilyIds, compareLocationCodes } = require('../../services/inventory/warehouseLocations.service');
 const { createAdjustmentCore, confirmAdjustmentCore } = require('./adjustments.controller');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { cellToText, parseLocaleNumber } = require('../../utils/excelCell');
+const { can } = require('../../services/tenantPermissions.service');
 
 const MAX_REPORTED_ERRORS = 300;
 const CONFLICT_EPSILON = 0.001; // tolerancia para comparar decimales de stock
 
 const round2 = (n) => Math.round((parseFloat(n) + Number.EPSILON) * 100) / 100;
+
+// Orden de recorrido: ubicación (natural) y luego SKU; sin ubicación al final.
+const byLocationThenSku = (a, b) =>
+  compareLocationCodes(a.location_code, b.location_code)
+  || (a.product_sku || '').localeCompare(b.product_sku || '', 'es', { numeric: true });
 
 function httpError(statusCode, payload) {
   const err = new Error(payload.message);
@@ -57,9 +64,13 @@ async function generateCountNumber(tenant_id, transaction) {
 
 /**
  * POST /api/inventory/physical-counts
- * body: { warehouse_id?, category_id?, include_inactive? }
+ * body: { warehouse_id?, category_id?, location_id?, include_subcategories?, include_inactive? }
  * Crea la sesión y toma el snapshot de system_qty (current_stock) para cada
  * producto que aplica. No genera el Excel todavía (ver /template).
+ *
+ * category_id es una FAMILIA: la categoría y todas sus subcategorías, salvo que
+ * include_subcategories = false (solo la categoría exacta). location_id filtra
+ * por ubicación física (req. 2.2); la plantilla sale ordenada por ubicación.
  */
 const createPhysicalCount = async (req, res) => {
   if (!req.user) return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
@@ -67,8 +78,9 @@ const createPhysicalCount = async (req, res) => {
 
   const tenant_id = req.user.tenant_id;
   const user_id = req.user.id;
-  const { warehouse_id = null, category_id = null } = req.body;
+  const { warehouse_id = null, category_id = null, location_id = null } = req.body;
   const include_inactive = req.body.include_inactive === true || req.body.include_inactive === 'true';
+  const include_subcategories = !(req.body.include_subcategories === false || req.body.include_subcategories === 'false');
 
   const t = await sequelize.transaction();
   try {
@@ -80,6 +92,13 @@ const createPhysicalCount = async (req, res) => {
       const cat = await Category.findOne({ where: { id: category_id, tenant_id }, transaction: t });
       if (!cat) throw httpError(400, { success: false, message: 'La categoría indicada no existe' });
     }
+    if (location_id) {
+      const loc = await WarehouseLocation.findOne({ where: { id: location_id, tenant_id }, transaction: t });
+      if (!loc) throw httpError(400, { success: false, message: 'La ubicación indicada no existe' });
+      if (warehouse_id && loc.warehouse_id !== warehouse_id) {
+        throw httpError(400, { success: false, message: `La ubicación ${loc.code} no pertenece a la bodega elegida` });
+      }
+    }
 
     const where = {
       tenant_id,
@@ -88,14 +107,24 @@ const createPhysicalCount = async (req, res) => {
     };
     if (!include_inactive) where.is_active = true;
     if (warehouse_id) where.warehouse_id = warehouse_id;
-    if (category_id) where.category_id = category_id;
+    if (category_id) {
+      where.category_id = include_subcategories
+        ? { [Op.in]: await categoryFamilyIds({ Category, tenantId: tenant_id, categoryId: category_id, transaction: t }) }
+        : category_id;
+    }
+    if (location_id) where.location_id = location_id;
 
-    const products = await Product.findAll({
+    const productsRaw = await Product.findAll({
       where,
       attributes: ['id', 'sku', 'name', 'current_stock', 'average_cost'],
+      include: [{ model: WarehouseLocation, as: 'location', attributes: ['id', 'code'], required: false }],
       order: [['sku', 'ASC']],
       transaction: t
     });
+    // Orden de recorrido: por ubicación (natural: A-2 antes de A-10) y luego por SKU;
+    // los productos sin ubicación van al final.
+    const products = [...productsRaw].sort((a, b) =>
+      compareLocationCodes(a.location?.code, b.location?.code) || String(a.sku).localeCompare(String(b.sku), 'es', { numeric: true }));
 
     if (products.length === 0) {
       throw httpError(400, { success: false, message: 'No hay productos que cumplan estos filtros para generar el conteo' });
@@ -108,6 +137,8 @@ const createPhysicalCount = async (req, res) => {
       count_number,
       warehouse_id,
       category_id,
+      location_id,
+      include_subcategories,
       include_inactive,
       status: 'open',
       generated_by: user_id,
@@ -121,6 +152,7 @@ const createPhysicalCount = async (req, res) => {
       product_id: p.id,
       product_sku: p.sku,
       product_name: p.name,
+      location_code: p.location?.code || null,
       system_qty: parseFloat(p.current_stock) || 0,
       unit_cost: parseFloat(p.average_cost) || 0,
       counted_qty: null,
@@ -141,6 +173,8 @@ const createPhysicalCount = async (req, res) => {
         status: 'open',
         warehouse_id,
         category_id,
+        location_id,
+        include_subcategories,
         include_inactive,
         total_products: products.length,
         generated_at: physicalCount.generated_at
@@ -164,19 +198,21 @@ const getPhysicalCounts = async (req, res) => {
     if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
 
     const tenant_id = req.user.tenant_id;
-    const { status, warehouse_id, search = '', page = 1, limit = 10 } = req.query;
+    const { status, warehouse_id, location_id, search = '', page = 1, limit = 10 } = req.query;
     const offset = (page - 1) * limit;
 
     const where = { tenant_id };
     if (status) where.status = status;
     if (warehouse_id) where.warehouse_id = warehouse_id;
+    if (location_id) where.location_id = location_id;
     if (search) where.count_number = { [Op.iLike]: `%${search}%` };
 
     const { count, rows } = await PhysicalCount.findAndCountAll({
       where,
       include: [
         { model: Warehouse, as: 'warehouse', attributes: ['id', 'name'] },
-        { model: Category, as: 'category', attributes: ['id', 'name'] }
+        { model: Category, as: 'category', attributes: ['id', 'name'] },
+        { model: WarehouseLocation, as: 'location', attributes: ['id', 'code'], required: false }
       ],
       order: [['generated_at', 'DESC']],
       limit: parseInt(limit),
@@ -216,6 +252,7 @@ const getPhysicalCountById = async (req, res) => {
         { model: PhysicalCountItem, as: 'items' },
         { model: Warehouse, as: 'warehouse', attributes: ['id', 'name'] },
         { model: Category, as: 'category', attributes: ['id', 'name'] },
+        { model: WarehouseLocation, as: 'location', attributes: ['id', 'code'], required: false },
         { model: InventoryAdjustment, as: 'entry_adjustment', attributes: ['id', 'adjustment_number', 'status'] },
         { model: InventoryAdjustment, as: 'exit_adjustment', attributes: ['id', 'adjustment_number', 'status'] }
       ]
@@ -231,9 +268,16 @@ const getPhysicalCountById = async (req, res) => {
 };
 
 /**
- * GET /api/inventory/physical-counts/:id/template
+ * GET /api/inventory/physical-counts/:id/template?blind=true|false
  * Genera y descarga el .xlsx a partir del snapshot ya guardado (no re-consulta
  * stock actual). Solo la columna "Conteo físico" queda editable.
+ *
+ * blind=true genera la plantilla CIEGA: sin "Cantidad en sistema" ni
+ * "Diferencia", para que quien cuenta no se vea influenciado por lo que dice
+ * el sistema. La comparación contra el sistema ocurre después, al subir el
+ * archivo (vista previa dry_run) y en el informe de resultados. El lector de
+ * la carga empareja por product_id/SKU y lee solo "Conteo físico", así que
+ * ambas variantes de plantilla se suben igual.
  */
 const downloadTemplate = async (req, res) => {
   try {
@@ -242,6 +286,7 @@ const downloadTemplate = async (req, res) => {
 
     const { id } = req.params;
     const tenant_id = req.user.tenant_id;
+    const blind = req.query.blind === 'true';
 
     const physicalCount = await PhysicalCount.findOne({
       where: { id, tenant_id },
@@ -249,7 +294,8 @@ const downloadTemplate = async (req, res) => {
     });
     if (!physicalCount) return res.status(404).json({ success: false, message: 'Sesión de conteo no encontrada' });
 
-    const items = [...physicalCount.items].sort((a, b) => (a.product_sku || '').localeCompare(b.product_sku || ''));
+    // Recorrido por ubicación (la que tenía el producto al generar la sesión), luego SKU.
+    const items = [...physicalCount.items].sort(byLocationThenSku);
     const productIds = items.map((it) => it.product_id);
     const products = await Product.findAll({
       where: { id: { [Op.in]: productIds } },
@@ -263,32 +309,47 @@ const downloadTemplate = async (req, res) => {
     workbook.created = new Date();
 
     const sheet = workbook.addWorksheet('Conteo');
-    sheet.columns = [
+    const columns = [
+      { header: 'Ubicación', key: 'location', width: 14 },
       { header: 'Código (SKU)', key: 'sku', width: 18 },
       { header: 'Nombre', key: 'name', width: 42 },
       { header: 'Categoría', key: 'category', width: 22 },
-      { header: 'Unidad', key: 'unit', width: 10 },
-      { header: 'Cantidad en sistema', key: 'system_qty', width: 18 },
-      { header: 'Conteo físico', key: 'counted_qty', width: 16 },
-      { header: 'Diferencia', key: 'diff', width: 14 },
-      { header: 'product_id', key: 'product_id', width: 38 }
+      { header: 'Unidad', key: 'unit', width: 10 }
     ];
+    if (!blind) columns.push({ header: 'Cantidad en sistema', key: 'system_qty', width: 18 });
+    columns.push({ header: 'Conteo físico', key: 'counted_qty', width: 16 });
+    if (!blind) columns.push({ header: 'Diferencia', key: 'diff', width: 14 });
+    columns.push({ header: 'product_id', key: 'product_id', width: 38 });
+    sheet.columns = columns;
     sheet.getRow(1).font = { bold: true };
+
+    // Las letras de columna dependen de la variante (con/sin cantidades).
+    const countedCol = sheet.getColumn('counted_qty').letter;
+    const systemCol = blind ? null : sheet.getColumn('system_qty').letter;
+    const diffCol = blind ? null : sheet.getColumn('diff').letter;
 
     items.forEach((item, idx) => {
       const rowNumber = idx + 2;
       const product = productById.get(item.product_id);
-      sheet.addRow({
+      const rowData = {
+        location: item.location_code || '',
         sku: item.product_sku,
         name: item.product_name,
         category: product?.category?.name || '',
         unit: product?.unit_of_measure || '',
-        system_qty: parseFloat(item.system_qty) || 0,
         counted_qty: null,
-        diff: null,
         product_id: item.product_id
-      });
-      sheet.getCell(`G${rowNumber}`).value = { formula: `IF(F${rowNumber}="","",F${rowNumber}-E${rowNumber})` };
+      };
+      if (!blind) {
+        rowData.system_qty = parseFloat(item.system_qty) || 0;
+        rowData.diff = null;
+      }
+      sheet.addRow(rowData);
+      if (!blind) {
+        sheet.getCell(`${diffCol}${rowNumber}`).value = {
+          formula: `IF(${countedCol}${rowNumber}="","",${countedCol}${rowNumber}-${systemCol}${rowNumber})`
+        };
+      }
     });
 
     // Bloquear todas las celdas por defecto; desbloquear solo "Conteo físico".
@@ -298,7 +359,7 @@ const downloadTemplate = async (req, res) => {
       });
     });
     for (let r = 2; r <= items.length + 1; r++) {
-      sheet.getCell(`F${r}`).protection = { locked: false };
+      sheet.getCell(`${countedCol}${r}`).protection = { locked: false };
     }
     sheet.getColumn('product_id').hidden = true;
     await sheet.protect('', { selectLockedCells: true, selectUnlockedCells: true });
@@ -309,9 +370,10 @@ const downloadTemplate = async (req, res) => {
     metaSheet.addRow(['count_number', physicalCount.count_number]);
     metaSheet.addRow(['downloaded_at', new Date().toISOString()]);
     metaSheet.addRow(['tenant_id', tenant_id]);
+    metaSheet.addRow(['blind', blind ? 'true' : 'false']);
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${physicalCount.count_number}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${physicalCount.count_number}${blind ? '-ciego' : ''}.xlsx"`);
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
@@ -457,6 +519,16 @@ const uploadPhysicalCountInner = async (req, res) => {
       : (req.query.dry_run === 'false' || req.body?.dry_run === 'false' ? false : true);
     const treatEmptyAsZero = req.body?.treat_empty_as_zero === 'true';
     const applyDespiteConflict = req.body?.apply_despite_conflict === 'true';
+
+    // Aplicar el conteo mueve el stock: permiso propio (la vista previa solo pide 'create').
+    if (!dryRun && !(await can(tenant_id, req.user.role, 'inventory.physical_counts.approve'))) {
+      return res.status(403).json({
+        success: false,
+        code: 'FORBIDDEN',
+        permission: 'inventory.physical_counts.approve',
+        message: 'No tienes permiso para aplicar conteos físicos. Puedes revisar el archivo (vista previa); pídele a quien tenga el permiso que lo aplique.'
+      });
+    }
 
     const count = await PhysicalCount.findOne({
       where: { id, tenant_id },
@@ -776,31 +848,60 @@ const downloadReport = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Resultado');
     sheet.columns = [
+      { header: 'Ubicación', key: 'location', width: 14 },
       { header: 'Código (SKU)', key: 'sku', width: 18 },
       { header: 'Nombre', key: 'name', width: 42 },
       { header: 'Cantidad en sistema', key: 'system_qty', width: 18 },
       { header: 'Conteo físico', key: 'counted_qty', width: 16 },
       { header: 'Diferencia', key: 'diff_qty', width: 14 },
       { header: 'Costo unitario', key: 'unit_cost', width: 16 },
-      { header: 'Valor diferencia', key: 'value', width: 16 }
+      { header: 'Valor diferencia', key: 'value', width: 16 },
+      { header: 'Resultado', key: 'result', width: 14 }
     ];
     sheet.getRow(1).font = { bold: true };
 
     count.items
       .filter((it) => it.applied)
-      .sort((a, b) => (a.product_sku || '').localeCompare(b.product_sku || ''))
+      .sort(byLocationThenSku)
       .forEach((it) => {
         const diff = it.diff_qty !== null ? parseFloat(it.diff_qty) : null;
         sheet.addRow({
+          location: it.location_code || '',
           sku: it.product_sku,
           name: it.product_name,
           system_qty: parseFloat(it.system_qty) || 0,
           counted_qty: it.counted_qty !== null ? parseFloat(it.counted_qty) : null,
           diff_qty: diff,
           unit_cost: parseFloat(it.unit_cost) || 0,
-          value: diff !== null ? round2(diff * (parseFloat(it.unit_cost) || 0)) : null
+          value: diff !== null ? round2(diff * (parseFloat(it.unit_cost) || 0)) : null,
+          result: diff === null || diff === 0 ? 'Sin diferencia' : (diff > 0 ? 'Sobrante' : 'Faltante')
         });
       });
+
+    // Comparación completa físico vs sistema: los productos de la sesión que
+    // no se contaron (celda vacía en el archivo) no entran al ajuste, pero
+    // quien revisa el conteo necesita verlos.
+    const notCounted = count.items.filter((it) => !it.applied);
+    if (notCounted.length > 0) {
+      const pending = workbook.addWorksheet('No contados');
+      pending.columns = [
+        { header: 'Ubicación', key: 'location', width: 14 },
+        { header: 'Código (SKU)', key: 'sku', width: 18 },
+        { header: 'Nombre', key: 'name', width: 42 },
+        { header: 'Cantidad en sistema', key: 'system_qty', width: 18 }
+      ];
+      pending.getRow(1).font = { bold: true };
+      notCounted
+        .sort(byLocationThenSku)
+        .forEach((it) => {
+          pending.addRow({
+            location: it.location_code || '',
+            sku: it.product_sku,
+            name: it.product_name,
+            system_qty: parseFloat(it.system_qty) || 0
+          });
+        });
+    }
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${count.count_number}-resultado.xlsx"`);

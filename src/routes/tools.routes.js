@@ -18,6 +18,11 @@ router.get('/', ctrl.list);
 router.get('/options/responsibles', requireAnyPermission('tools.assign', 'tools.manage'), ctrl.responsibles);
 router.get('/options/fixed-assets', manage, ctrl.fixedAssets);
 router.get('/project/:projectId', ctrl.projectTools);
+// Lotes de herramientas por obra y etapa (checklist masivo, Fase 4 req. 1.5)
+router.get('/project/:projectId/batches', ctrl.projectBatches);
+router.post('/project/:projectId/batches', assign, ctrl.createBatch);
+router.get('/batches/:batchId/acta', ctrl.batchActa);
+router.post('/batches/:batchId/sign', assign, ctrl.signBatch);
 router.post('/assignments/:assignmentId/return', assign, ctrl.returnAssignment);
 router.get('/assignments/:assignmentId/acta/:kind', ctrl.actaPdf);
 router.post('/', manage, ctrl.create);

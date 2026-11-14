@@ -55,6 +55,8 @@ async function createAndSendCreditNote({ tenantId, saleId, items, amount, reason
     if (!original.cufe) {
       throw httpError('La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');
     }
+    const radianBlock = require('../../utils/radianAcceptance').notesBlockedReason(original);
+    if (radianBlock) throw httpError(radianBlock, 409);
     if (!original.items?.length) {
       throw httpError('La factura no tiene ítems');
     }

@@ -21,6 +21,8 @@ const openingBalancesCtrl = require('../../controllers/accounting/openingBalance
 const fixedAssetsCtrl = require('../../controllers/accounting/fixedAssets.controller');
 const loansCtrl = require('../../controllers/accounting/loans.controller');
 const bankAccountsCtrl = require('../../controllers/accounting/bankAccounts.controller');
+const roundingAdjustmentCtrl = require('../../controllers/accounting/roundingAdjustment.controller');
+const thirdPartySetupCtrl = require('../../controllers/accounting/thirdPartySetup.controller');
 const bankImportCtrl = require('../../controllers/accounting/bankImport.controller');
 const bankReconciliationCtrl = require('../../controllers/accounting/bankReconciliation.controller');
 const exogenaCtrl = require('../../controllers/accounting/exogena.controller');
@@ -75,6 +77,15 @@ router.post('/ica/settlements', accountingStaff, icaCtrl.createSettlement);
 router.get('/iva-prorrateo', ivaProrrateoCtrl.report);
 router.post('/iva-prorrateo', accountingStaff, ivaProrrateoCtrl.createEntry);
 router.patch('/ica/settlements/:id/void', accountingStaff, icaCtrl.voidSettlement);
+
+// Terceros nuevos pendientes de revisión contable (3.2)
+router.get('/third-parties/pending-setup', thirdPartySetupCtrl.listPending);
+router.post('/third-parties/:kind/:id/configured', accountingStaff, thirdPartySetupCtrl.markConfigured);
+
+// Ajuste al peso (5.1): configuración y bitácora
+router.get('/rounding-adjustment/config', roundingAdjustmentCtrl.getConfig);
+router.put('/rounding-adjustment/config', accountingStaff, roundingAdjustmentCtrl.updateConfig);
+router.get('/rounding-adjustments', roundingAdjustmentCtrl.list);
 
 // Mapeo de eventos -> cuentas
 router.get('/account-mappings', accountMappingsCtrl.list);

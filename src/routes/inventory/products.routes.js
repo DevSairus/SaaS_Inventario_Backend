@@ -42,7 +42,7 @@ const uploadProductImageMiddleware = require('../../middleware/uploadProductImag
 const uploadProductsExcelMiddleware = require('../../middleware/uploadProductsExcel');
 
 const { authMiddleware, checkRole } = require('../../middleware/auth');
-const { requirePermission } = require('../../middleware/requirePermission');
+const { requirePermission, requireAnyPermission } = require('../../middleware/requirePermission');
 const { branchMiddleware } = require('../../middleware/branch');
 
 router.use(authMiddleware);
@@ -67,7 +67,7 @@ router.post('/equivalents/batch-check', batchCheckEquivalents);
 
 // Marcas y líneas para autocompletado (antes de /:id)
 router.get('/vehicle-brands-lines', getBrandsAndLines);
-router.post('/vehicle-brands-lines', requirePermission('inventory.products.write'), getOrCreateBrandAndLine);
+router.post('/vehicle-brands-lines', requireAnyPermission('inventory.products.create', 'inventory.products.edit'), getOrCreateBrandAndLine);
 
 // Carga masiva de productos por Excel, incluye equivalencias por código (antes de /:id)
 // Márgenes de ganancia por categoría / global. Cambiarlos puede mover el
@@ -78,7 +78,7 @@ router.post('/margins/preview', requirePermission('inventory.price_adjustments.w
 router.post('/margins/apply', requirePermission('inventory.price_adjustments.write'), applyMargin);
 router.put('/margins/method', requirePermission('inventory.price_adjustments.write'), updateMarginMethod);
 
-router.post('/bulk-import', requirePermission('inventory.products.write'), uploadProductsExcelMiddleware.single('archivo'), bulkImportProducts);
+router.post('/bulk-import', requirePermission('inventory.products.create'), uploadProductsExcelMiddleware.single('archivo'), bulkImportProducts);
 
 // CRUD básico
 // branchMiddleware solo en el listado/búsqueda: getAllProducts filtra por las
@@ -86,10 +86,10 @@ router.post('/bulk-import', requirePermission('inventory.products.write'), uploa
 // editar, código de barras, etc.) no requieren sede resuelta.
 router.get('/', branchMiddleware, getAllProducts);
 router.get('/:id', getProductById);
-router.post('/', requirePermission('inventory.products.write'), createProduct);
-router.put('/:id', requirePermission('inventory.products.write'), updateProduct);
-router.patch('/:id/deactivate', requirePermission('inventory.products.write'), deactivateProduct);
-router.delete('/:id', requirePermission('inventory.products.write'), deleteProductPermanently);
+router.post('/', requirePermission('inventory.products.create'), createProduct);
+router.put('/:id', requirePermission('inventory.products.edit'), updateProduct);
+router.patch('/:id/deactivate', requirePermission('inventory.products.edit'), deactivateProduct);
+router.delete('/:id', requirePermission('inventory.products.delete'), deleteProductPermanently);
 
 // Proveedores por producto (para stock alerts)
 router.get('/:id/suppliers', getProductSuppliers);
@@ -99,18 +99,18 @@ router.get('/:id/in-process', getProductInProcess);
 
 // Equivalencias por producto
 router.get('/:id/equivalents', getProductEquivalents);
-router.post('/:id/equivalents', requirePermission('inventory.products.write'), addToEquivalenceGroup);
-router.delete('/:id/equivalents/:groupId', requirePermission('inventory.products.write'), removeFromEquivalenceGroup);
-router.put('/:id/equivalents/:groupId/member/:memberId', requirePermission('inventory.products.write'), updateMember);
+router.post('/:id/equivalents', requirePermission('inventory.products.edit'), addToEquivalenceGroup);
+router.delete('/:id/equivalents/:groupId', requirePermission('inventory.products.edit'), removeFromEquivalenceGroup);
+router.put('/:id/equivalents/:groupId/member/:memberId', requirePermission('inventory.products.edit'), updateMember);
 
 // Aplicaciones vehiculares por producto
 router.get('/:id/vehicle-applications', getProductVehicleApplications);
-router.post('/:id/vehicle-applications', requirePermission('inventory.products.write'), addVehicleApplication);
-router.put('/:id/vehicle-applications/:appId', requirePermission('inventory.products.write'), updateVehicleApplication);
-router.delete('/:id/vehicle-applications/:appId', requirePermission('inventory.products.write'), removeVehicleApplication);
+router.post('/:id/vehicle-applications', requirePermission('inventory.products.edit'), addVehicleApplication);
+router.put('/:id/vehicle-applications/:appId', requirePermission('inventory.products.edit'), updateVehicleApplication);
+router.delete('/:id/vehicle-applications/:appId', requirePermission('inventory.products.edit'), removeVehicleApplication);
 
 // Imagen del producto
-router.post('/:id/image', requirePermission('inventory.products.write'), uploadProductImageMiddleware.single('image'), uploadProductImage);
-router.delete('/:id/image', requirePermission('inventory.products.write'), deleteProductImage);
+router.post('/:id/image', requireAnyPermission('inventory.products.create', 'inventory.products.edit'), uploadProductImageMiddleware.single('image'), uploadProductImage);
+router.delete('/:id/image', requirePermission('inventory.products.edit'), deleteProductImage);
 
 module.exports = router;

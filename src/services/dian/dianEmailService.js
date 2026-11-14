@@ -11,6 +11,7 @@ const AdmZip = require('adm-zip');
 const logger = require('../../config/logger');
 const emailService = require('../emailService');
 const { generateSalePDFBuffer } = require('../pdfService');
+const { resolveInvoiceRecipients } = require('../../utils/emailRecipients');
 
 function buildZip({ pdfBuffer, signedXml, baseName }) {
   const zip = new AdmZip();
@@ -41,14 +42,39 @@ function buildEmailHtml(sale, tenant) {
 }
 
 /**
+ * Correos a los que va la factura: el principal del comprador más los
+ * adicionales (los propios de la factura si se definieron; si no, los
+ * actuales del cliente).
+ */
+async function resolveRecipients(sale) {
+  let customerAdditional = [];
+  if (!Array.isArray(sale.additional_emails_override) && sale.customer_id) {
+    const { Customer } = require('../../models');
+    const customer = await Customer.findByPk(sale.customer_id, { attributes: ['id', 'additional_emails'] });
+    customerAdditional = customer?.additional_emails || [];
+  }
+  return resolveInvoiceRecipients({
+    primary: sale.customer_email,
+    saleOverride: sale.additional_emails_override,
+    customerAdditional,
+  });
+}
+
+/**
  * Envía al comprador el PDF+XML de una factura ya aceptada por la DIAN.
- * No lanza — quien invoque debe tratar el error como "no bloqueante"
- * (ver dianService.sendInvoiceToDian, se llama vía setImmediate).
+ * Un correo POR destinatario (nadie ve las direcciones de los demás) y el
+ * resultado de cada uno queda en sales.email_delivery.
+ *
+ * No lanza por fallos de envío — quien invoque debe tratar el error como
+ * "no bloqueante" (ver dianService.sendInvoiceToDian, se llama vía
+ * setImmediate). Devuelve { sent, recipients } donde `sent` es true si al
+ * menos un destinatario recibió el correo.
  */
 async function sendElectronicInvoiceEmail(sale, tenant, signedXml) {
-  if (!sale.customer_email || !sale.customer_email.trim()) {
+  const recipients = await resolveRecipients(sale);
+  if (recipients.length === 0) {
     logger.warn(`[DIAN] Factura ${sale.dian_invoice_number}: sin email de cliente, no se envía PDF+XML.`);
-    return { sent: false, reason: 'no_customer_email' };
+    return { sent: false, reason: 'no_customer_email', recipients: [] };
   }
 
   const pdfBuffer = await generateSalePDFBuffer(sale, tenant);
@@ -56,16 +82,40 @@ async function sendElectronicInvoiceEmail(sale, tenant, signedXml) {
   const zipBuffer = buildZip({ pdfBuffer, signedXml, baseName });
 
   const subjectPrefix = { factura: 'Factura electrónica', nota_credito: 'Nota crédito electrónica', nota_debito: 'Nota débito electrónica' }[sale.document_type] || 'Documento electrónico';
+  const subject = `${subjectPrefix} ${sale.dian_invoice_number}`;
+  const html = buildEmailHtml(sale, tenant);
 
-  await emailService.sendEmail({
-    to: sale.customer_email.trim(),
-    subject: `${subjectPrefix} ${sale.dian_invoice_number}`,
-    html: buildEmailHtml(sale, tenant),
-    attachments: [{ filename: `${baseName}.zip`, content: zipBuffer }],
-  });
+  const results = [];
+  for (const email of recipients) {
+    try {
+      const response = await emailService.sendEmail({
+        to: email,
+        subject,
+        html,
+        attachments: [{ filename: `${baseName}.zip`, content: zipBuffer }],
+      });
+      if (response?.mode === 'log') {
+        results.push({ email, status: 'skipped', error: 'Servicio de correo no configurado' });
+      } else {
+        results.push({ email, status: 'sent' });
+      }
+    } catch (err) {
+      logger.error(`[DIAN] Error enviando ${sale.dian_invoice_number} a ${email}: ${err.message}`);
+      results.push({ email, status: 'failed', error: String(err.message || err).slice(0, 300) });
+    }
+  }
 
-  logger.info(`[DIAN] PDF+XML de ${sale.dian_invoice_number} enviado a ${sale.customer_email}`);
-  return { sent: true };
+  const delivery = { sent_at: new Date().toISOString(), recipients: results };
+  try {
+    const { Sale } = require('../../models');
+    await Sale.update({ email_delivery: delivery }, { where: { id: sale.id } });
+  } catch (err) {
+    logger.error(`[DIAN] No se pudo guardar el registro de entrega de ${sale.dian_invoice_number}: ${err.message}`);
+  }
+
+  const sentCount = results.filter((r) => r.status === 'sent').length;
+  logger.info(`[DIAN] PDF+XML de ${sale.dian_invoice_number}: ${sentCount}/${results.length} destinatarios`);
+  return { sent: sentCount > 0, recipients: results };
 }
 
-module.exports = { sendElectronicInvoiceEmail };
+module.exports = { sendElectronicInvoiceEmail, resolveRecipients };

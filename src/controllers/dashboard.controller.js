@@ -830,7 +830,7 @@ exports.getSuggestions = async (req, res) => {
 
     if (canSee(['admin', 'manager', 'seller', 'technician'])) {
       todaysAppointments.forEach((a) => {
-        const time = new Date(a.scheduled_at).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' });
+        const time = new Date(a.scheduled_at).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Bogota' });
         suggestions.push({
           id: `appointment_${a.id}`,
           title: `Confirmar cita de las ${time} — ${a.customer_name}`,

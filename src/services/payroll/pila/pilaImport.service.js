@@ -15,6 +15,7 @@
 // genera Pitbox) o su equivalente en Excel (una fila por registro, mismas
 // columnas en el mismo orden: 22 del encabezado y 98 por cotizante).
 
+const { pilaCodeFor } = require('./pilaCodes');
 const { Op } = require('sequelize');
 const { R1, R2, parseRecord } = require('./pilaLayout');
 const { ARL_TARIFAS } = require('./pilaCalc');
@@ -132,7 +133,8 @@ async function analyze(tenantId, parsed) {
   const suppliers = (await Supplier.findAll({ where: { tenant_id: tenantId }, attributes: ['id', 'name', 'business_name', 'tax_id', 'pila_code', 'payroll_fund_types'] }))
     .map((s) => s.get({ plain: true }));
   const supplierName = (s) => s?.business_name || s?.name || '';
-  const byCode = (code) => suppliers.filter((s) => s.pila_code && s.pila_code.toUpperCase() === code.toUpperCase());
+  // Código por tipo (el del proveedor o el del catálogo nacional por su NIT; ver pilaCodes.js).
+  const byCode = (code, type) => suppliers.filter((s) => pilaCodeFor(s, type) === code.toUpperCase());
 
   // ── Encabezado ──
   const nitPlanilla = digits(header.nit);
@@ -157,15 +159,17 @@ async function analyze(tenantId, parsed) {
     if (!code) return;
     const assignedId = settings[settingField];
     const assigned = suppliers.find((s) => s.id === assignedId);
+    const type = settingField.startsWith('arl') ? 'arl' : 'ccf';
     if (assigned) {
-      if (!assigned.pila_code) {
+      const current = pilaCodeFor(assigned, type);
+      if (!current && !assigned.pila_code) {
         add({ entity: 'supplier', entity_id: assigned.id, field: 'pila_code', value: code, label: `Código PILA de ${supplierName(assigned)} (${label})`, current: null });
-      } else if (assigned.pila_code.toUpperCase() !== code.toUpperCase()) {
-        warnings.push(`La ${label} de la planilla es ${code}, pero la asignada en Pitbox (${supplierName(assigned)}) tiene código ${assigned.pila_code}.`);
+      } else if (current && current !== code.toUpperCase()) {
+        warnings.push(`La ${label} de la planilla es ${code}, pero la asignada en Pitbox (${supplierName(assigned)}) tiene código ${current}.`);
       }
       return;
     }
-    const match = byCode(code);
+    const match = byCode(code, type);
     if (match.length === 1) {
       add({ entity: 'settings', entity_id: tenantId, field: settingField, value: match[0].id, label: `${label} de la empresa: ${supplierName(match[0])}`, current: null });
     } else {
@@ -244,16 +248,18 @@ async function analyze(tenantId, parsed) {
     const fund = (code, field, label) => {
       if (!code) return;
       const assigned = suppliers.find((s) => s.id === e[field]);
+      const type = field === 'eps_supplier_id' ? 'eps' : 'afp';
       if (assigned) {
-        if (!assigned.pila_code) {
+        const current = pilaCodeFor(assigned, type);
+        if (!current && !assigned.pila_code) {
           add({ entity: 'supplier', entity_id: assigned.id, field: 'pila_code', value: code, label: `Código PILA de ${supplierName(assigned)} (${label})`, current: null });
           assigned.pila_code = code; // para no proponerlo dos veces con otro valor
-        } else if (assigned.pila_code.toUpperCase() !== code.toUpperCase()) {
-          warnings.push(`${empName}: en la planilla su ${label} es ${code}, pero en Pitbox tiene asignada ${supplierName(assigned)} (código ${assigned.pila_code}).`);
+        } else if (current && current !== code.toUpperCase()) {
+          warnings.push(`${empName}: en la planilla su ${label} es ${code}, pero en Pitbox tiene asignada ${supplierName(assigned)} (código ${current}).`);
         }
         return;
       }
-      const match = byCode(code);
+      const match = byCode(code, type);
       if (match.length === 1) {
         add({ entity: 'employee', entity_id: e.id, employee_name: empName, field, value: match[0].id, label: `${label}: ${supplierName(match[0])}`, current: null });
       } else {

@@ -37,6 +37,11 @@ const PhysicalCountItem = sequelize.define('PhysicalCountItem', {
     allowNull: true,
     comment: 'Snapshot del nombre al generar la plantilla'
   },
+  location_code: {
+    type: DataTypes.STRING(40),
+    allowNull: true,
+    comment: 'Snapshot del código de ubicación del producto al generar la plantilla'
+  },
   system_qty: {
     type: DataTypes.DECIMAL(15, 2),
     allowNull: false,

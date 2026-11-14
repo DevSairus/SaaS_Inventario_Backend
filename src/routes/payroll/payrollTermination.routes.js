@@ -5,6 +5,7 @@ const payrollTerminationController = require('../../controllers/payroll/payrollT
 // Autenticación/tenant/módulo aplicados en server.js
 router.get('/pending', payrollTerminationController.getPendingTerminations);
 router.get('/:employee_id/preview', payrollTerminationController.previewTermination);
+router.get('/:employee_id/pdf', payrollTerminationController.downloadTerminationPdf);
 router.post('/:employee_id/emit', payrollTerminationController.emitTermination);
 
 module.exports = router;

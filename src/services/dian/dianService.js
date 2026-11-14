@@ -315,7 +315,7 @@ async function sendInvoiceToDian(sale, tenant) {
       request_xml: signedXml,
       response_raw: dianResponse.raw,
       status: dianStatus,
-      error_message: accepted ? null : dianResponse.statusMessage,
+      error_message: accepted ? null : buildRejectionMessage(dianResponse),
       is_test: isTest,
     });
 
@@ -402,7 +402,7 @@ async function checkInvoiceStatus(sale, tenant) {
     cufe: sale.cufe,
     response_raw: result.raw,
     status: accepted ? 'accepted' : 'rejected',
-    error_message: accepted ? null : result.statusMessage,
+    error_message: accepted ? null : buildRejectionMessage(result),
     is_test: environment !== 'production',
   });
 
@@ -529,6 +529,10 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
     // el CUFE/CUDE: la DIAN normaliza espacios al parsear el XML y el hash
     // que ellos recalculan deja de coincidir con el que enviamos (FAD06).
     const noteCustomerNit = (note.customer_tax_id || '').toString().trim() || '13832081';
+    // DV real del NIT (schemeID 31), igual que la factura (dianKitAdapter
+    // buildCounterparty). Antes iba '0' fijo y la DIAN rechazaba la nota con
+    // CAK24 ("DV no corresponde al NIT informado") aunque la factura sí pasara.
+    const noteCustomerDv = noteSchemeID === '31' ? String(dianKit.computeNitCheckDigit(noteCustomerNit)) : '0';
 
     const noteInput = {
       id: noteNumber,
@@ -536,12 +540,12 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       issueTime: new Date(),
       customer: {
         name: note.customer_name || 'Consumidor Final',
-        identification: { number: noteCustomerNit, type: noteSchemeID, dv: '0' },
+        identification: { number: noteCustomerNit, type: noteSchemeID, dv: noteCustomerDv },
         personType: '1',
         fiscalResponsibilities: ['R-99-PN'],
         taxInfo: {
           registrationName: note.customer_name || 'Consumidor Final',
-          companyId: { number: noteCustomerNit, type: noteSchemeID, dv: '0' },
+          companyId: { number: noteCustomerNit, type: noteSchemeID, dv: noteCustomerDv },
           taxLevelCode: 'R-99-PN',
           taxScheme: { code: '01' },
           address: noteAddress,
@@ -619,7 +623,7 @@ async function _sendNoteToDian(note, tenant, isDebit = false) {
       request_xml: result.signedXml,
       response_raw: dianResponse.raw,
       status: dianStatus,
-      error_message: accepted ? null : dianResponse.statusMessage,
+      error_message: accepted ? null : buildRejectionMessage(dianResponse),
       is_test: isTest,
     });
 
@@ -844,7 +848,7 @@ async function sendSupportDocumentToDian({ tenant, sourceType, sourceId, branchI
       request_xml: signedXml,
       response_raw: dianResponse.raw,
       status: dianStatus,
-      error_message: accepted ? null : dianResponse.statusMessage,
+      error_message: accepted ? null : buildRejectionMessage(dianResponse),
       is_test: isTest,
     });
 
@@ -1128,7 +1132,7 @@ async function sendSupportDocumentAdjustmentToDian(adjustment, supportDocument, 
       request_xml: signedXml,
       response_raw: dianResponse.raw,
       status: dianStatus,
-      error_message: accepted ? null : dianResponse.statusMessage,
+      error_message: accepted ? null : buildRejectionMessage(dianResponse),
       is_test: isTest,
     });
 

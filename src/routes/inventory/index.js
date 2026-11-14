@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 
 const warehousesRoutes = require('./warehouses.routes');
+const warehouseLocationsRoutes = require('./warehouseLocations.routes');
 const productsRoutes = require('./products.routes');
 const categoriesRoutes = require('./categories.routes');
 const suppliersRoutes = require('./suppliers.routes');
@@ -15,6 +16,7 @@ const transfersRoutes = require('./transfers.routes');
 const internalConsumptionsRoutes = require('./internalConsumptions.routes');
 
 router.use('/warehouses', warehousesRoutes);
+router.use('/locations', warehouseLocationsRoutes);
 router.use('/products', productsRoutes);
 router.use('/categories', categoriesRoutes);
 router.use('/suppliers', suppliersRoutes);

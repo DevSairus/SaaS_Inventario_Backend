@@ -37,6 +37,19 @@ const PhysicalCount = sequelize.define('PhysicalCount', {
     allowNull: false,
     defaultValue: false
   },
+  // Filtro por ubicación física (req. 2.3, migración 2026111302).
+  location_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Filtro de ubicación usado al generar la plantilla (Product.location_id)'
+  },
+  // category_id es una FAMILIA: la categoría y todas sus subcategorías, salvo
+  // que se pida solo la categoría exacta (include_subcategories = false).
+  include_subcategories: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
+  },
   status: {
     type: DataTypes.STRING(20),
     allowNull: false,

@@ -9,6 +9,7 @@
 // Periodo: pensión y riesgos con el mes liquidado; salud con el mes
 // siguiente (trabajadores dependientes).
 
+const { pilaCodeFor } = require('./pilaCodes');
 const { Op } = require('sequelize');
 const { buildHeader, buildDetail } = require('./pilaLayout');
 const { computeCotizante } = require('./pilaCalc');
@@ -81,10 +82,11 @@ async function buildPila(tenantId, year, month) {
     if (employee.eps_supplier_id) supplierIds.add(employee.eps_supplier_id);
     if (employee.pension_fund_supplier_id) supplierIds.add(employee.pension_fund_supplier_id);
   }
-  const suppliers = supplierIds.size ? await Supplier.findAll({ where: { tenant_id: tenantId, id: { [Op.in]: [...supplierIds] } }, attributes: ['id', 'pila_code', 'name'] }) : [];
-  const code = (id) => (id ? suppliers.find((s) => s.id === id)?.pila_code || '' : '');
-  const codigoArl = code(settings.arl_supplier_id);
-  const codigoCcf = code(settings.ccf_supplier_id);
+  const suppliers = supplierIds.size ? await Supplier.findAll({ where: { tenant_id: tenantId, id: { [Op.in]: [...supplierIds] } }, attributes: ['id', 'pila_code', 'tax_id', 'name'] }) : [];
+  // Código por tipo: el del proveedor, o el del catálogo nacional por su NIT (pilaCodes.js).
+  const code = (id, type) => (id ? pilaCodeFor(suppliers.find((s) => s.id === id), type) : '');
+  const codigoArl = code(settings.arl_supplier_id, 'arl');
+  const codigoCcf = code(settings.ccf_supplier_id, 'ccf');
   if (!codigoArl) warnings.push('Falta el código PILA de la ARL de la empresa (Configuración de Nómina → ARL, y en Proveedores su código PILA).');
 
   const rows = [...byEmployee.values()]
@@ -96,7 +98,7 @@ async function buildPila(tenantId, year, month) {
         unpaidDays,
         period: { year, month },
         settings,
-        codes: { eps: code(employee.eps_supplier_id), afp: code(employee.pension_fund_supplier_id), ccf: codigoCcf, arl: codigoArl },
+        codes: { eps: code(employee.eps_supplier_id, 'eps'), afp: code(employee.pension_fund_supplier_id, 'afp'), ccf: codigoCcf, arl: codigoArl },
         smlmv: PAYROLL_CONSTANTS.SMLMV,
         defaultCityCode: cfg.city_code,
         ibcFallback: (l) => basesDeLiquidacion(l).ibc,

@@ -4,11 +4,13 @@
 // payrollTerminationService.js para el cálculo y la orquestación de
 // emisión. Mismo patrón de auth/tenant que el resto de controllers de
 // payroll.
-const { Employee } = require('../../models');
+const { Employee, Tenant } = require('../../models');
 const {
   previewLiquidacionDefinitiva,
   emitirLiquidacionDefinitiva,
+  obtenerLiquidacionParaPdf,
 } = require('../../services/payroll/payrollTerminationService');
+const { generateTerminationSettlementPDF } = require('../../services/payroll/payrollTerminationPdfService');
 
 function parseOpciones(body = {}) {
   const indemnizacion = Number(body.indemnizacion) || 0;
@@ -41,13 +43,18 @@ const getPendingTerminations = async (req, res) => {
     for (const employee of employees) {
       // eslint-disable-next-line no-await-in-loop
       const emitido = await PayrollPeriod.findOne({
-        where: { tenant_id: req.user.tenant_id, period_type: 'liquidacion', status: 'emitido', notes: { [Op.like]: `%${employee.id}%` } },
+        where: {
+          tenant_id: req.user.tenant_id, period_type: 'liquidacion', status: 'emitido',
+          [Op.or]: [{ employee_id: employee.id }, { notes: { [Op.like]: `%${employee.id}%` } }],
+        },
       });
       rows.push({
         employee_id: employee.id,
         employee_name: `${employee.first_name} ${employee.first_surname}`,
         document_number: employee.document_number,
         termination_date: employee.termination_date,
+        termination_reason: employee.termination_reason || null,
+        termination_notes: employee.termination_notes || null,
         is_active: employee.is_active,
         already_settled: !!emitido,
       });
@@ -149,8 +156,38 @@ const emitTermination = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/payroll/termination/:employee_id/pdf?indemnizacion=&bonifRetiro=
+ * Comprobante PDF de la liquidación definitiva (6.3). Si ya fue emitida y
+ * aceptada por la DIAN se arma con lo firmado; si no, es un borrador con el
+ * cálculo actual.
+ */
+const downloadTerminationPdf = async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
+    if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
+
+    let opciones;
+    try {
+      opciones = parseOpciones(req.query);
+    } catch (validationError) {
+      return res.status(400).json({ success: false, message: validationError.message });
+    }
+
+    const data = await obtenerLiquidacionParaPdf(req.user.tenant_id, req.params.employee_id, opciones);
+    const tenant = await Tenant.findByPk(req.user.tenant_id);
+    await generateTerminationSettlementPDF(res, { ...data, tenant });
+  } catch (error) {
+    console.error('Error en downloadTerminationPdf:', error);
+    if (!res.headersSent) {
+      res.status(400).json({ success: false, message: error.message || 'Error al generar el PDF de la liquidación' });
+    }
+  }
+};
+
 module.exports = {
   getPendingTerminations,
   previewTermination,
   emitTermination,
+  downloadTerminationPdf,
 };

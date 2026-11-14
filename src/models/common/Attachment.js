@@ -4,7 +4,7 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../../config/database');
 
-const ATTACHMENT_KINDS = ['invoice_pdf', 'invoice_xml', 'payment_proof', 'delivery_note', 'photo', 'contract', 'quote', 'other'];
+const ATTACHMENT_KINDS = ['invoice_pdf', 'invoice_xml', 'payment_proof', 'delivery_note', 'photo', 'contract', 'quote', 'rut', 'chamber_of_commerce', 'other'];
 
 const Attachment = sequelize.define('Attachment', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -13,6 +13,8 @@ const Attachment = sequelize.define('Attachment', {
   entity_id: { type: DataTypes.UUID, allowNull: false },
   kind: { type: DataTypes.STRING(30), allowNull: false, defaultValue: 'other', validate: { isIn: [ATTACHMENT_KINDS] } },
   description: { type: DataTypes.STRING(255), allowNull: true },
+  // Vigencia del documento (p. ej. Cámara de Comercio del proveedor).
+  valid_until: { type: DataTypes.DATEONLY, allowNull: true },
   file_name: { type: DataTypes.STRING(255), allowNull: false },
   mime_type: { type: DataTypes.STRING(120), allowNull: true },
   size_bytes: { type: DataTypes.INTEGER, allowNull: true },

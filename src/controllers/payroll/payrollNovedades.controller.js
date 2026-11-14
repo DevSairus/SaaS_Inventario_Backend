@@ -2,7 +2,7 @@
 const { PayrollNovedad, PayrollPeriod, Employee } = require('../../models');
 const { Op } = require('sequelize');
 const { DIAN_CATEGORY_MAP, CATEGORIAS_HORAS_EXTRA, validarTopeHorasExtra } = require('../../services/payroll/payrollService');
-const { getEmployeesActiveInPeriod } = require('../../services/payroll/payrollPeriodEmissionService');
+const { getEmployeesActiveInPeriod, isEmployeeInPeriod, refreshLiquidationPreview } = require('../../services/payroll/payrollPeriodEmissionService');
 const { suggestNovedad: suggest, commissionsMonthlyAverage } = require('../../services/payroll/novedadSuggest.service');
 const { getSettings: getPayrollSettings } = require('../../services/payroll/payrollAccountingService');
 
@@ -89,6 +89,15 @@ const createNovedad = async (req, res) => {
 
     const employee = await Employee.findOne({ where: { id: employee_id, tenant_id } });
     if (!employee) return res.status(404).json({ success: false, message: 'Empleado no encontrado' });
+    // Las liquidaciones definitivas ('liquidacion') llevan su propio rango de
+    // fechas; en los demás periodos no se aceptan novedades de quien ya se
+    // retiró antes del periodo o aún no había ingresado.
+    if (period.period_type !== 'liquidacion' && !isEmployeeInPeriod(employee, period)) {
+      return res.status(400).json({
+        success: false,
+        message: 'El empleado no está vigente en este periodo (fecha de ingreso o de retiro fuera del rango). Su pago pendiente se hace por la liquidación definitiva.',
+      });
+    }
 
     const novedad = await PayrollNovedad.create({
       tenant_id,
@@ -101,6 +110,10 @@ const createNovedad = async (req, res) => {
       notes: notes || null,
       created_by: req.user.id || null,
     });
+
+    // Si el periodo ya está 'liquidado', su resumen se recalcula para que
+    // incluya la novedad recién cargada (antes quedaba desactualizado).
+    try { await refreshLiquidationPreview(period, tenant_id); } catch (e) { console.error('No se pudo refrescar el resumen del periodo:', e.message); }
 
     let warning = null;
     if (CATEGORIAS_HORAS_EXTRA.has(novedad.dian_category)) {
@@ -142,6 +155,7 @@ const deleteNovedad = async (req, res) => {
     }
 
     await novedad.destroy();
+    try { await refreshLiquidationPreview(novedad.period, tenant_id); } catch (e) { console.error('No se pudo refrescar el resumen del periodo:', e.message); }
     res.json({ success: true, message: 'Novedad eliminada' });
   } catch (error) {
     console.error('Error en deleteNovedad:', error);
@@ -200,7 +214,9 @@ const copyNovedadesFromPreviousPeriod = async (req, res) => {
       }
     }
 
-    const sourceNovedades = await PayrollNovedad.findAll({ where: { tenant_id, payroll_period_id: sourcePeriod.id } });
+    // Las generadas desde las horas de los proyectos no se copian: son de las
+    // fechas del otro período (se generan en este con sus propias horas).
+    const sourceNovedades = await PayrollNovedad.findAll({ where: { tenant_id, payroll_period_id: sourcePeriod.id, source: null } });
     if (!sourceNovedades.length) {
       return res.json({ success: true, message: 'El periodo de origen no tiene novedades para copiar', data: { copied: 0, skipped: 0, source_period_id: sourcePeriod.id } });
     }
@@ -230,6 +246,8 @@ const copyNovedadesFromPreviousPeriod = async (req, res) => {
       notes: n.notes,
       created_by: req.user.id || null,
     })));
+
+    try { await refreshLiquidationPreview(targetPeriod, tenant_id); } catch (e) { console.error('No se pudo refrescar el resumen del periodo:', e.message); }
 
     res.status(201).json({
       success: true,
@@ -273,4 +291,4 @@ module.exports = {
   createNovedad,
   deleteNovedad,
   copyNovedadesFromPreviousPeriod,
-};
+};

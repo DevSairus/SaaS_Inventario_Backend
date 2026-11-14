@@ -13,6 +13,10 @@ const audit = require('../utils/audit');
 const { can } = require('../services/tenantPermissions.service');
 const { storeAttachment, readAttachment, removeAttachment } = require('../services/attachments/attachmentStorage');
 
+// Roles con acceso a los documentos de proveedores (mismos que escriben proveedores
+// en routes/inventory/suppliers.routes.js): el RUT puede traer datos personales.
+const SUPPLIER_DOC_ROLES = ['admin', 'manager', 'warehouse_keeper', 'accountant', 'super_admin'];
+
 // Documentos que admiten adjuntos: modelo + permiso extra para verlos (los
 // gastos solo los ve quien ve gastos).
 const ENTITIES = {
@@ -23,6 +27,7 @@ const ENTITIES = {
   tool: { model: 'Tool', label: 'herramienta' },
   sale: { model: 'Sale', label: 'venta' },
   payment_batch: { model: 'PaymentBatch', label: 'lote de pago', readPermission: 'payments.schedule' },
+  supplier: { model: 'Supplier', label: 'proveedor', roles: SUPPLIER_DOC_ROLES },
 };
 const OWN_DELETE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -37,6 +42,9 @@ async function assertEntity(req, entityType, entityId) {
   const def = ENTITIES[entityType];
   if (!def) throw httpError(400, 'Tipo de documento no admite adjuntos');
   if (!/^[0-9a-f-]{36}$/i.test(String(entityId || ''))) throw httpError(400, 'Documento inválido');
+  if (def.roles && !def.roles.includes(req.user.role)) {
+    throw httpError(403, `No tienes acceso a los adjuntos de este ${def.label}`);
+  }
   if (def.readPermission && !(await can(req.user.tenant_id, req.user.role, def.readPermission))) {
     throw httpError(403, `No tienes acceso a los adjuntos de este ${def.label}`);
   }
@@ -46,8 +54,22 @@ async function assertEntity(req, entityType, entityId) {
   if (!exists) throw httpError(404, `No se encontró el ${def.label}`);
 }
 
+// 'YYYY-MM-DD' real (rechaza 2026-02-31) o null si viene vacío; lanza 400 si es inválida.
+const parseValidUntil = (value) => {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(text) ? new Date(`${text}T00:00:00Z`) : null;
+  if (!date || Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== text) {
+    throw httpError(400, 'La fecha de vigencia no es válida (use AAAA-MM-DD)');
+  }
+  return text;
+};
+const todayISO = () => new Date().toISOString().slice(0, 10);
+
 const serialize = (a) => ({
   id: a.id, entity_type: a.entity_type, entity_id: a.entity_id, kind: a.kind, description: a.description,
+  valid_until: a.valid_until || null,
+  is_expired: !!a.valid_until && a.valid_until < todayISO(),
   file_name: a.file_name, mime_type: a.mime_type, size_bytes: a.size_bytes, created_at: a.created_at,
   uploaded_by: a.uploaded_by,
   uploader: a.uploader ? { id: a.uploader.id, name: [a.uploader.first_name, a.uploader.last_name].filter(Boolean).join(' ') || a.uploader.email } : null,
@@ -75,6 +97,8 @@ const upload = async (req, res) => {
     await assertEntity(req, entity_type, entity_id);
     await assertWritable(req, entity_type, entity_id);
     const kind = Attachment.KINDS.includes(req.body.kind) ? req.body.kind : 'other';
+    // La vigencia solo aplica a la Cámara de Comercio; en otros tipos se ignora.
+    const validUntil = kind === 'chamber_of_commerce' ? parseValidUntil(req.body.valid_until) : null;
     const stored = await storeAttachment({ tenantId: req.user.tenant_id, file: req.file });
     const att = await Attachment.create({
       ...stored,
@@ -83,9 +107,10 @@ const upload = async (req, res) => {
       entity_id,
       kind,
       description: String(req.body.description || '').trim().slice(0, 255) || null,
+      valid_until: validUntil,
       uploaded_by: req.user.id,
     });
-    audit({ tenant_id: req.user.tenant_id, user_id: req.user.id, action: 'attach', entity: entity_type, entity_id, changes: { file: att.file_name, kind }, req });
+    audit({ tenant_id: req.user.tenant_id, user_id: req.user.id, action: 'attach', entity: entity_type, entity_id, changes: { file: att.file_name, kind, valid_until: validUntil }, req });
     res.status(201).json({ success: true, message: 'Archivo adjuntado', data: serialize(att) });
   } catch (error) {
     sendError(res, error, 'Error al adjuntar el archivo');
@@ -138,4 +163,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { list, upload, download, remove, ENTITIES };
+module.exports = { list, upload, download, remove, ENTITIES, parseValidUntil };

@@ -22,7 +22,7 @@
 const { generateSoftwareSecurityCode } = require('@dian-kit/core');
 const { Op } = require('sequelize');
 const {
-  sequelize, Employee, PayrollNovedad, PayrollConcept, PayrollDocument, DianEvent, DianResolution,
+  sequelize, Employee, PayrollNovedad, PayrollConcept, PayrollDocument, PayrollPeriod, DianEvent, DianResolution,
 } = require('../../models');
 const logger = require('../../config/logger');
 const { liquidarEmpleado, resumenLiquidacionParaImpresion, DIAN_CATEGORY_MAP } = require('./payrollService');
@@ -57,6 +57,35 @@ async function getEmployeesActiveInPeriod(tenantId, period) {
   if (period.branch_id) where.branch_id = period.branch_id;
 
   return Employee.findAll({ where, order: [['first_name', 'ASC']] });
+}
+
+/**
+ * Regla única de "¿este empleado entra en este periodo?" (misma lógica de
+ * fechas que getEmployeesActiveInPeriod, para validar un empleado suelto).
+ * Un empleado con termination_date anterior al inicio del periodo ya no
+ * entra: su último pago se hace por la liquidación definitiva, aunque esta
+ * aún no esté confirmada (is_active sigue en true hasta confirmarla).
+ */
+function isEmployeeInPeriod(employee, period) {
+  const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
+  const hire = iso(employee.hire_date);
+  const term = iso(employee.termination_date);
+  if (hire && hire > iso(period.end_date)) return false;
+  if (term && term < iso(period.start_date)) return false;
+  return true;
+}
+
+/**
+ * Recalcula y guarda el resumen (liquidation_preview) de un periodo que está
+ * en 'liquidado'. Se llama cada vez que cambian sus novedades, para que lo
+ * que ve el usuario siempre refleje las novedades vigentes. No hace nada en
+ * otros estados.
+ */
+async function refreshLiquidationPreview(period, tenantId) {
+  if (!period || period.status !== 'liquidado') return null;
+  const preview = await previewPayrollPeriod(period, tenantId);
+  await period.update({ liquidation_preview: preview, liquidation_preview_at: new Date() });
+  return preview;
 }
 
 /**
@@ -128,6 +157,42 @@ async function getPayrollResolution(tenantId, isTest) {
 }
 
 /**
+ * Sede con la que se numera un documento de nómina. getNextConsecutive()
+ * busca la resolución por sede, pero un período puede no tener sede (se
+ * crea para "todas las sedes": branch_id null) y antes se pasaba
+ * period.branch_id tal cual → "No se puede generar el consecutivo DIAN sin
+ * una sede", aunque cada empleado sí tuviera la suya.
+ *
+ * Orden: las sedes preferidas que tengan resolución activa de ese tipo
+ * (período, luego empleado) y, si ninguna la tiene, la sede de la
+ * resolución activa de la empresa — la numeración de nómina electrónica es
+ * propia del empleador (la DIAN no autoriza rangos por sede como en
+ * facturación), así que una sola resolución puede servir a todas las sedes.
+ * Mismo criterio que getPayrollResolution(), que ya validaba "alguna
+ * resolución de la empresa" antes de emitir.
+ */
+async function resolvePayrollNumberingBranch({ tenantId, preferredBranchIds = [], isTest, documentType = 'payroll', transaction }) {
+  const candidates = [...new Set(preferredBranchIds.filter(Boolean))];
+  for (const branchId of candidates) {
+    const own = await DianResolution.findOne({
+      where: { tenant_id: tenantId, branch_id: branchId, document_type: documentType, is_test: isTest, is_active: true },
+      attributes: ['id'],
+      transaction,
+    });
+    if (own) return branchId;
+  }
+  const company = await DianResolution.findOne({
+    where: { tenant_id: tenantId, document_type: documentType, is_test: isTest, is_active: true },
+    attributes: ['branch_id'],
+    order: [['created_at', 'DESC']],
+    transaction,
+  });
+  // Sin ninguna resolución: se devuelve la sede preferida para que
+  // getNextConsecutive dé su mensaje (o cree la de simulación).
+  return company?.branch_id || candidates[0] || null;
+}
+
+/**
  * Emite (o reintenta emitir) el Documento Soporte de Pago de Nómina
  * Electrónica de UN empleado dentro de un periodo, dentro de su propia
  * transacción — igual que sendSupportDocumentToDian() hace para un
@@ -150,6 +215,26 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
     if (payrollDocument && payrollDocument.dian_status === 'accepted') {
       await t.commit();
       return { employee, liquidation: payrollDocument.snapshot_liquidation, accepted: true, error: null, payrollDocumentId: payrollDocument.id };
+    }
+
+    // Un empleado con liquidación definitiva ya aceptada que cubre este período
+    // no puede volver a pagarse en la nómina normal (se pagaría dos veces).
+    if (period.period_type !== 'liquidacion') {
+      const liquidado = await PayrollDocument.findOne({
+        where: { tenant_id: tenant.id, employee_id: employee.id, dian_status: 'accepted' },
+        include: [{
+          model: PayrollPeriod, as: 'period', required: true, attributes: ['id', 'end_date'],
+          where: { period_type: 'liquidacion', end_date: { [Op.gte]: period.start_date } },
+        }],
+        transaction: t,
+      });
+      if (liquidado) {
+        await t.rollback();
+        return {
+          employee, liquidation: null, accepted: false, payrollDocumentId: null,
+          error: 'El empleado ya tiene la liquidación definitiva aceptada por la DIAN que cubre este período: no se le emite nómina normal.',
+        };
+      }
     }
 
     const { diasNoRemunerados, novedadesDian } = await getNovedadesParaLiquidacion(tenant.id, employee.id, period.id);
@@ -175,7 +260,13 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
     const reusableNumber = (payrollDocument?.payroll_document_number && payrollDocument.dian_status !== 'accepted')
       ? payrollDocument.payroll_document_number
       : null;
-    const rawNumbering = await getNextConsecutive(tenant.id, period.branch_id, isTest, t, reusableNumber, 'payroll');
+    const numberingBranchId = await resolvePayrollNumberingBranch({
+      tenantId: tenant.id, preferredBranchIds: [period.branch_id, employee.branch_id], isTest, transaction: t,
+    });
+    if (!numberingBranchId) {
+      throw new Error(`El período no tiene sede y el empleado ${[employee.first_name, employee.first_surname].filter(Boolean).join(' ')} tampoco: asígnele una sede en su perfil de nómina.`);
+    }
+    const rawNumbering = await getNextConsecutive(tenant.id, numberingBranchId, isTest, t, reusableNumber, 'payroll');
     const numbering = { prefix: rawNumbering.resolution.prefix, consecutivo: rawNumbering.consecutive };
     const numeroDocumento = rawNumbering.invoiceNumber;
     const cfg = extractDianConfig(tenant);
@@ -186,7 +277,8 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
     if (!payrollDocument) {
       payrollDocument = await PayrollDocument.create({
         tenant_id: tenant.id,
-        branch_id: period.branch_id,
+        // Período "todas las sedes": el documento queda en la sede del empleado.
+        branch_id: period.branch_id || employee.branch_id || null,
         employee_id: employee.id,
         payroll_period_id: period.id,
         payroll_document_number: numeroDocumento,
@@ -389,11 +481,14 @@ async function submitPayrollPeriod(period, tenant, userId) {
 
 module.exports = {
   getEmployeesActiveInPeriod,
+  isEmployeeInPeriod,
+  refreshLiquidationPreview,
   getNovedadesParaLiquidacion,
   getActiveAutoConcepts,
   previewPayrollPeriod,
   submitPayrollPeriod,
   getPayrollResolution,
+  resolvePayrollNumberingBranch,
   // Exportado para payrollTerminationService.js (mejora #7): la
   // liquidación definitiva emite el Documento Soporte de UN empleado
   // dentro de su propio PayrollPeriod ('liquidacion'), sin pasar por
@@ -403,4 +498,4 @@ module.exports = {
   // correo, idempotencia) es exactamente el mismo por documento, así que
   // se reutiliza tal cual en vez de duplicarlo.
   emitirDocumentoEmpleado,
-};
+};

@@ -3,6 +3,7 @@ const { Op, fn, col, where: sqlWhere } = require('sequelize');
 const { sanitizeRetentionConcepts } = require('../../services/taxService');
 const { PAYROLL_FUND_TYPES } = require('../../data/payroll-funds-colombia');
 const { MAX_LIMIT } = require('../../utils/pagination');
+const { notifyNewThirdParty, pendingFields } = require('../../services/accounting/thirdPartySetup.service');
 
 const sanitizeFundTypes = (value) => (Array.isArray(value) ? [...new Set(value.filter((t) => PAYROLL_FUND_TYPES.includes(t)))] : []);
 
@@ -297,7 +298,10 @@ const createSupplier = async (req, res) => {
       // desde el Documento Soporte quedaba sin ciudad y fallaba la validación.
       city_code: city_code || null,
       country_code: country_code ? String(country_code).trim().toUpperCase().slice(0, 2) : null,
+      ...pendingFields(),
     });
+    // 3.2 — aviso a contabilidad (no bloquea la respuesta).
+    notifyNewThirdParty(tenant_id, 'supplier', supplier, { creatorName: req.user?.name || req.user?.email }).catch(() => {});
 
     res.status(201).json({
       success: true,

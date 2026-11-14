@@ -22,7 +22,8 @@ const { Purchase, Sale, Supplier, Customer, Tenant, RadianEvent, User } = requir
 const { signXml } = require('../dian/dianSignerService');
 const dianApiService = require('../dian/dianApiService');
 const { isSimulation, simulationConfig, simulatedResponse } = require('../dian/dianSimulation');
-const { buildEventXml } = require('./radianXmlBuilder');
+const { buildEventXml, CLAIM_REASONS } = require('./radianXmlBuilder');
+const { coDateStr, formatCo } = require('../../utils/colombiaTime');
 const { addBusinessDays, isWithinBusinessDeadline } = require('./businessDays');
 // Contado/crédito decidido al emitir la factura (sales.payment_form)
 const { isCreditSale } = require('../sales/paymentTerms.service');
@@ -57,11 +58,22 @@ async function sendRadianEvent({
   eventCode, tenantId, userId,
   purchaseId, saleId,
   documentNumber, documentCufe,
-  counterpartyNit, counterpartyName,
-  claimReasonCode, claimReasonText, declarantType,
+  counterpartyNit, counterpartyName, counterpartyDocType,
+  claimReasonCode, claimReasonText, receiptNumber, receiptCude,
+  receiver,
   extraNote, details,
 }) {
   const user = userId ? await User.findByPk(userId, { attributes: ['id', 'first_name', 'last_name', 'cedula'] }) : null;
+  // 030/032: quién recibió la factura / el bien. Por defecto el usuario que
+  // emite; se puede indicar otra persona (quien firmó el recibido).
+  const issuer = {
+    first_name: (receiver?.first_name || user?.first_name || '').trim(),
+    last_name: (receiver?.last_name || user?.last_name || '').trim(),
+    id_number: String(receiver?.id_number || user?.cedula || '').trim(),
+    id_type: String(receiver?.id_type || '13').trim(),
+    job_title: (receiver?.job_title || '').trim() || null,
+    department: (receiver?.department || '').trim() || null,
+  };
   const tenant = await Tenant.findByPk(tenantId);
   // Modo simulación: datos/certificado de demo y sin envío a la DIAN (dianSimulation.js).
   const cfg = simulationConfig(tenant);
@@ -79,11 +91,17 @@ async function sendRadianEvent({
     // rompían el del CUFE (ver dianKitAdapter.js#cleanId).
     ownNit: String(cfg.nit).trim(),
     ownName: cfg.company_name || tenant.company_name,
+    ownDv: cfg.dv,
     counterpartyNit: String(counterpartyNit).trim(),
+    counterpartyDocType: counterpartyDocType || '31',
     counterpartyName,
-    issuerFirstName: user?.first_name || 'N/A',
-    issuerFamilyName: user?.last_name || 'N/A',
-    claimReasonCode, claimReasonText, declarantType, extraNote,
+    issuerFirstName: issuer.first_name,
+    issuerFamilyName: issuer.last_name,
+    issuerIdNumber: issuer.id_number,
+    issuerIdType: issuer.id_type,
+    issuerJobTitle: issuer.job_title,
+    issuerDepartment: issuer.department,
+    claimReasonCode, claimReasonText, receiptNumber, receiptCude, extraNote,
     softwarePin: cfg.software_pin,
     environment: cfg.environment || 'test',
   });
@@ -98,10 +116,12 @@ async function sendRadianEvent({
     counterparty_nit: counterpartyNit,
     event_code: eventCode,
     cude,
-    issued_at: new Date(`${issueDate}T${(issueTime || '00:00:00').replace(/-05:00$/, '')}`),
+    // issueTime ya trae el -05:00: sin él, en un servidor UTC el instante
+    // quedaba 5 horas antes y el plazo del 032 se contaba mal.
+    issued_at: new Date(`${issueDate}T${issueTime || '00:00:00-05:00'}`),
     issuer_user_id: user?.id || null,
     issuer_snapshot: ['030', '032'].includes(eventCode)
-      ? { first_name: user?.first_name, last_name: user?.last_name, cedula: user?.cedula }
+      ? { first_name: issuer.first_name, last_name: issuer.last_name, id_number: issuer.id_number, id_type: issuer.id_type, job_title: issuer.job_title, department: issuer.department }
       : null,
     claim_reason_code: eventCode === '031' ? (claimReasonCode || null) : null,
     details: details || null,
@@ -198,11 +218,11 @@ async function emitPurchaseEvent(eventCode, purchaseId, tenantId, userId, extra 
       throw new Error('Falta el vencimiento del plazo de 3 días hábiles (debería haberse fijado al aceptar el 032) — no se puede validar el plazo.');
     }
     if (!isWithinBusinessDeadline(new Date(), purchase.radian_deadline_at)) {
-      throw new Error(`El plazo de 3 días hábiles desde el recibo del bien/servicio (032) ya venció el ${new Date(purchase.radian_deadline_at).toLocaleDateString('es-CO')} — este evento ya no se puede emitir.`);
+      throw new Error(`El plazo de 3 días hábiles desde el recibo del bien/servicio (032) ya venció el ${formatCo(purchase.radian_deadline_at)} — este evento ya no se puede emitir.`);
     }
   }
-  if (eventCode === '031' && !extra.claimReasonText) {
-    throw new Error('El motivo del reclamo es obligatorio.');
+  if (eventCode === '031' && !CLAIM_REASONS[extra.claimReasonCode]) {
+    throw new Error('Seleccione el concepto del reclamo (01 Documento con inconsistencias, 02 Mercancía no entregada, 03 Mercancía entregada parcialmente, 04 Servicio no prestado).');
   }
 
   const supplier = purchase.supplier;
@@ -217,8 +237,10 @@ async function emitPurchaseEvent(eventCode, purchaseId, tenantId, userId, extra 
     documentCufe: purchase.cufe,
     counterpartyNit: supplier.tax_id,
     counterpartyName: supplier.business_name || supplier.name,
+    counterpartyDocType: supplier.document_type || (supplier.person_type === 'natural' ? '13' : '31'),
     claimReasonCode: extra.claimReasonCode,
     claimReasonText: extra.claimReasonText,
+    receiver: extra.receiver,
   });
 
   if (result.accepted) {
@@ -240,8 +262,8 @@ async function emitPurchaseEvent(eventCode, purchaseId, tenantId, userId, extra 
   };
 }
 
-const emitAcuse030 = (purchaseId, tenantId, userId) => emitPurchaseEvent('030', purchaseId, tenantId, userId);
-const emitRecibo032 = (purchaseId, tenantId, userId) => emitPurchaseEvent('032', purchaseId, tenantId, userId);
+const emitAcuse030 = (purchaseId, tenantId, userId, receiver) => emitPurchaseEvent('030', purchaseId, tenantId, userId, { receiver });
+const emitRecibo032 = (purchaseId, tenantId, userId, receiver) => emitPurchaseEvent('032', purchaseId, tenantId, userId, { receiver });
 const emitAceptacion033 = (purchaseId, tenantId, userId) => emitPurchaseEvent('033', purchaseId, tenantId, userId);
 const emitReclamo031 = (purchaseId, tenantId, userId, { claimReasonCode, claimReasonText }) =>
   emitPurchaseEvent('031', purchaseId, tenantId, userId, { claimReasonCode, claimReasonText });
@@ -263,11 +285,18 @@ const SALE_RECEIVED_STATUS = { '032': '032_received', '033': '033_received', '03
  * comprador (AttachedDocument con el Request/Response) — se registran a
  * mano hasta que se confirme y construya el polling real.
  *
+ * El 032 exige su número, su CUDE y su fecha/hora REAL de generación: el
+ * plazo de 3 días hábiles corre desde esa fecha (no desde que se registra
+ * en Pitbox) y el 034 debe citar ese número y CUDE en su declaración jurada
+ * (Anexo FE 1.9 §6.5.5.7). Si un 032 ya registrado no los tiene (registros
+ * anteriores a esta regla), volver a registrarlo los completa.
+ *
  * @param {'032'|'033'|'031'} eventCode
  * @param {string} saleId
  * @param {string} tenantId
  * @param {string} userId
- * @param {{ note?: string }} [extra]
+ * @param {{ note?: string, eventNumber?: string, cude?: string, issuedAt?: string }} [extra]
+ *   issuedAt: 'YYYY-MM-DDTHH:MM' en hora Colombia, o ISO con zona.
  */
 async function recordSaleReceivedEvent(eventCode, saleId, tenantId, userId, extra = {}) {
   if (!SALE_RECEIVED_STATUS[eventCode]) {
@@ -281,30 +310,66 @@ async function recordSaleReceivedEvent(eventCode, saleId, tenantId, userId, extr
   if (!sale) throw new Error('Venta no encontrada');
   if (!sale.cufe) throw new Error('Esta venta no tiene CUFE — no se puede registrar un evento sobre ella.');
 
-  if (eventCode === '032' && sale.radian_status !== 'none') {
+  // 032 ya registrado sin número/CUDE: se completa en vez de duplicarlo.
+  let existing032 = null;
+  if (eventCode === '032' && sale.radian_status === '032_received') {
+    existing032 = await RadianEvent.findOne({
+      where: { tenant_id: tenantId, sale_id: sale.id, direction: 'received', event_code: '032' },
+      order: [['created_at', 'DESC']],
+    });
+    if (existing032?.cude) {
+      throw new Error('El Recibo del bien (032) de esta venta ya está registrado con su CUDE.');
+    }
+  } else if (eventCode === '032' && sale.radian_status !== 'none') {
     throw new Error(`Ya hay un evento registrado sobre esta venta (estado actual: "${sale.radian_status}").`);
   }
   if (['033', '031'].includes(eventCode) && sale.radian_status !== '032_received') {
     throw new Error(`Solo se puede registrar ${eventCode} después de un 032 recibido (estado actual: "${sale.radian_status}").`);
   }
 
+  let issuedAt = new Date();
+  let receiptFields = {};
+  if (eventCode === '032') {
+    const eventNumber = String(extra.eventNumber || '').trim();
+    const cude = String(extra.cude || '').trim().toLowerCase();
+    if (!eventNumber) throw new Error('Ingrese el número del Recibo del bien (032) que emitió el cliente.');
+    if (!/^[0-9a-f]{96}$/.test(cude)) {
+      throw new Error('El CUDE del 032 debe tener 96 caracteres hexadecimales (lo encuentra en el XML o en la consulta del documento en la DIAN).');
+    }
+    const raw = String(extra.issuedAt || '').trim();
+    issuedAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(raw) ? new Date(`${raw.length === 16 ? `${raw}:00` : raw}-05:00`) : new Date(raw);
+    if (!raw || Number.isNaN(issuedAt.getTime())) throw new Error('Ingrese la fecha y hora en que el cliente generó el 032.');
+    if (issuedAt > new Date()) throw new Error('La fecha del 032 no puede ser futura.');
+    const invoiceAt = sale.dian_accepted_at || sale.dian_sent_at || sale.sale_date;
+    if (invoiceAt && coDateStr(issuedAt) < coDateStr(invoiceAt)) {
+      throw new Error('La fecha del 032 no puede ser anterior a la de la factura.');
+    }
+    receiptFields = { cude, details: { event_number: eventNumber } };
+  }
+
   const user = userId ? await User.findByPk(userId, { attributes: ['id', 'first_name', 'last_name', 'cedula'] }) : null;
 
-  const eventRow = await RadianEvent.create({
-    tenant_id: tenantId,
-    direction: 'received',
-    sale_id: sale.id,
-    document_cufe: sale.cufe,
-    document_number: sale.dian_invoice_number || null,
-    counterparty_nit: sale.customer?.tax_id || null,
-    event_code: eventCode,
-    issued_at: new Date(),
-    issuer_user_id: user?.id || null,
-    request_xml: extra.note || null,
-    dian_status: 'accepted',
-    is_test: false,
-    created_by: user?.id || null,
-  });
+  let eventRow;
+  if (existing032) {
+    eventRow = await existing032.update({ ...receiptFields, issued_at: issuedAt, ...(extra.note ? { request_xml: extra.note } : {}) });
+  } else {
+    eventRow = await RadianEvent.create({
+      tenant_id: tenantId,
+      direction: 'received',
+      sale_id: sale.id,
+      document_cufe: sale.cufe,
+      document_number: sale.dian_invoice_number || null,
+      counterparty_nit: sale.customer?.tax_id || null,
+      event_code: eventCode,
+      issued_at: issuedAt,
+      issuer_user_id: user?.id || null,
+      request_xml: extra.note || null,
+      ...receiptFields,
+      dian_status: 'accepted',
+      is_test: false,
+      created_by: user?.id || null,
+    });
+  }
 
   const updates = { radian_status: SALE_RECEIVED_STATUS[eventCode] };
   if (eventCode === '032') {
@@ -316,17 +381,101 @@ async function recordSaleReceivedEvent(eventCode, saleId, tenantId, userId, extr
 }
 
 /**
+ * Consulta en la DIAN (GetStatusEvent, Anexo FE 1.9 §7.17) los eventos que
+ * el CLIENTE registró sobre nuestra factura y los registra en Pitbox, en
+ * lugar de digitar a mano el número y el CUDE del 032. Usa la misma
+ * máquina de estados que el registro manual (recordSaleReceivedEvent):
+ *   - 032 con número, CUDE y fecha → se registra (o completa uno incompleto)
+ *     y arranca el plazo de 3 días hábiles desde su fecha real;
+ *   - después, 033 o 031 → se registra y cierra la posibilidad del 034.
+ * Un evento que la respuesta no trae completo NO se registra: se devuelve
+ * para mostrarlo, con un fragmento del XML si no se reconoció ninguno.
+ *
+ * @returns {Promise<{ found: boolean, message: string, events: Array, applied: string[], skipped: string[], xmlSample?: string }>}
+ */
+async function syncSaleEventsFromDian(saleId, tenantId, userId = null) {
+  const sale = await Sale.findOne({ where: { id: saleId, tenant_id: tenantId } });
+  if (!sale) throw new Error('Venta no encontrada');
+  if (!sale.cufe) throw new Error('Esta venta no tiene CUFE.');
+
+  const tenant = await Tenant.findByPk(tenantId);
+  const dianKit = require('../dian/dianKitAdapter');
+  const response = await dianKit.getStatusEvent(tenant, sale.cufe);
+  if (!response?.found) {
+    return { found: false, message: response?.message || 'La DIAN no devolvió eventos para esta factura.', events: [], applied: [], skipped: [] };
+  }
+
+  const { parseStatusEventXml } = require('./radianStatusEvents');
+  const events = parseStatusEventXml(response.xml, sale.cufe);
+  const applied = [];
+  const skipped = [];
+  const note = 'Registrado automáticamente desde la DIAN (GetStatusEvent)';
+
+  const e032 = events.find((e) => e.code === '032');
+  if (e032) {
+    const receipt032 = sale.radian_status === '032_received'
+      ? await RadianEvent.findOne({ where: { tenant_id: tenantId, sale_id: sale.id, direction: 'received', event_code: '032' }, order: [['created_at', 'DESC']] })
+      : null;
+    const needs032 = sale.radian_status === 'none' || (sale.radian_status === '032_received' && !receipt032?.cude);
+    if (needs032) {
+      if (e032.number && e032.cude && e032.issuedAt) {
+        try {
+          await recordSaleReceivedEvent('032', sale.id, tenantId, userId, { eventNumber: e032.number, cude: e032.cude, issuedAt: e032.issuedAt, note });
+          applied.push('032');
+          await sale.reload();
+        } catch (err) {
+          skipped.push(`032: ${err.message}`);
+        }
+      } else {
+        skipped.push('032: la respuesta de la DIAN no trae completos el número, el CUDE o la fecha');
+      }
+    }
+  }
+
+  if (sale.radian_status === '032_received') {
+    const answer = events.find((e) => e.code === '033') || events.find((e) => e.code === '031');
+    if (answer) {
+      try {
+        await recordSaleReceivedEvent(answer.code, sale.id, tenantId, userId, { note });
+        applied.push(answer.code);
+      } catch (err) {
+        skipped.push(`${answer.code}: ${err.message}`);
+      }
+    }
+  }
+
+  const result = {
+    found: true,
+    message: response.message || '',
+    events,
+    applied,
+    skipped,
+  };
+  // Formato de respuesta aún sin verificar con un envío real: si no se
+  // reconoció ningún evento, se devuelve un fragmento para diagnosticarlo.
+  if (!events.length) {
+    result.xmlSample = String(response.xml || '').slice(0, 3000);
+    logger.warn(`[RADIAN] GetStatusEvent sin eventos reconocidos para ${sale.dian_invoice_number}: ${result.xmlSample.slice(0, 500)}`);
+  }
+  return result;
+}
+
+/**
  * Emite el evento 034 (Aceptación tácita) sobre una venta a crédito: solo
  * cuando hubo un 032 recibido del cliente y venció el plazo de 3 días
  * hábiles sin que llegara 033 ni 031 (ver §2 y §5.7 del plan — siempre
  * requiere acción explícita del usuario, nunca se auto-emite).
  *
- * @param {'direct'|'mandatario'|'mandato_persona_natural'} [declarantType]
- *   Ver DECLARATION_NOTE_TEMPLATES en radianXmlBuilder.js — el texto de la
- *   declaración jurada sigue MARCADO COMO PENDIENTE DE VERIFICAR, no usar
- *   en producción sin revisión legal/contra el Anexo FE 1.9 §6.5.5.7.
+ * La declaración jurada (texto literal del Anexo FE 1.9 §6.5.5.7, ver
+ * radianXmlBuilder.js#tacitAcceptanceNote) cita el número y el CUDE del 032
+ * del cliente. Solo se soporta la emisión directa (sin mandatario).
+ *
+ * @param {'direct'} [declarantType]
  */
 async function emitAceptacionTacita034(saleId, tenantId, userId, declarantType = 'direct') {
+  if (declarantType !== 'direct') {
+    throw new Error('Por ahora el 034 solo se puede emitir directamente (sin mandatario).');
+  }
   const sale = await Sale.findOne({
     where: { id: saleId, tenant_id: tenantId },
     include: [{ model: Customer, as: 'customer' }],
@@ -343,7 +492,16 @@ async function emitAceptacionTacita034(saleId, tenantId, userId, declarantType =
     throw new Error('Falta el vencimiento del plazo de 3 días hábiles.');
   }
   if (isWithinBusinessDeadline(new Date(), sale.radian_deadline_at)) {
-    throw new Error(`El plazo de 3 días hábiles aún no vence (${new Date(sale.radian_deadline_at).toLocaleDateString('es-CO')}) — el 034 no se puede emitir antes de que venza.`);
+    throw new Error(`El plazo de 3 días hábiles aún no vence (${formatCo(sale.radian_deadline_at)}) — el 034 no se puede emitir antes de que venza.`);
+  }
+
+  const receipt = await RadianEvent.findOne({
+    where: { tenant_id: tenantId, sale_id: sale.id, direction: 'received', event_code: '032' },
+    order: [['created_at', 'DESC']],
+  });
+  const receiptNumber = receipt?.details?.event_number;
+  if (!receipt?.cude || !receiptNumber) {
+    throw new Error('Falta el número y el CUDE del Recibo del bien (032) del cliente: complételos en "Registrar evento del cliente" antes de emitir el 034.');
   }
 
   const customer = sale.customer;
@@ -358,7 +516,9 @@ async function emitAceptacionTacita034(saleId, tenantId, userId, declarantType =
     documentCufe: sale.cufe,
     counterpartyNit: customer.tax_id,
     counterpartyName: customer.business_name || `${customer.first_name || ''} ${customer.last_name || ''}`.trim(),
-    declarantType,
+    counterpartyDocType: customer.document_type || '13',
+    receiptNumber,
+    receiptCude: receipt.cude,
   });
 
   if (result.accepted) {
@@ -422,7 +582,7 @@ async function emitInscripcion036(saleId, tenantId, userId) {
   const result = await sendRadianEvent({
     eventCode: '036', tenantId, userId, saleId: sale.id,
     documentNumber: sale.dian_invoice_number, documentCufe: sale.cufe,
-    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer),
+    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer), counterpartyDocType: sale.customer.document_type || '13',
   });
 
   if (result.accepted) {
@@ -514,7 +674,7 @@ async function emitLimitacion041(saleId, tenantId, userId, { reason } = {}) {
   const result = await sendRadianEvent({
     eventCode: '041', tenantId, userId, saleId: sale.id,
     documentNumber: sale.dian_invoice_number, documentCufe: sale.cufe,
-    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer),
+    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer), counterpartyDocType: sale.customer.document_type || '13',
     extraNote: `Limitación de circulación — ${reason}`,
     details: { reason },
   });
@@ -536,7 +696,7 @@ async function emitTerminacionLimitacion042(saleId, tenantId, userId) {
   const result = await sendRadianEvent({
     eventCode: '042', tenantId, userId, saleId: sale.id,
     documentNumber: sale.dian_invoice_number, documentCufe: sale.cufe,
-    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer),
+    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer), counterpartyDocType: sale.customer.document_type || '13',
     extraNote: 'Terminación de la limitación de circulación',
   });
 
@@ -619,7 +779,7 @@ async function emitPago045(saleId, tenantId, userId, { amount, paymentDate, paym
   const result = await sendRadianEvent({
     eventCode: '045', tenantId, userId, saleId: sale.id,
     documentNumber: sale.dian_invoice_number, documentCufe: sale.cufe,
-    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer),
+    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer), counterpartyDocType: sale.customer.document_type || '13',
     extraNote: `Pago de ${amount} el ${payDate}${paymentMethod ? ' vía ' + paymentMethod : ''}`,
     details: { amount, payment_date: payDate, payment_method: paymentMethod || null, payee_nit: payeeNit },
   });
@@ -635,7 +795,7 @@ async function emitInformePago046(saleId, tenantId, userId, { note } = {}) {
   const result = await sendRadianEvent({
     eventCode: '046', tenantId, userId, saleId: sale.id,
     documentNumber: sale.dian_invoice_number, documentCufe: sale.cufe,
-    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer),
+    counterpartyNit: sale.customer.tax_id, counterpartyName: customerDisplayName(sale.customer), counterpartyDocType: sale.customer.document_type || '13',
     extraNote: note || 'Informe para el pago',
     details: { note: note || null },
   });
@@ -645,7 +805,7 @@ async function emitInformePago046(saleId, tenantId, userId, { note } = {}) {
 
 module.exports = {
   emitPurchaseEvent, emitAcuse030, emitRecibo032, emitAceptacion033, emitReclamo031,
-  recordSaleReceivedEvent, emitAceptacionTacita034,
+  recordSaleReceivedEvent, syncSaleEventsFromDian, emitAceptacionTacita034,
   emitInscripcion036, emitEndoso, emitCancelacionEndoso040,
   emitLimitacion041, emitTerminacionLimitacion042,
   emitMandato043, emitTerminacionMandato044,

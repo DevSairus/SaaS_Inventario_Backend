@@ -287,6 +287,26 @@ const changePayrollPeriodStatus = async (req, res) => {
       });
     }
 
+    // 6.1 — validaciones previas del flujograma: los errores bloquean el avance
+    // (las advertencias se muestran en el flujograma y no bloquean).
+    const workflow = require('../../services/payroll/payrollWorkflow.service');
+    if (status === 'liquidado' || status === 'emitido') {
+      const gate = await workflow.validateAdvance(tenant_id, period, status);
+      if (!gate.ok) {
+        await workflow.logEvent(tenant_id, period.id, {
+          type: 'advance_blocked', fromStatus: period.status, toStatus: status, user: req.user,
+          note: gate.errors.map((c) => c.message).join(' | '),
+          details: gate.errors.map((c) => ({ key: c.key, items: c.items })),
+        });
+        return res.status(422).json({
+          success: false,
+          message: `No se puede pasar a "${status}": ${gate.errors.map((c) => c.message).join(' ')}`,
+          data: { blocking: gate.errors },
+        });
+      }
+    }
+    const fromStatus = period.status;
+
     const updates = { status };
     if (status === 'cerrado') {
       updates.closed_at = new Date();
@@ -312,6 +332,7 @@ const changePayrollPeriodStatus = async (req, res) => {
       updates.liquidation_preview = preview;
       updates.liquidation_preview_at = new Date();
       await period.update(updates);
+      await workflow.logEvent(tenant_id, period.id, { type: 'status_change', fromStatus, toStatus: status, user: req.user, note: `${preview.totals.count} empleado(s) liquidados` });
       return res.json({
         success: true,
         message: `Periodo liquidado: ${preview.totals.count} empleado${preview.totals.count !== 1 ? 's' : ''}, revise antes de emitir`,
@@ -344,6 +365,11 @@ const changePayrollPeriodStatus = async (req, res) => {
 
       if (!emissionResult.allAccepted) {
         const rejected = emissionResult.results.filter(r => !r.accepted);
+        await workflow.logEvent(tenant_id, period.id, {
+          type: 'emission_rejected', fromStatus, toStatus: status, user: req.user,
+          note: `${rejected.length} de ${emissionResult.results.length} documentos no fueron aceptados por la DIAN`,
+          details: rejected.map((r) => ({ employee_id: r.employee.id, error: r.error })),
+        });
         return res.status(207).json({
           success: false,
           message: `${rejected.length} de ${emissionResult.results.length} empleados no fueron aceptados por la DIAN. El periodo permanece en "liquidado" — corrija y vuelva a intentar (los ya aceptados no se reenvían).`,
@@ -362,6 +388,7 @@ const changePayrollPeriodStatus = async (req, res) => {
       // Todos aceptados: sí se avanza el periodo a 'emitido' y queda
       // registrado el asiento contable generado.
       await period.update(updates);
+      await workflow.logEvent(tenant_id, period.id, { type: 'status_change', fromStatus, toStatus: status, user: req.user, note: `${emissionResult.results.length} documentos aceptados por la DIAN` });
       return res.json({
         success: true,
         message: `Periodo emitido: ${emissionResult.results.length} documentos aceptados por la DIAN, asiento contable generado`,
@@ -370,6 +397,7 @@ const changePayrollPeriodStatus = async (req, res) => {
     }
 
     await period.update(updates);
+    await workflow.logEvent(tenant_id, period.id, { type: 'status_change', fromStatus, toStatus: status, user: req.user });
     res.json({ success: true, message: `Periodo pasado a estado "${status}"`, data: period });
   } catch (error) {
     console.error('Error en changePayrollPeriodStatus:', error);
@@ -378,6 +406,20 @@ const changePayrollPeriodStatus = async (req, res) => {
       message: 'Error al cambiar el estado del periodo',
       error: process.env.NODE_ENV === 'production' ? undefined : error.message,
     });
+  }
+};
+
+// 6.1 — Flujograma del período: etapas, validaciones previas, responsables y bitácora.
+const getPayrollPeriodWorkflow = async (req, res) => {
+  try {
+    if (!req.user?.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
+    const period = await PayrollPeriod.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!period) return res.status(404).json({ success: false, message: 'Periodo no encontrado' });
+    const data = await require('../../services/payroll/payrollWorkflow.service').getWorkflow(req.user.tenant_id, period);
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error en getPayrollPeriodWorkflow:', error);
+    res.status(500).json({ success: false, message: 'Error al calcular el flujograma del periodo' });
   }
 };
 
@@ -541,4 +583,5 @@ module.exports = {
   deletePayrollPeriod,
   suggestNextPeriod,
   recalculatePeriodPreview,
+  getPayrollPeriodWorkflow,
 };

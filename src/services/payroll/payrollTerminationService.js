@@ -59,9 +59,10 @@ const {
 const {
   PAYROLL_CONSTANTS, diasComerciales, liquidarEmpleado, resumenLiquidacionParaImpresion,
 } = require('./payrollService');
-const { emitirDocumentoEmpleado, getPayrollResolution } = require('./payrollPeriodEmissionService');
+const { emitirDocumentoEmpleado, getPayrollResolution, isEmployeeInPeriod } = require('./payrollPeriodEmissionService');
 const { extractDianConfig } = require('../dian/dianService');
 const { generatePayrollEntry } = require('../accounting/autoEntries.service');
+const { terminationReasonLabel, calcularIndemnizacionSugerida } = require('./terminationReasons');
 const logger = require('../../config/logger');
 
 const PORCENTAJE_INTERESES_CESANTIAS = 12; // Ley 52/1975 -- 12% anual sobre cesantías causadas
@@ -96,7 +97,62 @@ async function obtenerRangoSalarioPendiente(tenantId, employee) {
   const inicio = finPeriodoAnterior ? addDaysISO(finPeriodoAnterior, 1) : employee.hire_date;
   const fin = employee.termination_date;
 
-  return { inicio, fin, hayPeriodoAnterior: !!finPeriodoAnterior };
+  // salarioCubierto: el período normal ya pagó los días hasta el retiro, así
+  // que la liquidación NO paga salario (solo prestaciones y vacaciones).
+  return { inicio, fin, hayPeriodoAnterior: !!finPeriodoAnterior, salarioCubierto: inicio > fin, pagadoHasta: finPeriodoAnterior };
+}
+
+/* ──────────────────────────────────────────────────────────
+ * 1b. Secuencia obligatoria (6.4): antes de liquidar, los períodos normales
+ *     que incluyen al empleado hasta su retiro deben estar emitidos y
+ *     aceptados; ahí se pagan los días causados. Devuelve los que faltan.
+ * ────────────────────────────────────────────────────────── */
+async function obtenerPeriodosPendientes(tenantId, employee) {
+  const periodos = await PayrollPeriod.findAll({
+    where: {
+      tenant_id: tenantId,
+      period_type: { [Op.in]: ['mensual', 'quincenal'] },
+      start_date: { [Op.lte]: employee.termination_date },
+      end_date: { [Op.gte]: employee.hire_date },
+    },
+    order: [['start_date', 'ASC']],
+  });
+  const aplicables = periodos.filter((p) => (
+    p.period_type === employee.payroll_periodicity
+    && (!p.branch_id || p.branch_id === employee.branch_id)
+    && isEmployeeInPeriod(employee, p)
+  ));
+  if (aplicables.length === 0) return [];
+
+  const pagados = await PayrollDocument.findAll({
+    where: {
+      tenant_id: tenantId, employee_id: employee.id, dian_status: 'accepted',
+      payroll_period_id: { [Op.in]: aplicables.map((p) => p.id) },
+    },
+    attributes: ['payroll_period_id'],
+  });
+  const idsPagados = new Set(pagados.map((d) => d.payroll_period_id));
+  return aplicables
+    .filter((p) => !idsPagados.has(p.id))
+    .map((p) => ({ id: p.id, period_type: p.period_type, start_date: p.start_date, end_date: p.end_date, status: p.status }));
+}
+
+/* Prima del semestre que ya se pagó en un período normal (p. ej. la de
+ * diciembre cuando el retiro es después): se descuenta para no pagarla dos veces. */
+async function obtenerPrimaYaPagada(tenantId, employee, desdeISO) {
+  const documentos = await PayrollDocument.findAll({
+    where: { tenant_id: tenantId, employee_id: employee.id, dian_status: 'accepted' },
+    include: [{ model: PayrollPeriod, as: 'period', attributes: ['end_date', 'period_type'] }],
+  });
+  let total = 0;
+  for (const doc of documentos) {
+    const periodo = doc.period;
+    if (!periodo || periodo.period_type === 'liquidacion') continue;
+    if (periodo.end_date < desdeISO || periodo.end_date > employee.termination_date) continue;
+    const primas = doc.snapshot_liquidation?.devengados?.primas;
+    if (primas) total += (Number(primas.pago) || 0) + (Number(primas.pagoNS) || 0);
+  }
+  return Math.round(total);
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -168,6 +224,27 @@ async function calcularVacacionesPendientes(tenantId, employee) {
 }
 
 /* ──────────────────────────────────────────────────────────
+ * 4b. Indemnización SUGERIDA según la causa del retiro (6.2). No se suma a
+ *     la liquidación sola: quien liquida decide el monto (ver
+ *     terminationReasons.js para las fórmulas y sus límites).
+ * ────────────────────────────────────────────────────────── */
+function sugerirIndemnizacion(employee) {
+  const serviceDays = diasComerciales(employee.hire_date, employee.termination_date);
+  const remainingDays = employee.contract_type === '2' && employee.contract_end_date
+    && employee.contract_end_date > employee.termination_date
+    ? diasComerciales(addDaysISO(employee.termination_date, 1), employee.contract_end_date)
+    : (employee.contract_type === '2' && employee.contract_end_date ? 0 : null);
+  return calcularIndemnizacionSugerida({
+    reason: employee.termination_reason,
+    contractType: employee.contract_type,
+    baseSalary: employee.base_salary,
+    serviceDays,
+    smlmv: PAYROLL_CONSTANTS.SMLMV,
+    remainingDays,
+  });
+}
+
+/* ──────────────────────────────────────────────────────────
  * 5. Orquestación -- arma el breakdown + las novedades DIAN listas para
  *    pasar a liquidarEmpleado()/persistir.
  * ────────────────────────────────────────────────────────── */
@@ -178,7 +255,11 @@ async function calcularLiquidacionDefinitiva(tenantId, employee, { indemnizacion
 
   const rangoPendiente = await obtenerRangoSalarioPendiente(tenantId, employee);
   const cesantias = calcularCesantiasEIntereses(employee);
-  const prima = calcularPrimaProporcional(employee);
+  const primaCausada = calcularPrimaProporcional(employee);
+  const primaYaPagada = await obtenerPrimaYaPagada(tenantId, employee, primaCausada.fechaInicioAcumulacion);
+  // `prima` es lo que se paga en esta liquidación (causada menos lo ya pagado).
+  const prima = { ...primaCausada, primaCausada: primaCausada.prima, yaPagada: primaYaPagada, prima: Math.max(0, primaCausada.prima - primaYaPagada) };
+  const periodosPendientes = await obtenerPeriodosPendientes(tenantId, employee);
   const vacaciones = await calcularVacacionesPendientes(tenantId, employee);
 
   const novedades = [];
@@ -208,15 +289,36 @@ async function calcularLiquidacionDefinitiva(tenantId, employee, { indemnizacion
     'Cesantías/intereses asumen que los años anteriores ya fueron consignados al fondo (obligación al 14 de febrero) -- si el retiro es antes de esa fecha del año en curso, revise el año anterior a mano.',
     'Vacaciones: según el libro de vacaciones (15 días por 360 días comerciales desde el ingreso o desde el saldo inicial, sin causar licencias no remuneradas ni días no remunerados). Revise el saldo inicial del empleado si entró antes de llevar la nómina en Pitbox.',
   ];
-  if (!Number(indemnizacion) && !Number(bonifRetiro)) {
-    notasLimitaciones.push('No se incluyó indemnización ni bonificación por retiro -- si el retiro fue sin justa causa o hay una negociación de por medio, calcúlelas aparte e inclúyalas antes de emitir.');
+  if (!employee.termination_reason) {
+    notasLimitaciones.push('Falta registrar la causa del retiro en la ficha del empleado: es obligatoria para emitir la liquidación.');
+  }
+  if (periodosPendientes.length > 0) {
+    notasLimitaciones.push(`Antes de liquidar debe emitir y ver aceptado por la DIAN ${periodosPendientes.length === 1 ? 'el período' : 'los períodos'} de nómina ${periodosPendientes.map((p) => `${p.start_date} a ${p.end_date}`).join(', ')}: ahí se pagan los días causados hasta el retiro.`);
+  }
+  if (rangoPendiente.salarioCubierto) {
+    notasLimitaciones.push(`Los días de salario hasta el retiro ya se pagaron en la nómina (hasta el ${rangoPendiente.pagadoHasta}): esta liquidación no incluye salario, solo prestaciones, vacaciones y lo que ingrese.`);
+  }
+  if (primaYaPagada > 0) {
+    notasLimitaciones.push(`A la prima del semestre se le descontó lo ya pagado en nómina (${primaYaPagada}).`);
+  }
+  const indemnizacionSugerida = sugerirIndemnizacion(employee);
+  if (indemnizacionSugerida.applies && !Number(indemnizacion)) {
+    notasLimitaciones.push(`El retiro fue sin justa causa: ${indemnizacionSugerida.note}${indemnizacionSugerida.amount > 0 ? ' Use el valor sugerido o ingrese el que corresponda; no se suma sola.' : ''}`);
+  } else if (!Number(indemnizacion) && !Number(bonifRetiro)) {
+    notasLimitaciones.push('No se incluyó indemnización ni bonificación por retiro -- si hay una negociación de por medio, calcúlelas aparte e inclúyalas antes de emitir.');
   }
 
   return {
     employeeId: employee.id,
     employeeName: `${employee.first_name} ${employee.first_surname}`,
     fechaRetiro: employee.termination_date,
+    motivoRetiro: employee.termination_reason || null,
+    motivoRetiroEtiqueta: terminationReasonLabel(employee.termination_reason),
+    observacionesRetiro: employee.termination_notes || null,
+    indemnizacionSugerida,
     rangoSalarioPendiente: rangoPendiente,
+    salarioCubierto: rangoPendiente.salarioCubierto,
+    periodosPendientes,
     cesantias,
     prima,
     vacaciones,
@@ -238,10 +340,14 @@ async function previewLiquidacionDefinitiva(tenantId, employeeId, opciones = {})
   if (!employee) throw new Error('Empleado no encontrado');
 
   const breakdown = await calcularLiquidacionDefinitiva(tenantId, employee, opciones);
+  // Si el salario ya está cubierto, el período de la liquidación es solo el
+  // día del retiro y no paga sueldo (excludes_salary).
+  const cubierto = breakdown.salarioCubierto;
   const periodoVirtual = {
-    start_date: breakdown.rangoSalarioPendiente.inicio,
+    start_date: cubierto ? breakdown.rangoSalarioPendiente.fin : breakdown.rangoSalarioPendiente.inicio,
     end_date: breakdown.rangoSalarioPendiente.fin,
     payment_date: null,
+    excludes_salary: cubierto,
   };
 
   const liquidation = liquidarEmpleado({
@@ -254,6 +360,61 @@ async function previewLiquidacionDefinitiva(tenantId, employeeId, opciones = {})
     liquidation,
     resumen: resumenLiquidacionParaImpresion(liquidation),
     netoTotal: liquidation.devengadosTotal - liquidation.deduccionesTotal,
+  };
+}
+
+/**
+ * Datos para el PDF de la liquidación (6.3).
+ *  - Si ya hay una liquidación EMITIDA y aceptada por la DIAN, se arma con lo
+ *    que quedó firmado (snapshot del documento): recalcular daría otro tramo
+ *    de salario, porque el último pago ya es la propia liquidación.
+ *  - Si no, es un borrador con el cálculo actual (sin persistir nada).
+ */
+async function obtenerLiquidacionParaPdf(tenantId, employeeId, opciones = {}) {
+  const employee = await Employee.findOne({ where: { id: employeeId, tenant_id: tenantId } });
+  if (!employee) throw new Error('Empleado no encontrado');
+  if (!employee.termination_date) throw new Error('El empleado no tiene fecha de retiro registrada');
+
+  const period = await PayrollPeriod.findOne({
+    where: {
+      tenant_id: tenantId, period_type: 'liquidacion', status: 'emitido',
+      [Op.or]: [{ employee_id: employee.id }, { notes: { [Op.like]: `%${employee.id}%` } }],
+    },
+    order: [['end_date', 'DESC']],
+  });
+  const emitted = period
+    ? await PayrollDocument.findOne({
+      where: { tenant_id: tenantId, employee_id: employee.id, payroll_period_id: period.id, dian_status: 'accepted' },
+    })
+    : null;
+
+  if (emitted && emitted.snapshot_liquidation) {
+    return {
+      employee,
+      status: 'emitida',
+      periodo: { start_date: period.start_date, end_date: period.end_date },
+      resumen: resumenLiquidacionParaImpresion(emitted.snapshot_liquidation),
+      netoTotal: Number(emitted.comprobante_total) || 0,
+      breakdown: null,
+      excludesSalary: !!period.excludes_salary,
+      terminationReason: period.termination_reason || employee.termination_reason || null,
+      documentNumber: emitted.payroll_document_number,
+      cune: emitted.cune,
+    };
+  }
+
+  const preview = await previewLiquidacionDefinitiva(tenantId, employeeId, opciones);
+  return {
+    employee,
+    status: 'borrador',
+    periodo: preview.periodo,
+    resumen: preview.resumen,
+    netoTotal: preview.netoTotal,
+    breakdown: preview.breakdown,
+    excludesSalary: !!preview.breakdown.salarioCubierto,
+    terminationReason: employee.termination_reason || null,
+    documentNumber: null,
+    cune: null,
   };
 }
 
@@ -278,34 +439,75 @@ async function emitirLiquidacionDefinitiva(tenantId, employeeId, userId, opcione
   const tenant = await Tenant.findByPk(tenantId);
   if (!tenant) throw new Error('Tenant no encontrado');
 
-  const breakdown = await calcularLiquidacionDefinitiva(tenantId, employee, opciones);
-  const { inicio, fin } = breakdown.rangoSalarioPendiente;
-
-  if (fin < inicio) {
-    throw new Error(`La fecha de retiro (${fin}) es anterior al día siguiente del último periodo ya pagado (${inicio}) -- revise el retiro o los periodos ya emitidos de este empleado.`);
+  if (!employee.termination_reason) {
+    throw new Error('Registre la causa del retiro en la ficha del empleado antes de emitir la liquidación definitiva.');
   }
 
-  // Reutiliza el periodo de liquidación si ya se había creado en un
-  // intento anterior (mismo tenant+empleado+fechas identifica de forma
-  // única a ESTA liquidación, aunque el UNIQUE de la tabla ya no exige
-  // fechas únicas entre liquidaciones de empleados distintos -- ver
-  // migración 20260903010000).
-  let period = await PayrollPeriod.findOne({
+  // Idempotencia: si la liquidación de este retiro ya fue emitida y aceptada,
+  // se devuelve tal cual. Hay que mirarlo ANTES de recalcular: el último pago
+  // aceptado es la propia liquidación, así que el tramo pendiente saldría
+  // vacío (inicio > fin) y el reintento fallaría con un error engañoso.
+  const periodoEmitido = await PayrollPeriod.findOne({
     where: {
-      tenant_id: tenantId, period_type: 'liquidacion', start_date: inicio, end_date: fin,
-      notes: { [Op.like]: `%${employee.id}%` },
+      tenant_id: tenantId, period_type: 'liquidacion', status: 'emitido', end_date: employee.termination_date,
+      [Op.or]: [{ employee_id: employee.id }, { notes: { [Op.like]: `%${employee.id}%` } }],
     },
   });
+  if (periodoEmitido) {
+    const documentoAceptado = await PayrollDocument.findOne({
+      where: { tenant_id: tenantId, employee_id: employee.id, payroll_period_id: periodoEmitido.id, dian_status: 'accepted' },
+    });
+    if (documentoAceptado) {
+      return {
+        alreadyEmitted: true, period: periodoEmitido, breakdown: null,
+        payrollDocumentId: documentoAceptado.id,
+      };
+    }
+  }
+
+  const breakdown = await calcularLiquidacionDefinitiva(tenantId, employee, opciones);
+  const { fin } = breakdown.rangoSalarioPendiente;
+
+  // Secuencia obligatoria (6.4): primero la nómina de los días causados.
+  if (breakdown.periodosPendientes.length > 0) {
+    const lista = breakdown.periodosPendientes.map((p) => `${p.start_date} a ${p.end_date}`).join(', ');
+    throw new Error(`Antes de emitir la liquidación definitiva debe emitir y ver aceptado por la DIAN ${breakdown.periodosPendientes.length === 1 ? 'el período' : 'los períodos'} de nómina ${lista}: ahí se pagan los días causados hasta el retiro.`);
+  }
+
+  // Si el salario ya está cubierto, el período de la liquidación es solo el
+  // día del retiro y no paga sueldo (excludes_salary).
+  const excludesSalary = breakdown.salarioCubierto;
+  const inicio = excludesSalary ? fin : breakdown.rangoSalarioPendiente.inicio;
+
+  // Reutiliza el periodo de liquidación si ya se había creado en un intento
+  // anterior: el enlace es el empleado (employee_id) y la fecha de retiro.
+  let period = await PayrollPeriod.findOne({
+    where: {
+      tenant_id: tenantId, period_type: 'liquidacion', end_date: fin,
+      [Op.or]: [{ employee_id: employee.id }, { notes: { [Op.like]: `%${employee.id}%` } }],
+    },
+  });
+
+  if (period && period.status !== 'emitido') {
+    // Reintento tras recalcular: el tramo pudo cambiar (p. ej. se emitió la nómina que faltaba).
+    await period.update({
+      start_date: inicio, excludes_salary: excludesSalary, employee_id: employee.id,
+      termination_reason: employee.termination_reason,
+    });
+  }
 
   if (!period) {
     period = await PayrollPeriod.create({
       tenant_id: tenantId,
       branch_id: employee.branch_id || null,
+      employee_id: employee.id,
       period_type: 'liquidacion',
       start_date: inicio,
       end_date: fin,
       payment_date: fin,
       status: 'abierto',
+      excludes_salary: excludesSalary,
+      termination_reason: employee.termination_reason,
       notes: `Liquidación definitiva -- ${breakdown.employeeName} (${employee.document_type} ${employee.document_number}), empleado ${employee.id}, retiro ${fin}`,
       created_by: userId || null,
     });
@@ -370,6 +572,10 @@ async function emitirLiquidacionDefinitiva(tenantId, employeeId, userId, opcione
 }
 
 module.exports = {
+  obtenerPeriodosPendientes,
+  obtenerPrimaYaPagada,
+  obtenerLiquidacionParaPdf,
+  sugerirIndemnizacion,
   obtenerRangoSalarioPendiente,
   calcularCesantiasEIntereses,
   calcularPrimaProporcional,

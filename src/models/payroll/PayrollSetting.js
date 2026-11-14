@@ -63,6 +63,9 @@ const PayrollSetting = sequelize.define('PayrollSetting', {
   // Jornada semanal de la empresa (valor de la hora, horas laboradas PILA);
   // vacía = máxima legal de la Ley 2101 -- ver services/payroll/jornada.js.
   weekly_hours: { type: DataTypes.DECIMAL(4, 1), allowNull: true },
+  // Horas ordinarias por día para clasificar la planilla de obra (migración
+  // 2026111404); vacía = jornada semanal / 6. Lo que pase es hora extra.
+  daily_hours: { type: DataTypes.DECIMAL(4, 2), allowNull: true },
   // PILA (encabezado de la planilla) -- ver services/payroll/pila/.
   pila_contributor_type: { type: DataTypes.STRING(2), allowNull: false, defaultValue: '01' },
   pila_presentation_form: { type: DataTypes.STRING(1), allowNull: false, defaultValue: 'U' },

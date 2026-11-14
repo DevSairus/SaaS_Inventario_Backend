@@ -39,6 +39,7 @@ router.post('/send-debit-note/:saleId',  ctrl.sendDebitNote);
 router.post('/create-credit-note/:saleId', ctrl.createAndSendCreditNote);
 router.post('/create-debit-note/:saleId',  ctrl.createAndSendDebitNote);
 router.post('/check-status/:saleId',     ctrl.checkStatus);
+router.post('/email/:saleId',            ctrl.resendInvoiceEmail);
 router.post('/test-set/:saleId',         mgmt, ctrl.sendToTestSet);
 
 // Documento Soporte (adquisiciones a no obligados a facturar) — Purchase o Expense

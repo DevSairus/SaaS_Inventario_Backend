@@ -139,6 +139,16 @@ const Employee = sequelize.define('Employee', {
     type: DataTypes.DATEONLY,
     allowNull: true,
   },
+  // Causa del retiro (6.2): ver services/payroll/terminationReasons.js. Es
+  // obligatoria para emitir la liquidación definitiva, no para registrar la fecha.
+  termination_reason: {
+    type: DataTypes.STRING(30),
+    allowNull: true,
+  },
+  termination_notes: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+  },
   // Libro de vacaciones (migración 2026110615): saldo de días pendientes a una
   // fecha de corte — ver services/payroll/vacationBook.service.js.
   vacation_opening_days: {

@@ -4,8 +4,11 @@
 // 48 horas). Se usa para el valor de la hora (horas extra/recargos: salario
 // mensual / horas del mes) y para "Número de horas laboradas" de la PILA.
 // La empresa puede fijar otra jornada en Configuración de Nómina
-// (payroll_settings.weekly_hours) si la suya es menor a la máxima legal.
-// Mismo cálculo en frontend/src/constants/payroll.js#weeklyHoursFor.
+// (payroll_settings.weekly_hours). Esa jornada propia es la que se REPORTA en
+// la PILA (weeklyHoursFor), pero para el VALOR DE LA HORA (monthlyHoursFor)
+// nunca puede superar la máxima legal de la fecha: un divisor mayor de horas
+// al mes abarataría ilegalmente la hora extra y los recargos.
+// Mismo cálculo en frontend/src/constants/payroll.js.
 
 const LEY_2101 = [
   { from: '2026-07-15', hours: 42 },
@@ -16,17 +19,26 @@ const LEY_2101 = [
 
 const toISO = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
 
-function weeklyHoursFor(date, override = null) {
-  const o = Number(override);
-  if (o > 0) return o;
+// Jornada máxima legal semanal vigente en `date` (por defecto, hoy).
+function legalWeeklyHours(date = null) {
   const iso = toISO(date || new Date());
   return (LEY_2101.find((s) => iso >= s.from) || { hours: 48 }).hours;
 }
 
-// Horas del mes = horas semanales x 30 / 6 (mes comercial de 30 días, 6
-// días laborables por semana): 44 h -> 220, 42 h -> 210.
-function monthlyHoursFor(date, override = null) {
-  return (weeklyHoursFor(date, override) * 30) / 6;
+// Jornada semanal de la empresa (la que se reporta en la PILA): la propia si
+// está definida; si no, la máxima legal de la fecha.
+function weeklyHoursFor(date, override = null) {
+  const o = Number(override);
+  if (o > 0) return o;
+  return legalWeeklyHours(date);
 }
 
-module.exports = { weeklyHoursFor, monthlyHoursFor };
+// Horas del mes para el valor de la hora = horas semanales x 30 / 6 (mes
+// comercial de 30 días, 6 días laborables por semana): 44 h -> 220, 42 h -> 210.
+// Si la jornada propia supera la máxima legal de la fecha, se usa la legal.
+function monthlyHoursFor(date, override = null) {
+  const semanales = Math.min(weeklyHoursFor(date, override), legalWeeklyHours(date));
+  return (semanales * 30) / 6;
+}
+
+module.exports = { legalWeeklyHours, weeklyHoursFor, monthlyHoursFor };

@@ -25,7 +25,7 @@ const logger = require('../../config/logger');
 const { formatFechaCol } = require('../dian/payrollXmlBuilder');
 const { submitPayrollAdjustmentDocument } = require('../dian/payrollDianAdapter');
 const { getNextConsecutive, extractDianConfig } = require('../dian/dianService');
-const { getNovedadesParaLiquidacion, getActiveAutoConcepts } = require('./payrollPeriodEmissionService');
+const { getNovedadesParaLiquidacion, getActiveAutoConcepts, resolvePayrollNumberingBranch } = require('./payrollPeriodEmissionService');
 const { liquidarEmpleado } = require('./payrollService');
 
 /**
@@ -128,8 +128,15 @@ async function sendPayrollAdjustmentToDian(adjustment, payrollDocument, tenant) 
     const t = await sequelize.transaction();
     let rawNumbering;
     try {
+      // Documento de un período "todas las sedes" (branch_id null): misma
+      // regla que la emisión — ver resolvePayrollNumberingBranch.
+      const numberingBranchId = await resolvePayrollNumberingBranch({
+        tenantId: tenant.id,
+        preferredBranchIds: [payrollDocument.branch_id, payrollDocument.employee?.branch_id],
+        isTest, documentType: 'payroll_adjustment', transaction: t,
+      });
       rawNumbering = await getNextConsecutive(
-        tenant.id, payrollDocument.branch_id, isTest, t, adjustment.adjustment_number, 'payroll_adjustment',
+        tenant.id, numberingBranchId, isTest, t, adjustment.adjustment_number, 'payroll_adjustment',
       );
       // Guardar el número reservado en la misma transacción que lo consume:
       // antes solo se guardaba al final, tras la respuesta de la DIAN, así

@@ -143,6 +143,9 @@ async function loadNovedades(tenantId, employeeIds) {
 async function getEmployeeBook(tenantId, employee, asOf, { forSettlement = false } = {}) {
   let novedades = (await loadNovedades(tenantId, [employee.id])).map((n) => n.get({ plain: true }));
   if (forSettlement) novedades = novedades.filter((n) => !(n.period?.period_type === 'liquidacion' && n.period.status !== 'emitido'));
+  // 6.5 — liquidaciones de vacaciones pagadas fuera de período y aún no absorbidas por una nómina.
+  const vacationService = require('./payrollVacationService');
+  novedades.push(...vacationService.settlementsAsNovedades(await vacationService.pendingForBook(tenantId, [employee.id])));
   return computeVacationBook(employee, novedades, asOf);
 }
 
@@ -163,6 +166,13 @@ async function listBooks(tenantId, { includeInactive = false, asOf } = {}) {
     const plain = n.get({ plain: true });
     if (!byEmployee.has(plain.employee_id)) byEmployee.set(plain.employee_id, []);
     byEmployee.get(plain.employee_id).push(plain);
+  }
+  // 6.5 — liquidaciones de vacaciones pagadas fuera de período y aún no absorbidas.
+  const vacationService = require('./payrollVacationService');
+  const pendientes = await vacationService.pendingForBook(tenantId, employees.map((e) => e.id));
+  for (const s of pendientes) {
+    if (!byEmployee.has(s.employee_id)) byEmployee.set(s.employee_id, []);
+    byEmployee.get(s.employee_id).push(...vacationService.settlementsAsNovedades([s]));
   }
   return employees.map((e) => {
     const { movimientos, ...book } = computeVacationBook(e, byEmployee.get(e.id) || [], asOf);

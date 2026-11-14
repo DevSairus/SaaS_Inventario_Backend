@@ -41,6 +41,11 @@ const Sale = sequelize.define('Sale', {
   },
   customer_tax_id: { type: DataTypes.STRING(50) },
   customer_email:  { type: DataTypes.STRING(255) },
+  // Factura a múltiples correos: NULL = usar los adicionales actuales del
+  // cliente; un arreglo (aunque vacío) reemplaza esa lista solo para esta factura.
+  additional_emails_override: { type: DataTypes.JSONB, allowNull: true },
+  // Último envío del PDF+XML al comprador: { sent_at, recipients: [{ email, status, error? }] }.
+  email_delivery: { type: DataTypes.JSONB, allowNull: true },
   customer_phone:  { type: DataTypes.STRING(20) },
   customer_address:{ type: DataTypes.TEXT },
   // ── DIAN — dirección real del comprador, denormalizada al momento de

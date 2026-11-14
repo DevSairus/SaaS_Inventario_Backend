@@ -43,6 +43,7 @@ const Supplier = require('./inventory/Supplier');
 const Purchase = require('./inventory/Purchase');
 const PurchaseItem = require('./inventory/PurchaseItem');
 const Warehouse = require('./inventory/Warehouse');
+const WarehouseLocation = require('./inventory/WarehouseLocation');
 const InventoryMovement = require('./inventory/InventoryMovement');
 const InventoryAdjustment = require('./inventory/InventoryAdjustment');
 const InventoryAdjustmentItem = require('./inventory/InventoryAdjustmentItem');
@@ -72,6 +73,8 @@ const Sale = require('./sales/Sale');
 const SaleItem = require('./sales/SaleItem');
 const CustomerReturn = require('./sales/CustomerReturn');
 const CustomerReturnItem = require('./sales/CustomerReturnItem');
+const ReturnStatusEvent = require('./inventory/ReturnStatusEvent');
+const { attachReturnStateMachine } = require('../services/returns/returnStateMachine');
 
 // NUEVOS MODELOS
 const Invoice = require('./billing/Invoice');
@@ -234,6 +237,8 @@ const PayrollDocumentAdjustment = require('./payroll/PayrollDocumentAdjustment')
 const PayrollNovedad = require('./payroll/PayrollNovedad');
 const PayrollSetting = require('./payroll/PayrollSetting');
 const PayrollPayment = require('./payroll/PayrollPayment');
+const PayrollVacationSettlement = require('./payroll/PayrollVacationSettlement');
+const PayrollPeriodEvent = require('./payroll/PayrollPeriodEvent');
 
 // ✅ NUEVO - Módulo de Soporte
 const SupportTicket = require('./support/SupportTicket');
@@ -580,6 +585,11 @@ SaleItem.hasMany(CustomerReturnItem, { foreignKey: 'sale_item_id', as: 'return_i
 // CustomerReturnItem - Product
 CustomerReturnItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(CustomerReturnItem, { foreignKey: 'product_id', as: 'customer_return_items' });
+
+// Máquina de estados + bitácora de las devoluciones de venta y de compra (req. 3.5 / 4.2).
+// Un solo hook por modelo: valida la transición y registra quién y cuándo.
+attachReturnStateMachine(CustomerReturn, 'customer', () => ReturnStatusEvent);
+attachReturnStateMachine(SupplierReturn, 'supplier', () => ReturnStatusEvent);
 
 // SupplierReturn - Purchase
 SupplierReturn.belongsTo(Purchase, { foreignKey: 'purchase_id', as: 'purchase' });
@@ -1042,6 +1052,10 @@ Employee.hasMany(PayrollNovedad, { foreignKey: 'employee_id', as: 'novedades' })
 PayrollSetting.belongsTo(Tenant, { foreignKey: 'tenant_id', as: 'tenant' });
 PayrollSetting.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
 
+// Nómina — liquidaciones de vacaciones fuera de período (6.5)
+PayrollVacationSettlement.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
+PayrollVacationSettlement.belongsTo(PayrollPeriod, { foreignKey: 'payroll_period_id', as: 'period' });
+
 // Nómina — PayrollPayment (desembolsos) ↔ PayrollPeriod / BankAccount / PayrollDocument
 PayrollPayment.belongsTo(PayrollPeriod, { foreignKey: 'payroll_period_id', as: 'period' });
 PayrollPeriod.hasMany(PayrollPayment, { foreignKey: 'payroll_period_id', as: 'payments' });
@@ -1176,6 +1190,7 @@ module.exports = {
   Purchase,
   PurchaseItem,
   Warehouse,
+  WarehouseLocation,
   InventoryMovement,
   InventoryAdjustment,
   InventoryAdjustmentItem,
@@ -1204,6 +1219,7 @@ module.exports = {
   SaleItem,
   CustomerReturn,
   CustomerReturnItem,
+  ReturnStatusEvent,
   SupplierReturn,
   SupplierReturnItem,
   Transfer,
@@ -1324,4 +1340,6 @@ module.exports = {
   PayrollNovedad,
   PayrollSetting,
   PayrollPayment,
+  PayrollVacationSettlement,
+  PayrollPeriodEvent,
 };

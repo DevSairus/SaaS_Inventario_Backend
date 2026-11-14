@@ -26,18 +26,18 @@ router.get('/', adjustmentsController.getAdjustments);
 router.get('/:id', adjustmentsController.getAdjustmentById);
 
 // Crear nuevo ajuste
-router.post('/', requirePermission('inventory.adjustments.write'), adjustmentsController.createAdjustment);
+router.post('/', requirePermission('inventory.adjustments.create'), adjustmentsController.createAdjustment);
 
 // Actualizar ajuste (solo draft)
-router.put('/:id', requirePermission('inventory.adjustments.write'), adjustmentsController.updateAdjustment);
+router.put('/:id', requirePermission('inventory.adjustments.edit'), adjustmentsController.updateAdjustment);
 
 // Confirmar ajuste (genera movimientos)
-router.patch('/:id/confirm', requirePermission('inventory.adjustments.write'), adjustmentsController.confirmAdjustment);
+router.patch('/:id/confirm', requirePermission('inventory.adjustments.approve'), adjustmentsController.confirmAdjustment);
 
 // Cancelar ajuste
-router.patch('/:id/cancel', requirePermission('inventory.adjustments.write'), adjustmentsController.cancelAdjustment);
+router.patch('/:id/cancel', requirePermission('inventory.adjustments.delete'), adjustmentsController.cancelAdjustment);
 
 // Eliminar ajuste (solo draft)
-router.delete('/:id', requirePermission('inventory.adjustments.write'), adjustmentsController.deleteAdjustment);
+router.delete('/:id', requirePermission('inventory.adjustments.delete'), adjustmentsController.deleteAdjustment);
 
 module.exports = router;

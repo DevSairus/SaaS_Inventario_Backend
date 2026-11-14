@@ -117,16 +117,62 @@ async function processTenantSchema(models) {
   return { overdue: overdueIds.length, dueSoon: dueSoonIds.length, tacitReady: readyIds.length };
 }
 
+// Sincronización automática con la DIAN (GetStatusEvent) de los eventos del
+// cliente sobre facturas a crédito que esperan 032 o la respuesta 033/031.
+// APAGADA por defecto (RADIAN_AUTO_SYNC=true la enciende) hasta verificar
+// con una respuesta real que el formato se lee bien — ver
+// radianStatusEvents.js. Solo REGISTRA lo que el cliente ya hizo; nunca
+// emite eventos propios (el 034 sigue siendo manual).
+const AUTO_SYNC_MAX_PER_TENANT = 100;
+const AUTO_SYNC_LOOKBACK_DAYS = 60;
+
+async function syncPendingSales(models, tenantId) {
+  const { Sale } = models;
+  const radianService = require('./radianService');
+  const { isCreditSale } = require('../sales/paymentTerms.service');
+  const since = new Date(Date.now() - AUTO_SYNC_LOOKBACK_DAYS * 86400000);
+  const sales = await Sale.findAll({
+    where: {
+      tenant_id: tenantId,
+      document_type: 'factura',
+      dian_status: 'accepted',
+      cufe: { [Op.not]: null },
+      radian_status: { [Op.in]: ['none', '032_received'] },
+      sale_date: { [Op.gte]: since },
+    },
+    order: [['sale_date', 'DESC']],
+    limit: AUTO_SYNC_MAX_PER_TENANT,
+  });
+  let applied = 0;
+  for (const sale of sales) {
+    if (!isCreditSale(sale)) continue;
+    try {
+      const r = await radianService.syncSaleEventsFromDian(sale.id, tenantId, null);
+      applied += r.applied?.length || 0;
+    } catch (err) {
+      logger.error(`[RADIAN-Sync] Venta ${sale.id}:`, err.message);
+    }
+  }
+  return applied;
+}
+
 async function runRadianDeadlinesJob() {
   const Tenant = require('../../models/auth/Tenant');
   const { runWithTenantSchema } = require('../../config/tenantContext');
   const models = require('../../models');
 
   const tenants = await Tenant.findAll({ where: { schema_name: { [Op.not]: null } }, attributes: ['id', 'schema_name'] });
+  const autoSync = process.env.RADIAN_AUTO_SYNC === 'true';
 
   const results = [];
   for (const tenant of tenants) {
     try {
+      // Primero se traen los eventos del cliente: así el plazo del 034 y los
+      // avisos de abajo ya reflejan el 032/033/031 que haya llegado.
+      if (autoSync) {
+        const synced = await runWithTenantSchema(tenant.schema_name, () => syncPendingSales(models, tenant.id));
+        if (synced) logger.log(`[RADIAN-Sync] ${tenant.schema_name}: ${synced} evento(s) del cliente registrados desde la DIAN`);
+      }
       const r = await runWithTenantSchema(tenant.schema_name, () => processTenantSchema(models));
       if (r.overdue || r.dueSoon || r.tacitReady) {
         results.push({ tenant: tenant.schema_name, ...r });

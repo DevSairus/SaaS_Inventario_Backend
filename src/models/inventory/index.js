@@ -6,6 +6,7 @@ const ProductSupplier = require('./ProductSupplier');
 const Purchase = require('./Purchase');
 const PurchaseItem = require('./PurchaseItem');
 const Warehouse = require('./Warehouse');
+const WarehouseLocation = require('./WarehouseLocation');
 const InventoryMovement = require('./InventoryMovement');
 const InventoryAdjustment = require('./InventoryAdjustment');
 const InventoryAdjustmentItem = require('./InventoryAdjustmentItem');
@@ -82,8 +83,15 @@ PhysicalCountItem.belongsTo(PhysicalCount, { foreignKey: 'count_id', as: 'count'
 PhysicalCountItem.belongsTo(Product, { foreignKey: 'product_id', as: 'product' });
 Product.hasMany(PhysicalCountItem, { foreignKey: 'product_id', as: 'physical_count_items' });
 
-// PhysicalCount - Warehouse / Category (N:1, filtros usados al generar)
+// Warehouse - WarehouseLocation (1:N) y Product - WarehouseLocation (N:1): ubicación física (req. 2.2)
+Warehouse.hasMany(WarehouseLocation, { foreignKey: 'warehouse_id', as: 'locations' });
+WarehouseLocation.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'warehouse' });
+Product.belongsTo(WarehouseLocation, { foreignKey: 'location_id', as: 'location' });
+WarehouseLocation.hasMany(Product, { foreignKey: 'location_id', as: 'products' });
+
+// PhysicalCount - Warehouse / Category / Location (N:1, filtros usados al generar)
 PhysicalCount.belongsTo(Warehouse, { foreignKey: 'warehouse_id', as: 'warehouse' });
+PhysicalCount.belongsTo(WarehouseLocation, { foreignKey: 'location_id', as: 'location' });
 PhysicalCount.belongsTo(Category, { foreignKey: 'category_id', as: 'category' });
 
 // PhysicalCount - InventoryAdjustment (los dos ajustes que genera al aplicar)
@@ -121,6 +129,7 @@ module.exports = {
   Purchase,
   PurchaseItem,
   Warehouse,
+  WarehouseLocation,
   InventoryMovement,
   InventoryAdjustment,
   InventoryAdjustmentItem,

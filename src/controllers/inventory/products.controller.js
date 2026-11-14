@@ -1,7 +1,8 @@
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { getCurrentSchema, runWithTenantSchema } = require('../../config/tenantContext');
-const { Product, Category } = require('../../models/inventory');
+const { Product, Category, WarehouseLocation } = require('../../models/inventory');
+const { resolveProductLocation } = require('../../services/inventory/warehouseLocations.service');
 const Vehicle = require('../../models/workshop/Vehicle');
 const { markForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { getInProcessMap } = require('../../services/inventory/stockInProcess.service');
@@ -76,6 +77,7 @@ const getAllProducts = async (req, res) => {
       sort_by = 'name', sort_order = 'ASC',
       applies_to_vehicle_id, applies_to_brand, applies_to_line, applies_to_year,
       exclude_sale_id, exclude_work_order_id,
+      location_id, no_location,
     } = req.query;
 
     // ── Seguridad: whitelist ORDER BY — Sequelize NO parametriza ORDER BY ────
@@ -146,6 +148,9 @@ const getAllProducts = async (req, res) => {
     }
     if (category_id) whereClause.category_id = category_id;
     if (is_active !== '') whereClause.is_active = is_active === 'true';
+    // Ubicación física (req. 2.2): una ubicación concreta, o los que no tienen.
+    if (location_id) whereClause.location_id = location_id;
+    else if (no_location === 'true') whereClause.location_id = null;
 
     // ── Filtro por sede/bodega activa ─────────────────────────────────────────
     // Solo se ven productos de las bodegas de la sede activa del usuario
@@ -240,7 +245,10 @@ const getAllProducts = async (req, res) => {
 
     const { count, rows } = await Product.findAndCountAll({
       where: whereClause,
-      include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }],
+      include: [
+        { model: Category, as: 'category', attributes: ['id', 'name'] },
+        { model: WarehouseLocation, as: 'location', attributes: ['id', 'code', 'warehouse_id'], required: false },
+      ],
       limit: safeLimit,
       offset: offset,
       order: orderClause,
@@ -294,7 +302,7 @@ const getProductById = async (req, res) => {
       if (!req.user.tenant_id) return res.status(400).json({ success: false, message: 'Usuario sin tenant asignado' });
       whereClause.tenant_id = req.user.tenant_id;
     }
-    const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });
+    const product = await Product.findOne({ where: whereClause, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }, { model: WarehouseLocation, as: 'location', attributes: ['id', 'code', 'warehouse_id'], required: false }] });
     if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
 
     // ── Cantidad en trámite (Sprint 3) ────────────────────────────────────
@@ -329,7 +337,7 @@ const createProduct = async (req, res) => {
     if (req.user.role !== 'super_admin' && !req.user.tenant_id) return res.status(400).json({ success: false, message: 'Error: Usuario sin tenant asignado. Por favor contacte a soporte.' });
 
     const {
-      sku, barcode, name, description, category_id, warehouse_id = null,
+      sku, barcode, name, description, category_id, warehouse_id = null, location_id = null,
       brand, unit_of_measure, average_cost, sale_price, base_price,
       profit_margin_percentage, current_stock = 0, reserved_stock = 0,
       min_stock = 0, max_stock, product_type = 'simple',
@@ -374,6 +382,15 @@ const createProduct = async (req, res) => {
     if (barcode) {
       const existingBarcode = await Product.findOne({ where: { barcode: barcode.trim(), tenant_id: tenantId } });
       if (existingBarcode) return res.status(400).json({ success: false, message: 'Ya existe un producto con ese código de barras' });
+    }
+
+    // Ubicación física (req. 2.2): debe existir, estar activa y ser de la bodega del producto.
+    let resolvedLocationId = null;
+    try {
+      resolvedLocationId = await resolveProductLocation({ WarehouseLocation, tenantId, warehouseId: warehouse_id || null, locationId: location_id || null });
+    } catch (locError) {
+      if (locError.status) return res.status(locError.status).json({ success: false, message: locError.message });
+      throw locError;
     }
 
     // Construir tax_config si no viene del frontend
@@ -443,6 +460,7 @@ const createProduct = async (req, res) => {
         description: description?.trim() || null,
         category_id: category_id || null,
         warehouse_id: warehouse_id || null,
+        location_id: resolvedLocationId,
         brand: brand?.trim() || null,
         vehicle_id: vehicleRecord?.id || null,
         unit_of_measure: unit_of_measure?.trim() || null,
@@ -526,6 +544,7 @@ const createProduct = async (req, res) => {
         include: [
           { model: Category, as: 'category', attributes: ['id', 'name'] },
           { model: Vehicle, as: 'vehicle' },
+          { model: WarehouseLocation, as: 'location', attributes: ['id', 'code', 'warehouse_id'], required: false },
         ],
       });
       if (tenantId) markForAlertCheck(res, product.id, tenantId);
@@ -610,6 +629,25 @@ const updateProduct = async (req, res) => {
       if (updateData[field] === '' || updateData[field] === undefined || updateData[field] === null) delete updateData[field];
     });
 
+    // Ubicación física (req. 2.2). location_id ausente = sin cambios (a diferencia de
+    // warehouse_id, que el formulario reenvía siempre); '' o null = quitar la ubicación.
+    // La ubicación es de UNA bodega: si cambia la bodega del producto, la ubicación
+    // anterior ya no aplica y se limpia.
+    {
+      const nextWarehouseId = updateData.warehouse_id !== undefined ? updateData.warehouse_id : product.warehouse_id;
+      if (updateData.location_id === '') updateData.location_id = null;
+      if (updateData.location_id !== undefined && updateData.location_id !== null) {
+        try {
+          updateData.location_id = await resolveProductLocation({ WarehouseLocation, tenantId, warehouseId: nextWarehouseId || null, locationId: updateData.location_id });
+        } catch (locError) {
+          if (locError.status) return res.status(locError.status).json({ success: false, message: locError.message });
+          throw locError;
+        }
+      } else if (updateData.location_id === undefined && product.location_id && (nextWarehouseId || null) !== (product.warehouse_id || null)) {
+        updateData.location_id = null;
+      }
+    }
+
     Object.keys(updateData).forEach(key => { if (updateData[key] === undefined) delete updateData[key]; });
 
     if (updateData.product_type) {
@@ -633,7 +671,7 @@ const updateProduct = async (req, res) => {
     }
 
     await product.update(updateData);
-    const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }] });
+    const updatedProduct = await Product.findOne({ where: { id }, include: [{ model: Category, as: 'category', attributes: ['id', 'name'] }, { model: Vehicle, as: 'vehicle' }, { model: WarehouseLocation, as: 'location', attributes: ['id', 'code', 'warehouse_id'], required: false }] });
     if (updateData.current_stock !== undefined || updateData.min_stock !== undefined || updateData.max_stock !== undefined) {
       markForAlertCheck(res, id, tenantId);
     }

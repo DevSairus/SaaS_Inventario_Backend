@@ -22,7 +22,25 @@ describe('jornada (Ley 2101)', () => {
     expect(weeklyHoursFor('2025-07-15')).toBe(44);
     expect(weeklyHoursFor('2026-09-30')).toBe(42);
     expect(monthlyHoursFor('2026-09-30')).toBe(210);
-    expect(monthlyHoursFor('2026-09-30', 44)).toBe(220);
+  });
+
+  test('valor de la hora: la jornada propia nunca supera la máxima legal de la fecha', () => {
+    // Menor a la legal: se respeta.
+    expect(monthlyHoursFor('2026-09-30', 40)).toBe(200);
+    // Igual a la legal: se respeta.
+    expect(monthlyHoursFor('2026-09-30', 42)).toBe(210);
+    // Mayor a la legal: el divisor se limita a la legal (44 h ya no es válida desde el 15-jul-2026).
+    expect(monthlyHoursFor('2026-09-30', 44)).toBe(210);
+    // Esa misma jornada de 44 h sí era válida en 2025 (tras el 15-jul-2025).
+    expect(monthlyHoursFor('2025-09-30', 44)).toBe(220);
+  });
+
+  test('PILA: la jornada propia se reporta tal cual; sin valor propio rige la legal', () => {
+    expect(weeklyHoursFor('2026-09-30', 44)).toBe(44);
+    expect(weeklyHoursFor('2026-09-30', 40)).toBe(40);
+    expect(weeklyHoursFor('2026-09-30', null)).toBe(42);
+    expect(weeklyHoursFor('2026-09-30', '')).toBe(42);
+    expect(weeklyHoursFor('2026-09-30', 0)).toBe(42);
   });
 });
 

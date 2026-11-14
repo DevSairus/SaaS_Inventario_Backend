@@ -24,6 +24,7 @@ const {
   Tool, ToolAssignment, ToolEvent, Employee, User, Project, Supplier, FixedAsset, FixedAssetDepreciationEntry,
 } = require('../../models');
 const { employeeName } = require('../projects/projectLabor.service');
+const { validateSignature } = require('../../utils/signature');
 
 const httpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -51,7 +52,6 @@ function usageDays(from, to) {
 const PROJECT_CLOSED = ['closed', 'cancelled'];
 const COST_MODES = ['zero', 'expense', 'fixed_asset'];
 const MANUAL_EVENTS = ['maintenance', 'calibration', 'repair', 'damage', 'note'];
-const SIGNATURE_MAX = 400 * 1024;
 const DUE_SOON_DAYS = 30;
 
 // ── Consecutivos ──────────────────────────────────────────────────────
@@ -375,14 +375,7 @@ async function updateTool(tenantId, userId, id, body) {
 }
 
 // ── Asignación (acta de entrega) ──────────────────────────────────────
-function validSignature(sig) {
-  if (sig === undefined || sig === null || sig === '') return null;
-  if (typeof sig !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(sig)) {
-    throw httpError(400, 'Firma inválida');
-  }
-  if (sig.length > SIGNATURE_MAX) throw httpError(400, 'La firma es demasiado grande');
-  return sig;
-}
+const validSignature = (sig) => validateSignature(sig);
 
 async function resolveResponsible(tenantId, body, transaction) {
   if (body.employee_id) {
@@ -401,8 +394,10 @@ async function resolveResponsible(tenantId, body, transaction) {
   return { employee_id: null, user_id: null, responsible_name: name, responsible_document: clean(body.responsible_document, 30) || null };
 }
 
-async function assignTool(tenantId, userId, toolId, body) {
-  return sequelize.transaction(async (t) => {
+// `transaction` opcional: el lote (toolBatches.service.js) entrega varias herramientas
+// en una sola transacción, todo o nada.
+async function assignTool(tenantId, userId, toolId, body, { transaction } = {}) {
+  const run = async (t) => {
     const tool = await Tool.findOne({ where: { id: toolId, tenant_id: tenantId }, transaction: t, lock: t.LOCK.UPDATE });
     if (!tool) throw httpError(404, 'Herramienta no encontrada');
     if (tool.status === 'retired') throw httpError(409, 'La herramienta está dada de baja');
@@ -459,12 +454,13 @@ async function assignTool(tenantId, userId, toolId, body) {
       assignment_id: assignment.id, project_id: project?.id || null, created_by: userId,
     }, { transaction: t });
     return assignment;
-  });
+  };
+  return transaction ? run(transaction) : sequelize.transaction(run);
 }
 
 // ── Devolución (acta de devolución) ───────────────────────────────────
-async function returnAssignment(tenantId, userId, assignmentId, body) {
-  return sequelize.transaction(async (t) => {
+async function returnAssignment(tenantId, userId, assignmentId, body, { transaction } = {}) {
+  const run = async (t) => {
     const a = await ToolAssignment.findOne({ where: { id: assignmentId, tenant_id: tenantId }, transaction: t, lock: t.LOCK.UPDATE });
     if (!a) throw httpError(404, 'Entrega no encontrada');
     if (a.status !== 'active') throw httpError(409, 'Esta entrega ya fue devuelta');
@@ -520,7 +516,8 @@ async function returnAssignment(tenantId, userId, assignmentId, body) {
       if (tool.tracking === 'individual') await tool.update({ status: 'maintenance' }, { transaction: t });
     }
     return a;
-  });
+  };
+  return transaction ? run(transaction) : sequelize.transaction(run);
 }
 
 // ── Mantenimiento, calibración y notas ────────────────────────────────
@@ -744,6 +741,8 @@ async function getAssignmentForActa(tenantId, assignmentId) {
 module.exports = {
   listTools, getTool, createTool, updateTool, assignTool, returnAssignment, addEvent, setInService, retireTool,
   responsibleOptions, fixedAssetOptions, projectTools, projectUsageCost, getAssignmentForActa,
+  // Para el lote de herramientas (toolBatches.service.js)
+  nextNumber,
   // Para pruebas
   addMonths, usageDays, displayStatus, dueInfo,
 };

@@ -10,6 +10,7 @@ router.get('/', authMiddleware, controller.getSupplierReturns);
 // Antes de '/:id': vista previa de la liquidación (modal de aprobar).
 router.get('/preview', authMiddleware, controller.getSupplierReturnSettlementPreview);
 router.get('/:id', authMiddleware, controller.getSupplierReturnById);
+router.get('/:id/history', authMiddleware, controller.getSupplierReturnHistory);
 router.post('/', authMiddleware, controller.createSupplierReturn);
 router.put('/:id/approve', authMiddleware, mgmt, controller.approveSupplierReturn);
 router.post('/:id/apply-credit', authMiddleware, mgmt, controller.applySupplierReturnCredit);

@@ -22,6 +22,7 @@ const { buildStockWarnings } = require('../../services/inventory/stockInProcess.
 const { resolveUnitCost } = require('../../utils/costResolver');
 const { pickComboFields, presentComboLines, expandComboApprovals } = require('../../utils/comboLines');
 const { applyRemisionFilter } = require('../../utils/remisionVisibility');
+const { getCurrentSchema } = require('../../config/tenantContext');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 const { daysOverdueOf, pendingReceivableWhere, draftSaleWhere, effectiveDueDateSql } = require('../../utils/receivables');
 const { searchMatch } = require('../../utils/searchText');
@@ -47,6 +48,12 @@ function resolveGlobalDiscount(type, value, preDiscountTotal) {
 // document_type NULL (borrador de venta) se incluye explícito porque
 // `<> 'cotizacion'` en SQL descarta los NULL.
 const NOT_QUOTE_WHERE = { [Op.or]: [{ document_type: null }, { document_type: { [Op.ne]: 'cotizacion' } }] };
+
+// Las notas crédito/débito son ajustes a una factura, no ventas: el listado
+// de Ventas (doc_group=sales) y sus totales las excluyen, y tienen su propia
+// sección (doc_group=notes). Mismo cuidado con los NULL que NOT_QUOTE_WHERE.
+const NOTE_TYPES = ['nota_credito', 'nota_debito'];
+const NOT_NOTE_WHERE = { [Op.or]: [{ document_type: null }, { document_type: { [Op.notIn]: NOTE_TYPES } }] };
 
 // Vigencia por defecto de una cotización (pdf_config.quote_validity_days del
 // tenant, 15 días si no está configurada).
@@ -146,7 +153,7 @@ const PAYMENT_REMINDER_REF = 'payment_reminder';
 // unificado de cotizaciones (quotes.controller.js) para que ambos filtren igual.
 function buildSaleListWhere(req) {
   const tenantId = req.tenant_id;
-  const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, payment_view, aging } = req.query;
+  const { status, quote_status, customer_id, from_date, to_date, document_type, search, customer_name, vehicle_plate, dian_status, quote_view, payment_view, aging, doc_group } = req.query;
   const where = { tenant_id: tenantId };
 
   // Para roles no-admin, se ignora el branch_id de query y se fuerza la
@@ -172,6 +179,13 @@ function buildSaleListWhere(req) {
     if (status) where.status = status;
     if (document_type) where.document_type = document_type;
     else where[Op.and] = [...(where[Op.and] || []), NOT_QUOTE_WHERE];
+    // Sin doc_group se conserva el comportamiento anterior (todos los tipos)
+    // para los demás consumidores de GET /sales.
+    if (doc_group === 'notes') {
+      where[Op.and] = [...(where[Op.and] || []), { document_type: { [Op.in]: NOTE_TYPES } }];
+    } else if (doc_group === 'sales') {
+      where[Op.and] = [...(where[Op.and] || []), NOT_NOTE_WHERE];
+    }
   }
   // En Cotizaciones, 'convertida' = ya pasó a remisión/factura; cualquier
   // otro estado se refiere a cotizaciones todavía sin convertir.
@@ -2112,16 +2126,74 @@ const deleteById = async (req, res) => {
 const getStats = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
-    const { from_date, to_date } = req.query;
-    // Ni los borradores ni las cotizaciones son ventas confirmadas — no
-    // deben sumar en los totales de Ventas.
-    const where = { tenant_id: tenantId, status: { [Op.ne]: 'draft' }, [Op.and]: [NOT_QUOTE_WHERE] };
+    const { from_date, to_date, doc_group } = req.query;
     const branch_id = resolveBranchFilter(req);
+    const dateRange = (from_date && to_date) ? { [Op.between]: [from_date, to_date] }
+      : from_date ? { [Op.gte]: from_date }
+      : to_date ? { [Op.lte]: to_date } : null;
+
+    // Sección "Notas crédito y débito": totales propios, separados de ventas.
+    if (doc_group === 'notes') {
+      const notesWhere = { tenant_id: tenantId, document_type: { [Op.in]: NOTE_TYPES }, status: { [Op.ne]: 'draft' } };
+      if (branch_id) notesWhere.branch_id = branch_id;
+      if (dateRange) notesWhere.sale_date = dateRange;
+      const rows = await Sale.findAll({
+        where: notesWhere,
+        attributes: [
+          'document_type',
+          [sequelize.fn('COUNT', sequelize.col('id')), 'count'],
+          [sequelize.fn('SUM', sequelize.col('total_amount')), 'amount'],
+          [sequelize.fn('SUM', sequelize.literal(`CASE WHEN dian_status = 'rejected' THEN 1 ELSE 0 END`)), 'rejected'],
+        ],
+        group: ['document_type'],
+        raw: true,
+      });
+      const by = (type) => rows.find(r => r.document_type === type) || {};
+      const credit = by('nota_credito');
+      const debit = by('nota_debito');
+      return res.json({
+        success: true,
+        data: {
+          credit_count:   parseInt(credit.count)   || 0,
+          credit_amount:  parseFloat(credit.amount) || 0,
+          debit_count:    parseInt(debit.count)    || 0,
+          debit_amount:   parseFloat(debit.amount)  || 0,
+          rejected_count: (parseInt(credit.rejected) || 0) + (parseInt(debit.rejected) || 0),
+        },
+      });
+    }
+
+    // Ventas brutas: ni borradores, ni canceladas (ya reversaron su
+    // inventario), ni cotizaciones, ni notas crédito/débito.
+    const where = { tenant_id: tenantId, status: { [Op.notIn]: ['draft', 'cancelled'] }, [Op.and]: [NOT_QUOTE_WHERE, NOT_NOTE_WHERE] };
     if (branch_id) where.branch_id = branch_id;
-    if (from_date && to_date) where.sale_date = { [Op.between]: [from_date, to_date] };
-    else if (from_date) where.sale_date = { [Op.gte]: from_date };
-    else if (to_date) where.sale_date = { [Op.lte]: to_date };
+    if (dateRange) where.sale_date = dateRange;
     applyRemisionFilter(req, where); // mismas ventas que getAll, sin facturas consolidadas (su ingreso está en las remisiones)
+
+    // Ventas netas = brutas − notas crédito + notas débito. Solo cuentan las
+    // notas aceptadas por la DIAN (una rechazada no tiene efecto). Se omiten
+    // las notas sobre una factura consolidada: al anularla, sus remisiones
+    // quedan libres y siguen sumando como venta, así que restarla duplicaría
+    // el descuento.
+    const schema = getCurrentSchema() || 'public';
+    const noteSumWhere = {
+      tenant_id: tenantId,
+      document_type: { [Op.in]: NOTE_TYPES },
+      dian_status: 'accepted',
+      status: { [Op.notIn]: ['draft', 'cancelled'] },
+      [Op.and]: [sequelize.literal(`NOT EXISTS (SELECT 1 FROM "${schema}"."sales" ref WHERE ref.id = "Sale"."reference_sale_id" AND ref.is_consolidated_invoice IS TRUE)`)],
+    };
+    if (branch_id) noteSumWhere.branch_id = branch_id;
+    if (dateRange) noteSumWhere.sale_date = dateRange;
+    const noteRows = await Sale.findAll({
+      where: noteSumWhere,
+      attributes: ['document_type', [sequelize.fn('SUM', sequelize.col('total_amount')), 'amount']],
+      group: ['document_type'],
+      raw: true,
+    });
+    const noteAmount = (type) => parseFloat(noteRows.find(r => r.document_type === type)?.amount) || 0;
+    const creditNotesAmount = noteAmount('nota_credito');
+    const debitNotesAmount = noteAmount('nota_debito');
 
     const stats = await Sale.findAll({
       where,
@@ -2170,7 +2242,10 @@ const getStats = async (req, res) => {
       success: true,
       data: {
         total_sales:    parseInt(stats[0].total_sales)    || 0,
-        total_amount:   parseFloat(stats[0].total_amount) || 0,
+        total_amount:   parseFloat(stats[0].total_amount) || 0, // ventas brutas
+        credit_notes_amount: creditNotesAmount,
+        debit_notes_amount:  debitNotesAmount,
+        net_amount: Math.round(((parseFloat(stats[0].total_amount) || 0) - creditNotesAmount + debitNotesAmount) * 100) / 100,
         pending_amount: parseFloat(pending.pending_amount) || 0,
         pending_count:  parseInt(pending.pending_count)    || 0,
         overdue_amount: parseFloat(pending.overdue_amount) || 0,

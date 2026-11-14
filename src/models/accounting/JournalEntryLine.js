@@ -13,6 +13,8 @@ const JournalEntryLine = sequelize.define(
     third_party_id: { type: DataTypes.UUID, allowNull: true },
     // Dimensión de proyecto (migración 2026110609).
     project_id: { type: DataTypes.UUID, allowNull: true },
+    // 5.1 — línea automática de ajuste al peso (bitácora). Migración 2026111103.
+    is_rounding_adjustment: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     line_order: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     // La tabla tiene created_at NOT NULL (sin updated_at, las líneas son
     // inmutables). Con timestamps:false Sequelize no le pone valor a menos

@@ -9,6 +9,8 @@ const audit = require('../../utils/audit');
 const { Tenant } = require('../../models');
 const svc = require('../../services/tools/tools.service');
 const { generateToolActaPdf } = require('../../services/tools/toolActaPdf.service');
+const batches = require('../../services/tools/toolBatches.service');
+const { generateToolBatchActaPdf } = require('../../services/tools/toolBatchActaPdf.service');
 
 const sendError = (res, error, fallback, where) => {
   if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
@@ -114,7 +116,42 @@ const actaPdf = handler('actaPdf', 'Error generando el acta', async (req, res) =
   return res.send(pdf);
 });
 
+// ── Lotes de herramientas (checklist masivo por etapa, Fase 4 req. 1.5) ──
+const logBatchAudit = (req, action, batchId, changes) => {
+  audit({ tenant_id: req.user.tenant_id, user_id: req.user.id, action, entity: 'tool_batch', entity_id: batchId, changes, req });
+};
+
+const projectBatches = handler('projectBatches', 'Error consultando los lotes de herramientas', async (req, res) => {
+  res.json({ success: true, data: await batches.listBatches(req.user.tenant_id, req.params.projectId) });
+});
+
+const createBatch = handler('createBatch', 'Error registrando el lote de herramientas', async (req, res) => {
+  const r = await batches.createBatch(req.user.tenant_id, req.user.id, req.params.projectId, req.body || {});
+  logBatchAudit(req, `batch_${r.kind}`, r.id, { batch_no: r.batch_no, items: r.items, project_id: req.params.projectId });
+  res.status(201).json({
+    success: true,
+    message: `${batches.KIND_LABEL[r.kind]} por lote ${r.batch_no} registrada (${r.items} herramienta(s))`,
+    data: r,
+  });
+});
+
+const signBatch = handler('signBatch', 'Error registrando la firma', async (req, res) => {
+  const r = await batches.signBatch(req.user.tenant_id, req.user.id, req.params.batchId, req.body || {});
+  logBatchAudit(req, 'batch_sign', req.params.batchId, { role: r.role });
+  res.status(201).json({ success: true, message: `Firma registrada en ${r.batch_no}`, data: await batches.listBatches(req.user.tenant_id, r.project_id) });
+});
+
+const batchActa = handler('batchActa', 'Error generando el acta del lote', async (req, res) => {
+  const data = await batches.getBatchForActa(req.user.tenant_id, req.params.batchId);
+  const tenant = await Tenant.findByPk(req.user.tenant_id, { attributes: ['id', 'company_name', 'business_name', 'tax_id', 'logo_url', 'primary_color'] });
+  const pdf = await generateToolBatchActaPdf({ data, tenant: tenant.toJSON() });
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `inline; filename="${data.batch.kind === 'return' ? 'devolucion' : 'entrega'}-lote-${data.batch.batch_no}.pdf"`);
+  res.send(pdf);
+});
+
 module.exports = {
+  projectBatches, createBatch, signBatch, batchActa,
   list, getById, create, update, assign, returnAssignment, addEvent, setService, retire,
   responsibles, fixedAssets, projectTools, actaPdf,
 };

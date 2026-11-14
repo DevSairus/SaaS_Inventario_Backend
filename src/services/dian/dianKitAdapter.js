@@ -1702,6 +1702,26 @@ async function getXmlByDocumentKey(tenant, cufe) {
 }
 
 /**
+ * Eventos RADIAN asociados a una factura (GetStatusEvent, Anexo FE 1.9
+ * §7.17) — devuelve el ApplicationResponse de la DIAN en `xml`. Mismo
+ * proxy por dian-service que getXmlByDocumentKey().
+ * @returns {Promise<{ found: boolean, xml: string|null, code: string, message: string, errors?: string[] }>}
+ */
+async function getStatusEvent(tenant, cufe) {
+  const cfg = tenant.dian_config || {};
+  if (isSimulation(cfg)) {
+    return { found: false, xml: null, code: 'SIM', message: 'Consulta a la DIAN no disponible en modo simulación' };
+  }
+  const dianServiceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
+  if (dianServiceUrls.length) {
+    return callRemoteDianService(dianServiceUrls, '/api/dian/get-status-event', { config: cfg, cufe });
+  }
+  const core = require('@dian-kit/core');
+  const { getStatusEvent: fetchEvents } = require('./dianXmlByDocumentKey');
+  return fetchEvents(cfg, cufe, core.loadP12);
+}
+
+/**
  * Llama al servicio DIAN remoto (Raspberry Pi / PC de respaldo), con
  * failover en orden sobre `baseUrls`.
  */
@@ -1750,6 +1770,7 @@ module.exports = {
   sendToDian,
   getStatusByCufe,
   getXmlByDocumentKey,
+  getStatusEvent,
   getNumberingRange,
   lookupAcquirer,
   computeNitCheckDigit,

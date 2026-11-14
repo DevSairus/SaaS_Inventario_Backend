@@ -582,8 +582,9 @@ async function createOrderLists(tenantId, project, { item_ids, supplier_override
  * reservado. Primero consume lo reservado de la línea; se puede despachar más
  * (hasta lo que falta por despachar) si hay stock.
  */
-async function dispatchBom(req, project, { from_warehouse_id, items, notes } = {}) {
+async function dispatchBom(req, project, { from_warehouse_id, items, notes, stage_id, signatures } = {}) {
   const tenantId = req.user.tenant_id;
+  const stages = require('./projectStages.service');
   assertEditable(project);
   if (STOCK_LOCKED_STATUSES.includes(project.status)) throw httpError(400, 'El proyecto ya terminó: no recibe despachos');
   if (!project.warehouse_id) throw httpError(400, 'El proyecto no tiene bodega. Créala en la pestaña Resumen antes de despachar.');
@@ -592,6 +593,9 @@ async function dispatchBom(req, project, { from_warehouse_id, items, notes } = {
 
   const { generateTransferNumber, assertBranchOwnsWarehouse } = require('../../controllers/inventory/transfers.controller');
   const { createMovementsBatch } = require('../../controllers/inventory/movements.controller');
+
+  // Firmas de quienes reciben/entregan (dibujadas en pantalla): se validan antes de mover stock.
+  const signaturesIn = stages.normalizeSignatures(signatures);
 
   const fromWarehouse = await Warehouse.findOne({ where: { id: from_warehouse_id, tenant_id: tenantId, is_active: true } });
   if (!fromWarehouse) throw httpError(404, 'Bodega de origen no encontrada');
@@ -602,17 +606,33 @@ async function dispatchBom(req, project, { from_warehouse_id, items, notes } = {
     const lockedProject = await Project.findByPk(project.id, { transaction: t, lock: t.LOCK.UPDATE });
     const where = { project_id: project.id, product_id: { [Op.ne]: null } };
     const requested = Array.isArray(items) && items.length ? new Map(items.map((i) => [i.item_id, round4(num(i.quantity))])) : null;
-    if (requested) where.id = [...requested.keys()];
+    // Despacho de una etapa: solo sus líneas y hasta su saldo (planeado − despachado).
+    let stage = null;
+    let stageSaldo = null;
+    if (stage_id) {
+      stage = await stages.loadOpenStage(tenantId, project, stage_id, t);
+      stageSaldo = await stages.stageSaldoMap(tenantId, project, stage, t);
+      if (requested) {
+        for (const id of requested.keys()) {
+          if (!stageSaldo.has(id)) throw httpError(400, `Hay líneas que no pertenecen a la etapa ${stage.stage_no} · ${stage.name}`);
+        }
+      }
+      where.id = [...(requested ? requested.keys() : stageSaldo.keys())];
+    } else if (requested) {
+      where.id = [...requested.keys()];
+    }
     const lines = await ProjectBomItem.findAll({ where, order: [['line_no', 'ASC']], transaction: t, lock: t.LOCK.UPDATE });
 
     const onSite = await onSiteForProject(tenantId, project, t);
     const plan = [];
     for (const line of lines) {
-      const pendingDispatch = round4(num(line.qty_required) - deliveredOf(line, onSite.get(line.id)));
+      const globalPending = round4(num(line.qty_required) - deliveredOf(line, onSite.get(line.id)));
+      const stageLeft = stageSaldo ? num(stageSaldo.get(line.id)) : Infinity;
+      const pendingDispatch = Math.min(globalPending, stageLeft);
       const qty = requested ? requested.get(line.id) : Math.min(num(line.qty_reserved), Math.max(pendingDispatch, 0));
       if (!(qty > 0)) continue;
       if (qty > pendingDispatch + 0.00005) {
-        throw httpError(400, `Línea ${line.line_no}: se piden ${qty} pero solo faltan ${pendingDispatch} por despachar`);
+        throw httpError(400, `Línea ${line.line_no}: se piden ${qty} pero solo faltan ${pendingDispatch} por despachar${stageLeft < globalPending ? ' en la etapa' : ''}`);
       }
       plan.push({ line, qty });
     }
@@ -678,7 +698,16 @@ async function dispatchBom(req, project, { from_warehouse_id, items, notes } = {
     if (lockedProject.status === 'approved') {
       await lockedProject.update({ status: 'in_progress', start_date: lockedProject.start_date || new Date() }, { transaction: t });
     }
-    return { transfer_id: transfer.id, transfer_number, lines: plan.length };
+
+    // Acta de despacho (con o sin etapa) con las firmas que hayan llegado.
+    const dispatch = await stages.createDispatchRecord({
+      tenantId, project, stage, transfer, fromWarehouseId: from_warehouse_id,
+      notes, userId: req.user.id, signatures: signaturesIn, transaction: t,
+    });
+    return {
+      transfer_id: transfer.id, transfer_number, lines: plan.length,
+      dispatch_id: dispatch.id, dispatch_no: dispatch.dispatch_no, stage_id: stage ? stage.id : null,
+    };
   });
   return result;
 }

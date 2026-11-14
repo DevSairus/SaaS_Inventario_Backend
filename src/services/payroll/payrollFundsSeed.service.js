@@ -33,6 +33,8 @@ async function ensurePayrollFundSuppliers(tenantId, transaction) {
       }
       continue;
     }
+    // Entidad que ya no recauda (p. ej. ARL Mapfre): no se crea en tenants nuevos.
+    if (fund.inactive) continue;
     const supplier = await Supplier.create({
       tenant_id: tenantId,
       name: fund.name,

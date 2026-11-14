@@ -25,6 +25,16 @@ const BankAccount = sequelize.define(
 
     chart_of_account_id: { type: DataTypes.UUID, allowNull: false },
 
+    // 5.2 — clasificación: define de qué cuenta PUC cuelga la subcuenta
+    // (ver services/accounting/bankAccountTypes.js). Migración 2026111104.
+    account_type: {
+      type: DataTypes.STRING(20),
+      allowNull: false,
+      defaultValue: 'corriente',
+      validate: { isIn: [['corriente', 'ahorros', 'moneda_extranjera']] },
+    },
+    currency: { type: DataTypes.STRING(3), allowNull: false, defaultValue: 'COP' },
+
     is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     created_by: { type: DataTypes.UUID, allowNull: true },
   },

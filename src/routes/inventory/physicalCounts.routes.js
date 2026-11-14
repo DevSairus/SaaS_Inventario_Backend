@@ -25,12 +25,15 @@ router.get('/:id/template', physicalCountsController.downloadTemplate);
 router.get('/:id/report', physicalCountsController.downloadReport);
 
 // Crear sesión
-router.post('/', requirePermission('inventory.physical_counts.write'), physicalCountsController.createPhysicalCount);
+router.post('/', requirePermission('inventory.physical_counts.create'), physicalCountsController.createPhysicalCount);
 
-// Subir Excel (preview con dry_run=true, aplicar con dry_run=false)
+// Subir Excel (preview con dry_run=true, aplicar con dry_run=false).
+// Aquí alcanza con 'create' (crear/previsualizar); aplicar el conteo exige además
+// 'inventory.physical_counts.approve', que se verifica en el controlador porque
+// dry_run puede venir en el cuerpo multipart y multer rompe el contexto del tenant.
 router.post(
   '/:id/upload',
-  requirePermission('inventory.physical_counts.write'),
+  requirePermission('inventory.physical_counts.create'),
   uploadExcelMiddleware.single('archivo'),
   physicalCountsController.uploadPhysicalCount
 );

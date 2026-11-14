@@ -30,6 +30,14 @@ async function loadConcepts(tenantId) {
   return resolveFiscalProfile(tenant?.tax_config || {}).concepts;
 }
 
+// Paginación común: page >= 1; limit acotado a [1, max] con valor por defecto.
+// El tamaño de página lo elige la pantalla (selector "por página").
+const parsePaging = (query, { defaultLimit = 50, maxLimit = 200 } = {}) => {
+  const page = Math.max(parseInt(query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit, 10) || defaultLimit, 1), maxLimit);
+  return { page, limit, offset: (page - 1) * limit };
+};
+
 const yearRange = (year) => {
   const y = Number(year) || new Date().getFullYear();
   return { from: `${y}-01-01`, to: `${y}-12-31`, year: y };
@@ -102,16 +110,18 @@ exports.overview = async (req, res) => {
   }
 };
 
-// GET /tax-classification/lines?year=&concept_id=
+// GET /tax-classification/lines?year=&concept_id=&page=&limit=
 // Detalle de lo comprado bajo un concepto (para revisar antes de la Exógena).
+// Paginado (antes se cortaba en silencio a las primeras 500 líneas).
 exports.lines = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
     const schema = getCurrentSchema() || 'public';
     const { from, to } = yearRange(req.query.year);
     const conceptId = String(req.query.concept_id || '');
+    const { page, limit, offset } = parsePaging(req.query, { defaultLimit: 100, maxLimit: 500 });
     const items = await sequelize.query(
-      `SELECT x.*, pu.purchase_number, pu.purchase_date, COALESCE(s.business_name, s.name) AS supplier_name,
+      `SELECT x.*, COUNT(*) OVER() AS total_rows, pu.purchase_number, pu.purchase_date, COALESCE(s.business_name, s.name) AS supplier_name,
               pr.id AS product_id, pr.name AS product_name, pr.sku, pr.product_type, pr.retention_concept AS product_concept,
               c.name AS category_name, c.retention_concept AS category_concept
        FROM (${purchaseItemsSql(schema).replace('SELECT p.id AS purchase_id,', 'SELECT pi.id AS item_id, pi.product_id AS item_product_id, p.id AS purchase_id,')}) x
@@ -120,12 +130,14 @@ exports.lines = async (req, res) => {
        LEFT JOIN "${schema}"."products" pr ON pr.id = x.item_product_id
        LEFT JOIN "${schema}"."categories" c ON c.id = pr.category_id
        WHERE x.concept_id = :conceptId
-       ORDER BY pu.purchase_date DESC
-       LIMIT 500`,
-      { replacements: { tenantId, from, to, conceptId }, type: QueryTypes.SELECT }
+       ORDER BY pu.purchase_date DESC, x.item_id ASC
+       LIMIT :limit OFFSET :offset`,
+      { replacements: { tenantId, from, to, conceptId, limit, offset }, type: QueryTypes.SELECT }
     );
+    const total = items.length > 0 ? Number(items[0].total_rows) : 0;
     res.json({
       success: true,
+      pagination: { page, limit, total, pages: Math.max(Math.ceil(total / limit), 1) },
       data: items.map((i) => ({
         item_id: i.item_id,
         purchase_id: i.purchase_id,
@@ -165,13 +177,13 @@ exports.saveCategories = async (req, res) => {
   }
 };
 
-// GET /tax-classification/products?search=&category_id=&type=&only_overrides=&page=
+// GET /tax-classification/products?search=&category_id=&type=&only_overrides=&page=&limit=
+// limit configurable (por defecto 50, máximo 200).
 exports.products = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
     const { search, category_id, type, only_overrides } = req.query;
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = 50;
+    const { page, limit, offset } = parsePaging(req.query, { defaultLimit: 50, maxLimit: 200 });
     const where = { tenant_id: tenantId };
     if (search) {
       const like = `%${String(search).trim()}%`;
@@ -187,9 +199,9 @@ exports.products = async (req, res) => {
       where,
       attributes: ['id', 'sku', 'name', 'product_type', 'category_id', 'retention_concept'],
       include: [{ model: Category, as: 'category', attributes: ['id', 'name', 'retention_concept'], required: false }],
-      order: [['name', 'ASC']],
+      order: [['name', 'ASC'], ['id', 'ASC']],
       limit,
-      offset: (page - 1) * limit,
+      offset,
     });
 
     res.json({
@@ -205,7 +217,7 @@ exports.products = async (req, res) => {
           inherited_from: p.category?.retention_concept ? 'categoría' : 'automático',
         };
       }),
-      pagination: { page, limit, total: count, pages: Math.ceil(count / limit) },
+      pagination: { page, limit, total: count, pages: Math.max(Math.ceil(count / limit), 1) },
     });
   } catch (error) {
     fail(res, error, 'Error listando productos');

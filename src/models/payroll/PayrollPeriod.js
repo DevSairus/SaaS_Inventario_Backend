@@ -52,6 +52,26 @@ const PayrollPeriod = sequelize.define('PayrollPeriod', {
     type: DataTypes.TEXT,
     allowNull: true,
   },
+  // Solo períodos 'liquidacion': causa del retiro al momento de emitir (6.2).
+  termination_reason: {
+    type: DataTypes.STRING(30),
+    allowNull: true,
+  },
+  // Solo períodos 'liquidacion': empleado liquidado (6.4). Es el enlace real;
+  // antes se buscaba su UUID dentro de `notes`.
+  employee_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'employees', key: 'id' },
+    onDelete: 'SET NULL',
+  },
+  // Solo períodos 'liquidacion': true si el período normal ya pagó los días
+  // hasta el retiro y esta liquidación NO paga salario (Básico en 0 días).
+  excludes_salary: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+  },
   // Snapshot de lo que calcularía payrollService.js#liquidarEmpleado para
   // cada empleado activo de este periodo/periodicidad, generado al pasar a
   // 'liquidado' — puramente informativo (NO se firma ni se envía a la

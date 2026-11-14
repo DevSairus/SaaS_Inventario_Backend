@@ -53,6 +53,12 @@ const PayrollNovedad = sequelize.define('PayrollNovedad', {
     type: DataTypes.TEXT,
     allowNull: true,
   },
+  // 'project_hours' = generada desde las horas de los proyectos
+  // (services/payroll/projectHoursPayroll.service.js); se regenera. NULL = manual.
+  source: {
+    type: DataTypes.STRING(30),
+    allowNull: true,
+  },
   created_by: {
     type: DataTypes.UUID,
     allowNull: true,

@@ -15,6 +15,7 @@ const { resolveUnitCost } = require('../../utils/costResolver');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 const { getOpenSession, isTreasuryEnabled, assertCashAvailable } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
+const { canTransition, statusLabel } = require('../../services/returns/returnStateMachine');
 
 /**
  * Generar número de devolución único.
@@ -200,6 +201,8 @@ const getCustomerReturnById = async (req, res) => {
         attributes: ['id', 'advance_number', 'amount', 'balance', 'status'],
       });
     }
+
+    data.history = await require('../../services/returns/returnHistory').loadReturnHistory({ returnType: 'customer', ret: customerReturn, tenantId: tenant_id });
 
     res.json({ success: true, data });
 
@@ -728,11 +731,11 @@ const approveCustomerReturn = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
 
-    if (customerReturn.status !== 'pending') {
+    if (!canTransition(customerReturn.status, 'approved')) {
       await transaction.rollback();
       return res.status(400).json({
         success: false,
-        message: `La devolución ya fue ${customerReturn.status === 'approved' ? 'aprobada' : 'rechazada'}`
+        message: `La devolución ya está ${statusLabel(customerReturn.status).toLowerCase()}`
       });
     }
 
@@ -747,7 +750,10 @@ const approveCustomerReturn = async (req, res) => {
     const approveBlocker = !saleForCheck
       ? 'La venta de esta devolución ya no existe.'
       : saleReturnBlocker(saleForCheck)
-        || (saleForCheck.dian_status === 'sending' ? 'La factura está en envío a la DIAN: espera la respuesta antes de aprobar la devolución.' : null);
+        || (saleForCheck.dian_status === 'sending' ? 'La factura está en envío a la DIAN: espera la respuesta antes de aprobar la devolución.' : null)
+        // Factura aceptada en RADIAN (033/034): la nota crédito de la
+        // devolución sería rechazada, así que no se mueve inventario ni cartera.
+        || require('../../utils/radianAcceptance').notesBlockedReason(saleForCheck);
     if (approveBlocker) {
       await transaction.rollback();
       return res.status(400).json({ success: false, message: approveBlocker });
@@ -886,8 +892,8 @@ const rejectCustomerReturn = async (req, res) => {
     if (!customerReturn) {
       return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
-    if (customerReturn.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'La devolución ya fue procesada' });
+    if (!canTransition(customerReturn.status, 'rejected')) {
+      return res.status(400).json({ success: false, message: `La devolución ya está ${statusLabel(customerReturn.status).toLowerCase()}: no se puede rechazar` });
     }
 
     await customerReturn.update({
@@ -963,8 +969,22 @@ const reverseCustomerReturn = async (req, res) => {
   }
 };
 
+// GET /:id/history -- línea de tiempo de estados (req. 3.5 / 4.2).
+const getCustomerReturnHistory = async (req, res) => {
+  try {
+    const ret = await CustomerReturn.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!ret) return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
+    const data = await require('../../services/returns/returnHistory').loadReturnHistory({ returnType: 'customer', ret, tenantId: req.user.tenant_id });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error en getCustomerReturnHistory:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener el historial' });
+  }
+};
+
 module.exports = {
   getCustomerReturns,
+  getCustomerReturnHistory,
   getCustomerReturnById,
   createCustomerReturn,
   approveCustomerReturn,

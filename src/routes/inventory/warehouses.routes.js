@@ -84,7 +84,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Crear nueva bodega
-router.post('/', requirePermission('inventory.warehouses.write'), async (req, res) => {
+router.post('/', requirePermission('inventory.warehouses.create'), async (req, res) => {
   try {
     const { Warehouse } = require('../../models/inventory');
     const { sequelize } = require('../../config/database');
@@ -146,7 +146,7 @@ router.post('/', requirePermission('inventory.warehouses.write'), async (req, re
 });
 
 // Actualizar bodega
-router.put('/:id', requirePermission('inventory.warehouses.write'), async (req, res) => {
+router.put('/:id', requirePermission('inventory.warehouses.edit'), async (req, res) => {
   try {
     const { Warehouse } = require('../../models/inventory');
     const { sequelize } = require('../../config/database');
@@ -225,7 +225,7 @@ router.put('/:id', requirePermission('inventory.warehouses.write'), async (req, 
 });
 
 // Eliminar bodega (solo si no tiene stock)
-router.delete('/:id', requirePermission('inventory.warehouses.write'), async (req, res) => {
+router.delete('/:id', requirePermission('inventory.warehouses.delete'), async (req, res) => {
   try {
     const { Warehouse } = require('../../models/inventory');
     const { ProductWarehouseStock } = require('../../models/inventory');

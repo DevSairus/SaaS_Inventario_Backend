@@ -12,6 +12,8 @@
  */
 'use strict';
 
+const { coDateStr, coDateTime } = require('../../utils/colombiaTime');
+
 function easterSunday(year) {
   // Meeus/Jones/Butcher
   const a = year % 19;
@@ -98,19 +100,26 @@ function isBusinessDay(date) {
 }
 
 /**
- * Suma N días hábiles a partir de `fromDate` (sin contar `fromDate` mismo).
- * Devuelve un Date a las 23:59:59 UTC de ese día hábil — se usa como
- * vencimiento de plazo (radian_deadline_at), y el criterio de "vencido" es
- * "ya pasó ese día completo".
+ * Suma N días hábiles a partir de `fromDate` (sin contar ese día) y devuelve
+ * el fin de ese día hábil EN HORA COLOMBIA (23:59:59 −05:00) — se usa como
+ * vencimiento de plazo (radian_deadline_at); "vencido" = ya pasó ese día
+ * completo en Colombia.
+ *
+ * Antes se contaba sobre el día UTC y vencía a las 23:59:59 UTC (6:59 p. m.
+ * en Colombia): un 034 emitido esa misma noche lo rechazaba la DIAN (el
+ * cliente aún estaba en plazo), y un evento recibido después de las 7 p. m.
+ * se contaba como del día siguiente.
  */
 function addBusinessDays(fromDate, n) {
-  let d = new Date(fromDate);
+  // Día calendario colombiano del evento, como fecha UTC a medianoche (los
+  // festivos se calculan por clave YYYY-MM-DD).
+  let d = new Date(`${coDateStr(fromDate)}T00:00:00Z`);
   let remaining = n;
   while (remaining > 0) {
     d = addDaysUTC(d, 1);
     if (isBusinessDay(d)) remaining--;
   }
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59));
+  return coDateTime(dateKey(d), '23:59:59');
 }
 
 /** true si `checkDate` está dentro del plazo (aún no vence). */

@@ -1,14 +1,15 @@
 // backend/src/controllers/radian/radian.controller.js
 /**
  * Endpoints:
- *   POST /api/radian/purchases/:id/acuse             → Emite el evento 030 (Acuse de recibo)
- *   POST /api/radian/purchases/:id/recibo            → Emite el evento 032 (Recibo del bien/servicio) — fija el plazo de 3 días hábiles
+ *   POST /api/radian/purchases/:id/acuse             → Emite el evento 030 (Acuse de recibo) — body opcional: { receiver: { first_name, last_name, id_number, id_type, job_title, department } } (por defecto, el usuario)
+ *   POST /api/radian/purchases/:id/recibo            → Emite el evento 032 (Recibo del bien/servicio) — fija el plazo de 3 días hábiles; body opcional: { receiver } igual que el 030
  *   POST /api/radian/purchases/:id/aceptacion        → Emite el evento 033 (Aceptación expresa)
- *   POST /api/radian/purchases/:id/reclamo           → Emite el evento 031 (Reclamo) — body: { reason_code, reason_text }
+ *   POST /api/radian/purchases/:id/reclamo           → Emite el evento 031 (Reclamo) — body: { reason_code (01-04, obligatorio), reason_text (opcional) }
  *   GET  /api/radian/purchases/:id/events            → Timeline de eventos RADIAN de una compra
- *   POST /api/radian/sales/:id/received-event        → Registra un 032/033/031 recibido del cliente — body: { event_code, note }
+ *   POST /api/radian/sales/:id/received-event        → Registra un 032/033/031 recibido del cliente — body: { event_code, note, event_number, cude, issued_at } (los tres últimos obligatorios en 032)
  *   POST /api/radian/sales/:id/aceptacion-tacita      → Emite el evento 034 (Aceptación tácita) — body: { declarant_type }
  *   GET  /api/radian/sales/:id/events                → Timeline de eventos RADIAN de una venta
+ *   POST /api/radian/sales/:id/sync-dian             → Consulta en la DIAN (GetStatusEvent) los eventos del cliente y registra 032/033/031
  *   GET  /api/radian/pending                          → Avisos activos (plazos por vencer/vencidos, 034 disponible)
  *
  *   Fase 4 (requiere factura inscrita — ver radianService.js):
@@ -40,7 +41,7 @@ const resultMessage = (result, label, code) => {
 
 const emitAcuse = async (req, res) => {
   try {
-    const result = await radianService.emitAcuse030(req.params.id, req.tenant_id, req.user.id);
+    const result = await radianService.emitAcuse030(req.params.id, req.tenant_id, req.user.id, req.body?.receiver);
     ok(res, { data: result, message: resultMessage(result, 'Acuse de recibo', '030') });
   } catch (e) {
     logger.error('[RADIAN] Error emitAcuse:', e);
@@ -50,7 +51,7 @@ const emitAcuse = async (req, res) => {
 
 const emitRecibo = async (req, res) => {
   try {
-    const result = await radianService.emitRecibo032(req.params.id, req.tenant_id, req.user.id);
+    const result = await radianService.emitRecibo032(req.params.id, req.tenant_id, req.user.id, req.body?.receiver);
     ok(res, { data: result, message: resultMessage(result, 'Recibo del bien/servicio', '032') });
   } catch (e) {
     logger.error('[RADIAN] Error emitRecibo:', e);
@@ -71,7 +72,9 @@ const emitAceptacion = async (req, res) => {
 const emitReclamo = async (req, res) => {
   try {
     const { reason_code, reason_text } = req.body;
-    if (!reason_text) return fail(res, 'El motivo del reclamo es obligatorio');
+    // El concepto (01-04, tabla 13.3.12) es obligatorio para la DIAN; el
+    // texto libre es un detalle opcional que va en cbc:Note.
+    if (!reason_code) return fail(res, 'Seleccione el concepto del reclamo');
 
     const result = await radianService.emitReclamo031(req.params.id, req.tenant_id, req.user.id, {
       claimReasonCode: reason_code,
@@ -102,11 +105,13 @@ const getEvents = async (req, res) => {
 
 const recordSaleEvent = async (req, res) => {
   try {
-    const { event_code, note } = req.body;
+    const { event_code, note, event_number, cude, issued_at } = req.body;
     if (!['032', '033', '031'].includes(event_code)) {
       return fail(res, 'event_code debe ser 032, 033 o 031');
     }
-    const result = await radianService.recordSaleReceivedEvent(event_code, req.params.id, req.tenant_id, req.user.id, { note });
+    const result = await radianService.recordSaleReceivedEvent(event_code, req.params.id, req.tenant_id, req.user.id, {
+      note, eventNumber: event_number, cude, issuedAt: issued_at,
+    });
     ok(res, { data: result, message: `Evento ${event_code} registrado` });
   } catch (e) {
     logger.error('[RADIAN] Error recordSaleEvent:', e);
@@ -122,6 +127,22 @@ const emitTacita = async (req, res) => {
   } catch (e) {
     logger.error('[RADIAN] Error emitTacita:', e);
     fail(res, e.message || 'Error al emitir el evento 034', 500);
+  }
+};
+
+// Trae de la DIAN (GetStatusEvent) los eventos del cliente sobre la factura.
+const syncSaleEvents = async (req, res) => {
+  try {
+    const result = await radianService.syncSaleEventsFromDian(req.params.id, req.tenant_id, req.user.id);
+    let message;
+    if (!result.found) message = result.message;
+    else if (result.applied.length) message = `Registrado desde la DIAN: ${result.applied.join(', ')}`;
+    else if (result.events.length) message = 'La DIAN no reporta eventos nuevos del cliente para esta factura';
+    else message = 'La DIAN respondió, pero no se reconocieron eventos en la respuesta';
+    ok(res, { data: result, message });
+  } catch (e) {
+    logger.error('[RADIAN] Error syncSaleEvents:', e);
+    fail(res, e.message || 'Error al consultar los eventos en la DIAN', 500);
   }
 };
 
@@ -262,7 +283,7 @@ const getPending = async (req, res) => {
 
 module.exports = {
   emitAcuse, emitRecibo, emitAceptacion, emitReclamo, getEvents,
-  recordSaleEvent, emitTacita, getSaleEvents,
+  recordSaleEvent, emitTacita, getSaleEvents, syncSaleEvents,
   emitInscripcion, emitEndoso, emitCancelacionEndoso,
   emitLimitacion, emitTerminarLimitacion,
   emitMandato, emitTerminarMandato,

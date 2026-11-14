@@ -151,6 +151,7 @@ const costAlertsRoutes              = require('./routes/inventory/costAlerts.rou
 const orderListsRoutes              = require('./routes/inventory/orderLists.routes');
 const priceAdjustmentsRoutes        = require('./routes/inventory/priceAdjustments.routes');
 const warehousesRoutes              = require('./routes/inventory/warehouses.routes');
+const warehouseLocationsRoutes      = require('./routes/inventory/warehouseLocations.routes');
 const projectsRoutes                = require('./routes/projects/projects.routes');
 const toolsRoutes                   = require('./routes/tools.routes');
 const solarRoutes                   = require('./routes/solar.routes');
@@ -258,6 +259,7 @@ const payrollDocumentsRoutes        = require('./routes/payroll/payrollDocuments
 const payrollSettingsRoutes         = require('./routes/payroll/payrollSettings.routes');
 const payrollCertificatesRoutes     = require('./routes/payroll/payrollCertificates.routes');
 const payrollTerminationRoutes      = require('./routes/payroll/payrollTermination.routes');
+const payrollVacationsRoutes        = require('./routes/payroll/payrollVacations.routes');
 const payrollDashboardRoutes        = require('./routes/payroll/payrollDashboard.routes');
 const payrollPilaRoutes             = require('./routes/payroll/pila.routes');
 
@@ -318,6 +320,7 @@ app.use('/api/inventory/cost-alerts',          authMiddleware, tenantMiddleware,
 app.use('/api/inventory/order-lists',          authMiddleware, tenantMiddleware, requireModule('inventory'), orderListsRoutes);
 app.use('/api/inventory/price-adjustments',    authMiddleware, tenantMiddleware, requireModule('inventory'), priceAdjustmentsRoutes);
 app.use('/api/inventory/warehouses',           authMiddleware, tenantMiddleware, warehousesRoutes);
+app.use('/api/inventory/locations',            authMiddleware, tenantMiddleware, warehouseLocationsRoutes);
 app.use('/api/branches',                       authMiddleware, tenantMiddleware, branchesRoutes);
 app.use('/api/stock-alerts',                   authMiddleware, tenantMiddleware, stockAlertsRoutes);
 app.use('/api/form-drafts',                    authMiddleware, tenantMiddleware, formDraftsRoutes);
@@ -410,6 +413,7 @@ app.use('/api/payroll/documents',              authMiddleware, tenantMiddleware,
 app.use('/api/payroll/settings',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollSettingsRoutes);
 app.use('/api/payroll/certificates',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollCertificatesRoutes);
 app.use('/api/payroll/termination',            authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollTerminationRoutes);
+app.use('/api/payroll/vacations',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollVacationsRoutes);
 app.use('/api/payroll/dashboard',               authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollDashboardRoutes);
 app.use('/api/payroll/pila',                    authMiddleware, tenantMiddleware, branchMiddleware, requireModule('payroll'), payrollPilaRoutes);
 

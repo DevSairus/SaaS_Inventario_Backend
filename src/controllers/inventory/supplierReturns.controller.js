@@ -15,6 +15,7 @@ const { purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2 } =
 const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
+const { canTransition, statusLabel } = require('../../services/returns/returnStateMachine');
 
 const SETTLEMENT_TYPES = ['refund', 'credit'];
 const badRequest = (message) => { const err = new Error(message); err.status = 400; return err; };
@@ -461,6 +462,7 @@ const getSupplierReturnById = async (req, res) => {
     } else if (supplierReturn.status === 'approved') {
       data.requires_support_adjustment = !!(await acceptedSupportDocumentFor(supplierReturn.purchase_id, req.user.tenant_id));
     }
+    data.history = await require('../../services/returns/returnHistory').loadReturnHistory({ returnType: 'supplier', ret: supplierReturn, tenantId: tenant_id });
     res.json({ success: true, data });
   } catch (error) {
     console.error('Error en getSupplierReturnById:', error);
@@ -672,9 +674,9 @@ const approveSupplierReturn = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
 
-    if (supplierReturn.status !== 'pending') {
+    if (!canTransition(supplierReturn.status, 'approved')) {
       await transaction.rollback();
-      return res.status(400).json({ success: false, message: 'La devolución ya fue procesada' });
+      return res.status(400).json({ success: false, message: `La devolución ya está ${statusLabel(supplierReturn.status).toLowerCase()}` });
     }
 
     // Revalidar contra el estado actual de la compra (pudo cancelarse u otra
@@ -855,8 +857,8 @@ const rejectSupplierReturn = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
     }
 
-    if (supplierReturn.status !== 'pending') {
-      return res.status(400).json({ success: false, message: 'La devolución ya fue procesada' });
+    if (!canTransition(supplierReturn.status, 'rejected')) {
+      return res.status(400).json({ success: false, message: `La devolución ya está ${statusLabel(supplierReturn.status).toLowerCase()}: no se puede rechazar` });
     }
 
     await supplierReturn.update({
@@ -938,7 +940,21 @@ const reverseSupplierReturn = async (req, res) => {
   }
 };
 
+// GET /:id/history -- línea de tiempo de estados (req. 3.5 / 4.2).
+const getSupplierReturnHistory = async (req, res) => {
+  try {
+    const ret = await SupplierReturn.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!ret) return res.status(404).json({ success: false, message: 'Devolución no encontrada' });
+    const data = await require('../../services/returns/returnHistory').loadReturnHistory({ returnType: 'supplier', ret, tenantId: req.user.tenant_id });
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Error en getSupplierReturnHistory:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener el historial' });
+  }
+};
+
 module.exports = {
+  getSupplierReturnHistory,
   getSupplierReturns,
   getSupplierReturnById,
   createSupplierReturn,

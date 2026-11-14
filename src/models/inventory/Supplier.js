@@ -31,6 +31,13 @@ const Supplier = sequelize.define('Supplier', {
     type: DataTypes.STRING(255),
     allowNull: true
   },
+  // 3.2 — revisión contable pendiente al crear (migración 2026111105).
+  accounting_setup_status: {
+    type: DataTypes.STRING(12), allowNull: false, defaultValue: 'configured',
+    validate: { isIn: [['pending', 'configured']] },
+  },
+  accounting_setup_at: { type: DataTypes.DATE, allowNull: true },
+  accounting_setup_by: { type: DataTypes.UUID, allowNull: true },
   tax_id: {
     type: DataTypes.STRING(50),
     allowNull: true

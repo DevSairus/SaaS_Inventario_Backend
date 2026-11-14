@@ -6,6 +6,8 @@ const { applyGoalProgressEvent } = require('../../services/crmGamificationServic
 const { economicSalesWhere } = require('../../utils/remisionVisibility');
 const { searchMatch } = require('../../utils/searchText');
 const { MAX_LIMIT } = require('../../utils/pagination');
+const { normalizeEmailList, validateEmailList } = require('../../utils/emailRecipients');
+const { notifyNewThirdParty, pendingFields } = require('../../services/accounting/thirdPartySetup.service');
 
 // Utilidad: el frontend envía full_name, la DB tiene first_name + last_name
 function splitFullName(fullName) {
@@ -33,8 +35,16 @@ function prepareCustomerData(body) {
   if (data.retention_config && typeof data.retention_config === 'object') {
     data.retention_config = sanitizeCustomerRetentionConfig(data.retention_config);
   }
+  if (data.additional_emails !== undefined) {
+    data.additional_emails = normalizeEmailList(data.additional_emails).emails;
+  }
   return data;
 }
+
+// Mensaje de error si la lista de correos adicionales del body no es válida.
+const additionalEmailsError = (body) => (
+  body.additional_emails === undefined ? null : validateEmailList(body.additional_emails)
+);
 
 // Retenciones que este cliente le practica al negocio (taxService.calculateSaleRetentions):
 // - withholding_agent: true / false; sin el campo = automático según el
@@ -154,6 +164,8 @@ const getById = async (req, res) => {
 const create = async (req, res) => {
   try {
     const tenantId = req.tenant_id;
+    const emailsError = additionalEmailsError(req.body);
+    if (emailsError) return res.status(400).json({ success: false, message: emailsError });
     const customerData = {
       ...prepareCustomerData(req.body),
       tenant_id: tenantId
@@ -175,7 +187,9 @@ const create = async (req, res) => {
       }
     }
 
-    const customer = await Customer.create(customerData);
+    const customer = await Customer.create({ ...customerData, ...pendingFields() });
+    // 3.2 — aviso a contabilidad (no bloquea la respuesta).
+    notifyNewThirdParty(tenantId, 'customer', customer, { creatorName: req.user?.name || req.user?.email }).catch(() => {});
 
     // Gamificación (CRM) §4 — mueve new_customers. Cliente no tiene
     // branch_id propio, así que la meta de sede se resuelve dentro del
@@ -207,6 +221,9 @@ const update = async (req, res) => {
   try {
     const { id } = req.params;
     const tenantId = req.tenant_id;
+
+    const emailsError = additionalEmailsError(req.body);
+    if (emailsError) return res.status(400).json({ success: false, message: emailsError });
 
     const customer = await Customer.findOne({
       where: { id, tenant_id: tenantId }

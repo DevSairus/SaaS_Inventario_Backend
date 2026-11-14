@@ -22,6 +22,13 @@ const Product = sequelize.define('Product', {
     allowNull: true,
     references: { model: 'warehouses', key: 'id' }
   },
+  // Ubicación física dentro de la bodega del producto (migración 2026111302).
+  // Siempre de la misma bodega que warehouse_id (lo valida el controlador).
+  location_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'warehouse_locations', key: 'id' }
+  },
   product_type: {
     type: DataTypes.ENUM('simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'),
     allowNull: false,

@@ -2,10 +2,11 @@ const { Employee } = require('../../models');
 const { Op } = require('sequelize');
 const { MAX_LIMIT } = require('../../utils/pagination');
 const vacationBook = require('../../services/payroll/vacationBook.service');
+const { isValidTerminationReason } = require('../../services/payroll/terminationReasons');
 
 const NULLABLE_FIELDS = [
   'other_names', 'second_surname', 'email', 'phone', 'position', 'cost_center',
-  'branch_id', 'termination_date', 'contract_end_date', 'bank_name', 'account_type', 'account_number',
+  'branch_id', 'termination_date', 'termination_reason', 'termination_notes', 'contract_end_date', 'bank_name', 'account_type', 'account_number',
   'state', 'city', 'city_code', 'address', 'notes', 'employee_code',
   'work_state', 'work_city', 'work_city_code', 'work_address',
   'eps_supplier_id', 'pension_fund_supplier_id', 'severance_fund_supplier_id',
@@ -165,6 +166,8 @@ const createEmployee = async (req, res) => {
       transport_allowance_eligible = true,
       hire_date,
       termination_date,
+      termination_reason,
+      termination_notes,
       contract_end_date,
       payment_method = 'transfer',
       payment_form = '1',
@@ -210,6 +213,10 @@ const createEmployee = async (req, res) => {
       });
     }
 
+    if (termination_reason && !isValidTerminationReason(termination_reason)) {
+      return res.status(400).json({ success: false, message: 'La causa del retiro no es válida' });
+    }
+
     const employee = await Employee.create({
       tenant_id,
       document_type,
@@ -234,6 +241,8 @@ const createEmployee = async (req, res) => {
       transport_allowance_eligible,
       hire_date,
       termination_date: termination_date || null,
+      termination_reason: termination_date ? (termination_reason || null) : null,
+      termination_notes: termination_date ? (String(termination_notes || '').trim() || null) : null,
       contract_end_date: contract_end_date || null,
       payment_method,
       payment_form,
@@ -315,6 +324,16 @@ const updateEmployee = async (req, res) => {
           message: 'Ya existe un empleado con ese tipo y número de documento',
         });
       }
+    }
+
+    // Causa del retiro (6.2): debe ser una de las del catálogo, y si se quita la
+    // fecha de retiro también se limpian la causa y sus observaciones.
+    if (updateData.termination_reason && !isValidTerminationReason(updateData.termination_reason)) {
+      return res.status(400).json({ success: false, message: 'La causa del retiro no es válida' });
+    }
+    if ('termination_date' in updateData && !updateData.termination_date) {
+      updateData.termination_reason = null;
+      updateData.termination_notes = null;
     }
 
     // Campos NOT NULL — no se sobrescriben con vacío

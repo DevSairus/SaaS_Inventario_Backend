@@ -464,6 +464,8 @@ async function annulConsolidatedInvoice({ saleId, tenantId, userId, reason }) {
     throw httpError(400, 'Esta acción solo aplica a facturas que agrupan remisiones');
   }
   if (invoice.status === 'cancelled') throw httpError(400, 'Esta factura ya está anulada');
+  const radianBlock = require('../../utils/radianAcceptance').notesBlockedReason(invoice);
+  if (radianBlock) throw httpError(409, radianBlock);
   if (invoice.dian_status !== 'accepted' || !invoice.cufe) {
     throw httpError(400, REVERTIBLE_DIAN_STATUSES.includes(invoice.dian_status)
       ? 'La DIAN no aceptó esta factura: usa "Revertir agrupación".'

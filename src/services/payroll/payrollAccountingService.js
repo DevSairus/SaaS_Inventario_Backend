@@ -864,6 +864,32 @@ async function cuentaBancaria(tenantId, bankAccountId, acc, t) {
   return { accountId: bank.chart_of_account_id, label: `${bank.bank_name} ${bank.account_alias || bank.account_number}` };
 }
 
+/**
+ * 6.5 — Pago directo de una liquidación de vacaciones fuera de período.
+ * Dr Anticipos de nómina (tercero = empleado) / Cr banco. Es un anticipo porque
+ * el devengo (gasto o consumo de la provisión de vacaciones) lo reconoce el
+ * período de nómina que absorbe la liquidación: ahí se descuenta este anticipo
+ * (ver payrollVacationService.attachToPeriod). Corre dentro de la transacción `t`.
+ */
+async function registrarPagoVacaciones({ tenantId, settlement, employee, paymentDate, bankAccountId, reference, userId, t }) {
+  const acc = await cargarMapeos(tenantId, t);
+  const bank = await cuentaBancaria(tenantId, bankAccountId, acc, t);
+  const total = round2(settlement.total_value);
+  if (!(total > 0)) throw new Error('El valor a pagar debe ser mayor a cero');
+  const titulo = `Pago vacaciones VAC-${settlement.doc_number} — ${etiquetaEmpleado(employee)}`;
+  return createDraftEntry(tenantId, {
+    entryDate: paymentDate,
+    sourceType: 'payroll_payment',
+    sourceId: settlement.id,
+    description: `${titulo}${reference ? ` — Ref. ${reference}` : ''}`,
+    lines: [
+      { account_id: acc('payroll_advances_receivable'), debit: total, credit: 0, description: `Anticipo vacaciones VAC-${settlement.doc_number} — ${etiquetaEmpleado(employee)}`, third_party_id: employee.id },
+      { account_id: bank.accountId, debit: 0, credit: total, description: `${titulo} — ${bank.label}` },
+    ],
+    createdBy: userId,
+  }, t);
+}
+
 async function lineasDePagosActivos(payments, t) {
   const { JournalEntryLine } = models();
   const ids = payments.map((p) => p.journal_entry_id).filter(Boolean);
@@ -1271,6 +1297,7 @@ module.exports = {
   estadoCesantiasAnuales,
   consignarCesantias,
   registrarPago,
+  registrarPagoVacaciones,
   anularPago,
   resumenContablePeriodo,
 };

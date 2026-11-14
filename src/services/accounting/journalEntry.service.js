@@ -75,12 +75,17 @@ async function getOrCreatePeriod(tenantId, entryDate, transaction) {
  * uno propio (dimensión de proyecto, módulo Proyectos).
  * Valida que debe == haber antes de crear.
  */
-async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sourceId, description, lines, createdBy, projectId }, transaction) {
+async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sourceId, description, lines: inputLines, createdBy, projectId }, transaction) {
   const { JournalEntry, JournalEntryLine } = require('../../models');
 
-  if (!lines || lines.length < 2) {
+  if (!inputLines || inputLines.length < 2) {
     throw new Error('Un asiento contable necesita al menos 2 líneas (débito y crédito)');
   }
+
+  // 5.1 — descuadre de hasta el tope (1 peso por defecto) por redondeo de
+  // impuestos: línea automática de ajuste al peso en vez de aceptarlo o rechazarlo.
+  const { balanceWithAdjustment } = require('./roundingAdjustment.service');
+  const { lines } = await balanceWithAdjustment(tenantId, inputLines, transaction);
 
   const totalDebit = lines.reduce((sum, l) => sum + Number(l.debit || 0), 0);
   const totalCredit = lines.reduce((sum, l) => sum + Number(l.credit || 0), 0);
@@ -124,6 +129,7 @@ async function createDraftEntry(tenantId, { branchId, entryDate, sourceType, sou
       description: l.description || null,
       third_party_id: l.third_party_id || null,
       project_id: l.project_id !== undefined ? l.project_id || null : projectId || null,
+      is_rounding_adjustment: !!l.is_rounding_adjustment,
       line_order: idx,
     })),
     { transaction }
@@ -268,6 +274,8 @@ async function reverseEntry(originalEntryId, tenantId, userId, reason, transacti
     description: `Reversión — ${l.description || ''}`.trim(),
     third_party_id: l.third_party_id || null,
     project_id: l.project_id || null,
+    // La reversión de un ajuste al peso también cuenta en la bitácora (netea el original).
+    is_rounding_adjustment: !!l.is_rounding_adjustment,
   }));
 
   const reversalEntry = await createDraftEntry(

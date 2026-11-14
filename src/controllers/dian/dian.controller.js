@@ -28,6 +28,7 @@ const logger = require('../../config/logger');
 const { Op } = require('sequelize');
 const { DIVIPOLA_DEPARTMENTS, DIVIPOLA_CITIES } = require('../../data/divipola-colombia');
 const { pickComboFields } = require('../../utils/comboLines');
+const { normalizeEmailList, validateEmailList } = require('../../utils/emailRecipients');
 
 /* ─── Helpers ─── */
 const ok = (res, data, status = 200) => res.status(status).json({ success: true, ...data });
@@ -142,15 +143,7 @@ const updateConfig = async (req, res) => {
       ...(certificate_password && certificate_password !== '[CONFIGURADO]' && { certificate_password }),
     };
 
-    // Modo simulación (demo, no envía a la DIAN): al activarlo se crean las
-    // resoluciones de simulación (prefijos SIM*) que falten.
-    const enteringSimulation = updated.environment === 'simulation' && current.environment !== 'simulation';
-
     await tenant.update({ dian_config: updated });
-
-    if (enteringSimulation) {
-      await require('../../services/dian/dianSimulation').ensureSimulationResolutions(tenant.id);
-    }
 
     // La instancia de DianKit (certificado cargado, ambiente, NIT, etc.) se
     // cachea en memoria por tenant — si no se invalida acá, los envíos
@@ -733,6 +726,65 @@ const createSupportDocumentAdjustment = async (req, res) => {
     if (e.status) return fail(res, e.message, e.status);
     logger.error('Error createSupportDocumentAdjustment:', e);
     fail(res, e.message || 'Error al crear la Nota de Ajuste', 500);
+  }
+};
+
+/* ──────────────────────────────────────────────────────────
+ * POST /api/dian/email/:saleId
+ * body (opcional): { additional_emails: string[] | string, use_customer_list: boolean }
+ * Reenvía el PDF+XML de un documento ya ACEPTADO por la DIAN a todos sus
+ * destinatarios (correo principal del comprador + adicionales).
+ *  - additional_emails: define la lista propia de ESTA factura (reemplaza la
+ *    del cliente; [] = solo el correo principal).
+ *  - use_customer_list: true quita la lista propia y vuelve a la del cliente.
+ * Responde con el resultado por destinatario (también queda en
+ * sales.email_delivery).
+ * ────────────────────────────────────────────────────────── */
+const resendInvoiceEmail = async (req, res) => {
+  try {
+    const tenantId = req.tenant_id;
+    const sale = await Sale.findOne({
+      where: { id: req.params.saleId, tenant_id: tenantId },
+      include: [{ model: SaleItem, as: 'items' }],
+    });
+    if (!sale) return fail(res, 'Documento no encontrado', 404);
+    if (sale.dian_status !== 'accepted') {
+      return fail(res, 'Solo se puede enviar por correo un documento aceptado por la DIAN.');
+    }
+
+    const body = req.body || {};
+    if (body.use_customer_list === true) {
+      await sale.update({ additional_emails_override: null });
+    } else if (body.additional_emails !== undefined) {
+      const error = validateEmailList(body.additional_emails);
+      if (error) return fail(res, error);
+      await sale.update({ additional_emails_override: normalizeEmailList(body.additional_emails).emails });
+    }
+
+    const event = await DianEvent.findOne({
+      where: { tenant_id: tenantId, sale_id: sale.id, status: 'accepted', request_xml: { [Op.ne]: null } },
+      order: [['created_at', 'DESC']],
+    });
+    if (!event?.request_xml) {
+      return fail(res, 'No se encontró el XML firmado aceptado de este documento para adjuntarlo.', 404);
+    }
+
+    const tenant = await Tenant.findByPk(tenantId);
+    const result = await require('../../services/dian/dianEmailService').sendElectronicInvoiceEmail(sale, tenant, event.request_xml);
+
+    if (result.reason === 'no_customer_email') {
+      return fail(res, 'El cliente no tiene correo registrado ni correos adicionales.');
+    }
+    const failed = result.recipients.filter((r) => r.status !== 'sent').length;
+    ok(res, {
+      data: { recipients: result.recipients },
+      message: failed === 0
+        ? `Documento enviado a ${result.recipients.length} correo(s)`
+        : `Enviado con ${failed} fallo(s) de ${result.recipients.length} — revise el detalle por correo`,
+    });
+  } catch (e) {
+    logger.error('Error resendInvoiceEmail:', e);
+    fail(res, e.message || 'Error al enviar el documento por correo', 500);
   }
 };
 
@@ -1335,6 +1387,11 @@ const createAndSendDebitNote = async (req, res) => {
       await transaction.rollback();
       return fail(res, 'La factura no tiene CUFE. Debe ser aceptada por la DIAN primero.');
     }
+    const radianBlock = require('../../utils/radianAcceptance').notesBlockedReason(original);
+    if (radianBlock) {
+      await transaction.rollback();
+      return fail(res, radianBlock, 409);
+    }
 
     const noteItems = [];
     let noteSubtotal = 0;
@@ -1528,6 +1585,7 @@ module.exports = {
 
   createSupportDocumentAdjustment,
   resendSupportDocumentAdjustment,
+  resendInvoiceEmail,
   listSupportDocumentAdjustments,
   getEvents,
   testConnection,

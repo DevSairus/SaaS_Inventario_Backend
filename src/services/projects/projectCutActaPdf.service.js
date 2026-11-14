@@ -105,7 +105,10 @@ async function generateCutActaPdf({ cut, project, customer, contract, tenant }) 
   doc.font('Helvetica').fontSize(8.5).fillColor(gray)
     .text(`Avance acumulado del contrato: ${Number(cut.progress_pct || 0).toLocaleString('es-CO')} %`, L, y, { width: 300 });
   totalRow('Valor del avance (costo directo)', cop(cut.direct_amount));
-  if (Number(cut.aiu_amount) > 0) totalRow('AIU', cop(cut.aiu_amount));
+  if (Number(cut.aiu_amount) > 0) {
+    const pct = (n) => `${Number(n || 0).toLocaleString('es-CO', { maximumFractionDigits: 2 })} %`;
+    totalRow(cut.aiu_enabled ? `AIU (A ${pct(cut.aiu_admin_pct)} · I ${pct(cut.aiu_unforeseen_pct)} · U ${pct(cut.aiu_profit_pct)})` : 'AIU', cop(cut.aiu_amount));
+  }
   totalRow('Subtotal', cop(cut.subtotal));
   totalRow('IVA', cop(cut.tax_amount));
   totalRow('Total del corte', cop(cut.total_amount), true);

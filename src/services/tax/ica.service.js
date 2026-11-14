@@ -35,6 +35,7 @@ const { QueryTypes, Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { createDraftEntry, getMappedAccountId, reverseEntry } = require('../accounting/journalEntry.service');
+const { buildTaxRoundingLine } = require('../accounting/roundingAdjustment.service');
 
 const round2 = (n) => Math.round(((Number(n) || 0) + Number.EPSILON) * 100) / 100;
 // Ningún UUID real: deja un IN (...) válido cuando no hay sedes asignadas.
@@ -342,10 +343,13 @@ async function causeIca(tenantId, params, userId) {
     }, { transaction: t });
 
     const city = report.municipality.city_name;
+    // La aproximación al mil va en su propia línea (429581 / 529581), no escondida
+    // en el gasto. Sin ese mapeo se conserva lo anterior: el ajuste dentro del gasto.
+    const roundingLine = await buildTaxRoundingLine(tenantId, totals.rounding_adjustment, t);
     const lines = [
-      // total_tax + ajuste al mil: así el pasivo queda en el valor del formulario.
-      { account_id: await getMappedAccountId(tenantId, 'ica_expense', t), debit: round2(totals.total_tax + totals.rounding_adjustment), credit: 0, description: `ICA ${city} (incluye avisos y bomberil)` },
+      { account_id: await getMappedAccountId(tenantId, 'ica_expense', t), debit: round2(roundingLine ? totals.total_tax : totals.total_tax + totals.rounding_adjustment), credit: 0, description: `ICA ${city} (incluye avisos y bomberil)` },
     ];
+    if (roundingLine) lines.push(roundingLine);
     if (report.retentions.length) {
       const reteicaAccount = await getMappedAccountId(tenantId, 'sale_reteica_receivable', t);
       for (const r of report.retentions) {

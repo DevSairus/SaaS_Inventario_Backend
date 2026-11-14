@@ -312,7 +312,7 @@ function aplicarNovedades(novedades, devengados, deducciones) {
         target[mapping.key].push(nov.payload);
         break;
       case 'single':
-        target[mapping.key] = (target[mapping.key] || 0) + Number(nov.payload);
+        target[mapping.key] = (target[mapping.key] || 0) + (typeof nov.payload === 'object' ? sumarValorNovedad(nov.payload) : (Number(nov.payload) || 0));
         break;
       case 'object':
         if (mapping.merge && target[mapping.key]) {
@@ -461,7 +461,14 @@ function diasAusenciaNovedades(novedades = []) {
 
 function liquidarEmpleado({ employee, period, novedades = [], autoConcepts = [], diasNoRemunerados = 0, softwareSecurityCode }) {
   const diasAusencia = diasAusenciaNovedades(novedades);
-  const { diasTrabajados, sueldoTrabajado, diasPeriodoCompleto } = calcularBasico(employee, period, diasNoRemunerados + diasAusencia);
+  // Liquidación definitiva cuyo salario ya se pagó en el período normal
+  // (period.excludes_salary): no hay días ni sueldo que pagar aquí, solo
+  // prestaciones, vacaciones e indemnización. Sin esto el día del retiro se
+  // pagaría dos veces.
+  const sinSalario = !!period.excludes_salary;
+  const { diasTrabajados, sueldoTrabajado, diasPeriodoCompleto } = sinSalario
+    ? { diasTrabajados: 0, sueldoTrabajado: 0, diasPeriodoCompleto: Math.max(1, diasComerciales(period.start_date, period.end_date)) }
+    : calcularBasico(employee, period, diasNoRemunerados + diasAusencia);
 
   const devengados = { basico: { diasTrabajados, sueldoTrabajado } };
   const transporte = calcularAuxilioTransporte(employee, diasTrabajados, diasPeriodoCompleto);
@@ -496,7 +503,9 @@ function liquidarEmpleado({ employee, period, novedades = [], autoConcepts = [],
     deduccionesTotal,
     // Desglose del IBC (no viaja al XML): lo usan la contabilidad y la PILA.
     ibc: ibcDetalle,
-    tiempoLaboradoDias: diasTrabajados,
+    // Sin salario en el documento, el tiempo laborado es el de toda la relación
+    // laboral (ingreso a retiro), no los días del tramo (que serían 0).
+    tiempoLaboradoDias: sinSalario ? Math.max(1, diasComerciales(employee.hire_date, employee.termination_date || period.end_date)) : diasTrabajados,
     softwareSecurityCode,
     paymentDates: period.payment_date ? [period.payment_date] : [],
   };
@@ -604,4 +613,4 @@ module.exports = {
   liquidarEmpleado,
   diasAusenciaNovedades,
   resumenLiquidacionParaImpresion,
-};
+};

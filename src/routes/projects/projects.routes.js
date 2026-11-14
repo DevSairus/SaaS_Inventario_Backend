@@ -23,6 +23,30 @@ router.get('/options', ctrl.options);
 router.get('/labor/employees', requirePermission('projects.time.write'), ctrl.employeeOptions);
 router.get('/labor/periods', manage, ctrl.laborPeriods);
 router.post('/labor/periods/:periodId/allocate', manage, ctrl.allocatePeriod);
+// Horarios de obra (Fase 4, req. 1.1): turnos y distribución de horas por empleado y proyecto.
+const hoursCtrl = require('../../controllers/projects/projectWorkHours.controller');
+router.get('/labor/shifts', hoursCtrl.listShifts);
+router.post('/labor/shifts', manage, hoursCtrl.createShift);
+router.put('/labor/shifts/:shiftId', manage, hoursCtrl.updateShift);
+router.get('/labor/distribution', hoursCtrl.distribution);
+// Mantenimientos recurrentes (Fase 4, req. 1.3): agenda, planes y visitas.
+const mntCtrl = require('../../controllers/projects/maintenance.controller');
+const mntManage = requirePermission('projects.maintenance.manage');
+const mntVisit = requirePermission('projects.maintenance.visit');
+router.get('/maintenance/agenda', mntCtrl.agenda);
+router.get('/maintenance/installations', mntCtrl.listInstallations);
+router.post('/maintenance/installations', mntManage, mntCtrl.createInstallation);
+router.post('/maintenance/installations/import', mntManage, mntCtrl.importInstallations);
+router.get('/maintenance/installations/:installationId', mntCtrl.installationDetail);
+router.put('/maintenance/installations/:installationId', mntManage, mntCtrl.updateInstallation);
+router.post('/maintenance/installations/:installationId/equipment', mntManage, mntCtrl.createEquipment);
+router.put('/maintenance/installations/:installationId/equipment/:equipmentId', mntManage, mntCtrl.updateEquipment);
+router.post('/maintenance/installations/:installationId/plans', mntManage, mntCtrl.createPlan);
+router.put('/maintenance/plans/:planId', mntManage, mntCtrl.updatePlan);
+router.put('/maintenance/visits/:visitId', mntManage, mntCtrl.rescheduleVisit);
+router.post('/maintenance/visits/:visitId/complete', mntVisit, mntCtrl.completeVisit);
+router.post('/maintenance/visits/:visitId/cancel', mntManage, mntCtrl.cancelVisit);
+router.get('/maintenance/visits/:visitId/pdf', mntCtrl.visitPdf);
 router.post('/', manage, ctrl.create);
 
 router.get('/:id', ctrl.getById);
@@ -48,6 +72,16 @@ router.post('/:id/retention/release', billing, cuts.releaseRetention);
 router.post('/:id/contract/close', billing, cuts.closeContract);
 router.get('/:id/documents', ctrl.getDocuments);
 
+// Etapas de obra y actas de despacho (Fase 4, req. 1.2). Etapas: gerencia; firmar/consultar actas: bodega.
+const stagesCtrl = require('../../controllers/projects/projectStages.controller');
+router.get('/:id/stages', stagesCtrl.listStages);
+router.post('/:id/stages', manage, stagesCtrl.createStage);
+router.put('/:id/stages/:stageId', manage, stagesCtrl.updateStage);
+router.delete('/:id/stages/:stageId', manage, stagesCtrl.deleteStage);
+router.get('/:id/dispatches', stagesCtrl.listDispatches);
+router.get('/:id/dispatches/:dispatchId/acta', stagesCtrl.acta);
+router.post('/:id/dispatches/:dispatchId/sign', stock, stagesCtrl.signDispatch);
+
 router.post('/:id/budget', manage, ctrl.addBudgetLine);
 router.put('/:id/budget/:lineId', manage, ctrl.updateBudgetLine);
 router.delete('/:id/budget/:lineId', manage, ctrl.deleteBudgetLine);
@@ -67,6 +101,10 @@ router.post('/:id/return', stock, ctrl.returnSurplus);
 
 router.get('/:id/time-entries', ctrl.getTimeEntries);
 router.post('/:id/time-entries', requirePermission('projects.time.write'), ctrl.addTimeEntry);
+router.post('/:id/time-sheet', requirePermission('projects.time.write'), hoursCtrl.saveSheet);
+router.get('/:id/hours-distribution', hoursCtrl.projectDistribution);
+router.get('/:id/maintenance', mntCtrl.projectInstallation);
+router.post('/:id/maintenance', mntManage, mntCtrl.activateProject);
 router.delete('/:id/time-entries/:entryId', requirePermission('projects.time.write'), ctrl.deleteTimeEntry);
 
 module.exports = router;
