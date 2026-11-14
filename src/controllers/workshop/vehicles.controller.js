@@ -12,6 +12,7 @@ const QRCode = require('qrcode');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { buildWaLink } = require('../../services/whatsappService');
 const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery');
+const { eventTemplate, greetingName } = require('../../services/waEventTemplates');
 const { findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
 const { MAX_LIMIT } = require('../../utils/pagination');
 
@@ -302,11 +303,14 @@ const sendPortalWhatsApp = async (req, res) => {
       return res.status(400).json({ success: false, message: 'El vehículo no tiene propietario con teléfono registrado.' });
     }
 
-    const portalUrl = portalUrlFor(await ensurePortalToken(vehicle));
+    const token = await ensurePortalToken(vehicle);
+    const portalUrl = portalUrlFor(token);
     const greeting = vehicle.customer?.first_name ? `Hola ${vehicle.customer.first_name}!` : 'Hola!';
     const message = `${greeting} Te compartimos la hoja de vida de tu vehículo *${vehicle.plate}*: historial de servicios y próximo mantenimiento.\n${portalUrl}`;
+    const tenant = await Tenant.findByPk(tenant_id, { attributes: ['id', 'business_config'] });
+    const template = eventTemplate(tenant, 'vehicle_portal', [greetingName(vehicle.customer), vehicle.plate], token);
 
-    const sent = await deliverWhatsApp({ tenantId: tenant_id, to: phone, body: message, userId: req.user?.id || null });
+    const sent = await deliverWhatsApp({ tenantId: tenant_id, to: phone, body: message, template, userId: req.user?.id || null });
     res.json({ success: true, ...waResponse(sent), portal_url: portalUrl });
   } catch (error) {
     logger.error('[WhatsApp] Error enviando portal del vehículo:', error);

@@ -9,6 +9,7 @@ const {
 const { Op } = require('sequelize');
 const { runWithTenantSchema } = require('../../config/tenantContext');
 const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsappDelivery');
+const { eventTemplate } = require('../../services/waEventTemplates');
 
 const {
   tenantTimeZone, wallTimeToInstant, localDateStr, localTimeStr, weekdayOf, localDayRange, formatDateTimeEs,
@@ -618,6 +619,9 @@ const sendAppointmentWhatsApp = async (req, res) => {
 
     const tenant = await Tenant.findByPk(tenant_id);
     const message = MESSAGE_BUILDERS[type](appointment, tenant);
+    const template = eventTemplate(tenant, `appointment_${type}`, [
+      appointment.customer_name || 'cliente', formatDateEs(appointment.scheduled_at), appointment.vehicle_plate || '-',
+    ]);
 
     // Cita sin un teléfono utilizable: como antes, wa.me sin número para que
     // el asesor elija el contacto (la confirmación/cancelación ya se hizo).
@@ -626,6 +630,7 @@ const sendAppointmentWhatsApp = async (req, res) => {
         tenantId: tenant_id,
         to: appointment.customer_phone,
         body: message,
+        template,
         userId: req.user?.id || null,
       })
       : { channel: 'wa_me', waLink: `https://wa.me/?text=${encodeURIComponent(message)}`, reason: FALLBACK.NOT_CONNECTED };

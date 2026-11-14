@@ -101,6 +101,32 @@ describe('connectWithToken', () => {
     expect(saved.wa_demo_mode).toBe(false);
   });
 
+  it('sin el número en la app WhatsApp Business no marca coexistencia ni pide el sync', async () => {
+    metaClient.listWabaPhoneNumbers.mockResolvedValue([
+      { id: PHONE_ID, display_phone_number: '+57 312 2257965', platform_type: 'CLOUD_API', is_on_biz_app: false },
+    ]);
+    const row = mockConfigRow();
+    TenantMetaConfig.findOrCreate.mockResolvedValue([row]);
+
+    await waCloud.connectWithToken({ tenantId: TENANT_ID, accessToken: 'tok', wabaId: WABA_ID, phoneNumberId: PHONE_ID });
+
+    expect(row.update.mock.calls[0][0].wa_coexistence).toBe(false);
+    expect(metaClient.requestCoexistenceSync).not.toHaveBeenCalled();
+  });
+
+  it('con el número en la app WhatsApp Business marca coexistencia y pide el sync', async () => {
+    metaClient.listWabaPhoneNumbers.mockResolvedValue([
+      { id: PHONE_ID, display_phone_number: '+57 312 2257965', is_on_biz_app: true },
+    ]);
+    const row = mockConfigRow();
+    TenantMetaConfig.findOrCreate.mockResolvedValue([row]);
+
+    await waCloud.connectWithToken({ tenantId: TENANT_ID, accessToken: 'tok', wabaId: WABA_ID, phoneNumberId: PHONE_ID });
+
+    expect(row.update.mock.calls[0][0].wa_coexistence).toBe(true);
+    expect(metaClient.requestCoexistenceSync).toHaveBeenCalledTimes(1);
+  });
+
   it('marca como NO permanente el token de un número de prueba', async () => {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     metaClient.debugToken.mockResolvedValue({

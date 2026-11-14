@@ -52,6 +52,8 @@ router.post('/conversations/:id/ai/summarize', ctrl.summarizeConversation);
 
 router.post('/templates/sync', checkRole('admin'), ctrl.syncTemplates);
 router.get('/templates', ctrl.listTemplates);
+router.get('/event-templates', checkRole('admin'), ctrl.listEventTemplates);
+router.put('/event-templates/:event', checkRole('admin'), ctrl.setEventTemplate);
 router.get('/reminders', ctrl.listReminders);
 router.post('/reminders', ctrl.createReminder);
 router.get('/campaigns', ctrl.listCampaigns);

@@ -74,6 +74,13 @@ async function resolveAccessToken(tenantConfig) {
   }
 }
 
+// Coexistencia real = el número sigue en la app WhatsApp Business del celular
+// (Meta: is_on_biz_app). Un número registrado solo en Cloud API no la tiene
+// aunque el formulario la pida.
+function isOnBusinessApp(ownedNumber, requested) {
+  return !!requested && ownedNumber?.is_on_biz_app === true;
+}
+
 /**
  * Completa Embedded Signup: guarda WABA + phone_number_id + token cifrado.
  */
@@ -121,6 +128,7 @@ async function completeEmbeddedSignup({
     throw err;
   }
   const display = ownedNumber.display_phone_number || displayPhone || null;
+  const realCoexistence = isOnBusinessApp(ownedNumber, coexistence);
 
   // Si el número ya está activo y conectado a OTRO tenant, no se permite
   // "robarlo" -- ver también el índice único parcial en la migración
@@ -150,7 +158,7 @@ async function completeEmbeddedSignup({
     own_display_phone: display,
     own_access_token: encryptToken(access_token),
     own_token_expires_at: expires_in ? new Date(Date.now() + expires_in * 1000) : null,
-    wa_coexistence: !!coexistence,
+    wa_coexistence: realCoexistence,
     connected_at: new Date(),
     disconnected_at: null,
     last_error: null,
@@ -158,7 +166,7 @@ async function completeEmbeddedSignup({
   });
 
   // Sync de coexistencia: best-effort dentro de 24h
-  if (coexistence) {
+  if (realCoexistence) {
     try {
       await metaClient.requestCoexistenceSync({
         phoneNumberId,
@@ -255,6 +263,7 @@ async function connectWithToken({
   }
 
   const isPermanent = tokenSource === 'system_user' && (tokenInfo ? tokenInfo.never_expires : true);
+  const realCoexistence = isOnBusinessApp(ownedNumber, coexistence);
 
   const [config] = await TenantMetaConfig.findOrCreate({ where: { tenant_id: tenantId } });
   await config.update({
@@ -268,13 +277,13 @@ async function connectWithToken({
     own_token_expires_at: tokenInfo?.never_expires ? null : (tokenInfo?.expires_at || null),
     own_token_is_permanent: isPermanent,
     own_token_source: tokenSource,
-    wa_coexistence: !!coexistence,
+    wa_coexistence: realCoexistence,
     connected_at: new Date(),
     disconnected_at: null,
     last_error: null,
   });
 
-  if (coexistence) {
+  if (realCoexistence) {
     try {
       await metaClient.requestCoexistenceSync({
         phoneNumberId,

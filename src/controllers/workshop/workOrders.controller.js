@@ -28,6 +28,7 @@ const { deliverWhatsApp, waResponse, FALLBACK } = require('../../services/whatsa
 const { buildWaLink } = require('../../services/whatsappService');
 const { getCustomerWhatsappNumber } = require('../../utils/customerWhatsappPhone');
 const { tenantTimeZone, wallTimeToInstant, localDateStr } = require('../../utils/tenantTime');
+const { getEventTemplate, eventTemplate, greetingName } = require('../../services/waEventTemplates');
 
 // Tipos de ítem que cuentan como mano de obra para comisión (ver
 // commissionSettlements.controller.js#SERVICE_TYPES) -- solo estos resuelven
@@ -2279,14 +2280,25 @@ const markAllQuoteNotificationsSeen = async (req, res) => {
 // La ronda ya quedó guardada (y la transacción cerrada): nada de WhatsApp
 // puede tumbar la respuesta. Sin celular queda el wa.me sin destinatario
 // para que el asesor elija el contacto.
-async function quoteWhatsApp({ tenantId, customer, message, userId }) {
+// Con plantilla de cotización configurada (Meta y WhatsApp) sale por ella,
+// con el token de la OT en el botón.
+async function quoteWhatsApp({ tenantId, order, customer, message, token, userId }) {
   const phone = getCustomerWhatsappNumber(customer);
   const waMe = (reason) => ({
     channel: 'wa_me', whatsapp_url: buildWaLink(phone, message), conversation_id: null, fallback_reason: reason,
   });
   if (!phone) return waMe('no_phone');
   try {
-    const sent = await deliverWhatsApp({ tenantId, to: phone, body: message, userId: userId || null });
+    const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'business_config'] });
+    let template = null;
+    if (getEventTemplate(tenant, 'quote_ot')) {
+      const vehicle = order.vehicle_id
+        ? await Vehicle.findOne({ where: { id: order.vehicle_id, tenant_id: tenantId }, attributes: ['plate', 'brand', 'model'] })
+        : null;
+      const vehicleText = [vehicle?.brand, vehicle?.model, vehicle?.plate].filter(Boolean).join(' ');
+      template = eventTemplate(tenant, 'quote_ot', [greetingName(customer), order.order_number, vehicleText], token);
+    }
+    const sent = await deliverWhatsApp({ tenantId, to: phone, body: message, template, userId: userId || null });
     const { waLink, ...rest } = waResponse(sent);
     return { ...rest, whatsapp_url: waLink || null, conversation_id: sent.conversation_id || null };
   } catch (err) {
@@ -2369,7 +2381,7 @@ const sendQuoteRequest = async (req, res) => {
       data: {
         quote_request_id: quoteRequest.id,
         share_url: shareUrl,
-        ...await quoteWhatsApp({ tenantId: tenant_id, customer, message, userId: req.user?.id }),
+        ...await quoteWhatsApp({ tenantId: tenant_id, order, customer, message, token, userId: req.user?.id }),
         items_count: pendingItems.length,
       },
     });
@@ -2433,7 +2445,7 @@ const resendQuoteRequest = async (req, res) => {
       data: {
         quote_request_id: quoteRequest.id,
         share_url: shareUrl,
-        ...await quoteWhatsApp({ tenantId: tenant_id, customer, message, userId: req.user?.id }),
+        ...await quoteWhatsApp({ tenantId: tenant_id, order, customer, message, token, userId: req.user?.id }),
         items_count: items.length,
       },
     });
@@ -4021,7 +4033,7 @@ const sendWhatsApp = async (req, res) => {
     }
 
     // Datos del cliente y la orden
-    const { order } = await getOrderWithTenant(id, tenant_id);
+    const { order, tenant } = await getOrderWithTenant(id, tenant_id);
     const phone = getCustomerWhatsappNumber(order?.customer);
     if (!phone) {
       return res.status(400).json({ success: false, message: 'El cliente no tiene número de teléfono registrado.' });
@@ -4030,8 +4042,9 @@ const sendWhatsApp = async (req, res) => {
     const frontendUrl = process.env.FRONTEND_URL || 'https://tu-app.vercel.app';
     const shareUrl = `${frontendUrl}/ot/${token}`;
     const message  = `Hola! Te compartimos el estado de tu Orden de Trabajo *${order.order_number}*.\nPuedes consultarla en tiempo real aquí:\n${shareUrl}`;
+    const template = eventTemplate(tenant, 'work_order_status', [greetingName(order.customer), order.order_number], token);
 
-    const sent = await deliverWhatsApp({ tenantId: tenant_id, to: phone, body: message, userId: req.user?.id || null });
+    const sent = await deliverWhatsApp({ tenantId: tenant_id, to: phone, body: message, template, userId: req.user?.id || null });
     res.json({ success: true, ...waResponse(sent), shareUrl });
   } catch (error) {
     logger.error('[WhatsApp] Error generando enlace OT:', error.message, error.stack);

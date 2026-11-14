@@ -2,7 +2,7 @@
 const { Op } = require('sequelize');
 const logger = require('../../config/logger') || console;
 const waCloud = require('../../services/whatsappCloud.service');
-const { WaConversation, WaMessage, Customer, User } = require('../../models');
+const { WaConversation, WaMessage, Customer, User, Tenant } = require('../../models');
 const {
   applyWaConversationScope,
   canManageAllAssignments,
@@ -42,6 +42,8 @@ const getWhatsAppStatus = async (req, res) => {
  * prueba). Alternativa a Embedded Signup para producción y para validar el
  * flujo antes de tener la WABA definitiva.
  */
+const NO_COEXISTENCE_NOTE = 'Meta lo tiene solo en la API de la nube (sin coexistencia): la app WhatsApp Business del celular no puede usar este número.';
+
 const connectWithToken = async (req, res) => {
   if (!ensureCanManageConnection(req, res)) return;
   try {
@@ -66,9 +68,10 @@ const connectWithToken = async (req, res) => {
 
     res.json({
       success: true,
-      message: data.own_token_is_permanent
+      message: (data.own_token_is_permanent
         ? 'WhatsApp conectado con token permanente. No hay que reconectar periódicamente.'
-        : 'WhatsApp conectado. Ojo: este token expira, para producción usa un System User.',
+        : 'WhatsApp conectado. Ojo: este token expira, para producción usa un System User.')
+        + (data.wa_coexistence ? '' : ` ${NO_COEXISTENCE_NOTE}`),
       data,
     });
   } catch (error) {
@@ -102,7 +105,9 @@ const completeEmbeddedSignup = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'WhatsApp conectado (coexistencia). El número sigue usable en WhatsApp Business App.',
+      message: data.wa_coexistence
+        ? 'WhatsApp conectado (coexistencia). El número sigue usable en WhatsApp Business App.'
+        : `WhatsApp conectado. ${NO_COEXISTENCE_NOTE}`,
       data,
     });
   } catch (error) {
@@ -430,9 +435,17 @@ const syncTemplates = async (req, res) => {
     const data = await waOps.syncTemplatesForTenant(req.tenant_id);
     res.json({ success: true, data });
   } catch (error) {
+    const meta = error.response?.data?.error;
+    logger.warn(`[WA Cloud] Sync plantillas tenant=${req.tenant_id}: ${meta?.message || error.message}`);
+    if (error.response?.status === 401 || meta?.code === 190) {
+      return res.status(400).json({
+        success: false,
+        message: 'Meta rechazó el token de WhatsApp (venció o no es válido). Reconecta WhatsApp con un token permanente.',
+      });
+    }
     res.status(error.status || 500).json({
       success: false,
-      message: error.message || 'Error al sincronizar plantillas',
+      message: meta?.message || error.message || 'Error al sincronizar plantillas',
     });
   }
 };
@@ -443,6 +456,29 @@ const listTemplates = async (req, res) => {
     res.json({ success: true, data });
   } catch (error) {
     res.status(500).json({ success: false, message: 'Error al listar plantillas' });
+  }
+};
+
+const eventTemplates = require('../../services/waEventTemplates');
+
+const listEventTemplates = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id, { attributes: ['id', 'business_config'] });
+    res.json({ success: true, data: await eventTemplates.listEventTemplates(tenant) });
+  } catch (error) {
+    logger.error('[WA Cloud] event-templates:', error);
+    res.status(500).json({ success: false, message: 'Error al obtener las plantillas por mensaje' });
+  }
+};
+
+const setEventTemplate = async (req, res) => {
+  try {
+    const tenant = await Tenant.findByPk(req.tenant_id);
+    const data = await eventTemplates.setEventTemplate(tenant, req.params.event, req.body || {});
+    res.json({ success: true, data });
+  } catch (error) {
+    if (!error.status) logger.error('[WA Cloud] set event-template:', error);
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Error al guardar la plantilla' });
   }
 };
 
@@ -783,6 +819,8 @@ module.exports = {
   assignConversation,
   syncTemplates,
   listTemplates,
+  listEventTemplates,
+  setEventTemplate,
   createReminder,
   listReminders,
   createCampaign,
