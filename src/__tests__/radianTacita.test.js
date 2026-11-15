@@ -40,9 +40,9 @@ describe('estructura del ApplicationResponse (XML de ejemplo oficial 030 y Anexo
     expect(xml).toContain(`>${expected}</sts:SoftwareSecurityCode>`);
   });
 
-  it('deja una segunda UBLExtension vacía para la firma (AAC01)', () => {
+  it('deja la segunda UBLExtension con la marca donde @dian-kit pone la firma (AAC01)', () => {
     expect((xml.match(/<ext:UBLExtension>/g) || []).length).toBe(2);
-    expect(xml).toMatch(/<\/sts:DianExtensions>[\s\S]*<ext:UBLExtension>\s*<ext:ExtensionContent\/>/);
+    expect(xml).toMatch(/<\/sts:DianExtensions>[\s\S]*<ext:UBLExtension>\s*<ext:ExtensionContent><!--FIRMA DIGITAL XAdES-BES AQUÍ--><\/ext:ExtensionContent>/);
   });
 
   it('CustomizationID 1, ProfileID literal y UUID con schemeID = ambiente (AAD02, AAD03, AAD07)', () => {

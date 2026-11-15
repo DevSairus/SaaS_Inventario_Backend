@@ -276,4 +276,87 @@ async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionPara
   return results;
 }
 
-module.exports = { sendTestDocuments, sendFullHabilitacionSet };
+/* ─────────────────────────────────────────────────────────────
+ * sendPayrollTestDocument — prueba rápida de habilitación de nómina
+ *
+ * Envía al set de pruebas de nómina (SendTestSetAsync + GetStatusZip) el
+ * Documento Soporte de Pago de un empleado REAL, con una liquidación de un
+ * mes completo calculada en memoria (sueldo, auxilio de transporte, salud y
+ * pensión, sin novedades). No crea periodo, PayrollDocument ni asiento
+ * contable: solo consume un número de la resolución de PRUEBAS de nómina
+ * y deja el DianEvent para el checklist de habilitación. Antes, la única
+ * forma de habilitar era emitir un periodo real en pruebas, que quedaba
+ * Emitido y con su asiento contable.
+ * ───────────────────────────────────────────────────────────── */
+async function sendPayrollTestDocument({ tenant, cfg, resolution: resolutionParam, employeeId = null }) {
+  ({ tenant, cfg } = forceTestEnvironment(tenant, cfg));
+  const { DianEvent, DianResolution, Employee } = require('../../models');
+  const { liquidarEmpleado } = require('../payroll/payrollService');
+  const { buildPayrollXml } = require('./payrollXmlBuilder');
+  const { assertPayrollDianConfig, signPayrollXml } = require('./payrollDianAdapter');
+  const dianApiService = require('./dianApiService');
+  const { generateSoftwareSecurityCode } = require('@dian-kit/core');
+
+  assertPayrollDianConfig(cfg);
+  const employee = await Employee.findOne({
+    where: { tenant_id: tenant.id, is_active: true, ...(employeeId ? { id: employeeId } : {}) },
+    order: [['created_at', 'ASC']],
+  });
+  if (!employee) throw new Error('No hay empleados activos: registre al menos uno en Nómina → Empleados para la prueba.');
+
+  // Mes calendario anterior completo, mensual: datos válidos y sin cruzarse
+  // con novedades reales (no se leen novedades).
+  const now = new Date();
+  const first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const last = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const period = { period_type: 'mensual', start_date: iso(first), end_date: iso(last), payment_date: iso(last), excludes_salary: false };
+
+  const transaction = await sequelize.transaction();
+  let numero = null;
+  try {
+    const resolution = await DianResolution.findOne({ where: { id: resolutionParam.id }, transaction, lock: transaction.LOCK.UPDATE });
+    if (!resolution?.is_active) throw new Error('La resolución de pruebas de nómina ya no está activa');
+    const consecutive = Number(resolution.current_number);
+    if (consecutive > Number(resolution.to_number)) throw new Error(`Rango agotado (hasta ${resolution.to_number})`);
+    numero = `${resolution.prefix}${consecutive}`;
+
+    const softwareSecurityCode = generateSoftwareSecurityCode(cfg.software_id_nomina, cfg.software_pin_nomina, numero);
+    const liquidation = liquidarEmpleado({ employee, period, novedades: [], autoConcepts: [], diasNoRemunerados: 0, softwareSecurityCode });
+    const built = buildPayrollXml({ tenant, employee, period, liquidation, numbering: { prefix: resolution.prefix, consecutivo: String(consecutive) } });
+    const signedXml = await signPayrollXml(built.xml, dianKit.getKit(tenant).config.certificateData, new Date());
+
+    await resolution.increment('current_number', { transaction });
+    await transaction.commit();
+
+    logger.info(`[DIAN AutoTest] → Payroll ${numero} (set de pruebas de nómina)`);
+    const dianResponse = await dianApiService.sendTestSetAsync({
+      xmlContent: signedXml, nit: cfg.nit, invoiceNumber: numero, testSetId: resolution.test_set_id,
+      p12Base64: cfg.certificate_p12_base64, password: cfg.certificate_password, environment: 'test',
+    });
+    const accepted = dianResponse.isValid || dianResponse.statusCode === '00';
+    const status = accepted ? 'accepted' : (dianResponse.statusCode ? 'rejected' : 'error');
+    await DianEvent.create({
+      tenant_id: tenant.id, sale_id: null,
+      event_type: 'SendTestSetAsync', document_type: 'Payroll',
+      invoice_number: numero, cufe: built.cune,
+      response_raw: dianResponse.raw, status,
+      error_message: accepted ? null : (dianResponse.statusMessage || dianResponse.statusDescription),
+      is_test: true,
+    }).catch((e) => logger.error('[DIAN AutoTest] Error guardando DianEvent:', e.message));
+
+    return [{
+      index: 1, type: 'nomina', invoiceNumber: numero, cufe: built.cune, accepted, signed: true, status,
+      employee: [employee.first_name, employee.first_surname].filter(Boolean).join(' '),
+      statusCode: dianResponse.statusCode, statusDescription: dianResponse.statusDescription,
+      statusMessage: dianResponse.statusMessage, errors: dianResponse.errors || [],
+      isFault: !accepted, rawPreview: dianResponse.raw?.substring(0, 1500) || null,
+    }];
+  } catch (err) {
+    if (!transaction.finished) await transaction.rollback();
+    logger.error('[DIAN AutoTest] Error nómina:', err.message);
+    return [{ index: 1, type: 'nomina', invoiceNumber: numero, accepted: false, signed: false, error: err.message, isFault: true }];
+  }
+}
+
+module.exports = { sendTestDocuments, sendFullHabilitacionSet, sendPayrollTestDocument };

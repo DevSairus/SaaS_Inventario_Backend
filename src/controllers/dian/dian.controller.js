@@ -1011,8 +1011,8 @@ const sendToTestSet = async (req, res) => {
 // DianEvent.document_type usa PascalCase (ver dianService.js) — distinto del
 // enum snake_case de DianResolution.document_type. Mismo mapeo que
 // dianAutoTestService.js#DIAN_EVENT_DOC_TYPE.
-const DIAN_EVENT_DOC_TYPE = { invoice: 'Invoice', support_document: 'SupportDocument' };
-const DOC_TYPE_LABEL_ES = { invoice: 'facturas', support_document: 'documentos soporte' };
+const DIAN_EVENT_DOC_TYPE = { invoice: 'Invoice', support_document: 'SupportDocument', payroll: 'Payroll' };
+const DOC_TYPE_LABEL_ES = { invoice: 'facturas', support_document: 'documentos soporte', payroll: 'documentos de nómina' };
 
 const getHabilitacionStatus = async (req, res) => {
   try {
@@ -1040,15 +1040,19 @@ const getHabilitacionStatus = async (req, res) => {
       },
     });
 
-    const effectiveTestSetId = resolution?.test_set_id || cfg.test_set_id;
+    const isPayroll = documentType === 'payroll';
+    // La nómina tiene su propio set de pruebas: no se usa el de facturación.
+    const effectiveTestSetId = isPayroll ? resolution?.test_set_id : (resolution?.test_set_id || cfg.test_set_id);
     const docLabelEs = DOC_TYPE_LABEL_ES[documentType] || documentType;
 
     const steps = [
       {
         key: 'software_registered',
-        label: 'Software registrado en DIAN',
-        done: !!(cfg.software_id && cfg.software_provider_nit),
-        details: cfg.software_id ? `Software ID: ${cfg.software_id}` : null,
+        label: isPayroll ? 'Software de nómina registrado en DIAN' : 'Software registrado en DIAN',
+        done: isPayroll ? !!(cfg.software_id_nomina && cfg.software_pin_nomina) : !!(cfg.software_id && cfg.software_provider_nit),
+        details: isPayroll
+          ? (cfg.software_id_nomina ? `Software ID de nómina: ${cfg.software_id_nomina}` : 'Escriba el Software ID y el PIN de nómina en la pestaña Configuración')
+          : (cfg.software_id ? `Software ID: ${cfg.software_id}` : null),
       },
       {
         key: 'certificate_configured',
@@ -1109,8 +1113,10 @@ const sendAutoTestDocuments = async (req, res) => {
     logger.info(`[DIAN AutoTest] cfg keys: nit=${!!cfg.nit} software_id=${!!cfg.software_id} software_pin=${!!cfg.software_pin} technical_key=${!!cfg.technical_key} test_set_id=${!!cfg.test_set_id} cert=${!!cfg.certificate_p12_base64}`);
     logger.info(`[DIAN AutoTest] nit=${cfg.nit} software_id=${cfg.software_id?.substring(0,8)}... test_set_id=${cfg.test_set_id?.substring(0,8)}...`);
 
-    // Validaciones
-    if (!cfg.nit || !cfg.software_id) {
+    const { count = 1, mode = 'invoices', document_type = 'invoice', employee_id = null } = req.body;
+
+    // Validaciones (la nómina valida su propio software más abajo)
+    if (!cfg.nit || (document_type !== 'payroll' && !cfg.software_id)) {
       return fail(res, 'Configure NIT y Software ID primero');
     }
     if (!cfg.certificate_p12_base64 || cfg.certificate_p12_base64 === '[CONFIGURADO]') {
@@ -1120,13 +1126,23 @@ const sendAutoTestDocuments = async (req, res) => {
       return fail(res, 'Contraseña del certificado no configurada.');
     }
 
-    const { count = 1, mode = 'invoices', document_type = 'invoice' } = req.body;
-
     const resolution = await DianResolution.findOne({
       where: { tenant_id: req.tenant_id, is_active: true, is_test: true, document_type },
     });
     if (!resolution) {
       return fail(res, `No hay resolución de habilitación activa para "${document_type}". Registre una resolución de pruebas primero.`);
+    }
+
+    // Nómina: su set de pruebas y su software son propios; no usa la llave
+    // técnica ni el TestSetId de facturación. Prueba con un empleado real,
+    // sin crear periodo, documento ni asiento (dianAutoTestService).
+    if (document_type === 'payroll') {
+      if (!resolution.test_set_id) {
+        return fail(res, 'Escriba el TestSetId de nómina en la resolución de Nómina electrónica (Habilitación / Pruebas). Se obtiene en el portal de habilitación de la DIAN.');
+      }
+      const results = await require('../../services/dian/dianAutoTestService').sendPayrollTestDocument({ tenant, cfg, resolution, employeeId: employee_id });
+      const ok1 = results.every((r) => r.accepted);
+      return ok(res, { data: results, message: ok1 ? '✅ Documento de nómina aceptado por la DIAN en el set de pruebas' : '⚠️ La DIAN no aceptó el documento de nómina de prueba.' });
     }
 
     // La llave técnica y el test_set_id pueden venir de la resolución propia

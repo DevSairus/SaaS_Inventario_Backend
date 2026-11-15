@@ -350,7 +350,7 @@ function buildEventXml({
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ext:UBLExtensions>${dianExtensions}
     <ext:UBLExtension>
-      <ext:ExtensionContent/>
+      <ext:ExtensionContent><!--FIRMA DIGITAL XAdES-BES AQUÍ--></ext:ExtensionContent>
     </ext:UBLExtension>
   </ext:UBLExtensions>
   <cbc:UBLVersionID>UBL 2.1</cbc:UBLVersionID>

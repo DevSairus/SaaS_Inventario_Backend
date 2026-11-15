@@ -19,7 +19,8 @@
 
 const logger = require('../../config/logger');
 const { Purchase, Sale, Supplier, Customer, Tenant, RadianEvent, User } = require('../../models');
-const { signXml } = require('../dian/dianSignerService');
+const { signXml } = require('@dian-kit/core');
+const { getKit } = require('../dian/dianKitAdapter');
 const dianApiService = require('../dian/dianApiService');
 const { isSimulation, simulationConfig, simulatedResponse } = require('../dian/dianSimulation');
 const { buildEventXml, CLAIM_REASONS } = require('./radianXmlBuilder');
@@ -137,10 +138,15 @@ async function sendRadianEvent({
   });
 
   try {
-    const signedXml = await signXml(xml, {
-      p12Base64: cfg.certificate_p12_base64,
-      password: cfg.certificate_password,
-      invoiceNumber: applicationResponseId,
+    // Firma XAdES con @dian-kit, el mismo firmador de las facturas que la
+    // DIAN acepta. El firmador propio (dianSignerService) producía firmas
+    // que no verificaban (resúmenes y SignatureValue inválidos) y la DIAN
+    // respondía "internal error" al 030 (2026-11-15). Se coloca donde está
+    // la marca <!--FIRMA DIGITAL XAdES-BES AQUÍ--> del builder.
+    const { signedXml } = await signXml({
+      xml,
+      certificate: getKit({ ...tenant.get({ plain: true }), dian_config: cfg }).config.certificateData,
+      signingTime: new Date(),
     });
 
     const result = isSimulation(cfg) ? simulatedResponse(applicationResponseId, cude) : await dianApiService.sendEventUpdateStatus({
