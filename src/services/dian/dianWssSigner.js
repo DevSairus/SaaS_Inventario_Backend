@@ -18,7 +18,10 @@ const NS = {
   DS:        'http://www.w3.org/2000/09/xmldsig#',
   WSSE:      'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd',
   WSU:       'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd',
-  WCF:       'http://wcf.dian.colombia/',
+  // SIN barra final: es el namespace de las operaciones de la DIAN (Anexo FE
+  // 1.9 y de Nómina, y @dian-kit). Con 'http://wcf.dian.colombia/' el WCF no
+  // reconocía la operación del cuerpo y respondía "internal error" (030).
+  WCF:       'http://wcf.dian.colombia',
   X509VT:    'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-x509-token-profile-1.0#X509v3',
   B64ET:     'http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary',
   EXC_C14N:  'http://www.w3.org/2001/10/xml-exc-c14n#',
