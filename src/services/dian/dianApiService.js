@@ -9,6 +9,7 @@ const https  = require('https');
 const axios  = require('axios');
 const logger = require('../../config/logger');
 const { extractFromP12, buildSignedEnvelope, NS } = require('./dianWssSigner');
+const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
 
 const ENDPOINTS = {
   test:       'https://vpfe-hab.dian.gov.co/WcfDianCustomerServices.svc',
@@ -75,6 +76,52 @@ function bodyGetXmlByDocumentKey(trackId) {
 }
 
 // Transporte
+//
+// La IP de Railway no está autorizada por la DIAN (responde 403 con una
+// página HTML). Igual que facturas y consultas (dianKitAdapter), si hay
+// DIAN_SERVICE_URL el sobre ya firmado se entrega por dian-service
+// (/api/dian/forward-soap), que corre en un equipo autorizado. Sin esa
+// variable (desarrollo local) se envía directo.
+async function soapRequestViaService(urls, environment, actionName, soapXml) {
+  const apiKey = process.env.DIAN_API_KEY || 'pitbox-dian-2026';
+  const start = Date.now();
+  const result = await callWithFailover(urls, async (baseUrl) => {
+    let response;
+    try {
+      response = await fetch(`${baseUrl}/api/dian/forward-soap`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+        body: JSON.stringify({ environment, actionName, soapXml }),
+      });
+    } catch (e) {
+      const cause = e.cause?.code || e.cause?.message || e.message;
+      throw new Error(`No se pudo conectar con el servicio DIAN (${baseUrl}): ${cause}. Verifique que dian-service esté encendido.`);
+    }
+    if (response.status === 404) {
+      throw new Error('El servicio DIAN (dian-service) está desactualizado: falta /api/dian/forward-soap. Actualícelo y reinícielo.');
+    }
+    if (!response.ok) throw new Error(`Servicio DIAN error ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    return response.json();
+  }, logger);
+  logger.info(`[DIAN] <- ${actionName} vía dian-service HTTP ${result.statusCode} (${Date.now() - start}ms) ${String(result.body || '').length}b`);
+  return { statusCode: result.statusCode, body: String(result.body || '') };
+}
+
+// Una respuesta que no es un sobre SOAP (403/5xx con página HTML) no es un
+// rechazo de la DIAN: el documento nunca llegó a validarse. Se lanza como
+// error de conexión para que quede como "error" (reintentable) y no como
+// "rechazado" con un motivo vacío.
+function assertSoapResponse(actionName, { statusCode, body }) {
+  if (/Envelope/i.test(body || '')) return;
+  const hint = statusCode === 403
+    ? 'La DIAN bloqueó la conexión (403): el envío no salió por un equipo autorizado. Revise DIAN_SERVICE_URL y que dian-service esté encendido y actualizado.'
+    : `La DIAN respondió HTTP ${statusCode} sin una respuesta SOAP válida. Intente de nuevo en unos minutos.`;
+  const err = new Error(hint);
+  err.httpStatus = statusCode;
+  err.isConnectionError = true;
+  throw err;
+}
+
 async function soapRequest(endpoint, actionName, soapXml, agent) {
   const start = Date.now();
   try {
@@ -155,7 +202,12 @@ async function signedCall({ p12Base64, password, environment, actionName, bodyCo
   });
 
   logger.info(`[DIAN] -> ${actionName} | ${environment} | ${Buffer.byteLength(soapXml)}b`);
-  return soapRequest(endpoint, actionName, soapXml, agent);
+  const serviceUrls = parseServiceUrls(process.env.DIAN_SERVICE_URL);
+  const response = serviceUrls.length
+    ? await soapRequestViaService(serviceUrls, environment === 'production' ? 'production' : 'test', actionName, soapXml)
+    : await soapRequest(endpoint, actionName, soapXml, agent);
+  assertSoapResponse(actionName, response);
+  return response;
 }
 
 // ─── API Pública ──────────────────────────────────────────────────────────────
