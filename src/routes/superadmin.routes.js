@@ -47,6 +47,7 @@ const { MODULES_CATALOG } = require('../config/modules.catalog');
 const { invalidateModulesCache, invalidateAllModulesCache, getEffectiveModulesForTenantId } = require('../services/moduleAccess');
 const { FEATURE_KEY: REMISION_FEATURE_KEY, isRemisionHidingEnabled } = require('../utils/remisionVisibility');
 const { withSessionsRevoked } = require('../utils/sessionRevocation');
+const { purgeTenant } = require('../services/tenantPurgeService');
 
 // amount es DECIMAL: Sequelize lo devuelve como string ("69000.00") y sumarlo
 // directo concatenaba. Se normaliza a valor mensual (anual / 12) para MRR.
@@ -629,61 +630,36 @@ router.delete(
   authMiddleware,
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
-    const transaction = await Tenant.sequelize.transaction();
     try {
       const { id } = req.params;
 
-      const tenant = await Tenant.findByPk(id, { transaction });
+      const tenant = await Tenant.findByPk(id);
       if (!tenant) {
-        await transaction.rollback();
         return res.status(404).json({ error: 'Empresa no encontrada' });
       }
-      const { schema_name: schemaName } = tenant;
-
-      // Eliminar en orden para respetar FK constraints
-      // 1. Usuarios del tenant
-      await User.destroy({ where: { tenant_id: id }, transaction });
-
-      // 2. Suscripciones
-      await TenantSubscription.destroy({ where: { tenant_id: id }, transaction });
-
-      // 3. El tenant mismo (el resto de tablas tienen ON DELETE CASCADE
-      // desde la migración 2026072704-fix-tenant-cascade-deletes.js)
-      await Tenant.destroy({ where: { id }, transaction });
-
-      await transaction.commit();
-
-      // 4. Si el tenant ya vivía en su propio schema (schema-per-tenant),
-      // el borrado de arriba solo limpió las filas legadas de `public` --
-      // el schema dedicado con los datos reales queda huérfano si no se
-      // dropea acá. No puede ir dentro de la misma transacción (DROP
-      // SCHEMA no es transaccional de forma útil junto con las queries
-      // anteriores y no debe bloquear la respuesta si falla).
-      if (schemaName) {
-        Tenant.sequelize
-          .query(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`)
-          .catch((err) => {
-            console.error(`Error dropeando schema "${schemaName}" del tenant eliminado:`, err);
-          });
+      if (req.user?.tenant_id === id) {
+        return res.status(400).json({ error: 'No puedes eliminar la empresa a la que pertenece tu propio usuario.' });
       }
+
+      // Antes esta ruta borraba usuarios y suscripciones a mano y fallaba en
+      // cuanto un usuario tenía audit_logs (u otra FK sin ON DELETE), y el
+      // schema dedicado solo se borraba después y "a ver si funciona".
+      // purgeTenant hace todo en una transacción: schema, filas de public,
+      // usuarios (soltando las referencias que queden) y la empresa.
+      const report = await purgeTenant(id, { reason: 'manual_superadmin', triggeredBy: req.user?.id || null });
+      invalidateModulesCache(id);
 
       res.json({
         success: true,
         message: `Empresa "${tenant.company_name}" eliminada permanentemente`,
+        report,
       });
     } catch (error) {
-      await transaction.rollback();
       console.error('Error eliminando tenant:', error);
-
-      // FK constraint violation — hay datos relacionados que impiden el borrado
-      if (error.name === 'SequelizeForeignKeyConstraintError') {
-        return res.status(409).json({
-          error: 'No se puede eliminar la empresa porque tiene datos relacionados (ventas, inventario, etc.). Desactívala en su lugar.',
-          details: error.message,
-        });
-      }
-
-      res.status(500).json({ error: 'Error al eliminar la empresa', details: error.message });
+      res.status(500).json({
+        error: 'No se pudo eliminar la empresa. No se borró nada.',
+        details: error.parent?.detail || error.message,
+      });
     }
   }
 );
