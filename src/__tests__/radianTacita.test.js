@@ -15,7 +15,50 @@ const base = {
   counterpartyNit: '800987654',
   counterpartyName: 'Cliente Dos SAS',
   softwarePin: '12345',
+  softwareId: 'fa326ca7-c1f8-40d3-a6fc-24d7c1040607',
+  softwareProviderNit: '900373979',
 };
+
+describe('estructura del ApplicationResponse (XML de ejemplo oficial 030 y Anexo FE 1.9)', () => {
+  const { xml } = buildEventXml({
+    ...base, eventCode: '030', applicationResponseId: 'ACR0021',
+    issuerFirstName: 'Solo', issuerFamilyName: 'Pruebas', issuerIdNumber: '2589846132', environment: 'test',
+  });
+
+  it('lleva DianExtensions con software, huella, proveedor autorizado y QR (AAB13-AAB36)', () => {
+    expect(xml).toContain('<sts:DianExtensions>');
+    expect(xml).toMatch(/<cbc:IdentificationCode listAgencyID="6"[^>]*>CO<\/cbc:IdentificationCode>/);
+    // DV de 900373979 por módulo 11 = 1 (el XML de ejemplo usa NIT ficticios con DV inventados).
+    expect(xml).toMatch(/<sts:ProviderID schemeID="1" schemeName="31"[^>]*>900373979<\/sts:ProviderID>/);
+    expect(xml).toMatch(/<sts:SoftwareID [^>]*>fa326ca7-c1f8-40d3-a6fc-24d7c1040607<\/sts:SoftwareID>/);
+    expect(xml).toMatch(/<sts:AuthorizationProviderID schemeID="4" schemeName="31"[^>]*>800197268<\/sts:AuthorizationProviderID>/);
+    expect(xml).toContain(`documentkey=${base.invoiceCufe}</sts:QRCode>`);
+  });
+
+  it('la huella del software es SHA-384(SoftwareID + PIN + número del evento)', () => {
+    const expected = require('crypto').createHash('sha384').update(`${base.softwareId}${base.softwarePin}ACR0021`).digest('hex');
+    expect(xml).toContain(`>${expected}</sts:SoftwareSecurityCode>`);
+  });
+
+  it('deja una segunda UBLExtension vacía para la firma (AAC01)', () => {
+    expect((xml.match(/<ext:UBLExtension>/g) || []).length).toBe(2);
+    expect(xml).toMatch(/<\/sts:DianExtensions>[\s\S]*<ext:UBLExtension>\s*<ext:ExtensionContent\/>/);
+  });
+
+  it('CustomizationID 1, ProfileID literal y UUID con schemeID = ambiente (AAD02, AAD03, AAD07)', () => {
+    expect(xml).toContain('<cbc:CustomizationID>1</cbc:CustomizationID>');
+    expect(xml).toContain('<cbc:ProfileID>DIAN 2.1: ApplicationResponse de la Factura Electrónica de Venta</cbc:ProfileID>');
+    expect(xml).toMatch(/<cbc:ProfileExecutionID>2<\/cbc:ProfileExecutionID>[\s\S]*<cbc:UUID schemeID="2" schemeName="CUDE-SHA384">/);
+  });
+
+  it('IssuerParty va después de DocumentReference, como en el esquema UBL y el ejemplo', () => {
+    expect(xml.indexOf('<cac:IssuerParty>')).toBeGreaterThan(xml.indexOf('</cac:DocumentReference>'));
+  });
+
+  it('no se construye sin el ID del software', () => {
+    expect(() => buildEventXml({ ...base, softwareId: '', eventCode: '033' })).toThrow(/ID del software/);
+  });
+});
 
 describe('plazo de 3 días hábiles (hora Colombia)', () => {
   it('un 032 a las 8 p. m. del viernes cuenta desde el viernes, salta el festivo y vence a medianoche en Colombia', () => {
@@ -102,7 +145,7 @@ describe('CUDE y partes del evento (Anexo FE 1.9 §11.5 y §6.5.4)', () => {
       referencedDocumentId: base.invoiceNumber, documentTypeCode: '01', softwarePin: base.softwarePin,
     });
     expect(cude).toBe(expected);
-    expect(xml).toContain(`<cbc:UUID schemeName="CUDE-SHA384">${expected}</cbc:UUID>`);
+    expect(xml).toContain(`<cbc:UUID schemeID="2" schemeName="CUDE-SHA384">${expected}</cbc:UUID>`);
   });
 
   it('SenderParty/ReceiverParty usan PartyTaxScheme con CompanyID como el XML de ejemplo', () => {

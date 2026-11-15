@@ -64,6 +64,7 @@
  */
 'use strict';
 
+const crypto = require('crypto');
 const { escXml, getColombiaDateTime } = require('../dian/dianXmlBuilder');
 
 // DV del NIT (módulo 11) — mismo algoritmo que dianKitAdapter#computeNitCheckDigit,
@@ -217,10 +218,15 @@ function buildEventXml({
   receiptNumber, receiptCude,
   extraNote,
   softwarePin,
+  softwareId,
+  softwareProviderNit,
   environment = 'test',
 }) {
   if (!EVENT_DESCRIPTION[eventCode]) {
     throw new Error(`Código de evento RADIAN no soportado: ${eventCode}`);
+  }
+  if (!String(softwareId || '').trim()) {
+    throw new Error('Configure el ID del software en Configuración DIAN antes de emitir eventos RADIAN.');
   }
 
   const { date: issueDate, time: issueTime } = getColombiaDateTime();
@@ -301,6 +307,37 @@ function buildEventXml({
     responseCodeAttrs = ` name="${escXml(reasonName)}" listID="${claimReasonCode}"`;
   }
 
+  // DianExtensions (Anexo FE 1.9, AAB13-AAB36), igual que el XML de ejemplo
+  // oficial del 030. Sin este grupo la DIAN no identifica el software y su
+  // servicio responde un fault genérico ("internal error") en vez de una
+  // regla de validación. SoftwareSecurityCode = SHA-384(SoftwareID + PIN +
+  // número del evento) -- la segunda cbc:Note del ejemplo oficial es
+  // exactamente esa cadena. El QR lleva el CUFE de la factura referenciada.
+  const swId = String(softwareId).trim();
+  const providerId = cleanPartyId(softwareProviderNit || ownNit, '31');
+  const securityCode = crypto.createHash('sha384')
+    .update(`${swId}${softwarePin || ''}${applicationResponseId}`, 'utf8').digest('hex');
+  const AGENCY = 'schemeAgencyID="195" schemeAgencyName="CO, DIAN (Dirección de Impuestos y Aduanas Nacionales)"';
+  const dianExtensions = `
+    <ext:UBLExtension>
+      <ext:ExtensionContent>
+        <sts:DianExtensions>
+          <sts:InvoiceSource>
+            <cbc:IdentificationCode listAgencyID="6" listAgencyName="United Nations Economic Commission for Europe" listSchemeURI="urn:oasis:names:specification:ubl:codelist:gc:CountryIdentificationCode-2.1">CO</cbc:IdentificationCode>
+          </sts:InvoiceSource>
+          <sts:SoftwareProvider>
+            <sts:ProviderID schemeID="${computeNitCheckDigit(providerId)}" schemeName="31" ${AGENCY}>${escXml(providerId)}</sts:ProviderID>
+            <sts:SoftwareID ${AGENCY}>${escXml(swId)}</sts:SoftwareID>
+          </sts:SoftwareProvider>
+          <sts:SoftwareSecurityCode ${AGENCY}>${securityCode}</sts:SoftwareSecurityCode>
+          <sts:AuthorizationProvider>
+            <sts:AuthorizationProviderID schemeID="4" schemeName="31" ${AGENCY}>800197268</sts:AuthorizationProviderID>
+          </sts:AuthorizationProvider>
+          <sts:QRCode>https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=${escXml(invoiceCufe)}</sts:QRCode>
+        </sts:DianExtensions>
+      </ext:ExtensionContent>
+    </ext:UBLExtension>`;
+
   const xml = `<?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <ApplicationResponse xmlns="urn:oasis:names:specification:ubl:schema:xsd:ApplicationResponse-2"
   xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
@@ -311,17 +348,17 @@ function buildEventXml({
   xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"
   xmlns:xades141="http://uri.etsi.org/01903/v1.4.1#"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-  <ext:UBLExtensions>
+  <ext:UBLExtensions>${dianExtensions}
     <ext:UBLExtension>
       <ext:ExtensionContent/>
     </ext:UBLExtension>
   </ext:UBLExtensions>
   <cbc:UBLVersionID>UBL 2.1</cbc:UBLVersionID>
-  <cbc:CustomizationID>10</cbc:CustomizationID>
-  <cbc:ProfileID>DIAN 2.1: Eventos</cbc:ProfileID>
+  <cbc:CustomizationID>1</cbc:CustomizationID>
+  <cbc:ProfileID>DIAN 2.1: ApplicationResponse de la Factura Electrónica de Venta</cbc:ProfileID>
   <cbc:ProfileExecutionID>${profileExecutionID}</cbc:ProfileExecutionID>
   <cbc:ID>${escXml(applicationResponseId)}</cbc:ID>
-  <cbc:UUID schemeName="CUDE-SHA384">${cude}</cbc:UUID>
+  <cbc:UUID schemeID="${profileExecutionID}" schemeName="CUDE-SHA384">${cude}</cbc:UUID>
   <cbc:IssueDate>${issueDate}</cbc:IssueDate>
   <cbc:IssueTime>${issueTime}</cbc:IssueTime>${headerNoteXml}
   ${partyXml('SenderParty', { id: ownId, name: ownName, docType: '31', dv: ownDv || undefined })}
@@ -330,12 +367,12 @@ function buildEventXml({
     <cac:Response>
       <cbc:ResponseCode${responseCodeAttrs}>${responseCode}</cbc:ResponseCode>
       <cbc:Description>${escXml(EVENT_DESCRIPTION[eventCode])}</cbc:Description>
-    </cac:Response>${issuerPartyXml}
+    </cac:Response>
     <cac:DocumentReference>
       <cbc:ID>${escXml(invoiceNumber)}</cbc:ID>
       <cbc:UUID schemeName="CUFE-SHA384">${escXml(invoiceCufe)}</cbc:UUID>
       <cbc:DocumentTypeCode>01</cbc:DocumentTypeCode>
-    </cac:DocumentReference>
+    </cac:DocumentReference>${issuerPartyXml}
   </cac:DocumentResponse>
 </ApplicationResponse>`;
 

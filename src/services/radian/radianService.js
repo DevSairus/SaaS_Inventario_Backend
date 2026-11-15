@@ -45,6 +45,7 @@ function assertDianConfig(cfg) {
     throw new Error('Contraseña del certificado no configurada.');
   }
   if (!cfg.software_pin) throw new Error('Configure el Software PIN en Configuración DIAN.');
+  if (!cfg.software_id) throw new Error('Configure el ID del software en Configuración DIAN.');
 }
 
 /**
@@ -103,6 +104,10 @@ async function sendRadianEvent({
     issuerDepartment: issuer.department,
     claimReasonCode, claimReasonText, receiptNumber, receiptCude, extraNote,
     softwarePin: cfg.software_pin,
+    // Mismo software y proveedor tecnológico que la factura (dianKitAdapter):
+    // van en sts:DianExtensions y en el SoftwareSecurityCode.
+    softwareId: cfg.software_id,
+    softwareProviderNit: String(cfg.software_provider_nit || cfg.nit || '').trim(),
     environment: cfg.environment || 'test',
   });
 
