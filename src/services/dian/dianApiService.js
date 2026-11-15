@@ -89,7 +89,23 @@ function bodyGetXmlByDocumentKey(trackId) {
 async function soapRequestViaService(urls, environment, actionName, soapXml) {
   const apiKey = process.env.DIAN_API_KEY || 'pitbox-dian-2026';
   const start = Date.now();
-  const result = await callWithFailover(urls, async (baseUrl) => {
+  // Hasta 3 intentos si el túnel no alcanza a dian-service (502/503/504):
+  // en ese caso la petición no llegó a la DIAN, reintentar es seguro.
+  let result;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      result = await sendOnce();
+      break;
+    } catch (err) {
+      if (!err.retriable || attempt >= 3) throw err;
+      logger.warn(`[DIAN] ${actionName}: dian-service no respondió (intento ${attempt}/3), reintentando en 4 s`);
+      await new Promise((r) => setTimeout(r, 4000));
+    }
+  }
+  logger.info(`[DIAN] <- ${actionName} vía dian-service HTTP ${result.statusCode} (${Date.now() - start}ms) ${String(result.body || '').length}b`);
+  return { statusCode: result.statusCode, body: String(result.body || '') };
+
+  function sendOnce() { return callWithFailover(urls, async (baseUrl) => {
     let response;
     try {
       response = await fetch(`${baseUrl}/api/dian/forward-soap`, {
@@ -104,11 +120,16 @@ async function soapRequestViaService(urls, environment, actionName, soapXml) {
     if (response.status === 404) {
       throw new Error('El servicio DIAN (dian-service) está desactualizado: falta /api/dian/forward-soap. Actualícelo y reinícielo.');
     }
-    if (!response.ok) throw new Error(`Servicio DIAN error ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    // 502/503/504 con página HTML = el túnel de Cloudflare no alcanzó a
+    // dian-service (apagado o reiniciándose). No es una respuesta de la DIAN.
+    if ([502, 503, 504].includes(response.status)) {
+      const err = new Error(`El servicio DIAN (dian-service) no respondió a través del túnel (HTTP ${response.status}). Verifique que esté encendido en el equipo autorizado y reintente.`);
+      err.retriable = true;
+      throw err;
+    }
+    if (!response.ok) throw new Error(`Servicio DIAN error ${response.status}: ${(await response.text()).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 300)}`);
     return response.json();
-  }, logger);
-  logger.info(`[DIAN] <- ${actionName} vía dian-service HTTP ${result.statusCode} (${Date.now() - start}ms) ${String(result.body || '').length}b`);
-  return { statusCode: result.statusCode, body: String(result.body || '') };
+  }, logger); }
 }
 
 // Una respuesta que no es un sobre SOAP (403/5xx con página HTML) no es un

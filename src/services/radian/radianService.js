@@ -159,20 +159,25 @@ async function sendRadianEvent({
     });
 
     const accepted = result.isValid || result.statusCode === '00';
+    // Motivo legible: las reglas que lista la DIAN ("Regla: LGC62, Rechazo: …")
+    // valen más que el resumen genérico ("Validación contiene errores…").
+    const dianReason = (result.errors && result.errors.length)
+      ? result.errors.join(' | ')
+      : (result.statusMessage || result.statusDescription);
 
     await eventRow.update({
       signed_xml: signedXml,
       track_id: result.xmlDocumentKey || null,
       dian_status: accepted ? 'accepted' : 'rejected',
       dian_response_raw: result.raw,
-      error_message: accepted ? null : (result.statusMessage || result.statusDescription || 'Rechazado por la DIAN'),
+      error_message: accepted ? null : (dianReason || 'Rechazado por la DIAN'),
     });
 
     return {
       accepted,
       statusCode: result.statusCode,
       trackId: result.xmlDocumentKey,
-      message: result.statusMessage || result.statusDescription,
+      message: accepted ? (result.statusMessage || result.statusDescription) : dianReason,
       eventId: eventRow.id,
       issuedAt: eventRow.issued_at,
     };
@@ -205,6 +210,20 @@ const PURCHASE_EVENT_RULES = {
  * @param {string} userId - quien ejecuta el evento (JWT solo trae id/email/role)
  * @param {{claimReasonCode?: string, claimReasonText?: string}} [extra] - solo 031
  */
+/**
+ * Forma de pago de la factura del proveedor según su XML (cac:PaymentMeans/
+ * cbc:ID: 1 = contado, 2 = crédito). null si no hay XML o no la trae.
+ * Los eventos 030-033 solo aplican a facturas a crédito: la DIAN rechaza
+ * con la regla LGC62 ("La factura referenciada no es de tipo crédito").
+ */
+function supplierInvoicePaymentForm(purchase) {
+  const xml = String(purchase?.supplier_xml || '');
+  const block = (xml.match(/<(?:[\w-]+:)?PaymentMeans\b[^>]*>([\s\S]*?)<\/(?:[\w-]+:)?PaymentMeans>/) || [])[1];
+  if (!block) return null;
+  const id = ((block.match(/<(?:[\w-]+:)?ID\b[^>]*>\s*([^<\s]+)\s*</) || [])[1] || '').trim();
+  return id === '1' ? 'cash' : id === '2' ? 'credit' : null;
+}
+
 async function emitPurchaseEvent(eventCode, purchaseId, tenantId, userId, extra = {}) {
   const rules = PURCHASE_EVENT_RULES[eventCode];
   if (!rules) throw new Error(`Código de evento RADIAN no soportado para Compras: ${eventCode}`);
@@ -220,6 +239,9 @@ async function emitPurchaseEvent(eventCode, purchaseId, tenantId, userId, extra 
   }
   if (!purchase.dian_issue_date) {
     throw new Error('Falta la fecha de emisión de la factura del proveedor.');
+  }
+  if (supplierInvoicePaymentForm(purchase) === 'cash') {
+    throw new Error('La factura del proveedor es de contado. Los eventos RADIAN (acuse, recibo, aceptación y reclamo) solo aplican a facturas a crédito: la DIAN los rechaza en una factura de contado (regla LGC62).');
   }
   if (!rules.requiresStatus.includes(purchase.radian_status)) {
     throw new Error(`No se puede emitir el evento ${eventCode} — la compra debe estar en estado "${rules.requiresStatus.join('/')}" (estado actual: "${purchase.radian_status}").`);
@@ -815,6 +837,7 @@ async function emitInformePago046(saleId, tenantId, userId, { note } = {}) {
 }
 
 module.exports = {
+  supplierInvoicePaymentForm,
   emitPurchaseEvent, emitAcuse030, emitRecibo032, emitAceptacion033, emitReclamo031,
   recordSaleReceivedEvent, syncSaleEventsFromDian, emitAceptacionTacita034,
   emitInscripcion036, emitEndoso, emitCancelacionEndoso040,

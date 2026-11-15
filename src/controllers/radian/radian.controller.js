@@ -94,7 +94,11 @@ const getEvents = async (req, res) => {
       order: [['created_at', 'DESC']],
       attributes: { exclude: ['request_xml', 'signed_xml', 'dian_response_raw'] },
     });
-    ok(res, { data: events });
+    // Forma de pago de la factura del proveedor: en contado los eventos
+    // 030-033 no aplican (la DIAN los rechaza, regla LGC62).
+    const { Purchase } = require('../../models');
+    const purchase = await Purchase.findOne({ where: { id: req.params.id, tenant_id: req.tenant_id }, attributes: ['id', 'supplier_xml'] });
+    ok(res, { data: events, payment_form: radianService.supplierInvoicePaymentForm(purchase) });
   } catch (e) {
     logger.error('[RADIAN] Error getEvents:', e);
     fail(res, 'Error al consultar los eventos RADIAN', 500);
