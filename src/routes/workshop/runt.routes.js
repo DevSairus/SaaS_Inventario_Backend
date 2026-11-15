@@ -10,6 +10,7 @@ const ctrl    = require('../../controllers/workshop/runt.controller');
 // GET  /workshop/vehicles/runt/captcha      → genera nuevo captcha
 // POST /workshop/vehicles/runt/consultar    → consulta vehículo por placa + doc + captcha
 router.get('/captcha',    ctrl.getCaptcha);
+router.get('/tipos-documento', ctrl.getTiposDocumento);
 router.post('/consultar', ctrl.consultarVehiculo);
 
 module.exports = router;

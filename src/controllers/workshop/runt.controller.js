@@ -45,6 +45,28 @@ async function callRemoteRunt(path, body = null) {
   }, logger);
 }
 
+/* ─── GET /workshop/vehicles/runt/tipos-documento ───────────────────────── */
+// Tipos de documento del propietario que acepta el RUNT, pedidos al propio
+// RUNT (GET /tipo-documento, el mismo que usa su portal público): así salen
+// todos, incluido el PPT, con el código exacto que espera la consulta. Si el
+// RUNT no responde, la pantalla usa su lista básica (C, E, P, N).
+const getTiposDocumento = async (req, res) => {
+  try {
+    const data = RUNT_SERVICE_URLS.length
+      ? await callRemoteRunt('/api/runt/tipos-documento', {})
+      : (await axios.get(`${RUNT_BASE}/tipo-documento`, { headers: runtHeaders, timeout: 15000 })).data;
+    const list = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+    const tipos = list
+      .map((t) => ({ id: String(t.id ?? t.codigo ?? '').trim(), nombre: String(t.nombre ?? t.descripcion ?? '').trim() }))
+      .filter((t) => t.id && t.nombre);
+    if (!tipos.length) return res.status(502).json({ success: false, message: 'El RUNT no devolvió tipos de documento' });
+    return res.json({ success: true, data: tipos });
+  } catch (err) {
+    logger.error('RUNT getTiposDocumento error:', { message: err.message });
+    return res.status(502).json({ success: false, message: 'No se pudo consultar los tipos de documento del RUNT' });
+  }
+};
+
 /* ─── GET /workshop/vehicles/runt/captcha ───────────────────────────────── */
 const getCaptcha = async (req, res) => {
   try {
@@ -265,4 +287,4 @@ function toTitle(str) {
   return str.toLowerCase().split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
-module.exports = { getCaptcha, consultarVehiculo };
+module.exports = { getCaptcha, consultarVehiculo, getTiposDocumento };

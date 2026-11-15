@@ -575,6 +575,10 @@ const quickCreate = async (req, res) => {
       // una vez (ver utils/customerWhatsappPhone.js).
       mobile,
       tax_id: String(new_customer.tax_id || '').trim() || null,
+      // Tipo de documento DIAN (PPT, pasaporte, NIT…). Antes no se recibía y
+      // todo quedaba como cédula de ciudadanía (13), el default de la tabla.
+      document_type: ['11', '12', '13', '21', '22', '31', '41', '42', '47', '48', '50', '91'].includes(String(new_customer.document_type || ''))
+        ? String(new_customer.document_type) : '13',
       // Correo opcional (facturas, recordatorios).
       email: String(new_customer.email || '').trim().toLowerCase() || null,
     };
