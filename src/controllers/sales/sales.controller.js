@@ -2637,7 +2637,7 @@ const sendWhatsApp = async (req, res) => {
 // entre publicPdf.routes.js y los endpoints públicos de cotización de abajo.
 async function resolveSaleSchemaByToken(token) {
   const [publicRows] = await sequelize.query(
-    'SELECT id FROM "public"."sales" WHERE share_token = :token LIMIT 1',
+    'SELECT id FROM "public"."sales" WHERE share_token = :token AND tenant_id IN (SELECT id FROM "public"."tenants" WHERE schema_name IS NULL) LIMIT 1',
     { replacements: { token } }
   );
   if (publicRows[0]) return { saleId: publicRows[0].id, schemaName: null };

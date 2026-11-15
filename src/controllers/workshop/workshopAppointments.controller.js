@@ -134,7 +134,7 @@ async function resolveTenantSchemaBySlug(slug) {
 // Mismo patrón que resolveSaleSchemaByToken, para /public/workshop/appointments/:token
 async function resolveAppointmentSchemaByToken(token) {
   const [publicRows] = await sequelize.query(
-    'SELECT id FROM "public"."workshop_appointments" WHERE share_token = :token LIMIT 1',
+    'SELECT id FROM "public"."workshop_appointments" WHERE share_token = :token AND tenant_id IN (SELECT id FROM "public"."tenants" WHERE schema_name IS NULL) LIMIT 1',
     { replacements: { token } }
   );
   if (publicRows[0]) return { appointmentId: publicRows[0].id, schemaName: null };

@@ -920,9 +920,12 @@ async function resolveConsentSchemaByToken(token) {
   const schemas = [null, ...tenants.map((t) => t.schema_name)];
   for (const schema of schemas) {
     const table = schema ? `"${schema}"."customer_consents"` : '"public"."customer_consents"';
+    // En public solo cuentan los tenants sin cortar: tras el corte, public
+    // conserva la copia vieja hasta la limpieza y no es la que está en uso.
+    const legacyOnly = schema ? '' : ' AND tenant_id IN (SELECT id FROM "public"."tenants" WHERE schema_name IS NULL)';
     try {
       const [rows] = await sequelize.query(
-        `SELECT id FROM ${table} WHERE token = :token LIMIT 1`,
+        `SELECT id FROM ${table} WHERE token = :token${legacyOnly} LIMIT 1`,
         { replacements: { token } }
       );
       if (rows[0]) return { consentId: rows[0].id, schemaName: schema };

@@ -38,7 +38,7 @@ async function cleanupTenantPublicData(sequelize, { id: tenantId, slug, schema_n
   const schemaName = schema_name || schemaNameFor(slug);
   console.log(`\n=== ${slug} (schema: ${schemaName}) ${execute ? '[EJECUTANDO]' : '[DRY-RUN]'} ===`);
 
-  const { directTables, indirectTables, resolutionChains } = await discoverTenantTables(sequelize);
+  const { directTables, indirectTables, resolutionChains } = await discoverTenantTables(sequelize, { excludePublicPinned: true });
   if (indirectTables.length) {
     console.log(`ℹ️  Tablas indirectas detectadas (sin tenant_id propio, resueltas por FK): ${indirectTables.join(', ')}`);
   }

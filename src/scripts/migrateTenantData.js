@@ -22,7 +22,7 @@ require('dotenv').config();
 const { directDbDialectOptions } = require('./_directDbSsl');
 const { Sequelize } = require('sequelize');
 const { schemaNameFor } = require('./provisionTenantSchema');
-const { discoverTenantTables, tablesInOrder, buildIndirectSourceSql, buildIndirectCountSql } = require('./tenantScopedTables');
+const { discoverTenantTables, tablesInOrder, cyclicFkEdges, buildIndirectSourceSql, buildIndirectCountSql } = require('./tenantScopedTables');
 
 const DATABASE_URL = process.env.DATABASE_URL_DIRECT || process.env.POSTGRES_URL || process.env.DATABASE_URL;
 
@@ -176,12 +176,43 @@ async function migrateTenantData(slug, tenantId, { freshSchema = false } = {}) {
   });
 
   try {
-    const { directTables, indirectTables, resolutionChains } = await discoverTenantTables(sequelize);
+    const { directTables, indirectTables, resolutionChains } = await discoverTenantTables(sequelize, { schemas: ['public', schemaName], excludePublicPinned: true });
     const indirectSet = new Set(indirectTables);
     if (indirectTables.length) {
       console.log(`ℹ️  Tablas indirectas detectadas (sin tenant_id propio, resueltas por FK): ${indirectTables.join(', ')}`);
     }
-    const ordered = await tablesInOrder(sequelize, [...directTables, ...indirectTables]);
+    // Ciclos de FK (grafo de public + el del schema destino): además del
+    // ciclo conocido sales <-> work_orders, el schema nuevo tiene otros
+    // (projects <-> sales, warehouses <-> projects...). Cada FK de un ciclo
+    // se inserta en NULL y se rellena al final, igual que DEFERRED_FK_COLUMNS.
+    // Solo aplica a columnas que existen en public (las demás no se copian)
+    // y a tablas directas (el backfill cruza por id + tenant_id).
+    const allTables = [...directTables, ...indirectTables];
+    const directSet = new Set(directTables);
+    const [publicColRows] = await sequelize.query(`
+      SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'
+    `);
+    const publicCols = new Set(publicColRows.map((r) => `${r.table_name}.${r.column_name}`));
+    const deferredFk = Object.fromEntries(Object.entries(DEFERRED_FK_COLUMNS).map(([t, cols]) => [t, [...cols]]));
+    const skipColumns = new Set(Object.entries(deferredFk).flatMap(([t, cols]) => cols.map((c) => `${t}.${c}`)));
+    for (const e of await cyclicFkEdges(sequelize, allTables, { schemas: ['public', schemaName] })) {
+      const key = `${e.child_table}.${e.child_column}`;
+      if (skipColumns.has(key)) continue;
+      skipColumns.add(key); // no cuenta para el orden en ningún caso
+      if (!publicCols.has(key)) continue; // no se copia: no hay nada que diferir
+      if (!directSet.has(e.child_table)) {
+        console.warn(`⚠️  FK circular en tabla indirecta ${key} -> ${e.parent_table}: se copia sin diferir`);
+        continue;
+      }
+      (deferredFk[e.child_table] = deferredFk[e.child_table] || []).push(e.child_column);
+    }
+    const autoDeferred = Object.entries(deferredFk)
+      .flatMap(([t, cols]) => cols.filter((c) => !(DEFERRED_FK_COLUMNS[t] || []).includes(c)).map((c) => `${t}.${c}`));
+    if (autoDeferred.length) console.log(`ℹ️  FKs circulares que se rellenan al final: ${autoDeferred.join(', ')}`);
+
+    // Grafo de FKs de public + el del schema destino (ver tablesInOrder),
+    // sin las FKs circulares que se rellenan al final.
+    const ordered = await tablesInOrder(sequelize, allTables, { schemas: ['public', schemaName], skipColumns });
     console.log(`Orden de copiado (${ordered.length} tablas):`, ordered.join(', '));
 
     const report = [];
@@ -194,7 +225,7 @@ async function migrateTenantData(slug, tenantId, { freshSchema = false } = {}) {
     // avisa del problema en vez de dejar una columna NOT NULL mentirosa).
     const relaxedNotNull = [];
     for (const [table, columns] of [
-      ...Object.entries(DEFERRED_FK_COLUMNS),
+      ...Object.entries(deferredFk),
       ...Object.entries(REMAPPED_FK_COLUMNS),
     ]) {
       if (!ordered.includes(table)) continue;
@@ -224,15 +255,36 @@ async function migrateTenantData(slug, tenantId, { freshSchema = false } = {}) {
     // la migración correspondiente UNA vez por schema, no este script, y el
     // INSERT de abajo solo repone filas con tenant_id = este tenant. Un
     // DELETE sin filtro borraría el catálogo global y nunca lo repondría.
-    for (const table of freshSchema ? [] : [...ordered].reverse()) {
-      if (indirectSet.has(table)) {
-        // No tiene tenant_id propio ni acá ni en public -- pero el schema
-        // completo pertenece a un solo tenant, así que borrar sin filtro es
-        // seguro (equivalente a "todas las filas de esta tabla en este schema").
-        await sequelize.query(`DELETE FROM "${schemaName}"."${table}"`);
-      } else {
-        await sequelize.query(`DELETE FROM "${schemaName}"."${table}" WHERE tenant_id IS NOT NULL`);
+    //
+    // Por pasadas: si una tabla todavía tiene hijos con filas (FK que el orden
+    // no conocía, ciclos), se deja para la pasada siguiente en vez de abortar
+    // el corte. Solo toca el schema destino, que no está en uso (schema_name
+    // se activa recién en el paso 3 de cutoverTenant).
+    let pending = freshSchema ? [] : [...ordered].reverse();
+    while (pending.length) {
+      const blocked = [];
+      let lastFkError = null;
+      for (const table of pending) {
+        try {
+          if (indirectSet.has(table)) {
+            // No tiene tenant_id propio ni acá ni en public -- pero el schema
+            // completo pertenece a un solo tenant, así que borrar sin filtro es
+            // seguro (equivalente a "todas las filas de esta tabla en este schema").
+            await sequelize.query(`DELETE FROM "${schemaName}"."${table}"`);
+          } else {
+            await sequelize.query(`DELETE FROM "${schemaName}"."${table}" WHERE tenant_id IS NOT NULL`);
+          }
+        } catch (err) {
+          if (err?.parent?.code !== '23503') throw err; // solo se reintenta la violación de FK
+          blocked.push(table);
+          lastFkError = err;
+        }
       }
+      if (blocked.length === pending.length) {
+        throw new Error(`No se pudo limpiar el schema destino "${schemaName}" (${blocked.join(', ')}): ${lastFkError.parent?.detail || lastFkError.message}`);
+      }
+      if (blocked.length) console.log(`ℹ️  Limpieza: ${blocked.length} tabla(s) quedan para otra pasada: ${blocked.join(', ')}`);
+      pending = blocked;
     }
 
     for (const table of ordered) {
@@ -253,7 +305,7 @@ async function migrateTenantData(slug, tenantId, { freshSchema = false } = {}) {
       const destColSet = new Set(destColRows.map(r => r.column_name));
       const destColInfo = new Map(destColRows.map(r => [r.column_name, r]));
       const cols = allCols.filter(c => destColSet.has(c.column_name));
-      const deferredCols = new Set([...(DEFERRED_FK_COLUMNS[table] || []), ...(REMAPPED_FK_COLUMNS[table] || [])]);
+      const deferredCols = new Set([...(deferredFk[table] || []), ...(REMAPPED_FK_COLUMNS[table] || [])]);
       const colNames = cols.map(c => `"${c.column_name}"`).join(', ');
       // Los tipos ENUM de Postgres son por-schema: aunque public.vehicles.vehicle_type
       // y tenant_x.vehicles.vehicle_type se llamen igual (enum_vehicles_vehicle_type),
@@ -375,7 +427,7 @@ async function migrateTenantData(slug, tenantId, { freshSchema = false } = {}) {
 
     // Backfill de las columnas de FK circular, ahora que ambas tablas del
     // ciclo tienen todas sus filas.
-    for (const [table, columns] of Object.entries(DEFERRED_FK_COLUMNS)) {
+    for (const [table, columns] of Object.entries(deferredFk)) {
       if (!ordered.includes(table)) continue;
       for (const column of columns) {
         await sequelize.query(`

@@ -31,6 +31,19 @@ const PUBLIC_ONLY_TABLES = new Set([
   'platform_user_tenants',
 ]);
 
+// Tablas con datos de un tenant que la app lee y escribe SIEMPRE en public,
+// aunque el tenant esté cortado a su schema (PUBLIC_SCHEMA_MODELS en
+// config/registerTenantSchemaHooks.js: soporte, integración con Meta, NCF,
+// sincronización de la ensambladora). Su copia "de verdad" es la de public:
+// el corte no las copia, el rollback no las toca y la limpieza de public no
+// las borra (antes, "Limpiar public" las borraba si el conteo coincidía con
+// la copia vieja del schema). La purga de un tenant sí las borra.
+const PUBLIC_PINNED_TABLES = new Set([
+  'support_tickets', 'support_ticket_messages', 'support_ticket_attachments',
+  'remote_support_sessions', 'ncf_config', 'meta_config', 'tenant_meta_configs',
+  'ensambladora_sync_credentials', 'ensambladora_eventos_sync',
+]);
+
 // OJO: estas dos consultas leen pg_catalog directamente, NO information_schema.
 // Las vistas de information_schema (table_constraints, key_column_usage,
 // constraint_column_usage) recorren TODOS los schemas de la base antes de
@@ -38,7 +51,7 @@ const PUBLIC_ONLY_TABLES = new Set([
 // más lentas: en local, con 8 schemas, una sola corrida tardó 571 s, y se
 // ejecutan 2 veces por cutover (y en cleanup/rollback/purge).
 
-async function getAllFkEdges(sequelize) {
+async function getAllFkEdges(sequelize, schemas = ['public']) {
   // Grafo COMPLETO de FKs en public (no solo entre un set dado): hace falta
   // para poder caminar hacia arriba desde cualquier tabla hija. Una fila por
   // par de columnas (las FKs compuestas se emparejan por posición).
@@ -56,8 +69,8 @@ async function getAllFkEdges(sequelize) {
     CROSS JOIN LATERAL unnest(con.conkey, con.confkey) AS k(child_attnum, parent_attnum)
     JOIN pg_attribute ca ON ca.attrelid = con.conrelid AND ca.attnum = k.child_attnum
     JOIN pg_attribute pa ON pa.attrelid = con.confrelid AND pa.attnum = k.parent_attnum
-    WHERE con.contype = 'f' AND cn.nspname = 'public' AND pn.nspname = 'public'
-  `);
+    WHERE con.contype = 'f' AND cn.nspname IN (:schemas) AND pn.nspname = cn.nspname
+  `, { replacements: { schemas } });
   return rows;
 }
 
@@ -94,10 +107,43 @@ async function getDirectTenantTables(sequelize) {
  * cadenas y combinarlas con OR (ver buildIndirectExistsSql) cubre ambos
  * casos sin adivinar cuál usa cada fila.
  */
-async function discoverTenantTables(sequelize) {
+async function discoverTenantTables(sequelize, { schemas = ['public'], excludePublicPinned = false } = {}) {
+  const result = await discoverAllTenantTables(sequelize, schemas);
+  if (!excludePublicPinned) return result;
+  const keep = (t) => !PUBLIC_PINNED_TABLES.has(t);
+  // Una indirecta cuya única cadena pasa por una tabla fija de public
+  // (support_ticket_messages -> support_tickets) también queda afuera.
+  const indirectTables = result.indirectTables.filter((t) => keep(t)
+    && (result.resolutionChains.get(t) || []).some((chain) => chain.every((hop) => keep(hop.parentTable))));
+  return { ...result, directTables: result.directTables.filter(keep), indirectTables };
+}
+
+async function discoverAllTenantTables(sequelize, schemas) {
   const directTables = await getDirectTenantTables(sequelize);
   const directSet = new Set(directTables);
-  const edges = await getAllFkEdges(sequelize);
+  // `schemas` suma FKs de otros schemas (el destino de un cutover): al
+  // `public` de producción le faltan FKs y, sin ellas, una tabla indirecta
+  // (ej. commission_settlement_items -> work_orders) no se descubría y ni se
+  // limpiaba ni se copiaba. Las cadenas se evalúan contra public, así que
+  // solo sirven las aristas cuyas tablas y columna hija existen en public.
+  let edges = await getAllFkEdges(sequelize, schemas);
+  if (schemas.some((s) => s !== 'public')) {
+    const [cols] = await sequelize.query(`
+      SELECT c.relname AS table_name, a.attname AS column_name
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
+      WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
+    `);
+    const publicCols = new Set(cols.map((r) => `${r.table_name}.${r.column_name}`));
+    const seen = new Set();
+    edges = edges.filter((e) => {
+      const key = `${e.child_table}.${e.child_column}>${e.parent_table}.${e.parent_column}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return publicCols.has(`${e.child_table}.${e.child_column}`) && publicCols.has(`${e.parent_table}.${e.parent_column}`);
+    });
+  }
 
   const byChild = new Map();
   for (const e of edges) {
@@ -144,12 +190,61 @@ async function discoverTenantTables(sequelize) {
   return { directTables, indirectTables, resolutionChains };
 }
 
-/** Orden topológico sobre un set de tablas dado (mismo grafo de FKs de public). */
-async function tablesInOrder(sequelize, tables, { forDelete = false } = {}) {
+/**
+ * FKs que forman ciclos entre tablas distintas del set (componentes
+ * fuertemente conexos, Tarjan). Ninguna orden de inserción de una sola
+ * pasada respeta un ciclo: esas columnas hay que insertarlas en NULL y
+ * rellenarlas al final. Devuelve [{ child_table, child_column, parent_table }].
+ */
+async function cyclicFkEdges(sequelize, tables, { schemas = ['public'] } = {}) {
   const tableSet = new Set(tables);
-  const edges = await getAllFkEdges(sequelize);
+  const edges = (await getAllFkEdges(sequelize, schemas))
+    .filter((e) => tableSet.has(e.child_table) && tableSet.has(e.parent_table) && e.child_table !== e.parent_table);
+  const adj = new Map(tables.map((t) => [t, new Set()]));
+  for (const e of edges) adj.get(e.child_table).add(e.parent_table);
+
+  let index = 0;
+  const idx = new Map(); const low = new Map(); const onStack = new Set(); const stack = [];
+  const comp = new Map();
+  const strong = (v) => {
+    idx.set(v, index); low.set(v, index); index++;
+    stack.push(v); onStack.add(v);
+    for (const w of adj.get(v)) {
+      if (!idx.has(w)) { strong(w); low.set(v, Math.min(low.get(v), low.get(w))); }
+      else if (onStack.has(w)) low.set(v, Math.min(low.get(v), idx.get(w)));
+    }
+    if (low.get(v) === idx.get(v)) {
+      let w;
+      do { w = stack.pop(); onStack.delete(w); comp.set(w, v); } while (w !== v);
+    }
+  };
+  for (const t of tables) if (!idx.has(t)) strong(t);
+
+  const seen = new Set();
+  return edges.filter((e) => {
+    if (comp.get(e.child_table) !== comp.get(e.parent_table)) return false;
+    const key = `${e.child_table}.${e.child_column}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * Orden topológico sobre un set de tablas dado. Por defecto con el grafo de
+ * FKs de public; `schemas` suma el de otros schemas (ej. el schema destino de
+ * un cutover). Hace falta porque el `public` de producción es la base vieja y
+ * le faltan FKs que el schema nuevo sí tiene (sales.warehouse_id -> warehouses):
+ * con solo el grafo de public, el corte de lemans-motos borró bodegas antes
+ * que las ventas que las usan (2026-11-15).
+ */
+async function tablesInOrder(sequelize, tables, { forDelete = false, schemas = ['public'], skipColumns = null } = {}) {
+  const tableSet = new Set(tables);
+  const edges = await getAllFkEdges(sequelize, schemas);
   const deps = new Map(tables.map((t) => [t, new Set()]));
-  for (const { child_table, parent_table } of edges) {
+  for (const { child_table, child_column, parent_table } of edges) {
+    // skipColumns: FKs que se insertan en NULL y se rellenan después (ciclos)
+    if (skipColumns && skipColumns.has(`${child_table}.${child_column}`)) continue;
     if (tableSet.has(child_table) && tableSet.has(parent_table) && child_table !== parent_table) {
       deps.get(child_table).add(parent_table);
     }
@@ -195,7 +290,9 @@ function buildIndirectExistsSql(chain, schema, outerAlias) {
 function buildIndirectOrExistsSql(table, resolutionChains, schema, outerAlias) {
   const chains = resolutionChains.get(table);
   if (!chains || !chains.length) throw new Error(`No hay cadena de resolución para "${table}"`);
-  return chains.map((chain) => buildIndirectExistsSql(chain, schema, outerAlias)).join('\n     OR ');
+  // Entre paréntesis: sin ellos, "A OR B AND x" se lee "A OR (B AND x)" al
+  // combinar la condición con otra (le pasó al rollback, 2026-11-15).
+  return `(${chains.map((chain) => buildIndirectExistsSql(chain, schema, outerAlias)).join('\n     OR ')})`;
 }
 
 /** SELECT count(*) de una tabla indirecta filtrando por el tenant_id "prestado". */
@@ -219,10 +316,13 @@ function buildIndirectSourceSql(table, resolutionChains, selectExprs) {
 
 module.exports = {
   PUBLIC_ONLY_TABLES,
+  PUBLIC_PINNED_TABLES,
   getAllFkEdges,
   getDirectTenantTables,
   discoverTenantTables,
   tablesInOrder,
+  cyclicFkEdges,
+  buildIndirectOrExistsSql,
   buildIndirectCountSql,
   buildIndirectDeleteSql,
   buildIndirectSourceSql,

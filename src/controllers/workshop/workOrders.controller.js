@@ -59,7 +59,7 @@ async function generateMaintenanceRecordsSafe(orderId, tenant_id) {
 // cliente abre el link de WhatsApp, no en cada request normal del taller.
 async function resolveWorkOrderSchemaByToken(token) {
   const [publicRows] = await sequelize.query(
-    'SELECT id FROM "public"."work_orders" WHERE share_token = :token LIMIT 1',
+    'SELECT id FROM "public"."work_orders" WHERE share_token = :token AND tenant_id IN (SELECT id FROM "public"."tenants" WHERE schema_name IS NULL) LIMIT 1',
     { replacements: { token } }
   );
   if (publicRows[0]) return { orderId: publicRows[0].id, schemaName: null };
