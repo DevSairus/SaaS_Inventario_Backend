@@ -26,7 +26,7 @@ const {
 } = require('../../models');
 const logger = require('../../config/logger');
 const { liquidarEmpleado, resumenLiquidacionParaImpresion, DIAN_CATEGORY_MAP } = require('./payrollService');
-const { submitPayrollDocument } = require('../dian/payrollDianAdapter');
+const { submitPayrollDocument, assertPayrollDianConfig } = require('../dian/payrollDianAdapter');
 const { getNextConsecutive, extractDianConfig } = require('../dian/dianService');
 const { generatePayrollEntry } = require('../accounting/autoEntries.service');
 
@@ -267,7 +267,13 @@ async function emitirDocumentoEmpleado({ tenant, period, employee, isTest, autoC
       throw new Error(`El período no tiene sede y el empleado ${[employee.first_name, employee.first_surname].filter(Boolean).join(' ')} tampoco: asígnele una sede en su perfil de nómina.`);
     }
     const rawNumbering = await getNextConsecutive(tenant.id, numberingBranchId, isTest, t, reusableNumber, 'payroll');
-    const numbering = { prefix: rawNumbering.resolution.prefix, consecutivo: rawNumbering.consecutive };
+    const numbering = {
+      prefix: rawNumbering.resolution.prefix,
+      consecutivo: rawNumbering.consecutive,
+      // Set de pruebas de habilitación de nómina (resolución de tipo nómina): en
+      // ambiente de pruebas el envío va a SendTestSetAsync (payrollDianAdapter).
+      testSetId: rawNumbering.resolution.test_set_id || null,
+    };
     const numeroDocumento = rawNumbering.invoiceNumber;
     const cfg = extractDianConfig(tenant);
     const softwareSecurityCode = generateSoftwareSecurityCode(cfg.software_id_nomina, cfg.software_pin_nomina, numeroDocumento);
@@ -447,6 +453,9 @@ async function submitPayrollPeriod(period, tenant, userId) {
   // vuelve a resolverla internamente por cada documento (documentType
   // 'payroll'), no hace falta pasarla explícitamente.
   await getPayrollResolution(tenant.id, isTest);
+  // Software de nómina, PIN y certificado: falla de una vez, antes del
+  // primer empleado, en vez de un error por cada uno.
+  assertPayrollDianConfig(cfg);
 
   const employees = await getEmployeesActiveInPeriod(tenant.id, period);
   if (!employees.length) {

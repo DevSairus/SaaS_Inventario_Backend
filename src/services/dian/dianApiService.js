@@ -62,8 +62,12 @@ function bodySendTestSetAsync(fileName, content64, testSetId) {
 // llamaba a esta función dando por hecho que existía; nunca se había
 // agregado, así que el primer envío real de nómina electrónica tronaba con
 // un TypeError ("dianApiService.sendNominaSync is not a function").
-function bodySendNominaSync(fileName, content64) {
-  return `<wcf:SendNominaSync xmlns:wcf="${NS.WCF}"><wcf:fileName>${fileName}</wcf:fileName><wcf:contentFile>${content64}</wcf:contentFile></wcf:SendNominaSync>`;
+// SOLO contentFile: así lo define el Anexo de Nómina (numeral 9.7.2) y la
+// plantilla de la librería ubl21dian que usan proveedores en producción.
+// Antes llevaba también fileName (copiado de SendBillSync), un elemento que
+// la operación no tiene.
+function bodySendNominaSync(content64) {
+  return `<wcf:SendNominaSync xmlns:wcf="${NS.WCF}"><wcf:contentFile>${content64}</wcf:contentFile></wcf:SendNominaSync>`;
 }
 // SendEventUpdateStatus lleva SOLO contentFile — a diferencia de
 // SendBillSync, NO lleva fileName (confirmado contra el Anexo FE 1.9
@@ -166,13 +170,20 @@ function parseSoapResponse(xml) {
   }
   const isValidRaw = parseXmlValue(xml, 'IsValid');
   const statusCode = parseXmlValue(xml, 'StatusCode');
+  // ErrorMessage trae una lista <b:string>Regla: …, Rechazo: …</b:string>:
+  // se une en un texto legible en vez de guardar el bloque XML crudo.
+  const errorBlock = parseXmlValue(xml, 'ErrorMessage');
+  const errorList = errorBlock
+    ? [...errorBlock.matchAll(/<(?:[a-zA-Z0-9_]+:)?string>([\s\S]*?)<\/(?:[a-zA-Z0-9_]+:)?string>/g)].map((m) => m[1].trim()).filter(Boolean)
+    : [];
   return {
     isValid: isValidRaw === 'true' || statusCode === '00',
     statusCode,
     statusDescription: parseXmlValue(xml, 'StatusDescription'),
     statusMessage: parseXmlValue(xml, 'StatusMessage') ||
-                   parseXmlValue(xml, 'ErrorMessage') ||
+                   (errorList.length ? errorList.join(' | ') : errorBlock) ||
                    parseXmlValue(xml, 'ProcessedMessage'),
+    errors: errorList,
     xmlDocumentKey: parseXmlValue(xml, 'XmlDocumentKey') || parseXmlValue(xml, 'ZipKey'),
     transactionId: parseXmlValue(xml, 'TransactionID'),
     raw: xml,
@@ -237,7 +248,7 @@ async function sendBillSync({ xmlContent, nit, invoiceNumber, p12Base64, passwor
 async function sendNominaSync({ xmlContent, nit, documentNumber, p12Base64, password, environment = 'production' }) {
   const zipBuf = createZip(Buffer.from(xmlContent, 'utf8'), `${nit}${documentNumber}.xml`);
   const r = await signedCall({ p12Base64, password, environment, actionName: 'SendNominaSync',
-    bodyContent: bodySendNominaSync(`${nit}${documentNumber}.zip`, zipBuf.toString('base64')) });
+    bodyContent: bodySendNominaSync(zipBuf.toString('base64')) });
   return parseSoapResponse(r.body);
 }
 

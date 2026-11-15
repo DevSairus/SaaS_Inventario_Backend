@@ -84,6 +84,7 @@ const getConfig = async (req, res) => {
     if (safe.certificate_p12_base64) safe.certificate_p12_base64 = '[CONFIGURADO]';
     if (safe.certificate_password) safe.certificate_password = '[CONFIGURADO]';
     if (safe.software_pin) safe.software_pin = safe.software_pin.substring(0, 3) + '***';
+    if (safe.software_pin_nomina) safe.software_pin_nomina = String(safe.software_pin_nomina).substring(0, 3) + '***';
 
     ok(res, { data: safe });
   } catch (e) {
@@ -110,9 +111,14 @@ const updateConfig = async (req, res) => {
       software_id, software_provider_nit, software_pin,
       technical_key, environment,
       customization_id, test_set_id,
+      // Nómina electrónica: software propio habilitado para nómina (distinto
+      // al de facturación). El TestSetId de nómina va en su resolución.
+      software_id_nomina, software_pin_nomina,
       // Certificado (solo si se envía)
       certificate_p12_base64, certificate_password,
     } = req.body;
+    // El PIN vuelve enmascarado ("123***") si no se cambió: no lo pisa.
+    const pinNominaChanged = software_pin_nomina !== undefined && !String(software_pin_nomina).endsWith('***');
 
     const updated = {
       ...current,
@@ -138,6 +144,8 @@ const updateConfig = async (req, res) => {
       ...(environment !== undefined && { environment }),
       ...(customization_id !== undefined && { customization_id }),
       ...(test_set_id !== undefined && { test_set_id: test_set_id?.trim() }),
+      ...(software_id_nomina !== undefined && { software_id_nomina: String(software_id_nomina || '').trim() }),
+      ...(pinNominaChanged && { software_pin_nomina: String(software_pin_nomina || '').trim() }),
       // Solo actualizar certificado si se envía un valor real
       ...(certificate_p12_base64 && certificate_p12_base64 !== '[CONFIGURADO]' && { certificate_p12_base64 }),
       ...(certificate_password && certificate_password !== '[CONFIGURADO]' && { certificate_password }),

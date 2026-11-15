@@ -60,6 +60,44 @@ async function signPayrollXml(unsignedXml, certificateData, signingTime) {
 }
 
 /**
+ * Antes de armar nada: sin software de nómina (ID + PIN) el XML sale sin
+ * SoftwareID y con un SoftwareSC calculado sobre valores vacíos, y la DIAN
+ * lo rechaza siempre. Se detiene con un mensaje claro (fuera de simulación,
+ * que completa datos de demo).
+ */
+function assertPayrollDianConfig(cfg) {
+  if (isSimulation(cfg)) return;
+  const missing = [];
+  if (!String(cfg.software_id_nomina || '').trim()) missing.push('el Software ID de nómina');
+  if (!String(cfg.software_pin_nomina || '').trim()) missing.push('el PIN del software de nómina');
+  if (!cfg.nit) missing.push('el NIT de la empresa');
+  if (!cfg.certificate_p12_base64 || cfg.certificate_p12_base64 === '[CONFIGURADO]') missing.push('el certificado digital');
+  if (!cfg.certificate_password || cfg.certificate_password === '[CONFIGURADO]') missing.push('la contraseña del certificado');
+  if (missing.length) {
+    const err = new Error(`Falta configurar ${missing.join(', ')} en Configuración DIAN (sección Software de Nómina Electrónica) antes de emitir nómina electrónica.`);
+    err.code = 'PAYROLL_DIAN_CONFIG';
+    throw err;
+  }
+}
+
+/**
+ * Envío a la DIAN. En habilitación (ambiente de pruebas) con el TestSetId
+ * de la resolución de nómina, va al set de pruebas por SendTestSetAsync y
+ * se consulta con GetStatusZip (memoria oficial DIAN de habilitación de
+ * nómina); así cuenta para habilitar el software. En producción, o en
+ * pruebas sin set, por SendNominaSync (Anexo, numeral 9.7).
+ */
+async function sendPayrollToDian({ cfg, signedXml, documentNumber, numbering }) {
+  const environment = cfg.environment === 'production' ? 'production' : 'test';
+  const base = { nit: cfg.nit, p12Base64: cfg.certificate_p12_base64, password: cfg.certificate_password, environment };
+  if (environment === 'test' && numbering?.testSetId) {
+    logger.info(`[Payroll-DIAN] ${documentNumber} -> set de pruebas de habilitación (SendTestSetAsync)`);
+    return dianApiService.sendTestSetAsync({ ...base, xmlContent: signedXml, invoiceNumber: documentNumber, testSetId: numbering.testSetId });
+  }
+  return dianApiService.sendNominaSync({ ...base, xmlContent: signedXml, documentNumber });
+}
+
+/**
  * Orquestación completa: construye el XML, lo firma, y lo envía a DIAN vía
  * SendNominaSync. Análogo a createInvoice()/createSupportDocument() en
  * dianKitAdapter.js pero para nómina.
@@ -75,6 +113,7 @@ async function signPayrollXml(unsignedXml, certificateData, signingTime) {
 async function submitPayrollDocument({ tenant, employee, period, liquidation, numbering }) {
   tenant = withSimulation(tenant); // modo simulación (dianSimulation.js)
   const cfg = tenant.dian_config || {};
+  assertPayrollDianConfig(cfg);
 
   const built = buildPayrollXml({ tenant, employee, period, liquidation, numbering });
 
@@ -87,14 +126,7 @@ async function submitPayrollDocument({ tenant, employee, period, liquidation, nu
   const signedXml = await signPayrollXml(built.xml, kit.config.certificateData, new Date());
 
   // Simulación: no sale hacia la DIAN.
-  const dianResponse = isSimulation(cfg) ? simulatedResponse(built.numeroDocumento, built.cune) : await dianApiService.sendNominaSync({
-    xmlContent: signedXml,
-    nit: cfg.nit,
-    documentNumber: built.numeroDocumento,
-    p12Base64: cfg.certificate_p12_base64,
-    password: cfg.certificate_password,
-    environment: cfg.environment === 'production' ? 'production' : 'test',
-  });
+  const dianResponse = isSimulation(cfg) ? simulatedResponse(built.numeroDocumento, built.cune) : await sendPayrollToDian({ cfg, signedXml, documentNumber: built.numeroDocumento, numbering });
 
   return {
     xml: signedXml,
@@ -127,6 +159,7 @@ async function submitPayrollAdjustmentDocument({
 }) {
   tenant = withSimulation(tenant); // modo simulación (dianSimulation.js)
   const cfg = tenant.dian_config || {};
+  assertPayrollDianConfig(cfg);
 
   const built = buildPayrollAdjustmentXml({
     tenant, employee, period, liquidation, numbering, adjustmentType, predecessor,
@@ -136,14 +169,7 @@ async function submitPayrollAdjustmentDocument({
   const signedXml = await signPayrollXml(built.xml, kit.config.certificateData, new Date());
 
   // Simulación: no sale hacia la DIAN.
-  const dianResponse = isSimulation(cfg) ? simulatedResponse(built.numeroDocumento, built.cune) : await dianApiService.sendNominaSync({
-    xmlContent: signedXml,
-    nit: cfg.nit,
-    documentNumber: built.numeroDocumento,
-    p12Base64: cfg.certificate_p12_base64,
-    password: cfg.certificate_password,
-    environment: cfg.environment === 'production' ? 'production' : 'test',
-  });
+  const dianResponse = isSimulation(cfg) ? simulatedResponse(built.numeroDocumento, built.cune) : await sendPayrollToDian({ cfg, signedXml, documentNumber: built.numeroDocumento, numbering });
 
   return {
     xml: signedXml,
@@ -173,6 +199,7 @@ async function getPayrollDocumentStatus({ cune, tenant }) {
 }
 
 module.exports = {
+  assertPayrollDianConfig,
   signPayrollXml,
   submitPayrollDocument,
   submitPayrollAdjustmentDocument,

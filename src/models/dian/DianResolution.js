@@ -60,7 +60,7 @@ const DianResolution = sequelize.define('DianResolution', {
     allowNull: true,
   },
   document_type: {
-    type: DataTypes.ENUM('invoice', 'credit_note', 'debit_note', 'support_document', 'support_document_adjustment'),
+    type: DataTypes.ENUM('invoice', 'credit_note', 'debit_note', 'support_document', 'support_document_adjustment', 'payroll', 'payroll_adjustment'),
     defaultValue: 'invoice',
   },
   technical_key: {

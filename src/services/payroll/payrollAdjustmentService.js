@@ -149,7 +149,13 @@ async function sendPayrollAdjustmentToDian(adjustment, payrollDocument, tenant) 
       if (!t.finished) await t.rollback();
       throw e;
     }
-    const numbering = { prefix: rawNumbering.resolution.prefix, consecutivo: rawNumbering.consecutive };
+    const numbering = {
+      prefix: rawNumbering.resolution.prefix,
+      consecutivo: rawNumbering.consecutive,
+      // Set de pruebas de habilitación de nómina (resolución de tipo nómina): en
+      // ambiente de pruebas el envío va a SendTestSetAsync (payrollDianAdapter).
+      testSetId: rawNumbering.resolution.test_set_id || null,
+    };
     const numeroDocumento = rawNumbering.invoiceNumber;
 
     const predecessor = await resolvePredecessor(payrollDocument);

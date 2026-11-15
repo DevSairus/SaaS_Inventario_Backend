@@ -193,6 +193,21 @@ function codigoQrXml(qrText) {
   return `<CodigoQR>${escXml(qrText)}</CodigoQR>`;
 }
 
+// URL del QR (NIE021): catálogo de habilitación o de producción según el
+// ambiente (Ambiente 2 = pruebas), como la usan los proveedores en producción.
+function qrUrl(cune, tipoAmbiente) {
+  const host = String(tipoAmbiente) === '1' ? 'catalogo-vpfe.dian.gov.co' : 'catalogo-vpfe-hab.dian.gov.co';
+  return `https://${host}/document/searchqr?documentkey=${cune}`;
+}
+
+// Contenedor de la firma. @dian-kit/core#signXml pone la firma donde
+// encuentra este comentario; sin él la dejaba antes de la etiqueta de
+// cierre de la raíz, FUERA de ext:ExtensionContent, y el XSD de nómina
+// (v1.0.6) rechaza el documento. El comentario no cuenta en el resumen:
+// la canonicalización C14N lo omite.
+const SIGNATURE_PLACEHOLDER = '<!--FIRMA DIGITAL XAdES-BES AQUÍ-->';
+const UBL_EXTENSIONS_XML = `<ext:UBLExtensions><ext:UBLExtension><ext:ExtensionContent>${SIGNATURE_PLACEHOLDER}</ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>`;
+
 function informacionGeneralXml({ version = 'V1.0: Documento Soporte de Pago de Nómina Electrónica', ambiente, cune, fechaGen, horaGen, periodoNomina, tipoMoneda = 'COP', tipoXML = TIPO_XML_NOMINA_INDIVIDUAL }) {
   return `<InformacionGeneral ${attrs({
     Version: version,
@@ -237,7 +252,9 @@ function trabajadorXml({
     SalarioIntegral: salarioIntegral ? 'true' : 'false',
     TipoContrato: tipoContrato,
     CodigoTrabajador: codigoTrabajador,
-  }, [])} Sueldo="${truncate2(sueldo)}" />`;
+  }, [])} Sueldo="${truncate2(sueldo)}"${segundoApellido ? '' : ' SegundoApellido=""'} />`;
+  // SegundoApellido es obligatorio en el XSD 1.0.6 y en NIE048 (1..1): si el
+  // trabajador no tiene, va vacío (attrs() omite los valores vacíos).
 }
 
 function pagoXml({ forma, metodo, banco, tipoCuenta, numeroCuenta }) {
@@ -545,7 +562,7 @@ function buildPayrollXml({ tenant, employee, period, liquidation, numbering }) {
     // Contenedor de firma XAdES-BES — numeral 9.3 exige que esta sección
     // (y solo esta) use UBL 2.1, por eso lleva el namespace ext: aunque el
     // resto del árbol no use prefijos UBL. Se firma en payrollDianAdapter.js.
-    '<ext:UBLExtensions xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"><ext:UBLExtension><ext:ExtensionContent></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>',
+    UBL_EXTENSIONS_XML,
     periodoXml({
       fechaIngreso: employee.hire_date,
       fechaRetiro: employee.termination_date,
@@ -567,7 +584,7 @@ function buildPayrollXml({ tenant, employee, period, liquidation, numbering }) {
       softwareId: cfg.software_id_nomina,
       softwareSC: liquidation.softwareSecurityCode, // numeral 8.3 — mismo mecanismo que factura, ver dianKitAdapter.js#computeNitCheckDigit()/lógica de SoftwareSC equivalente
     }),
-    codigoQrXml(liquidation.qrText || `https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=${cune}`), // formato confirmado por NIE021 del Anexo
+    codigoQrXml(liquidation.qrText || qrUrl(cune, tipoAmbiente)), // formato confirmado por NIE021 del Anexo
     informacionGeneralXml({
       ambiente: tipoAmbiente, cune, fechaGen, horaGen,
       periodoNomina: period.period_type === 'quincenal' ? '2' : '1', // tabla 5.5.1 — MEJOR ESFUERZO, confirmar códigos exactos antes de habilitación
@@ -610,7 +627,13 @@ function buildPayrollXml({ tenant, employee, period, liquidation, numbering }) {
   const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <NominaIndividual
   xmlns="dian:gov:co:facturaelectronica:NominaIndividual"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+  xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"
+  xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"
+  xmlns:xades141="http://uri.etsi.org/01903/v1.4.1#"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  SchemaLocation=""
   xsi:schemaLocation="dian:gov:co:facturaelectronica:NominaIndividual NominaIndividualElectronicaXSD.xsd">
   ${body}
 </NominaIndividual>`;
@@ -673,14 +696,18 @@ function buildPayrollAdjustmentXml({ tenant, employee, period, liquidation, numb
   const numeroDocumento = `${numbering.prefix}${numbering.consecutivo}`;
   const tipoAmbiente = cfg.environment === 'production' ? '1' : '2';
 
-  const devengadosTotal = liquidation.devengadosTotal || 0;
-  const deduccionesTotal = liquidation.deduccionesTotal || 0;
+  const isDelete = adjustmentType === 'delete';
+  // Eliminar no lleva devengados, deducciones ni trabajador, y su CUNE se
+  // calcula con ValDev/ValDed/ValTol = 0.00 y DocEmp = 0 (Anexo, numeral
+  // 8.1.1.4, "Opción Eliminar"). Antes usaba los totales y la cédula reales.
+  const devengadosTotal = isDelete ? 0 : (liquidation.devengadosTotal || 0);
+  const deduccionesTotal = isDelete ? 0 : (liquidation.deduccionesTotal || 0);
   const comprobanteTotal = devengadosTotal - deduccionesTotal;
 
   const cune = buildCune({
     numeroDocumento, fechaGen, horaGen, devengadosTotal, deduccionesTotal, comprobanteTotal,
     nitEmpleador: cfg.nit,
-    numeroDocumentoEmpleado: employee.document_number,
+    numeroDocumentoEmpleado: isDelete ? '0' : employee.document_number,
     tipoXML: TIPO_XML_NOMINA_AJUSTE,
     softwarePin: cfg.software_pin_nomina,
     tipoAmbiente,
@@ -708,7 +735,8 @@ function buildPayrollAdjustmentXml({ tenant, employee, period, liquidation, numb
       fechaGen,
     }),
     numeroSecuenciaXmlXml({
-      codigoTrabajador: employee.employee_code,
+      // En Eliminar el XSD no admite CodigoTrabajador.
+      codigoTrabajador: isDelete ? null : employee.employee_code,
       prefijo: numbering.prefix,
       consecutivo: numbering.consecutivo,
       numero: numeroDocumento,
@@ -720,11 +748,13 @@ function buildPayrollAdjustmentXml({ tenant, employee, period, liquidation, numb
       softwareId: cfg.software_id_nomina,
       softwareSC: liquidation.softwareSecurityCode,
     }),
-    codigoQrXml(`https://catalogo-vpfe.dian.gov.co/document/searchqr?documentkey=${cune}`),
+    codigoQrXml(qrUrl(cune, tipoAmbiente)),
     informacionGeneralXml({
       version: 'V1.0: Nota de Ajuste de Documento Soporte de Pago de Nómina Electrónica',
       ambiente: tipoAmbiente, cune, fechaGen, horaGen,
-      periodoNomina: period.period_type === 'quincenal' ? '2' : '1',
+      // En Eliminar el XSD no admite PeriodoNomina ni TipoMoneda.
+      periodoNomina: isDelete ? null : (period.period_type === 'quincenal' ? '2' : '1'),
+      tipoMoneda: isDelete ? null : 'COP',
       tipoXML: TIPO_XML_NOMINA_AJUSTE,
     }),
     empleadorXml({
@@ -757,9 +787,19 @@ function buildPayrollAdjustmentXml({ tenant, employee, period, liquidation, numb
     fechasPagosXml(liquidation.paymentDates),
   ];
 
+  // Eliminar: SOLO EliminandoPredecesor, NumeroSecuenciaXML,
+  // LugarGeneracionXML, ProveedorXML, CodigoQR, InformacionGeneral, Notas y
+  // Empleador (secuencia del XSD 1.0.6 de la caja de herramientas). Sin
+  // Periodo, Trabajador, Pago, FechasPagos ni devengados: el XSD los rechaza.
+  const ELIMINAR_TAGS = ['<EliminandoPredecesor', '<NumeroSecuenciaXML', '<LugarGeneracionXML', '<ProveedorXML', '<CodigoQR', '<InformacionGeneral', '<Notas', '<Empleador'];
+  if (isDelete) {
+    const keep = commonPieces.filter((piece) => ELIMINAR_TAGS.some((tag) => String(piece).startsWith(tag)));
+    commonPieces.length = 0;
+    commonPieces.push(...keep);
+  }
+
   // Reemplazar SÍ repite devengados/deducciones completos (es un
-  // documento sustituto íntegro); Eliminar no lleva conceptos — solo
-  // identifica qué se invalida (ver nota arriba sobre el mejor esfuerzo).
+  // documento sustituto íntegro).
   if (adjustmentType === 'replace') {
     commonPieces.push(
       devengadosXml(liquidation.devengados || {}),
@@ -776,9 +816,15 @@ function buildPayrollAdjustmentXml({ tenant, employee, period, liquidation, numb
   const xml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <NominaIndividualDeAjuste
   xmlns="dian:gov:co:facturaelectronica:NominaIndividualDeAjuste"
+  xmlns:xs="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+  xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"
+  xmlns:xades="http://uri.etsi.org/01903/v1.3.2#"
+  xmlns:xades141="http://uri.etsi.org/01903/v1.4.1#"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  SchemaLocation=""
   xsi:schemaLocation="dian:gov:co:facturaelectronica:NominaIndividualDeAjuste NominaIndividualDeAjusteElectronicaXSD.xsd">
-  <ext:UBLExtensions xmlns:ext="urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2"><ext:UBLExtension><ext:ExtensionContent></ext:ExtensionContent></ext:UBLExtension></ext:UBLExtensions>
+  ${UBL_EXTENSIONS_XML}
   <TipoNota>${tipoNota}</TipoNota>
   <${branchTag}>
   ${commonPieces.join('\n  ')}
