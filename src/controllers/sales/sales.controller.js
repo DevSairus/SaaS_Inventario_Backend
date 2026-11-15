@@ -25,7 +25,7 @@ const { applyRemisionFilter } = require('../../utils/remisionVisibility');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
 const { daysOverdueOf, pendingReceivableWhere, draftSaleWhere, effectiveDueDateSql } = require('../../utils/receivables');
-const { searchMatch } = require('../../utils/searchText');
+const { searchMatch, plateVariant } = require('../../utils/searchText');
 const { createCustomerAdvanceRecord, afterAdvanceCommitted, splitExcess } = require('../../services/finance/customerAdvance.service');
 const { contractLockReason } = require('../../services/projects/projectCuts.service');
 
@@ -228,10 +228,16 @@ function buildSaleListWhere(req) {
     where.vehicle_plate = { [Op.iLike]: `%${vehicle_plate}%` };
   }
 
-  if (search && !customer_name && !vehicle_plate) {
+  const term = String(search || '').trim();
+  if (term && !customer_name && !vehicle_plate) {
     // Número, cliente, NIT, email, teléfono, placa y número DIAN en una
-    // sola expresión indexada (ver utils/searchText.js).
-    where[Op.and] = [...(where[Op.and] || []), searchMatch('sales', 'Sale', search)];
+    // sola expresión indexada (ver utils/searchText.js). La placa escrita
+    // con espacio o guion ("abc 123") se busca también pegada.
+    const compact = plateVariant(term);
+    const match = searchMatch('sales', 'Sale', term);
+    where[Op.and] = [...(where[Op.and] || []), compact
+      ? { [Op.or]: [match, { vehicle_plate: { [Op.iLike]: `%${compact}%` } }] }
+      : match];
   }
 
   if (from_date && to_date) {

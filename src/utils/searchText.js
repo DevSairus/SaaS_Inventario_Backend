@@ -47,4 +47,26 @@ function searchMatch(table, alias, term) {
   );
 }
 
-module.exports = { SEARCH_COLUMNS, searchExpression, searchMatch };
+/**
+ * Las placas se guardan pegadas y en mayúscula ("ABC123"), pero se escriben
+ * "abc 123" o "ABC-123". Devuelve el término sin espacios, guiones ni puntos
+ * si eso lo cambia (si no, null: el término ya se busca tal cual).
+ */
+function plateVariant(term) {
+  const raw = String(term || '').trim();
+  const compact = raw.replace(/[\s.\-_]+/g, '');
+  return compact && compact !== raw ? compact : null;
+}
+
+/**
+ * Condiciones OR para buscar una placa en una columna (`'$vehicle.plate$'`,
+ * `'vehicle_plate'`...): el término tal cual y, si aplica, sin separadores.
+ */
+function plateConditions(column, term) {
+  const conds = [{ [column]: { [Op.iLike]: `%${String(term).trim()}%` } }];
+  const compact = plateVariant(term);
+  if (compact) conds.push({ [column]: { [Op.iLike]: `%${compact}%` } });
+  return conds;
+}
+
+module.exports = { SEARCH_COLUMNS, searchExpression, searchMatch, plateVariant, plateConditions };

@@ -6,6 +6,7 @@ const { saleBalance, saleRetentionPending, round2 } = require('../../utils/saleA
 const { normalizeOpeningBalanceAsSaleRow } = require('../../services/accounting/openingBalanceMerge.helper');
 const { parsePagination, buildPagination } = require('../../utils/pagination');
 const { sequelize } = require('../../config/database');
+const { plateConditions } = require('../../utils/searchText');
 
 // Saldos iniciales de cartera (OpeningBalance 'receivable', registrados en
 // Contabilidad → Saldos Iniciales) con el mismo shape que una venta. Antes
@@ -64,7 +65,9 @@ const pendingSalesWhere = (req) => {
     where[Op.and] = [...(where[Op.and] || []), { [Op.or]: [
       { customer_name: { [Op.iLike]: `%${term}%` } },
       { sale_number: { [Op.iLike]: `%${term}%` } },
+      { customer_tax_id: { [Op.iLike]: `%${term}%` } },
       { '$customer.tax_id$': { [Op.iLike]: `%${term}%` } },
+      ...plateConditions('vehicle_plate', term),
     ] }];
   }
   return where;

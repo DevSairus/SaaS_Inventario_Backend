@@ -7,6 +7,7 @@ const {
   DiagramTemplate, WorkOrderDiagnosisMark, CommissionCategory, Combo, ComboItem,
 } = require('../../models');
 const { Op } = require('sequelize');
+const { plateConditions } = require('../../utils/searchText');
 const { createMovement } = require('../inventory/movements.controller');
 const { nextMovementNumber } = require('../../services/inventory/movementNumber.service');
 const Tenant = require('../../models/auth/Tenant');
@@ -200,6 +201,25 @@ async function applyItemStockMovement(item, order, product, tenant_id, user_id, 
   return movement;
 }
 
+// Condiciones OR de búsqueda libre de OT por cliente y vehículo. `customer`
+// es la ruta del include del cliente para sequelize.col ('customer' o
+// 'work_order->customer'); `plate`, la columna de placa en formato '$...$'.
+const workOrderSearchConditions = (term, { plate, customer, extra = [] }) => {
+  const like = { [Op.iLike]: `%${term}%` };
+  const path = customer.replace(/->/g, '.');
+  return [
+    ...extra,
+    ...plateConditions(plate, term),
+    { [`$${path}.business_name$`]: like },
+    { [`$${path}.tax_id$`]: like },
+    { [`$${path}.phone$`]: like },
+    sequelize.where(
+      sequelize.fn('concat_ws', ' ', sequelize.col(`${customer}.first_name`), sequelize.col(`${customer}.last_name`)),
+      like,
+    ),
+  ];
+};
+
 // ── LIST ─────────────────────────────────────────────────────────────────────
 
 const list = async (req, res) => {
@@ -222,15 +242,17 @@ const list = async (req, res) => {
     }
     if (technician_id) where.technician_id = technician_id;
     if (customer_id)   where.customer_id   = customer_id;
-    if (search) {
-      where[Op.or] = [
-        { order_number:         { [Op.iLike]: `%${search}%` } },
-        { problem_description:  { [Op.iLike]: `%${search}%` } },
-        { '$vehicle.plate$':           { [Op.iLike]: `%${search}%` } },
-        { '$customer.first_name$':     { [Op.iLike]: `%${search}%` } },
-        { '$customer.last_name$':      { [Op.iLike]: `%${search}%` } },
-        { '$customer.business_name$':  { [Op.iLike]: `%${search}%` } },
-      ];
+    const term = String(search || '').trim();
+    if (term) {
+      // Número de OT, placa (también escrita con espacio o guion), cliente
+      // por nombre completo o razón social, documento y teléfono.
+      where[Op.or] = workOrderSearchConditions(term, {
+        plate: '$vehicle.plate$', customer: 'customer',
+        extra: [
+          { order_number:        { [Op.iLike]: `%${term}%` } },
+          { problem_description: { [Op.iLike]: `%${term}%` } },
+        ],
+      });
     }
 
     const { count, rows } = await WorkOrder.findAndCountAll({
@@ -2142,7 +2164,7 @@ const getPendingQuoteNotifications = async (req, res) => {
 // responden; si no, parcial/aprobada/rechazada según lo aprobado. El total es
 // la suma de lo aprobado. Orden: más reciente primero. Lo usa también el
 // listado unificado de cotizaciones (sales/quotes.controller.js).
-const listWorkshopQuoteRows = async (tenant_id, { status, from_date, to_date, customer_name, vehicle_plate } = {}, { limit = 50, offset = 0 } = {}) => {
+const listWorkshopQuoteRows = async (tenant_id, { status, from_date, to_date, customer_name, vehicle_plate, search } = {}, { limit = 50, offset = 0 } = {}) => {
   const schema = getCurrentSchema() || 'public';
   const items = `"${schema}"."work_order_items"`;
   const countWhere = (approval) => `(SELECT COUNT(*) FROM ${items} i WHERE i.quote_request_id = "WorkOrderQuoteRequest"."id" AND i.approval_status = '${approval}')`;
@@ -2165,7 +2187,15 @@ const listWorkshopQuoteRows = async (tenant_id, { status, from_date, to_date, cu
       ),
     ] });
   }
-  if (vehicle_plate) and.push({ '$work_order.vehicle.plate$': { [Op.iLike]: `%${String(vehicle_plate).trim()}%` } });
+  if (vehicle_plate) and.push({ [Op.or]: plateConditions('$work_order.vehicle.plate$', vehicle_plate) });
+  // Buscador libre del listado de cotizaciones: cliente, documento, placa u OT.
+  const term = String(search || '').trim();
+  if (term) {
+    and.push({ [Op.or]: workOrderSearchConditions(term, {
+      plate: '$work_order.vehicle.plate$', customer: 'work_order->customer',
+      extra: [{ '$work_order.order_number$': { [Op.iLike]: `%${term}%` } }],
+    }) });
+  }
 
   const { rows, count } = await WorkOrderQuoteRequest.findAndCountAll({
     where: { [Op.and]: and },

@@ -7,6 +7,7 @@ const {
   Customer 
 } = require('../../models');
 const { Op } = require('sequelize');
+const { plateConditions } = require('../../utils/searchText');
 const { sequelize } = require('../../config/database');
 const { CUSTOMER_RETURN_REASONS, reasonLabel } = require('../../utils/returnLabels');
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
@@ -96,7 +97,9 @@ const getCustomerReturns = async (req, res) => {
         { '$customer.business_name$': { [Op.iLike]: `%${search}%` } },
         { '$customer.first_name$': { [Op.iLike]: `%${search}%` } },
         { '$customer.last_name$': { [Op.iLike]: `%${search}%` } },
-        { '$sale.sale_number$': { [Op.iLike]: `%${search}%` } }
+        { '$customer.tax_id$': { [Op.iLike]: `%${search}%` } },
+        { '$sale.sale_number$': { [Op.iLike]: `%${search}%` } },
+        ...plateConditions('$sale.vehicle_plate$', search)
       ];
     }
     if (customer_id) where.customer_id = customer_id;
