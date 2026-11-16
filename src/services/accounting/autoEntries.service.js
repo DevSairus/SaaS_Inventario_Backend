@@ -176,6 +176,11 @@ function salePaymentsForEntry(sale) {
 }
 
 async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
+  // Una nota crédito/débito también es un Sale, pero su asiento es otro (la
+  // NC reversa ingreso e IVA): Salud Contable llegó a generarle a una NC el
+  // asiento de una venta (ingreso al haber), justo al revés.
+  if (sale?.document_type === 'nota_credito') return generateCreditNoteEntry(sale, items, tenantId, userId, options);
+  if (sale?.document_type === 'nota_debito') return generateDebitNoteEntry(sale, items, tenantId, userId, options);
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
@@ -1041,7 +1046,7 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
  * @param {object} noteSale - instancia de Sale con document_type: 'nota_credito'
  * @param {Array} items - ítems de la nota (con item_type, subtotal)
  */
-async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
+async function generateCreditNoteEntry(noteSale, items, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
@@ -1114,7 +1119,7 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
       await t.rollback();
       throw error;
     }
-  }, `nota crédito ${noteSale.id}`);
+  }, `nota crédito ${noteSale.id}`, options);
 }
 
 /**
@@ -1129,7 +1134,7 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId) {
  * @param {object} noteSale - instancia de Sale con document_type: 'nota_debito'
  * @param {Array} items - ítems de la nota (con item_type, subtotal)
  */
-async function generateDebitNoteEntry(noteSale, items, tenantId, userId) {
+async function generateDebitNoteEntry(noteSale, items, tenantId, userId, options = {}) {
   return safeAutoGenerate(async () => {
     const t = await sequelize.transaction();
     try {
@@ -1194,7 +1199,7 @@ async function generateDebitNoteEntry(noteSale, items, tenantId, userId) {
       await t.rollback();
       throw error;
     }
-  }, `nota débito ${noteSale.id}`);
+  }, `nota débito ${noteSale.id}`, options);
 }
 
 /**

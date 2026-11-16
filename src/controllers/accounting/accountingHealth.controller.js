@@ -17,6 +17,8 @@ const {
   generatePurchaseEntry,
   generateExpenseEntry,
   generateCashSessionEntry,
+  generateCreditNoteEntry,
+  generateDebitNoteEntry,
 } = require('../../services/accounting/autoEntries.service');
 
 function defaultRange() {
@@ -43,6 +45,16 @@ async function generateEntryForSource(sourceType, sourceId, tenantId, userId, op
       const sale = await Sale.findOne({ where: { id: sourceId, tenant_id: tenantId }, include: [{ model: SaleItem, as: 'items' }] });
       if (!sale) throw Object.assign(new Error('Venta no encontrada'), { statusCode: 404 });
       return generateSaleEntry(sale, sale.items, tenantId, userId, options);
+    }
+    case 'credit_note':
+    case 'debit_note': {
+      const note = await Sale.findOne({
+        where: { id: sourceId, tenant_id: tenantId, document_type: sourceType === 'credit_note' ? 'nota_credito' : 'nota_debito' },
+        include: [{ model: SaleItem, as: 'items' }],
+      });
+      if (!note) throw Object.assign(new Error('Nota no encontrada'), { statusCode: 404 });
+      const gen = sourceType === 'credit_note' ? generateCreditNoteEntry : generateDebitNoteEntry;
+      return gen(note, note.items, tenantId, userId, options);
     }
     case 'purchase': {
       const purchase = await Purchase.findOne({ where: { id: sourceId, tenant_id: tenantId } });

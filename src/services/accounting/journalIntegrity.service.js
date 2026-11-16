@@ -25,6 +25,9 @@ const { Sale, Purchase, Expense, CashSession, JournalEntry, JournalEntryLine } =
  * @param {{ from: string, to: string, branchId?: string }} params
  * @returns {Promise<{ total_missing: number, by_type: Object, items: Array }>}
  */
+const NOTE_SOURCE = { nota_credito: 'credit_note', nota_debito: 'debit_note' };
+const NOTE_LABEL = { nota_credito: 'Nota crédito', nota_debito: 'Nota débito' };
+
 async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) {
   if (!from || !to) {
     throw new Error('from y to (YYYY-MM-DD) son obligatorios');
@@ -43,7 +46,7 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
         sale_date: { [Op.between]: [from, to] },
         ...branchFilter,
       },
-      attributes: ['id', 'sale_number', 'sale_date', 'total_amount', 'branch_id'],
+      attributes: ['id', 'sale_number', 'sale_date', 'total_amount', 'branch_id', 'document_type', 'dian_invoice_number'],
     }),
     Purchase.findAll({
       where: {
@@ -72,6 +75,12 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
       attributes: ['id', 'session_date', 'differences', 'branch_id'],
     }),
   ]);
+
+  const noteIds = sales.filter((s) => s.document_type === 'nota_credito').map((s) => s.id);
+  const { CustomerReturn } = require('../../models');
+  const returnNoteIds = new Set(noteIds.length && CustomerReturn
+    ? (await CustomerReturn.findAll({ where: { tenant_id: tenantId, credit_note_sale_id: noteIds }, attributes: ['credit_note_sale_id'], raw: true })).map((r) => r.credit_note_sale_id)
+    : []);
 
   // Los cierres de caja SOLO generan asiento si hubo sobrante/faltante real
   // (ver generateCashSessionEntry) — si la caja cuadró, no tener asiento es
@@ -109,10 +118,14 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
         branch_id: null,
       };
     }),
-    ...sales.map((s) => ({
-      source_type: 'sale',
+    // Las notas crédito/débito tienen su propio asiento (source_type
+    // credit_note / debit_note). Antes se buscaban como 'sale': toda NC salía
+    // como hueco y "Generar asiento" le creaba el asiento de una venta.
+    // La NC de una devolución no lleva asiento propio: lo hace la devolución.
+    ...sales.filter((s) => !returnNoteIds.has(s.id)).map((s) => ({
+      source_type: NOTE_SOURCE[s.document_type] || 'sale',
       source_id: s.id,
-      label: `Venta ${s.sale_number || s.id}`,
+      label: `${NOTE_LABEL[s.document_type] || 'Venta'} ${s.dian_invoice_number || s.sale_number || s.id}`,
       date: s.sale_date,
       amount: s.total_amount,
       branch_id: s.branch_id,
