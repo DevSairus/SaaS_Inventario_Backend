@@ -8,8 +8,8 @@
 //     sale_revenue_product / sale_revenue_service de siempre).
 //   - deferred_months + deferred_account_id: el cobro es un ingreso recibido
 //     por anticipado. La venta acredita la cuenta de pasivo (27...) y se crea
-//     un diferido que, cada mes desde el mes de la factura, se amortiza:
-//     débito pasivo / crédito cuenta de ingreso.
+//     un diferido que se amortiza al cierre de cada mes, desde el mes de la
+//     factura: débito pasivo / crédito cuenta de ingreso.
 //
 // Los asientos (venta, nota crédito, nota débito, devolución) siguen calculando
 // el ingreso como siempre (descuento global, AIU); splitRevenue solo reparte
@@ -93,11 +93,6 @@ async function splitRevenue(tenantId, items, totals, transaction) {
 }
 
 const firstOfMonth = (d) => `${String(d).slice(0, 7)}-01`;
-const monthsBetween = (fromYm, toYm) => {
-  const [fy, fm] = fromYm.split('-').map(Number);
-  const [ty, tm] = toYm.split('-').map(Number);
-  return (ty - fy) * 12 + (tm - fm);
-};
 function colombiaToday() {
   return new Date(Date.now() - 5 * 3600 * 1000).toISOString().slice(0, 10);
 }
@@ -164,34 +159,37 @@ async function reverseDeferredBucket(tenantId, originalSaleId, bucket, transacti
   return lines;
 }
 
+/** Último día del mes k (1 = mes de inicio) de un diferido, YYYY-MM-DD. */
+function monthEnd(startDate, k) {
+  const [y, m] = String(startDate).slice(0, 7).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1 + k, 0)).toISOString().slice(0, 10);
+}
+
 /**
- * Amortiza los meses vencidos de los diferidos activos (hasta `upTo`,
- * incluido el mes de esa fecha). Un asiento en borrador por diferido y mes:
- * el del mes de la factura con su fecha, los siguientes el día 1 del mes.
- * Se pone al día solo (si el job no corrió algún mes).
+ * Amortiza los meses cerrados de los diferidos activos: un asiento en borrador
+ * por diferido y mes, fechado el ÚLTIMO día de ese mes (cierre mensual: el
+ * mes de la factura se causa el último día de ese mes, no el día de la
+ * factura). Una cuota se genera cuando `upTo` llega al fin de su mes; el job
+ * diario corre a las 4:20 a. m., así que la del mes sale el último día. Se
+ * pone al día solo (si el job no corrió algún día).
  */
 async function amortizeDue(tenantId, { upTo = colombiaToday(), saleId = null, deferralId = null, userId = null } = {}) {
-  const { DeferredRevenue, Sale } = require('../../models');
+  const { DeferredRevenue } = require('../../models');
   const where = { tenant_id: tenantId, status: 'active' };
   if (saleId) where.sale_id = saleId;
   if (deferralId) where.id = deferralId;
   const deferrals = await DeferredRevenue.findAll({ where, order: [['start_date', 'ASC']] });
   const results = [];
   for (const d of deferrals) {
-    const due = Math.min(d.months, monthsBetween(String(d.start_date).slice(0, 7), String(upTo).slice(0, 7)) + 1);
+    let due = d.months_amortized;
+    while (due < d.months && monthEnd(d.start_date, due + 1) <= String(upTo).slice(0, 10)) due += 1;
     let created = 0;
     while (d.months_amortized < due) {
       const k = d.months_amortized + 1;
       const remainingMonths = d.months - d.months_amortized;
       const remaining = round2(Number(d.total_amount) - Number(d.amortized_amount));
       const amount = remainingMonths === 1 ? remaining : round2(remaining / remainingMonths);
-      const [y, m] = String(d.start_date).slice(0, 7).split('-').map(Number);
-      const monthDate = new Date(Date.UTC(y, m - 1 + (k - 1), 1)).toISOString().slice(0, 10);
-      let entryDate = monthDate;
-      if (k === 1) {
-        const sale = await Sale.findByPk(d.sale_id, { attributes: ['sale_date'] });
-        if (sale?.sale_date) entryDate = String(sale.sale_date instanceof Date ? sale.sale_date.toISOString() : sale.sale_date).slice(0, 10);
-      }
+      const entryDate = monthEnd(d.start_date, k);
       const t = await sequelize.transaction();
       try {
         if (amount > 0) {

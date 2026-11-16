@@ -328,7 +328,8 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
       const deferrals = await createDeferrals(tenantId, sale, revenueBuckets, userId, t);
 
       await t.commit();
-      // El mes de la factura se causa de una vez (los siguientes, el job diario).
+      // Ponerse al día si la factura es de un mes ya cerrado (factura con fecha
+      // atrasada); las cuotas de meses en curso las genera el job al cierre.
       if (deferrals.length) {
         try {
           await require('./deferredRevenue.service').amortizeDue(tenantId, { saleId: sale.id, userId });

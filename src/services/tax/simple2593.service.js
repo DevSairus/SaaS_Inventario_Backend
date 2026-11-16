@@ -151,7 +151,7 @@ async function employerPension(schema, tenantId, dateFrom, dateTo) {
 }
 
 // Documentos que facturan o reversan ingreso: lo que llevan a una cuenta de
-// ingreso diferido (27...) es ingreso percibido en ese momento.
+// ingreso diferido (27...) es ingreso realizado en ese momento (la factura lo realiza).
 const BILLING_SOURCES = ['sale', 'credit_note', 'debit_note', 'customer_return'];
 
 /**
@@ -178,10 +178,10 @@ async function deferredAccountMap(schema, tenantId) {
  * Ingresos por municipio (mismo alcance por sede que el ICA), con créditos y
  * débitos por cuenta.
  *
- * Ingresos diferidos (anualidades, semestralidades): el SIMPLE grava los
- * ingresos brutos PERCIBIDOS en el período (art. 904 E.T.), así que una
- * anualidad cobrada de una vez se declara completa en el bimestre en que se
- * factura, aunque contablemente se cause mes a mes. Por eso se suma lo que las
+ * Ingresos diferidos (anualidades, semestralidades): en el SIMPLE la factura
+ * electrónica realiza el ingreso (art. 28, remitido por el 904 E.T.), así que
+ * la anualidad se declara completa en el bimestre en que se factura -aunque
+ * se cobre después y contablemente se cause mes a mes-. Por eso se suma lo que las
  * facturas (y sus notas/devoluciones) llevaron a la cuenta del diferido -bajo
  * la cuenta de ingreso donde se causa, para que caiga en su actividad y grupo-
  * y NO se suman las amortizaciones mensuales (source_type deferred_revenue),
@@ -340,7 +340,7 @@ async function compute2593(tenantId, { year, period, inputs = {} }) {
   const allNet = allAccounts.reduce((s, a) => s + a.credit - a.debit, 0);
   const deferredIncluded = round2(allAccounts.reduce((s, a) => s + (a.includes_deferred || 0), 0));
   if (deferredIncluded) {
-    warnings.push(`Incluye ${Math.round(deferredIncluded).toLocaleString('es-CO')} de ingresos recibidos por anticipado (anualidades, semestralidades) facturados en el bimestre: el SIMPLE grava el ingreso percibido completo, aunque la contabilidad lo cause mes a mes. Sus amortizaciones mensuales no se vuelven a sumar.`);
+    warnings.push(`Incluye ${Math.round(deferredIncluded).toLocaleString('es-CO')} de ingresos recibidos por anticipado (anualidades, semestralidades) facturados en el bimestre: en el SIMPLE el ingreso se realiza al facturar (arts. 28 y 904 E.T.) y se declara completo, aunque la contabilidad lo cause mes a mes. Sus amortizaciones mensuales no se vuelven a sumar.`);
   }
   const inMunicipalities = GROUP_KEYS.reduce((s, g) => s + groupIncome[g], 0);
   const remainder = round2(allNet - inMunicipalities);
