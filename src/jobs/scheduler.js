@@ -183,6 +183,16 @@ const JOBS = [
     },
   },
   {
+    name: 'recurring-invoices',
+    // Diario, 6:10am hora Colombia: emite las facturas de los contratos
+    // recurrentes que vencen hoy (o que quedaron atrasadas / fallaron ayer).
+    schedule: '10 6 * * *',
+    run: async () => {
+      const { runAllTenants } = require('../services/sales/recurringInvoices.service');
+      return runAllTenants();
+    },
+  },
+  {
     name: 'deferred-revenue-amortization',
     // Diario, 4:20am hora Colombia: causa los meses vencidos de los ingresos
     // diferidos (anualidades, semestralidades...). El día 1 de cada mes genera

@@ -9,6 +9,17 @@ const { checkRole } = require('../middleware/auth');
 
 // Estadísticas (debe ir antes de /:id)
 router.get('/stats', salesController.getStats);
+
+// Facturación recurrente (contratos). Antes de /:id. Escritura: gerencia y contabilidad.
+const recurring = require('../controllers/sales/recurringInvoices.controller');
+const recurringStaff = checkRole('admin', 'manager', 'accountant', 'super_admin');
+router.get('/recurring', recurring.list);
+router.get('/recurring/preview', recurring.preview);
+router.get('/recurring/:id', recurring.get);
+router.post('/recurring', recurringStaff, recurring.create);
+router.put('/recurring/:id', recurringStaff, recurring.update);
+router.post('/recurring/:id/status', recurringStaff, recurring.setStatus);
+router.post('/recurring/:id/run', recurringStaff, recurring.runNow);
 // Cotizaciones de Ventas + Taller en un solo listado paginado
 router.get('/quotes', require('../controllers/sales/quotes.controller').list);
 

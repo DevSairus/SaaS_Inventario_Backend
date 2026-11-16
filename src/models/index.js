@@ -14,6 +14,7 @@ const TenantRolePermission = require('./auth/TenantRolePermission');
 const ChartOfAccount = require('./accounting/ChartOfAccount');
 const FiscalPeriod = require('./accounting/FiscalPeriod');
 const DeferredRevenue = require('./accounting/DeferredRevenue');
+const { RecurringInvoice, RecurringInvoiceRun } = require('./sales/RecurringInvoice');
 const JournalEntry = require('./accounting/JournalEntry');
 const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
@@ -1267,6 +1268,8 @@ module.exports = {
   ChartOfAccount,
   FiscalPeriod,
   DeferredRevenue,
+  RecurringInvoice,
+  RecurringInvoiceRun,
   JournalEntry,
   JournalEntryLine,
   AccountMapping,
