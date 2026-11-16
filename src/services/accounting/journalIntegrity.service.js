@@ -25,6 +25,31 @@ const { Sale, Purchase, Expense, CashSession, JournalEntry, JournalEntryLine } =
  * @param {{ from: string, to: string, branchId?: string }} params
  * @returns {Promise<{ total_missing: number, by_type: Object, items: Array }>}
  */
+/** Gastos con pagos (fechados en el rango) que no tienen su asiento de pago. */
+async function missingExpensePayments(tenantId, { from, to, branchFilter = {} }) {
+  const { pendingExpensePayments } = require('../finance/expensePayments.service');
+  const expenses = await Expense.findAll({
+    where: { tenant_id: tenantId, paid_amount: { [Op.gt]: 0 }, ...branchFilter },
+    attributes: ['id', 'tenant_id', 'expense_number', 'description', 'payment_history', 'branch_id'],
+  });
+  const inRange = (d) => { const s = String(d || '').slice(0, 10); return s >= from && s <= to; };
+  const out = [];
+  for (const e of expenses) {
+    if (!(e.payment_history || []).some((p) => inRange(p.date))) continue;
+    const pending = (await pendingExpensePayments(e)).filter(({ payment }) => inRange(payment.date));
+    if (!pending.length) continue;
+    out.push({
+      source_type: 'expense_payment',
+      source_id: e.id,
+      label: `Pago${pending.length > 1 ? `s (${pending.length})` : ''} del gasto ${e.expense_number || e.id} (${e.description})`,
+      date: pending[0].payment.date,
+      amount: pending.reduce((s, { payment }) => s + Number(payment.amount || 0), 0),
+      branch_id: e.branch_id,
+    });
+  }
+  return out;
+}
+
 const NOTE_SOURCE = { nota_credito: 'credit_note', nota_debito: 'debit_note' };
 const NOTE_LABEL = { nota_credito: 'Nota crédito', nota_debito: 'Nota débito' };
 
@@ -157,7 +182,9 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
   ];
 
   if (sourcesToCheck.length === 0) {
-    return { total_missing: 0, by_type: {}, items: [] };
+    const paymentsOnly = await missingExpensePayments(tenantId, { from, to, branchFilter });
+    if (!paymentsOnly.length) return { total_missing: 0, by_type: {}, items: [] };
+    return { total_missing: paymentsOnly.length, by_type: { expense_payment: paymentsOnly.length }, items: paymentsOnly.slice(0, 40), truncated: paymentsOnly.length > 40, shown: Math.min(paymentsOnly.length, 40) };
   }
 
   // ── 2. Traer los JournalEntry existentes que cubran esas fuentes ─────────
@@ -172,6 +199,11 @@ async function findMissingJournalEntries(tenantId, { from, to, branchId } = {}) 
 
   // ── 3. Los que no aparecen en existingKeys son los huérfanos ─────────────
   const missing = sourcesToCheck.filter((s) => !existingKeys.has(`${s.source_type}:${s.source_id}`));
+
+  // ── 4. Pagos de gastos sin su asiento (débito por pagar / crédito caja) ──
+  // Un gasto puede tener su asiento y que le falte el del pago: antes nadie
+  // lo veía. Se revisan los gastos con pagos fechados en el rango.
+  missing.push(...await missingExpensePayments(tenantId, { from, to, branchFilter }));
 
   const byType = missing.reduce((acc, item) => {
     acc[item.source_type] = (acc[item.source_type] || 0) + 1;

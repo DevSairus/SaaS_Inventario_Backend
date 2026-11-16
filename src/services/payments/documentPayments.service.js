@@ -31,6 +31,8 @@ async function registerPurchasePayment({ tenantId, userId, purchaseId, amount, m
   // Lo que se le debe al proveedor es el neto de retenciones (ver utils/purchaseAmounts.js).
   const remaining = purchaseBalance(purchase);
   if (remaining <= 0) throw httpError(400, 'Esta compra ya está pagada en su totalidad');
+  // Mismo caso que en los gastos: sin período abierto el pago quedaría sin asiento.
+  await require('../accounting/journalEntry.service').assertPeriodOpen(tenantId, date || new Date(), transaction);
 
   const effectiveAmount = round2(Math.min(parseFloat(amount), remaining));
   const paid_amount = round2(parseFloat(purchase.paid_amount || 0) + effectiveAmount);
@@ -76,17 +78,23 @@ async function registerExpensePayment({ tenantId, userId, expenseId, amount, met
   const remaining = expenseBalance(expense);
   if (remaining <= 0) throw httpError(400, 'Este gasto ya está pagado en su totalidad');
 
+  // Con el período contable cerrado el asiento del pago no se podría crear y
+  // el gasto quedaba pagado sin asiento: se rechaza antes de registrar nada.
+  await require('../accounting/journalEntry.service').assertPeriodOpen(tenantId, date || new Date(), transaction);
+
   const effectiveAmount = Math.round(Math.min(parseFloat(amount), remaining) * 100) / 100;
   const paid_amount = Math.round((parseFloat(expense.paid_amount || 0) + effectiveAmount) * 100) / 100;
   const effectiveMethod = method || expense.payment_method || 'Efectivo';
   const selectedBankAccountId = await resolveSelectedBankAccountId(tenantId, bankAccountId, effectiveMethod, transaction);
   const payment = {
+    id: require('crypto').randomUUID(),
     date: date || new Date(),
     amount: effectiveAmount,
     method: effectiveMethod,
     bank_account_id: selectedBankAccountId,
     user_id: userId,
     notes: notes || null,
+    journal_entry_id: null,
     ...extra,
   };
   await expense.update({
@@ -100,13 +108,17 @@ async function registerExpensePayment({ tenantId, userId, expenseId, amount, met
     document: expense,
     payment,
     amount: effectiveAmount,
-    // Asiento del abono (cuentas por pagar vs caja/bancos).
+    // Asiento del abono (cuentas por pagar vs caja/bancos). Devuelve el motivo
+    // si no se pudo generar (el pago queda registrado igual; el asiento se
+    // genera después desde Salud Contable), para avisarle al usuario.
     afterCommit: async () => {
       try {
-        const { generateExpensePaymentEntry } = require('../accounting/autoEntries.service');
-        await generateExpensePaymentEntry(expense, payment, tenantId, userId);
+        const { recordExpensePaymentEntries } = require('../finance/expensePayments.service');
+        const { errors } = await recordExpensePaymentEntries(expense.id, tenantId, userId);
+        return errors[0] || null;
       } catch (err) {
         logger.warn(`[accounting] Error generando asiento de pago de gasto ${expense.id}: ${err.message}`);
+        return err.message;
       }
     },
   };

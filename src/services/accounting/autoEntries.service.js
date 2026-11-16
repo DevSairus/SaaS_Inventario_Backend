@@ -692,7 +692,13 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
     const t = await sequelize.transaction();
     try {
       const total = Number(expense.total_amount || 0);
-      const isPaid = expense.payment_status === 'paid';
+      // "Pagado" aquí = pagado AL REGISTRARLO (ese pago va en este asiento).
+      // Los abonos posteriores tienen su propio asiento (expense_payment): si
+      // este asiento se genera tarde (Salud Contable) sobre un gasto que se
+      // pagó después, debe ir contra cuentas por pagar, o la caja sale doble.
+      const history = Array.isArray(expense.payment_history) ? expense.payment_history : [];
+      const { isInitialPayment } = require('../finance/expensePayments.service');
+      const isPaid = history.length ? history.some(isInitialPayment) : expense.payment_status === 'paid';
 
       // Mismo caso que en generatePurchaseEntry: Expense también calcula
       // retefuente/reteiva/reteica (Fase C de impuestos) y hasta ahora no se

@@ -216,7 +216,9 @@ const createExpense = async (req, res) => {
       : 0;
     const initialStatus = paid_now ? 'paid' : 'pending';
     const initialHistory = paid_now
-      ? [{ date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto' }]
+      // in_expense_entry: este pago va dentro del asiento del gasto (crédito a
+      // caja/bancos), no lleva asiento de pago propio.
+      ? [{ id: require('crypto').randomUUID(), date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto', in_expense_entry: true }]
       : [];
 
     const expense = await Expense.create({
@@ -406,6 +408,17 @@ const deleteExpense = async (req, res) => {
   }
 };
 
+// ¿El negocio lleva contabilidad? Sin el módulo no hay asientos y no se avisa.
+async function accountingActive(tenantId) {
+  try {
+    const { getEffectiveModulesForTenantId } = require('../../services/moduleAccess');
+    const modules = await getEffectiveModulesForTenantId(tenantId);
+    return Array.isArray(modules) ? modules.includes('accounting') : !!modules?.accounting;
+  } catch {
+    return true;
+  }
+}
+
 // Registrar un abono sobre un gasto pendiente/parcial
 const registerPayment = async (req, res) => {
   const transaction = await sequelize.transaction();
@@ -431,14 +444,21 @@ const registerPayment = async (req, res) => {
 
     await transaction.commit();
 
-    // Asiento del abono (cuentas por pagar vs caja/bancos), no bloqueante --
-    // mismo patrón que el asiento del gasto en createExpense.
-    setImmediate(() => registered.afterCommit());
+    // Asiento del abono (cuentas por pagar vs caja/bancos). Si no se puede
+    // generar, el pago queda registrado pero se avisa (antes solo quedaba en
+    // el log y el gasto aparecía pagado sin asiento del pago).
+    const accountingError = await registered.afterCommit();
+    const warn = accountingError && await accountingActive(tenant_id);
 
-    res.json({ success: true, message: 'Pago registrado exitosamente', data: expense });
+    res.json({
+      success: true,
+      message: 'Pago registrado exitosamente',
+      data: expense,
+      ...(warn && { accounting_warning: `El pago quedó registrado, pero no se generó su asiento contable: ${accountingError}. Corrígelo y genéralo desde Contabilidad → Salud Contable.` }),
+    });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
-    if (error.status === 400) return res.status(400).json({ success: false, message: error.message });
+    if (error.status === 400 || error.statusCode === 400) return res.status(400).json({ success: false, message: error.message });
     console.error('Error registrando pago de gasto:', error);
     res.status(500).json({ success: false, message: 'Error registrando el pago' });
   }

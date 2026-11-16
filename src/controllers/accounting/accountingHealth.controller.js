@@ -46,6 +46,13 @@ async function generateEntryForSource(sourceType, sourceId, tenantId, userId, op
       if (!sale) throw Object.assign(new Error('Venta no encontrada'), { statusCode: 404 });
       return generateSaleEntry(sale, sale.items, tenantId, userId, options);
     }
+    case 'expense_payment': {
+      // Todos los pagos del gasto que no tengan asiento (con el motivo si falla).
+      const { recordExpensePaymentEntries } = require('../../services/finance/expensePayments.service');
+      const r = await recordExpensePaymentEntries(sourceId, tenantId, userId, { rethrow: !!options.rethrow });
+      if (!r.generated && !r.errors.length) throw Object.assign(new Error('Ese gasto no tiene pagos sin asiento'), { statusCode: 400 });
+      return r;
+    }
     case 'credit_note':
     case 'debit_note': {
       const note = await Sale.findOne({
