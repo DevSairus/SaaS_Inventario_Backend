@@ -9,14 +9,17 @@
 // en el log. El gasto aparecía pagado sin asiento del pago y Salud Contable no
 // lo detectaba, porque solo revisaba el asiento del gasto.
 //
-// Pagos que NO llevan asiento propio: el que se hace al registrar el gasto
-// ("pagar ahora"), porque el asiento del gasto ya acredita caja o bancos.
+// Pagos que NO llevan asiento propio: los gastos registrados como pagados
+// ANTES del 2026-11-16, cuyo asiento del gasto ya acreditó caja o bancos. Se
+// reconocen porque su pago inicial no trae journal_entry_id (esquema viejo).
+// Desde esa fecha el pago inicial lleva su propio asiento, como cualquier pago.
 
 const logger = require('../../config/logger');
 
 const INITIAL_PAYMENT_NOTE = 'Pago al momento de registrar el gasto';
 
-const isInitialPayment = (p) => !!p?.in_expense_entry || p?.notes === INITIAL_PAYMENT_NOTE;
+const isInitialPayment = (p) => !!p?.in_expense_entry
+  || (p?.notes === INITIAL_PAYMENT_NOTE && !Object.prototype.hasOwnProperty.call(p, 'journal_entry_id'));
 const cents = (v) => Math.round(Number(v || 0) * 100);
 
 /**

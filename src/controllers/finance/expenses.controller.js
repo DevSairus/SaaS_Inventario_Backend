@@ -216,9 +216,10 @@ const createExpense = async (req, res) => {
       : 0;
     const initialStatus = paid_now ? 'paid' : 'pending';
     const initialHistory = paid_now
-      // in_expense_entry: este pago va dentro del asiento del gasto (crédito a
-      // caja/bancos), no lleva asiento de pago propio.
-      ? [{ id: require('crypto').randomUUID(), date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto', in_expense_entry: true }]
+      // Lleva su propio asiento de pago (journal_entry_id), igual que un pago
+      // registrado después con "Pagar": el gasto va contra cuentas por pagar y
+      // el pago las cancela contra caja o bancos.
+      ? [{ id: require('crypto').randomUUID(), date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto', journal_entry_id: null }]
       : [];
 
     const expense = await Expense.create({
@@ -260,11 +261,16 @@ const createExpense = async (req, res) => {
 
     await transaction.commit();
 
-    // Asiento contable en borrador (no bloqueante: si falla, solo se loguea)
+    // Asientos en borrador (no bloqueante: si falla, solo se loguea): el del
+    // gasto y, si se pagó al registrarlo, el del pago (como en "Pagar").
     setImmediate(async () => {
       try {
         const { generateExpenseEntry } = require('../../services/accounting/autoEntries.service');
         await generateExpenseEntry(expense, tenant_id, req.user.id);
+        if (paid_now) {
+          const { recordExpensePaymentEntries } = require('../../services/finance/expensePayments.service');
+          await recordExpensePaymentEntries(expense.id, tenant_id, req.user.id);
+        }
       } catch (err) {
         require('../../config/logger').warn(`[accounting] Error generando asiento de gasto ${expense.id}: ${err.message}`);
       }
