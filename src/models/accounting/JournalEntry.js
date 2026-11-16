@@ -25,6 +25,8 @@ const JournalEntry = sequelize.define(
         'sale', 'purchase', 'purchase_payment', 'expense', 'expense_payment', 'cash_session', 'payment', 'work_order_payment', 'customer_return', 'supplier_return', 'credit_note', 'debit_note', 'manual', 'adjustment',
         'customer_advance', 'customer_advance_application', 'customer_advance_refund', 'customer_advance_reassignment', 'fixed_asset_depreciation', 'fixed_asset_disposal', 'fixed_asset_impairment', 'inventory_cost_recalc', 'loan_payment',
         'reclassification', 'ica_settlement', 'ica_autoretention', 'iva_prorrateo',
+        // Amortización mensual de ingresos diferidos (deferredRevenue.service.js)
+        'deferred_revenue',
         'opening_balance', 'year_end_close', 'internal_consumption', 'inventory_adjustment', 'product_initial_stock', 'product_bulk_import',
         'payroll', 'payroll_provisions', 'payroll_payment', 'payroll_cesantias_year_end', 'payroll_provision_adjustment',
         // Módulo Proyectos: consumo de materiales en la obra y reclasificación de nómina

@@ -13,6 +13,7 @@ const TenantRolePermission = require('./auth/TenantRolePermission');
 // Contabilidad
 const ChartOfAccount = require('./accounting/ChartOfAccount');
 const FiscalPeriod = require('./accounting/FiscalPeriod');
+const DeferredRevenue = require('./accounting/DeferredRevenue');
 const JournalEntry = require('./accounting/JournalEntry');
 const JournalEntryLine = require('./accounting/JournalEntryLine');
 const AccountMapping = require('./accounting/AccountMapping');
@@ -1265,6 +1266,7 @@ module.exports = {
   CustomerAdvanceAlert,
   ChartOfAccount,
   FiscalPeriod,
+  DeferredRevenue,
   JournalEntry,
   JournalEntryLine,
   AccountMapping,

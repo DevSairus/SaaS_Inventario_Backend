@@ -29,6 +29,7 @@ const exogenaCtrl = require('../../controllers/accounting/exogena.controller');
 const accountMigrationsCtrl = require('../../controllers/accounting/accountMigrations.controller');
 const icaCtrl = require('../../controllers/accounting/ica.controller');
 const simple2593Ctrl = require('../../controllers/accounting/simple2593.controller');
+const deferredRevenueCtrl = require('../../controllers/accounting/deferredRevenue.controller');
 const ivaProrrateoCtrl = require('../../controllers/accounting/ivaProrrateo.controller');
 const { checkRole } = require('../../middleware/auth');
 
@@ -78,6 +79,10 @@ router.post('/ica/settlements', accountingStaff, icaCtrl.createSettlement);
 router.get('/iva-prorrateo', ivaProrrateoCtrl.report);
 router.post('/iva-prorrateo', accountingStaff, ivaProrrateoCtrl.createEntry);
 router.patch('/ica/settlements/:id/void', accountingStaff, icaCtrl.voidSettlement);
+
+// Ingresos diferidos (anualidades, semestralidades): lista y amortización manual
+router.get('/deferred-revenues', deferredRevenueCtrl.list);
+router.post('/deferred-revenues/amortize', accountingStaff, deferredRevenueCtrl.amortize);
 
 // Formulario 2593 — Recibo electrónico del SIMPLE (cálculo por bimestre; escritura solo contabilidad)
 router.get('/simple-2593', simple2593Ctrl.get);

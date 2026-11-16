@@ -109,7 +109,10 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '4', name: 'INGRESOS', type: 'ingreso', parent_code: null, accepts_entries: false },
   { code: '41', name: 'Operacionales', type: 'ingreso', parent_code: '4', accepts_entries: false },
   { code: '413501', name: 'Venta de Mercancías', type: 'ingreso', parent_code: '41', accepts_entries: true },
-  { code: '415595', name: 'Ingresos por Servicios (Taller)', type: 'ingreso', parent_code: '41', accepts_entries: true },
+  // 415595 cuelga de 4155 (antes de 41 directo: al abrirle auxiliares no
+  // quedaba en su grupo del PUC). Nombre genérico: no toda empresa es taller.
+  { code: '4155', name: 'Actividades empresariales y de servicios', type: 'ingreso', parent_code: '41', accepts_entries: false },
+  { code: '415595', name: 'Ingresos por servicios', type: 'ingreso', parent_code: '4155', accepts_entries: true },
   { code: '42', name: 'No Operacionales', type: 'ingreso', parent_code: '4', accepts_entries: false },
   { code: '421005', name: 'Ingresos Financieros', type: 'ingreso', parent_code: '42', accepts_entries: true },
   { code: '424505', name: 'Utilidad en venta de propiedades, planta y equipo', type: 'ingreso', parent_code: '42', accepts_entries: true },
@@ -162,7 +165,8 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '6', name: 'COSTOS DE VENTAS', type: 'costo', parent_code: null, accepts_entries: false },
   { code: '61', name: 'Costo de Ventas y de Prestación de Servicios', type: 'costo', parent_code: '6', accepts_entries: false },
   { code: '613501', name: 'Costo de Mercancía Vendida', type: 'costo', parent_code: '61', accepts_entries: true },
-  { code: '615595', name: 'Costo de Servicios (Taller)', type: 'costo', parent_code: '61', accepts_entries: true },
+  { code: '6155', name: 'Actividades empresariales y de servicios', type: 'costo', parent_code: '61', accepts_entries: false },
+  { code: '615595', name: 'Costo de servicios', type: 'costo', parent_code: '6155', accepts_entries: true },
 
   // ══════════════ CLASE 7 — COSTOS DE PRODUCCIÓN O DE OPERACIÓN ══════════════
   // Módulo Proyectos: materiales consumidos en la obra y mano de obra
@@ -181,11 +185,11 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   sale_bank_account: '111005',          // pago con tarjeta/transferencia -> Bancos
   sale_receivable: '130505',            // venta a crédito -> Clientes
   sale_revenue_product: '413501',       // ingreso por venta de mercancía
-  sale_revenue_service: '415595',       // ingreso por servicios de taller
+  sale_revenue_service: '415595',       // ingreso por servicios
   sale_tax_iva: '240805',               // IVA generado en la venta
   sale_tax_inc: '249505',               // INC (impoconsumo) generado en la venta
   sale_cogs_product: '613501',          // costo de la mercancía vendida
-  sale_cogs_service: '615595',          // costo de servicios de taller
+  sale_cogs_service: '615595',          // costo de servicios
   // Retención de garantía de las facturas parciales de obra (no vence hasta liberarla)
   sale_retention_guarantee: '130595',
 

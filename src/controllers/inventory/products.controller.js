@@ -338,6 +338,28 @@ function normalizeUnspsc(value) {
   return digits.length === 8 ? digits : null;
 }
 
+// Cuenta de ingreso e ingreso diferido del producto: cuentas de movimiento,
+// de ingreso y de pasivo. Diferido = meses Y cuenta de pasivo, o nada.
+async function productAccountingFields(tenantId, { revenue_account_id, deferred_months, deferred_account_id }) {
+  const { ChartOfAccount } = require('../../models');
+  const bad = (message) => Object.assign(new Error(message), { statusCode: 400 });
+  const out = { revenue_account_id: revenue_account_id || null, deferred_months: null, deferred_account_id: null };
+  const check = async (id, type, label) => {
+    const a = await ChartOfAccount.findOne({ where: { id, tenant_id: tenantId } });
+    if (!a || a.account_type !== type || !a.accepts_entries || !a.is_active) throw bad(`${label} debe ser una cuenta de ${type} activa y de movimiento`);
+  };
+  if (out.revenue_account_id) await check(out.revenue_account_id, 'ingreso', 'La cuenta de ingreso');
+  const months = Number(deferred_months) || 0;
+  if (months > 0 || deferred_account_id) {
+    if (!(months >= 1 && months <= 120)) throw bad('Los meses del ingreso diferido deben estar entre 1 y 120');
+    if (!deferred_account_id) throw bad('Elige la cuenta de pasivo del ingreso diferido (por ejemplo 2705...)');
+    await check(deferred_account_id, 'pasivo', 'La cuenta del ingreso diferido');
+    out.deferred_months = months;
+    out.deferred_account_id = deferred_account_id;
+  }
+  return out;
+}
+
 // GET /inventory/products/unspsc?q= — buscador del catálogo UNSPSC (DIAN).
 const searchUnspscCodes = (req, res) => {
   try {
@@ -362,7 +384,7 @@ const createProduct = async (req, res) => {
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
       tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false,
-      margin_inherited = false, unspsc_code
+      margin_inherited = false, unspsc_code, revenue_account_id, deferred_months, deferred_account_id
     } = req.body;
 
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
@@ -470,11 +492,14 @@ const createProduct = async (req, res) => {
       // por ese stock y, al venderlo, se acreditaba por algo que jamás se
       // había registrado como entrada (ver openingBalance.service.js, que ya
       // sigue este mismo patrón para la carga inicial de un tenant nuevo).
+      // Cuenta de ingreso propia e ingreso diferido (deferredRevenue.service.js).
+      const accountingFields = await productAccountingFields(tenantId, { revenue_account_id, deferred_months, deferred_account_id });
       const product = await Product.create({
         tenant_id: tenantId,
         sku: sku.trim(),
         barcode: barcode ? barcode.trim() : null,
         unspsc_code: normalizeUnspsc(unspsc_code),
+        ...accountingFields,
         name: name.trim(),
         description: description?.trim() || null,
         category_id: category_id || null,
@@ -639,6 +664,13 @@ const updateProduct = async (req, res) => {
     delete updateData.last_purchase_date;
 
     if (updateData.unspsc_code !== undefined) updateData.unspsc_code = normalizeUnspsc(updateData.unspsc_code);
+    if (['revenue_account_id', 'deferred_months', 'deferred_account_id'].some((k) => updateData[k] !== undefined)) {
+      Object.assign(updateData, await productAccountingFields(product.tenant_id, {
+        revenue_account_id: updateData.revenue_account_id !== undefined ? updateData.revenue_account_id : product.revenue_account_id,
+        deferred_months: updateData.deferred_months !== undefined ? updateData.deferred_months : product.deferred_months,
+        deferred_account_id: updateData.deferred_account_id !== undefined ? updateData.deferred_account_id : product.deferred_account_id,
+      }));
+    }
     const nullableFields = ['category_id', 'warehouse_id', 'barcode', 'description', 'brand', 'max_stock'];
     nullableFields.forEach(field => {
       if (updateData[field] === '' || updateData[field] === undefined) updateData[field] = null;
@@ -697,6 +729,7 @@ const updateProduct = async (req, res) => {
     }
     res.json({ success: true, message: 'Producto actualizado exitosamente', data: updatedProduct });
   } catch (error) {
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
     console.error('Error en updateProduct:', error);
     res.status(500).json({ success: false, message: 'Error al actualizar producto' });
   }

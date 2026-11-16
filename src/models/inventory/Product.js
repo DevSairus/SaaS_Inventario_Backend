@@ -67,6 +67,11 @@ const Product = sequelize.define('Product', {
     type: DataTypes.STRING(100),
     allowNull: true
   },
+  // Cuenta de ingreso propia y, si se causa en varios meses (anualidad,
+  // semestre), la cuenta de pasivo del diferido (ver deferredRevenue.service.js).
+  revenue_account_id: { type: DataTypes.UUID, allowNull: true },
+  deferred_months: { type: DataTypes.INTEGER, allowNull: true, validate: { min: 1, max: 120 } },
+  deferred_account_id: { type: DataTypes.UUID, allowNull: true },
   // Código UNSPSC (8 dígitos) para la factura electrónica (tabla 13.3.5).
   unspsc_code: {
     type: DataTypes.STRING(8),

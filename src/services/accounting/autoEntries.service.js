@@ -175,6 +175,25 @@ function salePaymentsForEntry(sale) {
   return legacyPaid > 0 ? [{ amount: legacyPaid, method: sale.payment_method }] : [];
 }
 
+/**
+ * Líneas débito que reversan ingreso (nota crédito, devolución): cada producto
+ * a su cuenta de ingreso; lo de ingreso diferido, primero contra el pasivo que
+ * aún no se ha causado (el diferido de la venta original baja) y el resto
+ * contra el ingreso ya causado.
+ */
+async function pushRevenueReversal(lines, tenantId, items, totals, originalSaleId, description, t) {
+  const { splitRevenue, reverseDeferredBucket } = require('./deferredRevenue.service');
+  for (const b of await splitRevenue(tenantId, items, totals, t)) {
+    if (!b.deferred) {
+      lines.push({ account_id: b.account_id, debit: b.amount, credit: 0, description });
+      continue;
+    }
+    for (const r of await reverseDeferredBucket(tenantId, originalSaleId, b, t)) {
+      lines.push({ account_id: r.account_id, debit: r.amount, credit: 0, description: r.description });
+    }
+  }
+}
+
 async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
   // Una nota crédito/débito también es un Sale, pero su asiento es otro (la
   // NC reversa ingreso e IVA): Salud Contable llegó a generarle a una NC el
@@ -266,14 +285,19 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
         lines.push({ account_id, debit: pending, credit: 0, description: 'Saldo pendiente por cobrar', third_party_id: sale.customer_id || null });
       }
 
-      // Haber: ingresos por producto y/o servicio
-      if (productRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
-        lines.push({ account_id, debit: 0, credit: productRevenue, description: 'Ingreso por venta de mercancía' });
-      }
-      if (serviceRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
-        lines.push({ account_id, debit: 0, credit: serviceRevenue, description: 'Ingreso por servicios' });
+      // Haber: ingresos, cada producto a su cuenta (revenue_account_id) o al
+      // mapeo de siempre; los de ingreso diferido (anualidades...) a su
+      // cuenta de pasivo, y se amortizan mes a mes (deferredRevenue.service).
+      const { splitRevenue, createDeferrals } = require('./deferredRevenue.service');
+      const revenueBuckets = await splitRevenue(tenantId, validItems, { product: productRevenue, service: serviceRevenue }, t);
+      for (const b of revenueBuckets) {
+        lines.push({
+          account_id: b.account_id, debit: 0, credit: b.amount,
+          description: b.deferred
+            ? `Ingreso recibido por anticipado (${b.deferred.months} meses)`
+            : (b.kind === 'product' ? 'Ingreso por venta de mercancía' : 'Ingreso por servicios'),
+          third_party_id: b.deferred ? (sale.customer_id || null) : undefined,
+        });
       }
       const saleInc = itemsInc(sale, validItems);
       await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - saleInc, inc: saleInc }, 'credit',
@@ -301,8 +325,17 @@ async function generateSaleEntry(sale, items, tenantId, userId, options = {}) {
         },
         t
       );
+      const deferrals = await createDeferrals(tenantId, sale, revenueBuckets, userId, t);
 
       await t.commit();
+      // El mes de la factura se causa de una vez (los siguientes, el job diario).
+      if (deferrals.length) {
+        try {
+          await require('./deferredRevenue.service').amortizeDue(tenantId, { saleId: sale.id, userId });
+        } catch (err) {
+          require('../../config/logger').warn(`[accounting] Amortización inicial de la venta ${sale.id}: ${err.message}`);
+        }
+      }
       return entry;
     } catch (error) {
       await t.rollback();
@@ -945,15 +978,15 @@ async function generateCustomerReturnEntry(customerReturn, items, sale, tenantId
 
       const lines = [];
 
-      // Debe: reversa de ingreso e IVA
-      if (productRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
-        lines.push({ account_id, debit: productRevenue, credit: 0, description: 'Reversión de ingreso por devolución de mercancía' });
-      }
-      if (serviceRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
-        lines.push({ account_id, debit: serviceRevenue, credit: 0, description: 'Reversión de ingreso por devolución de servicio' });
-      }
+      // Debe: reversa de ingreso (por cuenta de producto; lo diferido aún no
+      // causado, al pasivo) e IVA
+      // Las líneas de la devolución traen el tipo y el producto en su línea de venta.
+      const returnLines = (items || []).map((i) => {
+        const si = i.saleItem || i._saleItem || {};
+        return { product_id: i.product_id || si.product_id, item_type: si.item_type || i.item_type, subtotal: i.subtotal };
+      });
+      await pushRevenueReversal(lines, tenantId, returnLines,
+        { product: productRevenue, service: serviceRevenue }, sale.id, 'Reversión de ingreso por devolución', t);
       // INC devuelto: proporción del INC de cada línea original (customerReturn.tax = IVA + INC).
       const returnInc = sale.aiu_enabled ? 0 : (items || []).reduce((s, i) => {
         const si = i.saleItem || i._saleItem;
@@ -1077,15 +1110,10 @@ async function generateCreditNoteEntry(noteSale, items, tenantId, userId, option
 
       const lines = [];
 
-      // Debe: reversa de ingreso e IVA
-      if (productRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
-        lines.push({ account_id, debit: productRevenue, credit: 0, description: 'Reversión de ingreso por nota crédito' });
-      }
-      if (serviceRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
-        lines.push({ account_id, debit: serviceRevenue, credit: 0, description: 'Reversión de ingreso por nota crédito' });
-      }
+      // Debe: reversa de ingreso (cada producto a su cuenta; lo diferido aún
+      // no causado, al pasivo) e IVA
+      await pushRevenueReversal(lines, tenantId, items, { product: productRevenue, service: serviceRevenue },
+        noteSale.reference_sale_id, 'Reversión de ingreso por nota crédito', t);
       const creditInc = itemsInc(noteSale, items);
       await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - creditInc, inc: creditInc }, 'debit',
         { iva: 'Reversión de IVA por nota crédito', inc: 'Reversión de INC por nota crédito' });
@@ -1169,14 +1197,10 @@ async function generateDebitNoteEntry(noteSale, items, tenantId, userId, options
         lines.push({ account_id, debit: pending, credit: 0, description: 'Cartera por nota débito', third_party_id: noteSale.customer_id || null });
       }
 
-      // Haber: ingreso e IVA generados por el cargo
-      if (productRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_product', t);
-        lines.push({ account_id, debit: 0, credit: productRevenue, description: 'Ingreso por nota débito' });
-      }
-      if (serviceRevenue > 0) {
-        const account_id = await getMappedAccountId(tenantId, 'sale_revenue_service', t);
-        lines.push({ account_id, debit: 0, credit: serviceRevenue, description: 'Ingreso por nota débito' });
+      // Haber: ingreso (cada producto a su cuenta; un cargo adicional se causa
+      // de una vez, aunque el producto sea de ingreso diferido) e IVA
+      for (const b of await require('./deferredRevenue.service').splitRevenue(tenantId, items, { product: productRevenue, service: serviceRevenue }, t)) {
+        lines.push({ account_id: b.deferred ? b.deferred.revenue_account_id : b.account_id, debit: 0, credit: b.amount, description: 'Ingreso por nota débito' });
       }
       const debitInc = itemsInc(noteSale, items);
       await pushSaleTaxLines(lines, tenantId, t, { iva: totalTax - debitInc, inc: debitInc }, 'credit',

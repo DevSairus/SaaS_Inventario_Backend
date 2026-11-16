@@ -183,6 +183,17 @@ const JOBS = [
     },
   },
   {
+    name: 'deferred-revenue-amortization',
+    // Diario, 4:20am hora Colombia: causa los meses vencidos de los ingresos
+    // diferidos (anualidades, semestralidades...). El día 1 de cada mes genera
+    // la cuota del mes; los demás días solo se pone al día si algo faltó.
+    schedule: '20 4 * * *',
+    run: async () => {
+      const { amortizeAllTenants } = require('../services/accounting/deferredRevenue.service');
+      return amortizeAllTenants();
+    },
+  },
+  {
     name: 'loan-installments-overdue-check',
     // Diario, 5:00am hora Colombia -- marca 'vencida' cualquier cuota
     // 'pendiente' cuyo due_date ya pasó. Solo actualiza el status; no
