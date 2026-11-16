@@ -53,8 +53,8 @@ function headerBlocks(tenant, { branch } = {}) {
   const tradeName = String(tenant.company_name || '').trim();
   blocks.push(center(legalName, { bold: true, size: 'lg' }));
   if (tradeName && tradeName.toUpperCase() !== legalName.toUpperCase()) blocks.push(center(tradeName.toUpperCase(), { bold: true }));
-  const levelCode = tenant.dian_config?.tax_level_code;
-  const ivaRegime = levelCode ? (levelCode === 'R-99-PN' ? 'No responsable de IVA' : 'Responsable de IVA') : null;
+  // "Responsable de IVA · Régimen Simple de Tributación · ..." (configuración DIAN)
+  const ivaRegime = require('../../utils/fiscalResponsibilities').regimeLabel(tenant.dian_config);
   const nit = tenant.tax_id ? `NIT ${tenant.tax_id}${tenant.dian_config?.dv && !String(tenant.tax_id).includes('-') ? `-${tenant.dian_config.dv}` : ''}` : null;
   [nit, ivaRegime, branch?.address || tenant.address, tenant.phone ? `Tel. ${tenant.phone}` : null]
     .filter(Boolean)

@@ -23,6 +23,7 @@ const COLUMN_ALIASES = {
   sku: ['codigo', 'sku', 'codigo (sku)'],
   name: ['nombre', 'nombre del producto'],
   barcode: ['codigo de barras', 'barcode'],
+  unspsc: ['codigo unspsc', 'unspsc'],
   description: ['descripcion'],
   category: ['categoria'],
   brand: ['marca'],
@@ -268,6 +269,15 @@ function parseRow(rowNumber, data, ctx) {
   if (!sku) errors.push('Código es requerido');
   if (!name) errors.push('Nombre es requerido');
   const barcode = text('barcode') || null;
+  // Código UNSPSC (factura electrónica): 8 dígitos y que exista en el catálogo.
+  let unspsc_code = null;
+  const unspscRaw = text('unspsc').replace(/\D/g, '');
+  if (unspscRaw) {
+    const { findUnspsc } = require('../../services/inventory/unspscCatalog.service');
+    if (unspscRaw.length !== 8) errors.push('Código UNSPSC debe tener 8 dígitos');
+    else if (!findUnspsc(unspscRaw)) errors.push(`Código UNSPSC ${unspscRaw} no existe en el catálogo`);
+    else unspsc_code = unspscRaw;
+  }
   const description = text('description') || null;
   const brand = text('brand') || null;
   for (const [field, label, value] of [['sku', 'Código', sku], ['name', 'Nombre', name], ['barcode', 'Código de barras', barcode], ['brand', 'Marca', brand]]) {
@@ -330,7 +340,7 @@ function parseRow(rowNumber, data, ctx) {
     .filter(Boolean);
 
   return {
-    rowNumber, sku, name, barcode, description, brand, product_type, is_labor, unit_of_measure,
+    rowNumber, sku, name, barcode, unspsc_code, description, brand, product_type, is_labor, unit_of_measure,
     category_key, category_label, average_cost, profit_margin_percentage, margin_inherited, base_price,
     has_tax, tax_percentage, price_includes_tax, tax_config,
     current_stock, min_stock, max_stock, allow_negative_stock, track_inventory: !isService,
@@ -615,6 +625,7 @@ const bulkImportProductsInner = async (req, res) => {
           tenant_id: tenantId,
           sku: row.sku,
           barcode: row.barcode,
+          unspsc_code: row.unspsc_code,
           name: row.name,
           description: row.description,
           brand: row.brand,

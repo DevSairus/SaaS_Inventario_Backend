@@ -16,6 +16,7 @@ const { escXml } = require('./dianXmlBuilder');
 const { parseServiceUrls, callWithFailover } = require('../../utils/serviceUrls');
 const { dianPaymentMeans } = require('../sales/paymentTerms.service');
 const { isSimulation, simulationConfig, simulatedResponse } = require('./dianSimulation');
+const { parseResponsibilities, formatResponsibilities, partyTaxScheme } = require('../../utils/fiscalResponsibilities');
 
 // Inicializar dependencias de Node para xadesjs/xmldsigjs/xml-core
 // IMPORTANTE: debe ejecutarse ANTES de cualquier uso de DianKit
@@ -26,8 +27,12 @@ function initDeps() {
   // xmldsigjs tiene su propia instancia de xml-core
   try {
     const path = require('path');
+    // Resuelto desde xmldsigjs (no desde process.cwd()): en Windows el cwd
+    // puede venir como "d:\" y los módulos como "D:\", y Node los toma por
+    // dos instancias distintas de xml-core (la firma fallaba con
+    // "Node dependency not found: DOMParser" en pruebas locales).
     const xmldsigXmlCorePath = require.resolve('xml-core', {
-      paths: [path.join(process.cwd(), 'node_modules', 'xmldsigjs')],
+      paths: [path.dirname(require.resolve('xmldsigjs/package.json'))],
     });
     require(xmldsigXmlCorePath).setNodeDependencies({ DOMParser, XMLSerializer });
   } catch (e) {
@@ -87,9 +92,38 @@ function getKit(tenant) {
     },
     timeoutMs: 60000,
   });
+  // Para patchSelfPartyTax() en createDocumentWithItemCodes(), que solo recibe el kit.
+  kit.pitboxSelfTax = selfTaxInfo(cfg);
 
   _kitCache.set(cacheKey, kit);
   return kit;
+}
+
+/** Responsabilidades (lista con ';') y tributo del emisor, según la configuración DIAN. */
+function selfTaxInfo(cfg) {
+  return { taxLevelCode: formatResponsibilities(cfg.tax_level_code), taxScheme: partyTaxScheme(cfg) };
+}
+
+/**
+ * Escribe en el PartyTaxScheme de TU empresa (AccountingSupplierParty en
+ * factura y notas; AccountingCustomerParty en documento soporte) la lista
+ * completa de responsabilidades ("O-15;O-47", Anexo 1.9: "separando cada uno
+ * de los valores de la lista con ;") y el tributo de la tabla 13.2.6.2 (01
+ * IVA, 04 INC, ZA IVA e INC, ZZ No aplica). @dian-kit solo emite un código y
+ * el tributo 01. No toca el CUFE/CUDE (no los incluye) y va antes de firmar.
+ */
+function patchSelfPartyTax(xml, info, partyTag = 'AccountingSupplierParty') {
+  if (!info) return xml;
+  const re = new RegExp(`(<cac:${partyTag}>[\\s\\S]*?</cac:${partyTag}>)`);
+  return xml.replace(re, (block) => block.replace(
+    /(<cac:PartyTaxScheme>[\s\S]*?<\/cac:PartyTaxScheme>)/,
+    (pts) => pts
+      .replace(/(<cbc:TaxLevelCode[^>]*>)[^<]*(<\/cbc:TaxLevelCode>)/, `$1${escXml(info.taxLevelCode)}$2`)
+      .replace(
+        /<cac:TaxScheme>\s*<cbc:ID>[^<]*<\/cbc:ID>\s*<cbc:Name>[^<]*<\/cbc:Name>\s*<\/cac:TaxScheme>/,
+        `<cac:TaxScheme><cbc:ID>${info.taxScheme.code}</cbc:ID><cbc:Name>${escXml(info.taxScheme.name)}</cbc:Name></cac:TaxScheme>`
+      )
+  ));
 }
 
 /**
@@ -109,19 +143,28 @@ function cleanId(value) {
  * generar un Documento Soporte, donde tú eres el adquirente, no el vendedor.
  */
 function buildSelfParty(cfg, tenant) {
+  // Responsabilidades del RUT (tabla 13.2.6.1). @dian-kit solo acepta UN
+  // código en taxLevelCode: va el primero y patchSelfPartyTax() escribe la
+  // lista completa ("O-15;O-47") y el tributo real antes de firmar. Antes,
+  // sin configurar, salía O-13 (Gran contribuyente).
+  const responsibilities = parseResponsibilities(cfg.tax_level_code);
+  const isNatural = cfg.person_type === '2';
+  const name = cfg.company_name || tenant.company_name;
   return {
-    name: cfg.company_name || tenant.company_name,
+    name,
     identification: {
       number: cleanId(cfg.nit),
       type: '31',
       dv: cleanId(cfg.dv) || '0',
     },
-    personType: '1',
-    fiscalResponsibilities: [cfg.tax_level_code || 'O-13'],
+    // Tabla 13.2.3: 1 persona jurídica, 2 persona natural (antes fijo en 1).
+    personType: isNatural ? '2' : '1',
+    ...(isNatural && { person: splitPersonName(name) }),
+    fiscalResponsibilities: responsibilities,
     taxInfo: {
-      registrationName: cfg.company_name || tenant.company_name,
+      registrationName: name,
       companyId: { number: cleanId(cfg.nit), type: '31', dv: cleanId(cfg.dv) || '0' },
-      taxLevelCode: cfg.tax_level_code || 'O-13',
+      taxLevelCode: responsibilities[0],
       taxScheme: { code: '01' },
       address: buildAddress(cfg, tenant),
     },
@@ -658,11 +701,50 @@ function injectItemCodes(xml, items) {
   return xml.replace(/(<cac:Item>\s*<cbc:Description>[^<]*<\/cbc:Description>)/g, (m) => {
     const item = items[idx++] || {};
     const code = String(item.product_sku || item.sku || '').trim();
-    if (!code) return m;
-    const c = escXml(code);
-    return `${m}<cac:SellersItemIdentification><cbc:ID>${c}</cbc:ID></cac:SellersItemIdentification>`
-      + `<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">${c}</cbc:ID></cac:StandardItemIdentification>`;
+    const unspsc = unspscOf(item);
+    if (!code && !unspsc) return m;
+    const sellers = code ? `<cac:SellersItemIdentification><cbc:ID>${escXml(code)}</cbc:ID></cac:SellersItemIdentification>` : '';
+    // Tabla 13.3.5: UNSPSC = schemeID 001, schemeAgencyID 10 (Colombia
+    // Compra Eficiente); sin UNSPSC, codificación propia 999 (sin agencia).
+    // UBL admite un solo StandardItemIdentification por ítem.
+    const standard = unspsc
+      ? `<cac:StandardItemIdentification><cbc:ID schemeID="001" schemeAgencyID="10" schemeName="UNSPSC">${unspsc}</cbc:ID></cac:StandardItemIdentification>`
+      : `<cac:StandardItemIdentification><cbc:ID schemeID="999" schemeName="Estándar de adopción del contribuyente">${escXml(code)}</cbc:ID></cac:StandardItemIdentification>`;
+    return `${m}${sellers}${standard}`;
   });
+}
+
+function unspscOf(item) {
+  const v = String(item.unspsc_code || item.product?.unspsc_code || '').trim();
+  return /^\d{8}$/.test(v) ? v : null;
+}
+
+/**
+ * Trae el código UNSPSC de cada producto (products.unspsc_code) a las líneas
+ * que no lo traen. Las líneas son SaleItem/ítems de nota/objetos sueltos:
+ * se lee product_id y se deja `unspsc_code` en la misma línea.
+ */
+async function attachUnspscCodes(items) {
+  const ids = [...new Set(items
+    .filter((it) => it && !unspscOf(it))
+    .map((it) => it.product_id || it.product?.id)
+    .filter(Boolean))];
+  if (!ids.length) return items;
+  try {
+    const Product = require('../../models/inventory/Product');
+    const rows = await Product.findAll({ where: { id: ids }, attributes: ['id', 'unspsc_code'], raw: true });
+    const byId = new Map(rows.map((r) => [r.id, r.unspsc_code]));
+    for (const it of items) {
+      if (!it || unspscOf(it)) continue;
+      const code = byId.get(it.product_id || it.product?.id);
+      if (code) it.unspsc_code = code;
+    }
+  } catch (err) {
+    // Sin el código la línea sale con la codificación propia (999): no se
+    // frena la factura por esto.
+    logger.warn(`[dianKit] No se pudieron leer los códigos UNSPSC: ${err.message}`);
+  }
+  return items;
 }
 
 /**
@@ -685,8 +767,10 @@ async function createDocumentWithItemCodes(kit, kind, input, items, extraPatch) 
     operationType: opts.operationType,
     ...(kind !== 'invoice' && { billingReference: input.billingReference, discrepancyResponse: input.discrepancyResponse }),
   });
+  await attachUnspscCodes(items);
   return kit.processDocument(doc, (d, uuid, ssc) => {
     let xml = injectItemCodes(stripTaxPlaceholders(opts.build(d, uuid, ssc)), items);
+    xml = patchSelfPartyTax(xml, kit.pitboxSelfTax, 'AccountingSupplierParty');
     if (extraPatch) xml = extraPatch(xml);
     return xml;
   });
@@ -1114,6 +1198,8 @@ async function createSupportDocument(tenant, { documentNumber, items, resolution
   // Documento Soporte -- ver comentario de simplifySupplierParty() arriba.
   unsignedXml = stripTaxPlaceholders(simplifySupplierParty(unsignedXml));
   if (isNonResidentSeller(seller)) unsignedXml = applyNonResidentSeller(unsignedXml, seller);
+  // Tú eres el adquirente: responsabilidades y tributo reales (ver patchSelfPartyTax).
+  unsignedXml = patchSelfPartyTax(unsignedXml, selfTaxInfo(cfg), 'AccountingCustomerParty');
   const { signedXml } = await signXml({
     xml: unsignedXml,
     certificate: kit.config.certificateData,
@@ -1355,6 +1441,8 @@ async function createSupportDocumentAdjustment(tenant, {
   // omite por completo en vez de adivinar dónde sí iría.
   unsignedXml = stripTaxPlaceholders(simplifySupplierParty(unsignedXml));
   if (isNonResidentSeller(seller)) unsignedXml = applyNonResidentSeller(unsignedXml, seller);
+  // Tú eres el adquirente: responsabilidades y tributo reales (ver patchSelfPartyTax).
+  unsignedXml = patchSelfPartyTax(unsignedXml, selfTaxInfo(cfg), 'AccountingCustomerParty');
   unsignedXml = simplifyCustomerParty(unsignedXml);
 
   const { signedXml } = await signXml({
@@ -1765,6 +1853,8 @@ module.exports = {
   createInvoice,
   createDocumentWithItemCodes,
   injectItemCodes,
+  patchSelfPartyTax,
+  buildSelfParty,
   createSupportDocument,
   createSupportDocumentAdjustment,
   sendToDian,

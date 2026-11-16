@@ -26,6 +26,7 @@ const dianService = require('../../services/dian/dianService');
 const dianKit = require('../../services/dian/dianKitAdapter');
 const logger = require('../../config/logger');
 const { Op } = require('sequelize');
+const { formatResponsibilities } = require('../../utils/fiscalResponsibilities');
 const { DIVIPOLA_DEPARTMENTS, DIVIPOLA_CITIES } = require('../../data/divipola-colombia');
 const { pickComboFields } = require('../../utils/comboLines');
 const { normalizeEmailList, validateEmailList } = require('../../utils/emailRecipients');
@@ -106,7 +107,7 @@ const updateConfig = async (req, res) => {
       nit, dv, company_name, trade_name,
       address, city, city_code, dept,
       phone, email,
-      regime_code, tax_level_code,
+      regime_code, tax_level_code, person_type, inc_responsible,
       buyer_default_scheme_id, buyer_tax_level_code, buyer_regime_code,
       software_id, software_provider_nit, software_pin,
       technical_key, environment,
@@ -133,7 +134,10 @@ const updateConfig = async (req, res) => {
       ...(phone !== undefined && { phone }),
       ...(email !== undefined && { email }),
       ...(regime_code !== undefined && { regime_code }),
-      ...(tax_level_code !== undefined && { tax_level_code }),
+      // Una o varias responsabilidades (tabla 13.2.6.1), guardadas con ';'.
+      ...(tax_level_code !== undefined && { tax_level_code: formatResponsibilities(tax_level_code) }),
+      ...(person_type !== undefined && { person_type: person_type === '2' ? '2' : '1' }),
+      ...(inc_responsible !== undefined && { inc_responsible: !!inc_responsible }),
       ...(buyer_default_scheme_id !== undefined && { buyer_default_scheme_id }),
       ...(buyer_tax_level_code !== undefined && { buyer_tax_level_code }),
       ...(buyer_regime_code !== undefined && { buyer_regime_code }),

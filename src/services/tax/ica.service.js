@@ -414,4 +414,4 @@ async function voidSettlement(tenantId, settlementId, userId, reason) {
   }
 }
 
-module.exports = { computeIcaReport, causeIca, causeAutoIca, voidSettlement, matchActivity };
+module.exports = { computeIcaReport, causeIca, causeAutoIca, voidSettlement, matchActivity, branchScope };

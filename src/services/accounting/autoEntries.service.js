@@ -31,7 +31,9 @@ async function isIvaDeductible(tenantId, t) {
   const tenant = await Tenant.findByPk(tenantId, { attributes: ['tax_config', 'dian_config'], transaction: t });
   const flag = tenant?.tax_config?.fiscal_profile?.is_iva_responsible;
   if (flag === true || flag === false) return flag;
-  return tenant?.dian_config?.tax_level_code !== 'R-99-PN';
+  // Misma regla de siempre (R-99-PN = no responsable), ahora con varias
+  // responsabilidades separadas por ';' en tax_level_code.
+  return require('../../utils/fiscalResponsibilities').isIvaResponsibleForAccounting(tenant?.dian_config);
 }
 
 // Asignación directa (art. 490 E.T.): el IVA pagado en la compra de bienes

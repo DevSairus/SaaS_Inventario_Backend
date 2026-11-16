@@ -14,7 +14,8 @@ const {
   getProductByBarcode,
   checkBarcodeExists,
   uploadProductImage,
-  deleteProductImage
+  deleteProductImage,
+  searchUnspscCodes
 } = require('../../controllers/inventory/products.controller');
 
 const {
@@ -54,6 +55,9 @@ const PRODUCTS_WRITE_ROLES = ['admin', 'manager', 'warehouse_keeper', 'super_adm
 
 // Estadísticas
 router.get('/stats', getProductStats);
+
+// Catálogo UNSPSC para la factura electrónica (antes de /:id)
+router.get('/unspsc', searchUnspscCodes);
 
 // Búsqueda por código de barras
 router.get('/barcode/:barcode', getProductByBarcode);

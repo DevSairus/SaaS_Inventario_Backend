@@ -1,0 +1,103 @@
+// Casillas del formulario 2593 (Resolución DIAN 000081 de 2024), por sección,
+// con el nombre del instructivo. `input` = se digita en la pantalla (ruta en
+// los inputs del recibo); las demás las calcula Pitbox.
+const SHEET1 = [
+  { title: 'Ingresos por grupo de actividades (art. 908 E.T.)', boxes: [
+    { box: 26, label: 'Grupo 1: ingresos brutos bimestrales en todo el país' },
+    { box: 27, label: 'Grupo 1: ingresos brutos bimestrales en el exterior', input: 'exterior.1' },
+    { box: 28, label: 'Grupo 2: ingresos brutos bimestrales en todo el país' },
+    { box: 29, label: 'Grupo 2: ingresos brutos bimestrales en el exterior', input: 'exterior.2' },
+    { box: 30, label: 'Grupo 3: ingresos brutos bimestrales en todo el país' },
+    { box: 31, label: 'Grupo 3: ingresos brutos bimestrales en el exterior', input: 'exterior.3' },
+    { box: 32, label: 'Grupo 3 (sic): ingresos brutos bimestrales en todo el país' },
+    { box: 33, label: 'Grupo 3 (sic): ingresos brutos bimestrales en el exterior', input: 'exterior.3p' },
+    { box: 34, label: 'Grupo 6: ingresos brutos bimestrales en todo el país' },
+    { box: 35, label: 'Grupo 6: ingresos brutos bimestrales en el exterior', input: 'exterior.6' },
+    { box: 36, label: 'Tarifa SIMPLE consolidada (%)', percent: true },
+    { box: 37, label: 'Ganancias ocasionales en el país (suma de las casillas 106)' },
+    { box: 38, label: 'Ganancias ocasionales en el exterior', input: 'c38' },
+  ] },
+  { title: 'Liquidación anticipo bimestral componente SIMPLE nacional', boxes: [
+    { box: 39, label: 'Ingresos brutos bimestrales (26 a 35)' },
+    { box: 40, label: 'Ingresos no constitutivos de renta', input: 'c40' },
+    { box: 41, label: 'Total ingresos netos bimestrales (39 − 40)' },
+    { box: 42, label: 'Anticipo SIMPLE (36 × 41)' },
+    { box: 43, label: 'ICA consolidado liquidado durante el bimestre (casillas 99)' },
+    { box: 44, label: 'Valor del anticipo componente SIMPLE nacional (42 − 43)' },
+  ] },
+  { title: 'Descuentos', boxes: [
+    { box: 45, label: 'Aportes a pensión a cargo del empleador, pagados en el bimestre', input: 'c45' },
+    { box: 46, label: 'Excedente de aportes a pensión no solicitado como descuento en el bimestre anterior', input: 'prev_c48' },
+    { box: 47, label: 'Excedentes y aportes a pensión del empleador (limitados)' },
+    { box: 48, label: 'Exceso de aportes a pensión a cargo del empleador (45 + 46 − 47)' },
+    { box: 49, label: 'Anticipo neto impuesto unificado SIMPLE (44 − 47)' },
+  ] },
+  { title: 'Determinación del valor a pagar o excedente anticipo SIMPLE', boxes: [
+    { box: 50, label: 'Retenciones y autorretenciones de renta anteriores al SIMPLE (solo bimestre 1)', input: 'c50' },
+    { box: 51, label: 'Excedente anticipo impuesto SIMPLE del bimestre anterior', input: 'prev_c57' },
+    { box: 52, label: 'Saldo a favor por impuesto SIMPLE declaración año anterior', input: 'c52' },
+    { box: 53, label: 'Saldo anticipo SIMPLE (49 − 50 − 51 − 52)' },
+    { box: 54, label: 'Intereses causados por anticipo SIMPLE (solo ajustes)' },
+    { box: 55, label: 'Pagos anteriores anticipo SIMPLE por este periodo (solo ajustes)' },
+    { box: 56, label: 'Total a pagar anticipo impuesto SIMPLE' },
+    { box: 57, label: 'Excedente anticipo impuesto SIMPLE' },
+  ] },
+  { title: 'Liquidación impuesto nacional al consumo (comidas y bebidas)', boxes: [
+    { box: 58, label: 'Ingresos brutos gravados con impuesto nacional al consumo' },
+    { box: 59, label: 'Impuesto nacional al consumo' },
+    { box: 60, label: 'Excedente impuesto nacional al consumo del bimestre anterior', input: 'prev_c65' },
+    { box: 61, label: 'Saldo impuesto nacional al consumo (59 − 60)' },
+    { box: 62, label: 'Intereses causados (solo ajustes)' },
+    { box: 63, label: 'Pagos anteriores por este periodo (solo ajustes)' },
+    { box: 64, label: 'Total a pagar impuesto nacional al consumo bimestral' },
+    { box: 65, label: 'Excedente impuesto nacional al consumo bimestral' },
+  ] },
+  { title: 'Liquidación impuesto sobre las ventas (IVA)', boxes: [
+    { box: 66, label: 'IVA generado en el bimestre por operaciones gravadas' },
+    { box: 67, label: 'Impuestos descontables del bimestre' },
+    { box: 68, label: 'Saldo a favor declaración de IVA año anterior (solo bimestre 1)', input: 'c68' },
+    { box: 69, label: 'Excedente IVA bimestre anterior', input: 'prev_c75' },
+    { box: 70, label: 'Retenciones por IVA que le practicaron en el bimestre' },
+    { box: 71, label: 'Saldo impuesto sobre las ventas' },
+    { box: 72, label: 'Intereses causados (solo ajustes)' },
+    { box: 73, label: 'Pagos anteriores por este periodo (solo ajustes)' },
+    { box: 74, label: 'Total a pagar IVA bimestral' },
+    { box: 75, label: 'Excedente IVA bimestral' },
+  ] },
+  { title: 'Valores a pagar', boxes: [
+    { box: 76, label: 'ICA municipios o distritos (casillas 104)' },
+    { box: 77, label: 'Anticipo SIMPLE (casilla 56)' },
+    { box: 78, label: 'Impuesto nacional al consumo de comidas y bebidas (casilla 64)' },
+    { box: 79, label: 'Impuesto sobre las ventas (casilla 74)' },
+  ] },
+];
+
+const SHEET2 = [
+  { title: 'Base gravable', boxes: [
+    { box: 84, label: 'Ingresos brutos bimestrales en este municipio o distrito' },
+    { box: 85, label: 'Por devoluciones, rebajas y descuentos' },
+    { box: 86, label: 'Por exportaciones', input: 'c86' },
+    { box: 87, label: 'Por venta de activos fijos' },
+    { box: 88, label: 'Por actividades excluidas o no sujetas y otros ingresos no gravados' },
+    { box: 89, label: 'Por otras actividades exentas en este municipio o distrito', input: 'c89' },
+    { box: 90, label: 'Total ingresos gravables bimestrales en este municipio o distrito' },
+  ] },
+  { title: 'Valores a pagar ICA', boxes: [
+    { box: 95, label: 'Total impuesto de industria y comercio consolidado bimestral (suma 94)' },
+    { box: 96, label: 'Exención o exoneración sobre el impuesto', input: 'c96' },
+    { box: 97, label: 'Total saldo a cargo ICA consolidado (95 − 96)' },
+    { box: 98, label: 'Otros beneficios e incentivos', input: 'c98' },
+    { box: 99, label: 'Total componente ICA consolidado bimestral (97 − 98)' },
+    { box: 100, label: 'Retenciones o autorretenciones de ICA anteriores al SIMPLE (solo bimestre 1)', input: 'c100' },
+    { box: 101, label: 'Saldo componente ICA consolidado bimestral (99 − 100)' },
+    { box: 102, label: 'Intereses causados por ICA (solo ajustes)' },
+    { box: 103, label: 'Pagos anteriores ICA por este periodo (solo ajustes)' },
+    { box: 104, label: 'Saldo a pagar componente ICA territorial' },
+    { box: 105, label: 'Saldo a favor a solicitar en el municipio o distrito' },
+  ] },
+  { title: 'Sección informativa', boxes: [
+    { box: 106, label: 'Ingresos por ganancias ocasionales en el municipio o distrito', input: 'c106' },
+  ] },
+];
+
+module.exports = { SHEET1, SHEET2 };

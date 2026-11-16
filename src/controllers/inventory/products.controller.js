@@ -331,6 +331,24 @@ const getProductById = async (req, res) => {
   }
 };
 
+// Código UNSPSC: solo los 8 dígitos (el buscador puede mandar "25174200 - ...").
+// Vacío o inválido = sin código (la factura usa la codificación propia).
+function normalizeUnspsc(value) {
+  const digits = String(value ?? '').replace(/\D/g, '').slice(0, 8);
+  return digits.length === 8 ? digits : null;
+}
+
+// GET /inventory/products/unspsc?q= — buscador del catálogo UNSPSC (DIAN).
+const searchUnspscCodes = (req, res) => {
+  try {
+    const { searchUnspsc } = require('../../services/inventory/unspscCatalog.service');
+    res.json({ success: true, data: searchUnspsc(req.query.q, Math.min(Number(req.query.limit) || 30, 100)) });
+  } catch (error) {
+    console.error('Error buscando UNSPSC:', error);
+    res.status(500).json({ success: false, message: 'Error buscando en el catálogo UNSPSC' });
+  }
+};
+
 const createProduct = async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ success: false, message: 'Usuario no autenticado' });
@@ -344,7 +362,7 @@ const createProduct = async (req, res) => {
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
       tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false,
-      margin_inherited = false
+      margin_inherited = false, unspsc_code
     } = req.body;
 
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
@@ -456,6 +474,7 @@ const createProduct = async (req, res) => {
         tenant_id: tenantId,
         sku: sku.trim(),
         barcode: barcode ? barcode.trim() : null,
+        unspsc_code: normalizeUnspsc(unspsc_code),
         name: name.trim(),
         description: description?.trim() || null,
         category_id: category_id || null,
@@ -619,6 +638,7 @@ const updateProduct = async (req, res) => {
     delete updateData.last_purchase_cost;
     delete updateData.last_purchase_date;
 
+    if (updateData.unspsc_code !== undefined) updateData.unspsc_code = normalizeUnspsc(updateData.unspsc_code);
     const nullableFields = ['category_id', 'warehouse_id', 'barcode', 'description', 'brand', 'max_stock'];
     nullableFields.forEach(field => {
       if (updateData[field] === '' || updateData[field] === undefined) updateData[field] = null;
@@ -1176,6 +1196,7 @@ const getProductInProcess = async (req, res) => {
 };
 
 module.exports = {
+  searchUnspscCodes,
   getAllProducts,
   getProductById,
   getProductInProcess,

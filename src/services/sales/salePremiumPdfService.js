@@ -14,7 +14,7 @@
 //   - Técnico: features.technician_field_enabled.
 //   - IVA oculto: features.hide_remision_tax (remisión) / hide_invoice_tax.
 //   - Textos: pdf_config.payment_notes, legal_note, warranty_note.
-//   - Responsable de IVA: dian_config.tax_level_code; CIIU: actividad ICA por
+//   - Régimen: dian_config (regime_code, tax_level_code, inc_responsible); CIIU: actividad ICA por
 //     defecto (si el tenant configuró ICA).
 //   - Color: primary_color del tenant en los elementos de marca (franja
 //     superior, números de ítem, línea del total, recuadro DIAN). "Pagado"
@@ -26,6 +26,7 @@ const { amountInWords } = require('../../utils/numberToWords');
 const { saleBalance } = require('../../utils/saleAmounts');
 const { taxLinesFromItems } = require('../taxService');
 const { formatMeter, defaultMeterUnit } = require('../../constants/vehicleTypes');
+const { regimeLabel } = require('../../utils/fiscalResponsibilities');
 
 const C = {
   ink: '#111827',
@@ -189,8 +190,9 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
   if (tradeName && tradeName.toUpperCase() !== legalName.toUpperCase()) {
     doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.slate).text(tradeName.toUpperCase(), M, doc.y + 1, { width: HDR_LEFT_W });
   }
-  const levelCode = tenant.dian_config?.tax_level_code;
-  const ivaRegime = levelCode ? (levelCode === 'R-99-PN' ? 'No responsable de IVA' : 'Responsable de IVA') : null;
+  // Régimen y responsabilidades del RUT (configuración DIAN): "Responsable de
+  // IVA · Régimen Simple de Tributación · Agente de retención de IVA".
+  const ivaRegime = regimeLabel(tenant.dian_config);
   const nit = tenant.tax_id ? `NIT ${tenant.tax_id}${tenant.dian_config?.dv && !String(tenant.tax_id).includes('-') ? `-${tenant.dian_config.dv}` : ''}` : null;
   doc.font('Helvetica').fontSize(8.2).fillColor(C.muted);
   [
@@ -378,7 +380,14 @@ async function generatePremiumSalePDFBuffer(sale, tenant, { downloadImage, drawD
     doc.font('Helvetica-Bold').fontSize(9.5).fillColor(brand)
       .text(String(lineNo).padStart(2, '0'), COL.num[0] + 6, ty, { width: COL.num[1] - 6 });
     doc.font('Helvetica').fontSize(7.8).fillColor(C.slate)
-      .text(item.product_sku || item.product?.sku || '—', COL.code[0] + 4, ty + 1, { width: COL.code[1] - 6, height: 20, ellipsis: true });
+      .text(item.product_sku || item.product?.sku || '—', COL.code[0] + 4, ty + 1, { width: COL.code[1] - 6, height: 10, ellipsis: true });
+    // Código estándar con el que la factura electrónica identifica la línea
+    // (tabla 13.3.5): UNSPSC si el producto lo tiene; si no, el código propio.
+    const unspsc = item.unspsc_code || item.product?.unspsc_code;
+    if (unspsc) {
+      doc.font('Helvetica').fontSize(6.6).fillColor(C.muted)
+        .text(`UNSPSC ${unspsc}`, COL.code[0] + 4, ty + 11, { width: COL.code[1] - 6, height: 9, ellipsis: true });
+    }
     doc.font('Helvetica-Bold').fontSize(9.2).fillColor(C.ink).text(`${component ? '– ' : ''}${name}`, descX, ty, { width: descW });
     doc.font('Helvetica').fontSize(7).fillColor(C.muted).text(sub, descX, ty + nameH + 2, { width: descW });
     doc.font('Helvetica').fontSize(9).fillColor(C.slate)

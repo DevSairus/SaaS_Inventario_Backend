@@ -40,7 +40,26 @@ const IcaActivity = sequelize.define('IcaActivity', {
   // is_default.
   account_prefixes: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
   is_default: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  // Formulario 2593 (SIMPLE): grupo del art. 908 E.T. ('1','2','3','3p','6')
+  // y tarifa ICA consolidada (‰) adoptada por el municipio (null = calculada).
+  simple_group: { type: DataTypes.STRING(4), allowNull: true, validate: { isIn: [['1', '2', '3', '3p', '6']] } },
+  simple_rate: { type: DataTypes.DECIMAL(7, 4), allowNull: true },
 }, { ...base, tableName: 'ica_activities' });
+
+// Formulario 2593: un recibo por año y bimestre (ver simple2593.service.js).
+const SimpleReceipt = sequelize.define('SimpleReceipt', {
+  id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
+  tenant_id: { type: DataTypes.UUID, allowNull: false },
+  year: { type: DataTypes.INTEGER, allowNull: false },
+  period: { type: DataTypes.INTEGER, allowNull: false, validate: { min: 1, max: 6 } },
+  status: { type: DataTypes.STRING(12), allowNull: false, defaultValue: 'borrador', validate: { isIn: [['borrador', 'presentado']] } },
+  inputs: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
+  result: { type: DataTypes.JSONB, allowNull: true },
+  form_number: { type: DataTypes.STRING(40), allowNull: true },
+  presented_at: { type: DataTypes.DATE, allowNull: true },
+  presented_by: { type: DataTypes.UUID, allowNull: true },
+  created_by: { type: DataTypes.UUID, allowNull: true },
+}, { ...base, tableName: 'simple_receipts' });
 
 const IcaSettlement = sequelize.define('IcaSettlement', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
@@ -68,4 +87,4 @@ IcaMunicipality.hasMany(IcaActivity, { foreignKey: 'municipality_id', as: 'activ
 IcaActivity.belongsTo(IcaMunicipality, { foreignKey: 'municipality_id', as: 'municipality' });
 IcaSettlement.belongsTo(IcaMunicipality, { foreignKey: 'municipality_id', as: 'municipality' });
 
-module.exports = { IcaMunicipality, IcaActivity, IcaSettlement };
+module.exports = { IcaMunicipality, IcaActivity, IcaSettlement, SimpleReceipt };

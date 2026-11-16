@@ -28,6 +28,7 @@ const bankReconciliationCtrl = require('../../controllers/accounting/bankReconci
 const exogenaCtrl = require('../../controllers/accounting/exogena.controller');
 const accountMigrationsCtrl = require('../../controllers/accounting/accountMigrations.controller');
 const icaCtrl = require('../../controllers/accounting/ica.controller');
+const simple2593Ctrl = require('../../controllers/accounting/simple2593.controller');
 const ivaProrrateoCtrl = require('../../controllers/accounting/ivaProrrateo.controller');
 const { checkRole } = require('../../middleware/auth');
 
@@ -77,6 +78,14 @@ router.post('/ica/settlements', accountingStaff, icaCtrl.createSettlement);
 router.get('/iva-prorrateo', ivaProrrateoCtrl.report);
 router.post('/iva-prorrateo', accountingStaff, ivaProrrateoCtrl.createEntry);
 router.patch('/ica/settlements/:id/void', accountingStaff, icaCtrl.voidSettlement);
+
+// Formulario 2593 — Recibo electrónico del SIMPLE (cálculo por bimestre; escritura solo contabilidad)
+router.get('/simple-2593', simple2593Ctrl.get);
+router.get('/simple-2593/receipts', simple2593Ctrl.list);
+router.get('/simple-2593/export', simple2593Ctrl.exportExcel);
+router.put('/simple-2593', accountingStaff, simple2593Ctrl.save);
+router.post('/simple-2593/present', accountingStaff, simple2593Ctrl.present);
+router.post('/simple-2593/reopen', accountingStaff, simple2593Ctrl.reopen);
 
 // Terceros nuevos pendientes de revisión contable (3.2)
 router.get('/third-parties/pending-setup', thirdPartySetupCtrl.listPending);

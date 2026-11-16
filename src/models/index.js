@@ -20,7 +20,7 @@ const AccountMappingAudit = require('./accounting/AccountMappingAudit');
 const AccountMigration = require('./accounting/AccountMigration');
 const FormDraft = require('./common/FormDraft');
 const Attachment = require('./common/Attachment');
-const { IcaMunicipality, IcaActivity, IcaSettlement } = require('./tax/IcaModels');
+const { IcaMunicipality, IcaActivity, IcaSettlement, SimpleReceipt } = require('./tax/IcaModels');
 const OpeningBalance = require('./accounting/OpeningBalance');
 const FixedAsset = require('./accounting/FixedAsset');
 const FixedAssetDepreciationEntry = require('./accounting/FixedAssetDepreciationEntry');
@@ -1276,6 +1276,7 @@ module.exports = {
   IcaMunicipality,
   IcaActivity,
   IcaSettlement,
+  SimpleReceipt,
   OpeningBalance,
   FixedAsset,
   FixedAssetDepreciationEntry,

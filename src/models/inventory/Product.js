@@ -67,6 +67,12 @@ const Product = sequelize.define('Product', {
     type: DataTypes.STRING(100),
     allowNull: true
   },
+  // Código UNSPSC (8 dígitos) para la factura electrónica (tabla 13.3.5).
+  unspsc_code: {
+    type: DataTypes.STRING(8),
+    allowNull: true,
+    validate: { is: /^\d{8}$/ }
+  },
   name: {
     type: DataTypes.STRING(200),
     allowNull: false

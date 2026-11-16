@@ -35,6 +35,9 @@ function activityData(body) {
     autoica_rate: body.autoica_rate === '' || body.autoica_rate == null ? null : Number(body.autoica_rate),
     account_prefixes: cleanPrefixes(body.account_prefixes),
     is_default: !!body.is_default,
+    // Formulario 2593 (Régimen SIMPLE).
+    simple_group: ['1', '2', '3', '3p', '6'].includes(String(body.simple_group)) ? String(body.simple_group) : null,
+    simple_rate: body.simple_rate === '' || body.simple_rate == null ? null : Number(body.simple_rate),
   };
 }
 
