@@ -150,19 +150,78 @@ async function employerPension(schema, tenantId, dateFrom, dateTo) {
   return { amount: round2(row.amount), periods: row.periods };
 }
 
-/** Ingresos por municipio (mismo alcance por sede que el ICA), con créditos y débitos por cuenta. */
+// Documentos que facturan o reversan ingreso: lo que llevan a una cuenta de
+// ingreso diferido (27...) es ingreso percibido en ese momento.
+const BILLING_SOURCES = ['sale', 'credit_note', 'debit_note', 'customer_return'];
+
+/**
+ * Cuentas de pasivo de ingresos diferidos -> cuenta de ingreso donde se causan
+ * (de los diferidos creados y de la configuración de los productos).
+ */
+async function deferredAccountMap(schema, tenantId) {
+  const rows = await sequelize.query(
+    `SELECT DISTINCT ON (x.liability_id) x.liability_id, a.code, a.name
+     FROM (
+       SELECT liability_account_id AS liability_id, revenue_account_id AS revenue_id, created_at AS at
+       FROM "${schema}"."deferred_revenues" WHERE tenant_id = :tenantId
+       UNION ALL
+       SELECT deferred_account_id, revenue_account_id, updated_at
+       FROM "${schema}"."products" WHERE tenant_id = :tenantId AND deferred_account_id IS NOT NULL AND revenue_account_id IS NOT NULL
+     ) x JOIN "${schema}"."chart_of_accounts" a ON a.id = x.revenue_id
+     ORDER BY x.liability_id, x.at DESC`,
+    { replacements: { tenantId }, type: QueryTypes.SELECT }
+  ).catch(() => []); // schema sin la tabla todavía (migración pendiente)
+  return new Map(rows.map((r) => [r.liability_id, { code: r.code, name: r.name }]));
+}
+
+/**
+ * Ingresos por municipio (mismo alcance por sede que el ICA), con créditos y
+ * débitos por cuenta.
+ *
+ * Ingresos diferidos (anualidades, semestralidades): el SIMPLE grava los
+ * ingresos brutos PERCIBIDOS en el período (art. 904 E.T.), así que una
+ * anualidad cobrada de una vez se declara completa en el bimestre en que se
+ * factura, aunque contablemente se cause mes a mes. Por eso se suma lo que las
+ * facturas (y sus notas/devoluciones) llevaron a la cuenta del diferido -bajo
+ * la cuenta de ingreso donde se causa, para que caiga en su actividad y grupo-
+ * y NO se suman las amortizaciones mensuales (source_type deferred_revenue),
+ * que contarían el mismo ingreso dos veces.
+ */
 async function municipalityIncome(schema, tenantId, mun, dateFrom, dateTo, scope) {
+  const replacements = { tenantId, dateFrom, dateTo, ...scope.replacements };
   const rows = await sequelize.query(
     `SELECT a.code, a.name, COALESCE(SUM(l.credit), 0) AS credit, COALESCE(SUM(l.debit), 0) AS debit
      FROM "${schema}"."journal_entry_lines" l
      JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
      JOIN "${schema}"."chart_of_accounts" a ON a.id = l.account_id
      WHERE e.tenant_id = :tenantId AND e.status = 'posted' AND e.entry_date BETWEEN :dateFrom AND :dateTo
-       AND a.account_type = 'ingreso' AND e.source_type <> 'year_end_close'${scope.sql}
+       AND a.account_type = 'ingreso' AND e.source_type NOT IN ('year_end_close', 'deferred_revenue')${scope.sql}
      GROUP BY a.code, a.name ORDER BY a.code`,
-    { replacements: { tenantId, dateFrom, dateTo, ...scope.replacements }, type: QueryTypes.SELECT }
+    { replacements, type: QueryTypes.SELECT }
   );
-  return rows.map((r) => ({ code: r.code, name: r.name, credit: round2(r.credit), debit: round2(r.debit) }));
+  const byCode = new Map(rows.map((r) => [r.code, { code: r.code, name: r.name, credit: round2(r.credit), debit: round2(r.debit) }]));
+
+  const deferred = await deferredAccountMap(schema, tenantId);
+  if (deferred.size) {
+    const drows = await sequelize.query(
+      `SELECT l.account_id, COALESCE(SUM(l.credit), 0) AS credit, COALESCE(SUM(l.debit), 0) AS debit
+       FROM "${schema}"."journal_entry_lines" l
+       JOIN "${schema}"."journal_entries" e ON e.id = l.entry_id
+       WHERE e.tenant_id = :tenantId AND e.status = 'posted' AND e.entry_date BETWEEN :dateFrom AND :dateTo
+         AND l.account_id IN (:liabilityIds) AND e.source_type IN (:billingSources)${scope.sql}
+       GROUP BY l.account_id`,
+      { replacements: { ...replacements, liabilityIds: [...deferred.keys()], billingSources: BILLING_SOURCES }, type: QueryTypes.SELECT }
+    );
+    for (const d of drows) {
+      const rev = deferred.get(d.account_id);
+      const row = byCode.get(rev.code) || { code: rev.code, name: rev.name, credit: 0, debit: 0 };
+      row.credit = round2(row.credit + Number(d.credit));
+      row.debit = round2(row.debit + Number(d.debit));
+      row.includes_deferred = round2((row.includes_deferred || 0) + Number(d.credit) - Number(d.debit));
+      byCode.set(rev.code, row);
+    }
+  }
+  return [...byCode.values()].sort((a, b) => a.code.localeCompare(b.code));
 }
 
 /**
@@ -279,6 +338,10 @@ async function compute2593(tenantId, { year, period, inputs = {} }) {
   // asignado) va al grupo por defecto.
   const allAccounts = await municipalityIncome(schema, tenantId, null, dateFrom, dateTo, { sql: '', replacements: {} });
   const allNet = allAccounts.reduce((s, a) => s + a.credit - a.debit, 0);
+  const deferredIncluded = round2(allAccounts.reduce((s, a) => s + (a.includes_deferred || 0), 0));
+  if (deferredIncluded) {
+    warnings.push(`Incluye ${Math.round(deferredIncluded).toLocaleString('es-CO')} de ingresos recibidos por anticipado (anualidades, semestralidades) facturados en el bimestre: el SIMPLE grava el ingreso percibido completo, aunque la contabilidad lo cause mes a mes. Sus amortizaciones mensuales no se vuelven a sumar.`);
+  }
   const inMunicipalities = GROUP_KEYS.reduce((s, g) => s + groupIncome[g], 0);
   const remainder = round2(allNet - inMunicipalities);
   if (!municipalities.length) {
