@@ -27,6 +27,12 @@ const TEST_BUYER = {
   taxLevelCode: 'O-13', regimeCode: 'O-13',
 };
 
+/* ── "Venta" mínima para las facturas de prueba: createInvoice toma de la
+   venta la forma/medio de pago (dianPaymentMeans) y el descuento global.
+   Sin ella fallaba con "Cannot read properties of undefined (reading
+   'payment_form')". Contado en efectivo, sin descuento. ─── */
+const TEST_SALE = { payment_form: 'contado', payment_method: 'Efectivo', global_discount_amount: 0 };
+
 /**
  * Dígito de verificación de un NIT colombiano (algoritmo módulo 11 oficial
  * DIAN). Necesario porque el DV de un NIT de prueba inventado a mano casi
@@ -164,6 +170,7 @@ async function sendTestDocuments({ tenant, cfg, resolution: resolutionParam, cou
             resolution,
             customer: TEST_BUYER,
             documentType: docCode,
+            sale: TEST_SALE,
           });
 
       await resolution.increment('current_number', { transaction });
@@ -238,6 +245,7 @@ async function sendFullHabilitacionSet({ tenant, cfg, resolution: resolutionPara
         resolution,
         customer: TEST_BUYER,
         documentType: DIAN_DOC_TYPE_CODE[documentType] || '01',
+        sale: TEST_SALE,
       });
 
       await resolution.increment('current_number', { transaction });

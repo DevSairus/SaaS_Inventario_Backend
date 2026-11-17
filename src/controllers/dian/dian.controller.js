@@ -1033,7 +1033,11 @@ const getHabilitacionStatus = async (req, res) => {
       where: { tenant_id: req.tenant_id, is_active: true, is_test: true, document_type: documentType },
     });
 
-    // Contar documentos de ESTE tipo enviados al set de pruebas
+    // Contar documentos de ESTE tipo enviados al set de pruebas. Los del modo
+    // simulación (dianSimulation.js) también quedan como SendTestSetAsync
+    // "aceptados" porque ese ambiente no es producción, pero nunca salieron
+    // hacia la DIAN: no habilitan nada. Sin este filtro, una empresa usada
+    // para demos aparecía como ya habilitada.
     const testDocs = await DianEvent.count({
       where: {
         tenant_id: req.tenant_id,
@@ -1041,6 +1045,10 @@ const getHabilitacionStatus = async (req, res) => {
         event_type: 'SendTestSetAsync',
         status: 'accepted',
         document_type: DIAN_EVENT_DOC_TYPE[documentType] || 'Invoice',
+        [Op.or]: [
+          { response_raw: null },
+          { response_raw: { [Op.notILike]: '%"simulated":true%' } },
+        ],
       },
     });
 
