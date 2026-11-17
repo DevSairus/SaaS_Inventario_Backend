@@ -112,7 +112,10 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
     tenant_id: tenant.id, sale_id: null,
     event_type: 'SendTestSetAsync', document_type: docType,
     invoice_number: number, cufe,
-    response_raw: dianResponse.raw, status,
+    // XML firmado tal como se envió: sin él no hay forma de revisar un
+    // rechazo de habilitación (ej. FAD05e) contra lo que recibió la DIAN.
+    request_xml: signedXml,
+    response_raw: dianResponse.raw || JSON.stringify(dianResponse), status,
     error_message: accepted ? null : (dianResponse.statusMessage || dianResponse.statusDescription),
     is_test: true,
   }).catch(e => logger.error('[DIAN AutoTest] Error guardando DianEvent:', e.message));
