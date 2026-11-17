@@ -1531,8 +1531,12 @@ async function sendToDian(tenant, { signedXml, invoiceNumber, cufe, testSetId: t
           };
         }
 
-        // Si statusCode es un código final (00, 66, etc.) — devolver
-        if (sc && sc !== '99' && sc !== '0' && sc !== '') {
+        // Código final — devolver. El 99 es RECHAZO ("Validación contiene
+        // errores en campos mandatorios"), no "en proceso": antes se seguía
+        // esperando hasta el timeout y se perdían los errores. "En proceso"
+        // se reconoce por la descripción. Mismo criterio en dian-service.
+        const inProcess = !sc || sc === '0' || /en proceso/i.test(String(statusResp.statusDescription || ''));
+        if (!inProcess) {
           return {
             isValid: iv === true || iv === 'true',
             statusCode: sc,

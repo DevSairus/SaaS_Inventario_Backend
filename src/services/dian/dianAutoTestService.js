@@ -117,7 +117,9 @@ async function sendAndLog({ signedXml, cufe, number, docType, cfg, tenant, DianE
     is_test: true,
   }).catch(e => logger.error('[DIAN AutoTest] Error guardando DianEvent:', e.message));
 
-  return { accepted: accepted || pending, dianResponse, status };
+  // Pendiente NO es aceptado: antes se mostraba en verde y la DIAN podía
+  // haberlo rechazado (pasó: 13 rechazados en el portal, "aceptados" aquí).
+  return { accepted, pending, dianResponse, status };
 }
 
 /* ─────────────────────────────────────────────────────────────
