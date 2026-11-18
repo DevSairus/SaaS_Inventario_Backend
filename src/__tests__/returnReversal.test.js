@@ -16,6 +16,10 @@ jest.mock('../services/accounting/journalEntry.service', () => ({
 jest.mock('../services/finance/cashSession.service', () => ({
   getOpenSession: (...a) => mockGetOpenSession(...a),
   isTreasuryEnabled: jest.fn(async () => true),
+  resolvePaymentSession: async (...a) => {
+    const session = await mockGetOpenSession(...a);
+    return { session: session || null, missing: !session };
+  },
   assertCashAvailable: (...a) => mockAssertCash(...a),
 }));
 jest.mock('../services/accounting/bankAccountSelection', () => ({ resolveSelectedBankAccountId: jest.fn(async () => null) }));

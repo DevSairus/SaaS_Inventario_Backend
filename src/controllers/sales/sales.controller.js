@@ -16,7 +16,7 @@ const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
 const aiuService = require('../../services/sales/aiu.service');
 const { getOrCreateFinalConsumer } = require('../../services/sales/finalConsumer.service');
-const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolvePaymentSession } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
 const { resolveUnitCost } = require('../../utils/costResolver');
@@ -1488,12 +1488,11 @@ const confirm = async (req, res) => {
         // podría reconciliar de dónde salió este dinero. Pero esto solo aplica
         // a tenants con el módulo de Tesorería activo: sin ese módulo no hay
         // dónde abrir una caja, y exigirla les bloquearía las ventas.
-        if (await isTreasuryEnabled(tenantId)) {
-          openSession = await getOpenSession(tenantId, req.branch_id, transaction);
-          if (!openSession) {
-            await transaction.rollback();
-            return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
-          }
+        const cashCheck = await resolvePaymentSession(tenantId, req.branch_id, transaction);
+        openSession = cashCheck.session;
+        if (cashCheck.missing) {
+          await transaction.rollback();
+          return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
         }
 
         // in_sale_entry: se contabiliza dentro del asiento de la venta, una
@@ -1576,9 +1575,10 @@ const confirm = async (req, res) => {
           await transaction.rollback();
           return res.status(400).json({ success: false, message: 'La venta no tiene cliente: no se puede dejar el excedente como anticipo' });
         }
-        if (!openSession && await isTreasuryEnabled(tenantId)) {
-          openSession = await getOpenSession(tenantId, req.branch_id, transaction);
-          if (!openSession) {
+        if (!openSession) {
+          const cashCheck = await resolvePaymentSession(tenantId, req.branch_id, transaction);
+          openSession = cashCheck.session;
+          if (cashCheck.missing) {
             await transaction.rollback();
             return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar anticipos.' });
           }
@@ -1973,12 +1973,11 @@ const registerPayment = async (req, res) => {
     // Cualquier pago (efectivo, tarjeta, transferencia, otro) requiere una
     // caja abierta en la sede activa — solo para tenants con Tesorería activa.
     let openSession = null;
-    if (await isTreasuryEnabled(tenantId)) {
-      openSession = await getOpenSession(tenantId, req.branch_id, transaction);
-      if (!openSession) {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
-      }
+    const cashCheck = await resolvePaymentSession(tenantId, req.branch_id, transaction);
+    openSession = cashCheck.session;
+    if (cashCheck.missing) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
     }
 
     const effectiveMethod = payment_method || sale.payment_method || 'Efectivo';

@@ -19,7 +19,7 @@ const {
   CustomerAdvance, CustomerAdvanceApplication, Sale, Customer, JournalEntry,
 } = require('../../models');
 const { generateAdvanceNumber } = require('../../services/finance/advanceNumber.service');
-const { getOpenSession, isTreasuryEnabled, assertCashAvailable } = require('../../services/finance/cashSession.service');
+const { resolvePaymentSession, assertCashAvailable } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { markAdvanceForAlertCheck } = require('../../middleware/autoCheckAdvanceAlerts.middleware');
 const logger = require('../../config/logger');
@@ -48,12 +48,11 @@ const createAdvance = async (req, res) => {
     // Recibir un anticipo mueve efectivo hoy — exige caja abierta, mismo
     // criterio que registerPayment (solo para tenants con Tesorería activa).
     let openSession = null;
-    if (await isTreasuryEnabled(tenant_id)) {
-      openSession = await getOpenSession(tenant_id, branch_id, transaction);
-      if (!openSession) {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar anticipos.' });
-      }
+    const cashCheck = await resolvePaymentSession(tenant_id, branch_id, transaction);
+    openSession = cashCheck.session;
+    if (cashCheck.missing) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar anticipos.' });
     }
 
     const advance = await createCustomerAdvanceRecord({
@@ -411,12 +410,11 @@ const refundAdvance = async (req, res) => {
 
     // Devolver dinero sale de caja hoy — exige caja abierta, igual que recibir el anticipo.
     let openSession = null;
-    if (await isTreasuryEnabled(tenant_id)) {
-      openSession = await getOpenSession(tenant_id, branch_id, transaction);
-      if (!openSession) {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de devolver anticipos.' });
-      }
+    const cashCheck = await resolvePaymentSession(tenant_id, branch_id, transaction);
+    openSession = cashCheck.session;
+    if (cashCheck.missing) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de devolver anticipos.' });
     }
 
     const refund_id = require('crypto').randomUUID();

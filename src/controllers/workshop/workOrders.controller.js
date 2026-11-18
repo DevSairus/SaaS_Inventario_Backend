@@ -21,7 +21,7 @@ const { pickComboFields, presentComboLines, expandComboApprovals } = require('..
 const dianService = require('../../services/dian/dianService');
 const maintenanceService = require('../../services/workshop/maintenance.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
-const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolvePaymentSession } = require('../../services/finance/cashSession.service');
 const woPayments = require('../../services/workshop/workOrderPayments.service');
 const { normalizePlate, cleanPlate, findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
 const { isBlockedByAccountOwnership } = require('../../middleware/checkAccountOwnership');
@@ -3323,12 +3323,11 @@ const registerPayment = async (req, res) => {
     // Cobrar un abono mueve dinero hoy: caja abierta, igual que los cobros
     // de ventas (solo para tenants con Tesorería activa).
     let openSession = null;
-    if (await isTreasuryEnabled(tenant_id)) {
-      openSession = await getOpenSession(tenant_id, req.branch_id, transaction);
-      if (!openSession) {
-        await transaction.rollback();
-        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
-      }
+    const cashCheck = await resolvePaymentSession(tenant_id, req.branch_id, transaction);
+    openSession = cashCheck.session;
+    if (cashCheck.missing) {
+      await transaction.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
     }
 
     const effectiveMethod = payment_method || 'cash';

@@ -12,7 +12,7 @@ const { SUPPLIER_RETURN_REASONS, reasonLabel } = require('../../utils/returnLabe
 const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.middleware');
 const { resolveLandedPurchaseUnitCost } = require('../../utils/costResolver');
 const { purchaseBalance, purchasePaymentStatus, payablePurchaseWhere, round2 } = require('../../utils/purchaseAmounts');
-const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolvePaymentSession } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { markPurchaseForAlertCheck } = require('../../middleware/autoCheckPayableAlerts.middleware');
 const { canTransition, statusLabel } = require('../../services/returns/returnStateMachine');
@@ -181,10 +181,9 @@ async function settleSupplierReturn(supplierReturn, settlementInput, req, transa
   }
 
   let openSession = null;
-  if (await isTreasuryEnabled(tenantId)) {
-    openSession = await getOpenSession(tenantId, req.branch_id, transaction);
-    if (!openSession) throw badRequest('No hay una caja abierta en esta sede. Abre la caja antes de recibir el reintegro.');
-  }
+  const cashCheck = await resolvePaymentSession(tenantId, req.branch_id, transaction);
+  openSession = cashCheck.session;
+  if (cashCheck.missing) throw badRequest('No hay una caja abierta en esta sede. Abre la caja antes de recibir el reintegro.');
   const method = payment_method || 'Efectivo';
   return {
     fields: {

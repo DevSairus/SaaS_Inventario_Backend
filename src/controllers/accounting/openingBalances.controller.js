@@ -10,7 +10,7 @@ const { sequelize } = require('../../config/database');
 const { OpeningBalance, Customer, Supplier } = require('../../models');
 const openingBalanceService = require('../../services/accounting/openingBalance.service');
 const logger = require('../../config/logger');
-const { getOpenSession, isTreasuryEnabled } = require('../../services/finance/cashSession.service');
+const { resolvePaymentSession } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 
 // GET /api/accounting/opening-balances?type=receivable|payable
@@ -200,12 +200,11 @@ exports.registerPayment = async (req, res) => {
     // Tesorería exige caja abierta en la sede y el abono queda ligado a esa
     // caja -- antes no aparecía en el cuadre ni en Flujo de Caja.
     let openSession = null;
-    if (await isTreasuryEnabled(req.tenant_id)) {
-      openSession = await getOpenSession(req.tenant_id, req.branch_id, t);
-      if (!openSession) {
-        await t.rollback();
-        return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
-      }
+    const cashCheck = await resolvePaymentSession(req.tenant_id, req.branch_id, t);
+    openSession = cashCheck.session;
+    if (cashCheck.missing) {
+      await t.rollback();
+      return res.status(400).json({ success: false, message: 'No hay una caja abierta en esta sede. Abre la caja antes de registrar pagos.' });
     }
     const effectiveMethod = payment_method || 'Efectivo';
     const selectedBankAccountId = await resolveSelectedBankAccountId(req.tenant_id, bank_account_id, effectiveMethod, t);

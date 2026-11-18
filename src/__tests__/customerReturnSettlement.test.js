@@ -27,6 +27,11 @@ jest.mock('../services/finance/advanceNumber.service', () => ({ generateAdvanceN
 jest.mock('../services/finance/cashSession.service', () => ({
   getOpenSession: (...args) => mockGetOpenSession(...args),
   isTreasuryEnabled: (...args) => mockIsTreasuryEnabled(...args),
+  resolvePaymentSession: async (...args) => {
+    if (!(await mockIsTreasuryEnabled(...args))) return { session: null, missing: false };
+    const session = await mockGetOpenSession(...args);
+    return { session: session || null, missing: !session };
+  },
   assertCashAvailable: jest.fn(),
 }));
 jest.mock('../services/accounting/bankAccountSelection', () => ({

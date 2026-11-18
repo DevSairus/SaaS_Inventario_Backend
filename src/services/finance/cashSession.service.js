@@ -22,6 +22,30 @@ async function isTreasuryEnabled(tenantId) {
   return modules.includes('treasury');
 }
 
+// Ajuste por empresa (Configuración → Ventas): business_config.
+// require_open_cash_session. Por defecto (sin definir) se exige, que es el
+// comportamiento histórico. Solo tiene efecto con Tesorería activa.
+async function isOpenCashSessionRequired(tenantId) {
+  const { Tenant } = require('../../models');
+  const tenant = await Tenant.findByPk(tenantId, { attributes: ['id', 'business_config'] });
+  return tenant?.business_config?.require_open_cash_session !== false;
+}
+
+/**
+ * Caja para un movimiento de dinero (cobro, anticipo, devolución…):
+ *   - session: la caja abierta de la sede, si la hay, para ligar el
+ *     movimiento al cuadre (aunque no se exija).
+ *   - missing: true si la empresa exige caja abierta y no hay ninguna; el
+ *     llamador responde 400 con su propio mensaje.
+ * Sin Tesorería no hay cajas: { session: null, missing: false }.
+ */
+async function resolvePaymentSession(tenantId, branchId, transaction) {
+  if (!(await isTreasuryEnabled(tenantId))) return { session: null, missing: false };
+  const session = await getOpenSession(tenantId, branchId, transaction);
+  if (session) return { session, missing: false };
+  return { session: null, missing: await isOpenCashSessionRequired(tenantId) };
+}
+
 /**
  * Para una SALIDA de dinero en efectivo de la caja abierta (devolución al
  * cliente, devolución de anticipo): lanza un error 400 si en la caja no hay
@@ -42,4 +66,4 @@ async function assertCashAvailable(session, amount, method) {
   }
 }
 
-module.exports = { getOpenSession, isTreasuryEnabled, assertCashAvailable };
+module.exports = { getOpenSession, isTreasuryEnabled, isOpenCashSessionRequired, resolvePaymentSession, assertCashAvailable };

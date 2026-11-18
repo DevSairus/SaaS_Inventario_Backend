@@ -14,7 +14,7 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { resolveUnitCost } = require('../../utils/costResolver');
 const { saleBalance, salePaymentStatus } = require('../../utils/saleAmounts');
-const { getOpenSession, isTreasuryEnabled, assertCashAvailable } = require('../../services/finance/cashSession.service');
+const { resolvePaymentSession, assertCashAvailable } = require('../../services/finance/cashSession.service');
 const { resolveSelectedBankAccountId } = require('../../services/accounting/bankAccountSelection');
 const { canTransition, statusLabel } = require('../../services/returns/returnStateMachine');
 
@@ -606,10 +606,9 @@ async function settleCustomerReturn(customerReturn, settlementInput, ctx, transa
   }
 
   let openSession = null;
-  if (await isTreasuryEnabled(tenantId)) {
-    openSession = await getOpenSession(tenantId, ctx.branch_id, transaction);
-    if (!openSession) throw badRequest('No hay una caja abierta en esta sede. Abre la caja antes de devolver dinero.');
-  }
+  const cashCheck = await resolvePaymentSession(tenantId, ctx.branch_id, transaction);
+  openSession = cashCheck.session;
+  if (cashCheck.missing) throw badRequest('No hay una caja abierta en esta sede. Abre la caja antes de devolver dinero.');
   const method = payment_method || 'Efectivo';
   // Efectivo: que lo haya en la caja (según el cuadre de la sesión).
   await assertCashAvailable(openSession, calc.money_back, method);

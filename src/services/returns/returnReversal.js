@@ -46,13 +46,12 @@ async function assertReversalAllowedByDian({ creditNoteSaleId, supportAdjustment
 // le devolvemos al proveedor lo que nos reintegró).
 async function reversalMoneyFields({ amount, direction, body, tenantId, branchId, transaction }) {
   if (!(amount > 0)) return {};
-  const { getOpenSession, isTreasuryEnabled, assertCashAvailable } = require('../finance/cashSession.service');
+  const { resolvePaymentSession, assertCashAvailable } = require('../finance/cashSession.service');
   const { resolveSelectedBankAccountId } = require('../accounting/bankAccountSelection');
   let openSession = null;
-  if (await isTreasuryEnabled(tenantId)) {
-    openSession = await getOpenSession(tenantId, branchId, transaction);
-    if (!openSession) throw badRequest('No hay una caja abierta en esta sede. Abre la caja antes de reversar la devolución.');
-  }
+  const cashCheck = await resolvePaymentSession(tenantId, branchId, transaction);
+  openSession = cashCheck.session;
+  if (cashCheck.missing) throw badRequest('No hay una caja abierta en esta sede. Abre la caja antes de reversar la devolución.');
   const method = body.payment_method || 'Efectivo';
   if (direction === 'out') await assertCashAvailable(openSession, amount, method);
   return {
