@@ -5,6 +5,7 @@ const {
   WorkOrder, WorkOrderItem, WorkOrderQuoteRequest, Vehicle, Customer, User,
   Warehouse, Product, InventoryMovement, Sale, SaleItem,
   DiagramTemplate, WorkOrderDiagnosisMark, CommissionCategory, Combo, ComboItem,
+  WorkshopBay,
 } = require('../../models');
 const { Op } = require('sequelize');
 const { plateConditions } = require('../../utils/searchText');
@@ -86,7 +87,7 @@ const WO_SAFE_ATTRS = [
   'diagnosis','work_performed','photos_in','photos_out','received_at',
   'promised_at','completed_at','delivered_at','subtotal','tax_amount',
   'discount_type','discount_value','discount_amount','total_amount','paid_amount','payment_status','sale_id','notes','internal_notes',
-  'created_by','created_at','updated_at','share_token',
+  'created_by','created_at','updated_at','share_token','bay_id','status_changed_at',
 ];
 
 // Include para cargar el técnico responsable de cada ítem
@@ -312,6 +313,7 @@ const getById = async (req, res) => {
         { model: User,     as: 'technician', attributes: ['id', 'first_name', 'last_name', 'phone'] },
         { model: User,     as: 'creator_wo', attributes: ['id', 'first_name', 'last_name'] },
         { model: Warehouse,as: 'warehouse',  attributes: ['id', 'name'] },
+        { model: WorkshopBay, as: 'bay',     attributes: ['id', 'name', 'kind'] },
         { model: Sale,     as: 'sale',       attributes: ['id', 'sale_number', 'status', 'total_amount'] },
         {
           model: WorkOrderItem, as: 'items',
@@ -394,6 +396,13 @@ async function createWorkOrderCore({ tenant_id, user_id, branch_id, data, transa
     sanitizedWarehouseId = branchWarehouse?.id || null;
   }
 
+  // Bahía opcional desde el formulario (pantalla de taller). Lanza 400/404/409.
+  let bayId = null;
+  if (data.bay_id) {
+    const { assertBayAssignable } = require('../../services/workshop/workshopBoard.service');
+    bayId = (await assertBayAssignable({ tenantId: tenant_id, bayId: data.bay_id, warehouseId: sanitizedWarehouseId, transaction })).id;
+  }
+
   if (mileage_in) {
     await Vehicle.update({ current_mileage: mileage_in }, { where: { id: vehicle_id, tenant_id }, transaction });
   }
@@ -411,6 +420,7 @@ async function createWorkOrderCore({ tenant_id, user_id, branch_id, data, transa
     customer_id: sanitizedCustomerId,
     technician_id: sanitizedTechnicianId,
     warehouse_id: sanitizedWarehouseId,
+    bay_id: bayId,
     mileage_in, problem_description, promised_at, notes,
     created_by: user_id,
     received_at: new Date(),
@@ -515,6 +525,7 @@ const create = async (req, res) => {
   } catch (error) {
     // Si el fallo fue después del commit (recarga/aviso), ya no hay nada que revertir.
     if (!transaction.finished) await transaction.rollback();
+    if (error.status) return res.status(error.status).json({ success: false, message: error.message });
     logger.error('Error creando OT:', error);
     res.status(500).json({ success: false, message: 'Error al crear la orden' });
   }
@@ -2644,6 +2655,10 @@ async function respondQuoteRequestBody({ orderId, quoteRequestId, approvals, app
     } catch (e) {
       logger.error('Error emitiendo notificación de cotización aprobada:', e);
     }
+    // Pantalla de taller: suena y quita el "Esperando aprobación" de la tarjeta.
+    require('../../services/workshop/workshopBoard.service')
+      .notifyOrder(fullOrder, 'quote')
+      .catch((e) => logger.warn(`[workshop-board] aviso de cotización: ${e.message}`));
 
     res.json({ success: true, message: 'Respuesta registrada correctamente' });
   } catch (error) {

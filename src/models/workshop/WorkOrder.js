@@ -213,6 +213,20 @@ const WorkOrder = sequelize.define('WorkOrder', {
     unique: true,
     comment: 'Token único para que el cliente consulte el estado de su OT sin autenticarse'
   },
+  // Bahía que ocupa la OT (pantalla de taller). NULL = sin bahía. Se libera
+  // sola al entregar o cancelar (hook beforeUpdate abajo).
+  bay_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    references: { model: 'workshop_bays', key: 'id' },
+    onDelete: 'SET NULL'
+  },
+  // Desde cuándo la OT está en su estado actual (hooks abajo). NULL en OTs
+  // anteriores a la pantalla de taller: se usa received_at.
+  status_changed_at: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
   // Checklist de control de calidad al cierre — se muestra en el PDF final
   // de la OT (sección "Proceso Calidad y Servicio al Cliente").
   quality_checklist: {
@@ -229,7 +243,22 @@ const WorkOrder = sequelize.define('WorkOrder', {
     { fields: ['tenant_id', 'status'] },
     { fields: ['vehicle_id'] },
     { fields: ['customer_id'] }
-  ]
+  ],
+  hooks: {
+    beforeCreate: (order) => {
+      if (!order.status_changed_at) order.status_changed_at = new Date();
+    },
+    // Cubre todos los caminos que cambian el estado (changeStatus,
+    // generateSale, revertStatus...) sin tocarlos uno por uno.
+    beforeUpdate: (order) => {
+      if (order.changed('status')) {
+        order.status_changed_at = new Date();
+        // Sin mirar order.bay_id: la instancia puede venir cargada con
+        // attributes que no lo incluyen.
+        if (['entregado', 'cancelado'].includes(order.status)) order.bay_id = null;
+      }
+    },
+  },
 });
 
 module.exports = WorkOrder;

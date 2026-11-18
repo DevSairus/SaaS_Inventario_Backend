@@ -104,6 +104,7 @@ const WorkOrderQuoteRequest = require('./workshop/WorkOrderQuoteRequest');
 const LegalDocumentVersion = require('./legal/LegalDocumentVersion');
 const CustomerConsent = require('./legal/CustomerConsent');
 const WorkshopAppointmentConfig = require('./workshop/WorkshopAppointmentConfig');
+const WorkshopBay = require('./workshop/WorkshopBay');
 const WorkshopAppointment = require('./workshop/WorkshopAppointment');
 const CommissionSettlement = require('./workshop/CommissionSettlement');
 const CommissionSettlementItem = require('./workshop/CommissionSettlementItem');
@@ -709,6 +710,12 @@ CustomerConsent.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_or
 WorkOrder.hasMany(CustomerConsent, { foreignKey: 'work_order_id', as: 'consents' });
 CustomerConsent.belongsTo(LegalDocumentVersion, { foreignKey: 'document_version_id', as: 'document_version' });
 
+// WorkshopBay ↔ Branch / WorkOrder (pantalla de taller)
+WorkshopBay.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
+Branch.hasMany(WorkshopBay, { foreignKey: 'branch_id', as: 'workshop_bays' });
+WorkOrder.belongsTo(WorkshopBay, { foreignKey: 'bay_id', as: 'bay' });
+WorkshopBay.hasMany(WorkOrder, { foreignKey: 'bay_id', as: 'work_orders' });
+
 // WorkshopAppointmentConfig ↔ Branch
 WorkshopAppointmentConfig.belongsTo(Branch, { foreignKey: 'branch_id', as: 'branch' });
 Branch.hasOne(WorkshopAppointmentConfig, { foreignKey: 'branch_id', as: 'appointment_config' });
@@ -1237,6 +1244,7 @@ module.exports = {
   WorkOrderItem,
   WorkOrderQuoteRequest,
   WorkshopAppointmentConfig,
+  WorkshopBay,
   WorkshopAppointment,
   CommissionCategory,
   TechnicianCommissionRate,

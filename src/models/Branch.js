@@ -56,6 +56,12 @@ const Branch = sequelize.define('Branch', {
   ica_municipality_id: {
     type: DataTypes.UUID,
     allowNull: true,
+  },
+  // Token del enlace sin login de la pantalla de taller (TV) de esta sede.
+  // NULL = sin pantalla. Ver services/workshop/workshopBoard.service.js.
+  workshop_display_token: {
+    type: DataTypes.UUID,
+    allowNull: true,
   }
 }, {
   tableName: 'branches',

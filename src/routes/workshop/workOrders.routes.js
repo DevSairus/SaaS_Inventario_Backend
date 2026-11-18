@@ -31,6 +31,8 @@ router.post('/', checkAccountOwnership, ctrl.create);
 router.post('/quick', checkAccountOwnership, ctrl.quickCreate);
 router.put('/:id', ctrl.update);
 router.patch('/:id/status', ctrl.changeStatus);
+// Bahía (pantalla de taller): aparte de PUT /:id porque también aplica en 'listo'.
+router.patch('/:id/bay', require('../../controllers/workshop/workshopBoard.controller').setOrderBay);
 router.post('/:id/revert-status', ctrl.revertStatus); // solo administrador — ver revertStatus en el controller
 router.patch('/:id/checklist', ctrl.updateChecklist);
 

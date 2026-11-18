@@ -47,6 +47,12 @@ router.post('/sales/:token/respond', quoteResponseLimiter, respondPublicQuote);
 // impreso en el sticker QR -- ver getPublicVehiclePortal.
 router.get('/vehicles/:token', vehiclePortalLimiter, getPublicVehiclePortal);
 
+// GET /api/public/workshop-display/:token
+// Pantalla de taller del TV de una sede (solo lectura, sin datos del cliente).
+// El TV la consulta cada minuto y al recibir un aviso por socket. Ver
+// services/workshop/workshopBoard.service.js.
+router.get('/workshop-display/:token', require('../controllers/workshop/workshopBoard.controller').getPublicBoard);
+
 // ── Citas de Taller ──────────────────────────────────────────────────────
 // Sin token previo posible (primera vez que aparece el cliente) -- el
 // tenant se resuelve por Tenant.slug, no por share_token. Ver

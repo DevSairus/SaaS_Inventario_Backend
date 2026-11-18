@@ -300,6 +300,7 @@ app.use('/api/workshop/vehicles/runt',         authMiddleware, tenantMiddleware,
 app.use('/api/workshop/vehicles',              authMiddleware, tenantMiddleware, vehiclesRoutes);
 app.use('/api/workshop/work-orders',           authMiddleware, tenantMiddleware, branchMiddleware, workOrdersRoutes);
 app.use('/api/workshop/appointments',          authMiddleware, tenantMiddleware, branchMiddleware, appointmentsRoutes);
+app.use('/api/workshop/board',                 authMiddleware, tenantMiddleware, branchMiddleware, requireModule('workshop'), require('./routes/workshop/workshopBoard.routes'));
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
 app.use('/api/workshop/commission-categories', authMiddleware, tenantMiddleware, commissionCategoriesRoutes);
 app.use('/api/workshop/maintenance-types',     authMiddleware, tenantMiddleware, maintenanceTypesRoutes);
@@ -503,6 +504,12 @@ if (!isVercel) {
   // Inbox WhatsApp Cloud
   const { initWhatsAppNotifications } = require('./services/whatsappNotifications.socket');
   initWhatsAppNotifications(io);
+
+  // Pantalla de taller (mapa de ocupación por bahía) + avisos desde los hooks
+  // de WorkOrder/WorkOrderItem. Ver services/workshop/workshopBoard.service.js.
+  const { initWorkshopBoardNotifications } = require('./services/workshopBoard.socket');
+  initWorkshopBoardNotifications(io);
+  require('./services/workshop/workshopBoard.service').registerBoardHooks();
 
   server.listen(PORT, async () => {
     console.log('Servidor corriendo en puerto ' + PORT);
