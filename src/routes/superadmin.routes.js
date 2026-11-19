@@ -2666,18 +2666,31 @@ router.post(
       }
 
       // El email es de una sola persona en todo Pitbox (ver
-      // services/auth/identity.service.js): si ya existe, se vincula desde
-      // Usuarios de la empresa (POST /users/link), no se crea otra cuenta.
-      const existingUser = await User.findOne({
-        where: require('../services/auth/identity.service').emailWhere(email),
-        attributes: ['id', 'tenant_id'],
-      });
-
-      if (existingUser) {
-        return res.status(400).json({
-          error: existingUser.tenant_id === tenantId
-            ? 'El email ya está registrado en este tenant'
-            : 'El email ya está registrado en Pitbox: vincúlalo desde Usuarios de la empresa',
+      // services/auth/identity.service.js). Si ya trabaja en otra empresa, no
+      // se crea otra cuenta: se vincula a esta con el rol elegido y conserva
+      // su contraseña (la escrita en el formulario no se usa).
+      const identity = require('../services/auth/identity.service');
+      const st = await identity.emailStatusForTenant(email, tenantId);
+      if (st.status === 'member') {
+        return res.status(400).json({ error: 'El email ya está registrado en este tenant' });
+      }
+      if (st.status === 'platform') {
+        return res.status(400).json({ error: 'Ese email es de un usuario de plataforma (superadmin o soporte): usa otro correo' });
+      }
+      if (st.status === 'unavailable') {
+        return res.status(400).json({ error: 'Ese email ya existe en Pitbox pero no tiene acceso activo: actívalo en su empresa o usa otro correo' });
+      }
+      if (st.status === 'linkable') {
+        const { runWithTenantSchema } = require('../config/tenantContext');
+        const linked = await identity.linkExistingUser({ email, tenantId, role });
+        await runWithTenantSchema(tenant.schema_name || null, () => identity.assignMainBranch(linked));
+        const linkedResponse = linked.toJSON();
+        delete linkedResponse.password_hash;
+        return res.status(201).json({
+          success: true,
+          linked: true,
+          message: `${linked.first_name} ${linked.last_name} ya tenía cuenta en Pitbox: quedó vinculado a esta empresa y entra con su contraseña actual (la contraseña escrita no se usó).`,
+          user: linkedResponse,
         });
       }
 

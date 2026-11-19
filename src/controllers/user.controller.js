@@ -416,20 +416,8 @@ const linkUser = async (req, res) => {
 
     const user = await identity.linkExistingUser({ email, tenantId: req.tenant_id, role });
 
-    // Sede principal por defecto: sin sede, cualquier rol que no sea admin cae
-    // en "Sin sede asignada" al entrar. El admin la ajusta después en Sedes.
-    if (role !== 'admin') {
-      try {
-        const { Branch, UserBranch } = require('../models');
-        const branch = await Branch.findOne({
-          where: { tenant_id: req.tenant_id, is_active: true },
-          order: [['is_main', 'DESC'], ['created_at', 'ASC']],
-        });
-        if (branch) await UserBranch.create({ user_id: user.id, branch_id: branch.id, is_default: true });
-      } catch (e) {
-        console.warn('[link-user] no se pudo asignar la sede principal:', e.message);
-      }
-    }
+    // Sede principal por defecto (el admin la ajusta después en Sedes).
+    await identity.assignMainBranch(user);
 
     setImmediate(() => audit({
       tenant_id: req.tenant_id, user_id: req.user.id, action: 'LINK_USER', entity: 'user', entity_id: user.id,
@@ -447,7 +435,18 @@ const linkUser = async (req, res) => {
   } catch (error) {
     if (error.status) return res.status(error.status).json({ success: false, code: error.code, message: error.message });
     if (error.name === 'SequelizeUniqueConstraintError') {
-      return res.status(409).json({ success: false, code: 'ALREADY_MEMBER', message: 'Esta persona ya es usuario de tu empresa' });
+      // Puede ser que ya esté (dos clics a la vez) o que la BD aún tenga el
+      // correo único global (migraciones 2026111802/03 sin aplicar).
+      const st = await identity.emailStatusForTenant(req.body.email, req.tenant_id).catch(() => null);
+      if (st?.status === 'member') {
+        return res.status(409).json({ success: false, code: 'ALREADY_MEMBER', message: 'Esta persona ya es usuario de tu empresa' });
+      }
+      console.error('Error vinculando usuario (restricción única):', error.parent?.constraint || error.message);
+      return res.status(500).json({
+        success: false,
+        code: 'EMAIL_UNIQUE_CONSTRAINT',
+        message: 'No se pudo vincular: la base de datos todavía exige un correo único por persona. Avísale a soporte de Pitbox.',
+      });
     }
     console.error('Error vinculando usuario:', error);
     res.status(500).json({ success: false, message: 'Error al vincular el usuario' });

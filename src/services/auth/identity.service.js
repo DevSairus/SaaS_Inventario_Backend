@@ -230,7 +230,28 @@ async function linkExistingUser({ email, tenantId, role, transaction }) {
   return user;
 }
 
+/**
+ * Sede principal por defecto para quien se vincula: sin sede, cualquier rol
+ * que no sea admin cae en "Sin sede asignada" al entrar. Debe correr con el
+ * schema de la empresa activo (request con tenantMiddleware, o dentro de
+ * runWithTenantSchema). Nunca lanza: la vinculación no falla por esto.
+ */
+async function assignMainBranch(user) {
+  if (!user || user.role === 'admin') return;
+  try {
+    const { Branch, UserBranch } = require('../../models');
+    const branch = await Branch.findOne({
+      where: { tenant_id: user.tenant_id, is_active: true },
+      order: [['is_main', 'DESC'], ['created_at', 'ASC']],
+    });
+    if (branch) await UserBranch.create({ user_id: user.id, branch_id: branch.id, is_default: true });
+  } catch (e) {
+    console.warn('[identity] no se pudo asignar la sede principal:', e.message);
+  }
+}
+
 module.exports = {
+  assignMainBranch,
   tenantAccessError,
   canLogIn,
   signSessionToken,
