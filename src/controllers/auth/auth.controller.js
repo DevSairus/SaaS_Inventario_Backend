@@ -8,6 +8,7 @@ const { Op, fn, col, where: sqlWhere } = require('sequelize');
 
 const User = require('../../models/auth/User');
 const Tenant = require('../../models/auth/Tenant');
+const identity = require('../../services/auth/identity.service');
 
 const emailLookupWhere = (email) =>
   sqlWhere(fn('lower', col('email')), String(email).toLowerCase().trim());
@@ -39,164 +40,73 @@ const login = async (req, res) => {
     }
 
     /* =====================================================
-       BUSCAR USUARIO SEGÚN CONTEXTO MULTI-TENANT
+       FILAS DE ESE CORREO
+       Una persona puede tener una fila por empresa (misma identity_id y
+       contraseña): ver services/auth/identity.service.js. Solo cuentan las
+       filas activas, con acceso y cuya contraseña coincide -- un técnico sin
+       acceso (has_system_access = false) no tiene hash y nunca entra.
     ===================================================== */
 
-    let user;
+    const where = { [Op.and]: [identity.emailWhere(email)] };
+    if (tenant_id) where.tenant_id = tenant_id;
+    const rows = (await User.findAll({ where })).filter(identity.canLogIn);
 
-    const emailWhere = emailLookupWhere(email);
-
-    // 🔐 Si se envía tenant_id → login multi-tenant
-    if (tenant_id) {
-      user = await User.findOne({
-        where: {
-          tenant_id: tenant_id,
-          [Op.and]: emailWhere
-        }
-      });
-    } else {
-      // ⚠️ Permitir login sin tenant SOLO para super_admin
-      user = await User.findOne({
-        where: emailWhere
-      });
+    const hashOk = new Map();
+    const matching = [];
+    for (const row of rows) {
+      if (!hashOk.has(row.password_hash)) {
+        hashOk.set(row.password_hash, await bcrypt.compare(password, row.password_hash));
+      }
+      if (hashOk.get(row.password_hash)) matching.push(row);
     }
 
-    if (!user) {
+    if (!matching.length) {
       return res.status(401).json({
         success: false,
         message: 'Credenciales inválidas'
       });
     }
 
-    if (!user.is_active) {
-      return res.status(403).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
-
-    // Técnicos sin acceso al sistema (has_system_access = false) no tienen
-    // password_hash y nunca pueden iniciar sesión. Se valida ANTES del
-    // bcrypt.compare (no hay hash contra el cual comparar) y con el mismo
-    // mensaje genérico, para no revelar que el usuario existe.
-    if (!user.has_system_access || !user.password_hash) {
-      return res.status(403).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
+    // Usuario de plataforma (super_admin / soporte): sin empresa.
+    const platformUser = matching.find((u) => !u.tenant_id);
+    if (platformUser) return sendSession(res, req, platformUser, null, 1);
 
     /* =====================================================
-       VALIDAR TENANT SI APLICA
+       VALIDAR EMPRESAS
+       Mismos mensajes de antes (suspendida, cancelada, prueba vencida) si
+       ninguna de sus empresas deja entrar.
     ===================================================== */
 
-    if (user.tenant_id) {
-      const tenant = await Tenant.findByPk(user.tenant_id);
+    const tenants = await Tenant.findAll({ where: { id: matching.map((u) => u.tenant_id) } });
+    const byId = new Map(tenants.map((t) => [t.id, t]));
+    const allowed = matching.filter((u) => !identity.tenantAccessError(byId.get(u.tenant_id)));
 
-      if (!tenant) {
-        return res.status(403).json({
-          success: false,
-          message: 'Credenciales inválidas'
-        });
-      }
+    if (!allowed.length) {
+      const err = identity.tenantAccessError(byId.get(matching[0].tenant_id));
+      return res.status(err.status).json({ success: false, message: err.message, ...(err.code ? { code: err.code } : {}) });
+    }
 
-      if (!tenant.is_active) {
-        return res.status(403).json({
-          success: false,
-          message: 'Esta empresa fue desactivada. Contacta a soporte para más información.',
-          code: 'TENANT_INACTIVE'
-        });
-      }
-
-      // Mensajes distintos a propósito -- el usuario necesita saber SI PUEDE
-      // resolverlo pagando (suspendido/trial vencido) o si la cuenta ya no
-      // existe como tal (cancelada), no un "contacte a soporte" genérico
-      // que no dice si es por dinero, por decisión propia, o por un error.
-      if (tenant.subscription_status === 'suspended') {
-        return res.status(402).json({
-          success: false,
-          message: 'Tu suscripción está suspendida por falta de pago. Contacta a soporte para regularizar el pago y reactivar el servicio.',
-          code: 'SUBSCRIPTION_SUSPENDED'
-        });
-      }
-
-      if (tenant.subscription_status === 'cancelled') {
-        return res.status(403).json({
-          success: false,
-          message: 'Tu suscripción fue cancelada. Contacta a soporte si querés reactivarla.',
-          code: 'SUBSCRIPTION_CANCELLED'
-        });
-      }
-
-      if (tenant.subscription_status === 'trial' && tenant.trial_ends_at) {
-        if (new Date() > new Date(tenant.trial_ends_at)) {
-          return res.status(402).json({
-            success: false,
-            message: 'Tu período de prueba terminó. Contacta a soporte para activar tu suscripción y seguir usando el sistema.',
-            code: 'TRIAL_EXPIRED'
-          });
-        }
-      }
+    if (allowed.length === 1) {
+      return sendSession(res, req, allowed[0], byId.get(allowed[0].tenant_id), 1);
     }
 
     /* =====================================================
-       VALIDAR PASSWORD
+       VARIAS EMPRESAS: elegir a cuál entrar
+       Token de selección de 10 min con las filas permitidas; el frontend
+       llama a POST /auth/select-tenant con la elegida.
     ===================================================== */
 
-    const isPasswordValid = await bcrypt.compare(password, user.password_hash);
+    const accounts = allowed
+      .map((u) => ({ user: u, tenant: byId.get(u.tenant_id) }))
+      .sort((a, b) => a.tenant.company_name.localeCompare(b.tenant.company_name, 'es'));
 
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
-
-    /* =====================================================
-       ACTUALIZAR ÚLTIMO LOGIN
-    ===================================================== */
-
-    await user.update({ last_login: new Date() });
-
-    /* =====================================================
-       GENERAR TOKEN
-    ===================================================== */
-
-    const token = jwt.sign(
-      {
-        id: user.id,
-        email: user.email,
-        role: user.role,
-        tenant_id: user.tenant_id
-      },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
-
-    /* =====================================================
-       RESPUESTA
-    ===================================================== */
-
-    // Audit: registrar login exitoso
-    setImmediate(() => audit({ tenant_id: user.tenant_id, user_id: user.id, action: 'LOGIN', entity: 'user', entity_id: user.id, changes: { email: user.email }, req }));
-
-    res.json({
+    return res.json({
       success: true,
-      message: 'Login exitoso',
+      message: 'Elige la empresa',
       data: {
-        token,
-        user: {
-          id: user.id,
-          email: user.email,
-          first_name: user.first_name,
-          last_name: user.last_name,
-          role: user.role,
-          tenant_id: user.tenant_id,
-          // Usuarios de plataforma (ver middleware/platformScope.js). Solo
-          // para la UI: el backend vuelve a leerlos de la BD en cada request.
-          is_owner: user.role === 'super_admin' && user.is_owner === true,
-          all_tenants_access: user.all_tenants_access !== false
-        }
+        requires_tenant_selection: true,
+        selection_token: identity.signSelectionToken(allowed[0].identity_id || allowed[0].id, allowed.map((u) => u.id)),
+        companies: accounts.map((a) => identity.accountSummary(a)),
       }
     });
 
@@ -206,6 +116,91 @@ const login = async (req, res) => {
       success: false,
       message: 'Error en el servidor'
     });
+  }
+};
+
+// Emite el token de una fila ya validada y responde como el login de siempre.
+async function sendSession(res, req, user, tenant, companiesCount) {
+  await user.update({ last_login: new Date() });
+  const token = identity.signSessionToken(user);
+  // Audit: registrar login exitoso
+  setImmediate(() => audit({ tenant_id: user.tenant_id, user_id: user.id, action: 'LOGIN', entity: 'user', entity_id: user.id, changes: { email: user.email }, req }));
+  let count = companiesCount;
+  if (user.tenant_id && count === 1) count = (await identity.switchableAccounts(user)).length || 1;
+  return res.json({
+    success: true,
+    message: 'Login exitoso',
+    data: { token, user: identity.sessionUser(user, tenant, count) }
+  });
+}
+
+/* =====================================================
+   ELEGIR EMPRESA (después del login)
+   Body: { selection_token, user_id }
+===================================================== */
+
+const selectTenant = async (req, res) => {
+  try {
+    const { selection_token, user_id } = req.body || {};
+    const sel = identity.verifySelectionToken(selection_token);
+    if (!sel || !sel.user_ids.includes(user_id)) {
+      return res.status(401).json({ success: false, message: 'La selección venció. Inicia sesión de nuevo.', code: 'SELECTION_EXPIRED' });
+    }
+    const user = await User.findByPk(user_id);
+    if (!identity.canLogIn(user) || (user.identity_id || user.id) !== sel.identity_id) {
+      return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
+    }
+    const tenant = await Tenant.findByPk(user.tenant_id);
+    const err = identity.tenantAccessError(tenant);
+    if (err) return res.status(err.status).json({ success: false, message: err.message, ...(err.code ? { code: err.code } : {}) });
+    return sendSession(res, req, user, tenant, sel.user_ids.length);
+  } catch (error) {
+    logger.error('Error en selectTenant:', error);
+    res.status(500).json({ success: false, message: 'Error en el servidor' });
+  }
+};
+
+/* =====================================================
+   MIS EMPRESAS / CAMBIAR DE EMPRESA (sin cerrar sesión)
+===================================================== */
+
+const myCompanies = async (req, res) => {
+  try {
+    if (req.user.impersonated_by) return res.json({ success: true, data: [] });
+    const user = await User.findByPk(req.user.id);
+    if (!user || !user.tenant_id) return res.json({ success: true, data: [] });
+    const accounts = await identity.switchableAccounts(user);
+    res.json({ success: true, data: accounts.map((a) => identity.accountSummary(a, user.id)) });
+  } catch (error) {
+    logger.error('Error en myCompanies:', error);
+    res.status(500).json({ success: false, message: 'Error en el servidor' });
+  }
+};
+
+// Body: { tenant_id }
+const switchTenant = async (req, res) => {
+  try {
+    if (req.user.impersonated_by) {
+      return res.status(403).json({ success: false, message: 'No se puede cambiar de empresa en modo soporte' });
+    }
+    const current = await User.findByPk(req.user.id);
+    if (!identity.canLogIn(current) || !current.tenant_id) {
+      return res.status(401).json({ success: false, message: 'Usuario no válido' });
+    }
+    const { tenant_id: targetTenantId } = req.body || {};
+    const accounts = await identity.switchableAccounts(current);
+    const target = accounts.find((a) => a.tenant.id === targetTenantId);
+    if (!target) {
+      return res.status(403).json({ success: false, message: 'No tienes acceso a esa empresa' });
+    }
+    setImmediate(() => audit({
+      tenant_id: target.user.tenant_id, user_id: target.user.id, action: 'SWITCH_TENANT', entity: 'user', entity_id: target.user.id,
+      changes: { from_tenant_id: current.tenant_id, from_user_id: current.id }, req,
+    }));
+    return sendSession(res, req, target.user, target.tenant, accounts.length);
+  } catch (error) {
+    logger.error('Error en switchTenant:', error);
+    res.status(500).json({ success: false, message: 'Error en el servidor' });
   }
 };
 
@@ -326,6 +321,9 @@ const endImpersonation = async (req, res) => {
 };
 
 module.exports = {
+  selectTenant,
+  myCompanies,
+  switchTenant,
   login,
   getProfile,
   verifyToken,

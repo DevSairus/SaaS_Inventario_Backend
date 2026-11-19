@@ -10,7 +10,8 @@ const { sendEmail } = require('../../services/emailService');
 // forgotPassword/resetPassword lo tratan como "no encontrado" (ver abajo).
 const User = sequelize.define('User', {
   id: { type: DataTypes.UUID, defaultValue: DataTypes.UUIDV4, primaryKey: true },
-  email: { type: DataTypes.STRING, allowNull: true, unique: true },
+  email: { type: DataTypes.STRING, allowNull: true },
+  identity_id: { type: DataTypes.UUID, allowNull: true },
   password_hash: { type: DataTypes.STRING, allowNull: true },
   first_name: { type: DataTypes.STRING },
   last_name: { type: DataTypes.STRING },
@@ -40,14 +41,18 @@ const forgotPassword = async (req, res) => {
     }
 
     // Always return success to avoid user enumeration
-    const user = await User.findOne({
+    // Una persona puede tener una fila por empresa (misma contraseña, ver
+    // services/auth/identity.service.js): el enlace va en una de sus filas
+    // activas y al restablecer se cambia en todas.
+    const rows = await User.findAll({
       where: sqlWhere(fn('lower', col('email')), String(email).toLowerCase().trim())
     });
 
     // Técnicos sin acceso (has_system_access = false) nunca reciben reset —
     // no tienen email real ni forma de iniciar sesión. Se ignora en silencio,
     // igual que un email inexistente, para no revelar su estado.
-    if (user && user.is_active && user.has_system_access) {
+    const user = rows.find((u) => u.is_active && u.has_system_access);
+    if (user) {
       const token = crypto.randomBytes(32).toString('hex');
       const expires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
@@ -136,6 +141,8 @@ const resetPassword = async (req, res) => {
       password_reset_token: null,
       password_reset_expires: null,
     });
+    // La misma contraseña en todas las empresas de la persona.
+    await require('../../services/auth/identity.service').setIdentityPassword(user, password_hash);
 
     return res.json({ success: true, message: 'Contraseña actualizada correctamente. Ya puedes iniciar sesión.' });
 

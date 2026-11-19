@@ -375,6 +375,19 @@ router.post(
   authMiddleware,
   checkPermission('superadmin.manage_all'),
   async (req, res) => {
+    // El correo ya no es único en la BD (una persona puede estar en varias
+    // empresas, ver services/auth/identity.service.js): el admin de una
+    // empresa nueva tiene que ser alguien nuevo. A una persona existente se
+    // la vincula después desde Usuarios de la empresa.
+    if (req.body.admin_email && req.body.admin_password) {
+      try {
+        await require('../services/auth/identity.service').assertEmailAvailable(req.body.admin_email);
+      } catch (e) {
+        if (e.status) return res.status(e.status).json({ success: false, message: 'El email del administrador ya está registrado en Pitbox. Crea la empresa con otro correo y vincula a esa persona desde Usuarios.' });
+        throw e;
+      }
+    }
+
     const transaction = await Tenant.sequelize.transaction();
 
     try {
@@ -2652,17 +2665,19 @@ router.post(
         return res.status(404).json({ error: 'Tenant no encontrado' });
       }
 
-      // Verificar si el email ya existe en el tenant
+      // El email es de una sola persona en todo Pitbox (ver
+      // services/auth/identity.service.js): si ya existe, se vincula desde
+      // Usuarios de la empresa (POST /users/link), no se crea otra cuenta.
       const existingUser = await User.findOne({
-        where: {
-          email,
-          tenant_id: tenantId,
-        },
+        where: require('../services/auth/identity.service').emailWhere(email),
+        attributes: ['id', 'tenant_id'],
       });
 
       if (existingUser) {
         return res.status(400).json({
-          error: 'El email ya está registrado en este tenant',
+          error: existingUser.tenant_id === tenantId
+            ? 'El email ya está registrado en este tenant'
+            : 'El email ya está registrado en Pitbox: vincúlalo desde Usuarios de la empresa',
         });
       }
 
@@ -2898,6 +2913,8 @@ router.put(
       // ✅ Siempre hashear la contraseña antes de guardar
       const hashedPassword = await bcrypt.hash(password, 10);
       await user.update({ password_hash: hashedPassword });
+      // La misma contraseña en todas las empresas de la persona.
+      await require('../services/auth/identity.service').setIdentityPassword(user, hashedPassword);
 
       res.json({ success: true, message: 'Contraseña reseteada exitosamente' });
     } catch (error) {

@@ -19,9 +19,11 @@ const User = sequelize.define('User', {
   email: {
     // Nullable: un técnico con has_system_access = false no tiene email
     // (nunca inicia sesión). Ver validador de modelo más abajo.
+    // Único por empresa (lower(email), tenant_id), no en toda la tabla: una
+    // persona en varias empresas tiene una fila en cada una con el mismo
+    // identity_id (migración 2026111802, services/auth/identity.service.js).
     type: DataTypes.STRING,
     allowNull: true,
-    unique: true,
     validate: {
       isEmail: true
     }
@@ -91,6 +93,13 @@ const User = sequelize.define('User', {
     allowNull: false,
     defaultValue: true
   },
+  // Persona dueña de la fila: todas sus filas (una por empresa) comparten
+  // identity_id y contraseña. Lo fija el hook beforeCreate (= id) salvo al
+  // vincular a alguien que ya existe. Ver services/auth/identity.service.js.
+  identity_id: {
+    type: DataTypes.UUID,
+    allowNull: true
+  },
   last_login: {
     type: DataTypes.DATE,
     allowNull: true
@@ -115,6 +124,9 @@ const User = sequelize.define('User', {
   createdAt: 'created_at',
   updatedAt: 'updated_at',
   hooks: {
+    beforeCreate(user) {
+      if (!user.identity_id) user.identity_id = user.id;
+    },
     beforeValidate(user) {
       if (user.email) {
         user.email = String(user.email).toLowerCase().trim();

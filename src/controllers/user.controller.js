@@ -3,6 +3,7 @@ const { Op } = require('sequelize');
 const { validationResult } = require('express-validator');
 const bcrypt = require('bcryptjs');
 const audit = require('../utils/audit');
+const identity = require('../services/auth/identity.service');
 const {
   addTenantScope,
   addTenantData,
@@ -178,6 +179,8 @@ const updateProfile = async (req, res) => {
       phone,
       address,
     });
+    // Nombre y teléfono iguales en todas las empresas de la persona.
+    await identity.syncIdentityProfile(user, { first_name, last_name, phone });
 
     const userResponse = user.toJSON();
     delete userResponse.password_hash;
@@ -234,9 +237,11 @@ const changePassword = async (req, res) => {
       });
     }
 
-    // Actualizar contraseña
+    // Actualizar contraseña -- en todas las empresas de la persona (una fila
+    // por empresa con la misma contraseña, ver services/auth/identity.service.js).
     const hashedPassword = await bcrypt.hash(new_password, 12);
     await user.update({ password_hash: hashedPassword });
+    await identity.setIdentityPassword(user, hashedPassword);
 
     setImmediate(() => audit({ tenant_id: user.tenant_id, user_id: user.id, action: 'CHANGE_PASSWORD', entity: 'user', entity_id: user.id, changes: {}, req }));
 
@@ -297,8 +302,26 @@ const createUser = async (req, res) => {
       // está en uso por OTRO tenant, un findOne con addTenantScope no lo ve, y
       // el User.create de más abajo revienta con SequelizeUniqueConstraintError
       // sin que el usuario reciba ningún mensaje claro.
-      const existingUser = await User.findOne({ where: { email } });
-      if (existingUser) {
+      // Si la persona ya trabaja en otra empresa, no se crea otra cuenta: se
+      // vincula (POST /users/link), conservando su contraseña.
+      const st = await identity.emailStatusForTenant(email, req.tenant_id);
+      if (st.status === 'linkable') {
+        return res.status(409).json({
+          success: false,
+          code: 'EMAIL_LINKABLE',
+          message: 'Este correo ya tiene una cuenta en Pitbox. Puedes vincularla a tu empresa: la persona entra con su misma contraseña.',
+        });
+      }
+      if (st.status === 'member') {
+        return res.status(409).json({
+          success: false,
+          code: 'ALREADY_MEMBER',
+          message: st.user.is_active
+            ? 'Esta persona ya es usuario de tu empresa'
+            : 'Esta persona ya es usuario de tu empresa pero está inactiva: actívala desde la lista',
+        });
+      }
+      if (st.status !== 'new') {
         return res.status(409).json({
           success: false,
           message: 'El email ya está registrado',
@@ -351,6 +374,119 @@ const createUser = async (req, res) => {
     });
   }
 };
+
+// ── Personas en varias empresas (contadores, auxiliares) ──────────────────────
+// Ver services/auth/identity.service.js.
+
+// GET /users/email-status?email=  -- antes de crear: ¿el correo ya es de
+// alguien? (new | member | linkable | unavailable). No dice en qué otras
+// empresas está la persona.
+const getEmailStatus = async (req, res) => {
+  try {
+    const email = String(req.query.email || '').trim();
+    if (!email) return res.status(400).json({ success: false, message: 'El email es requerido' });
+    const st = await identity.emailStatusForTenant(email, req.tenant_id);
+    const status = st.status === 'platform' ? 'unavailable' : st.status;
+    res.json({
+      success: true,
+      data: {
+        status,
+        is_active: st.status === 'member' ? st.user.is_active : undefined,
+      },
+    });
+  } catch (error) {
+    console.error('Error consultando email:', error);
+    res.status(500).json({ success: false, message: 'Error al consultar el email' });
+  }
+};
+
+// POST /users/link { email, role }  -- agrega a la empresa a alguien que ya
+// tiene cuenta en Pitbox (otra empresa). Entra con su misma contraseña; se le
+// avisa por correo.
+const linkUser = async (req, res) => {
+  try {
+    const email = String(req.body.email || '').trim();
+    const role = req.body.role;
+    const validRoles = ['admin', 'manager', 'seller', 'warehouse_keeper', 'inventory_lead', 'accountant', 'user', 'viewer', 'technician'];
+    if (!email) return res.status(400).json({ success: false, message: 'El email es requerido' });
+    if (!validRoles.includes(role)) {
+      return res.status(400).json({ success: false, message: 'Selecciona un rol válido' });
+    }
+    if (!req.tenant_id) return res.status(400).json({ success: false, message: 'Empresa no encontrada' });
+
+    const user = await identity.linkExistingUser({ email, tenantId: req.tenant_id, role });
+
+    // Sede principal por defecto: sin sede, cualquier rol que no sea admin cae
+    // en "Sin sede asignada" al entrar. El admin la ajusta después en Sedes.
+    if (role !== 'admin') {
+      try {
+        const { Branch, UserBranch } = require('../models');
+        const branch = await Branch.findOne({
+          where: { tenant_id: req.tenant_id, is_active: true },
+          order: [['is_main', 'DESC'], ['created_at', 'ASC']],
+        });
+        if (branch) await UserBranch.create({ user_id: user.id, branch_id: branch.id, is_default: true });
+      } catch (e) {
+        console.warn('[link-user] no se pudo asignar la sede principal:', e.message);
+      }
+    }
+
+    setImmediate(() => audit({
+      tenant_id: req.tenant_id, user_id: req.user.id, action: 'LINK_USER', entity: 'user', entity_id: user.id,
+      changes: { email: user.email, role }, req,
+    }));
+    setImmediate(() => notifyLinked(user, req.tenant_id, req.user.id).catch((e) => console.warn('[link-user] correo:', e.message)));
+
+    const userResponse = user.toJSON();
+    delete userResponse.password_hash;
+    res.status(201).json({
+      success: true,
+      message: `${user.first_name} ${user.last_name} quedó vinculado a tu empresa. Entra con su mismo correo y contraseña.`,
+      data: { user: userResponse },
+    });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ success: false, code: error.code, message: error.message });
+    if (error.name === 'SequelizeUniqueConstraintError') {
+      return res.status(409).json({ success: false, code: 'ALREADY_MEMBER', message: 'Esta persona ya es usuario de tu empresa' });
+    }
+    console.error('Error vinculando usuario:', error);
+    res.status(500).json({ success: false, message: 'Error al vincular el usuario' });
+  }
+};
+
+const ROLE_LABELS = {
+  admin: 'Administrador', manager: 'Gerente', seller: 'Vendedor', warehouse_keeper: 'Bodeguero',
+  inventory_lead: 'Líder de inventario', accountant: 'Contador', user: 'Usuario', viewer: 'Consulta', technician: 'Técnico',
+};
+
+async function notifyLinked(user, tenantId, byUserId) {
+  const Tenant = require('../models/auth/Tenant');
+  const { sendEmail } = require('../services/emailService');
+  const [tenant, byUser] = await Promise.all([
+    Tenant.findByPk(tenantId, { attributes: ['company_name'] }),
+    User.findByPk(byUserId, { attributes: ['first_name', 'last_name', 'email'] }),
+  ]);
+  const company = tenant?.company_name || 'una empresa';
+  const by = [byUser?.first_name, byUser?.last_name].filter(Boolean).join(' ') || byUser?.email || 'un administrador';
+  const url = process.env.FRONTEND_URL || 'http://localhost:5173';
+  const esc = (s) => String(s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  await sendEmail({
+    to: user.email,
+    subject: `Te agregaron a ${company} en Pitbox`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #CF3A0B;">Ahora también trabajas en ${esc(company)}</h2>
+        <p>Hola <strong>${esc(user.first_name)}</strong>,</p>
+        <p>${esc(by)} te agregó a <strong>${esc(company)}</strong> en Pitbox con el rol <strong>${esc(ROLE_LABELS[user.role] || user.role)}</strong>.</p>
+        <p>Entra con tu mismo correo y contraseña. Al iniciar sesión podrás elegir la empresa, y desde el menú de tu usuario cambiar de empresa sin cerrar sesión.</p>
+        <div style="text-align: center; margin: 30px 0;">
+          <a href="${url}/login" style="background: #CF3A0B; color: white; padding: 14px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; display: inline-block;">Entrar a Pitbox</a>
+        </div>
+        <p style="color: #6b7280; font-size: 14px;">Si no reconoces a esta empresa, avísale a su administrador o a soporte de Pitbox.</p>
+      </div>
+    `,
+  });
+}
 
 // Crear cliente (simplificado)
 const createClient = async (req, res) => {
@@ -479,6 +615,15 @@ const updateUser = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: 'La contraseña debe tener al menos 8 caracteres',
+        });
+      }
+      // Quien también trabaja en otras empresas usa UNA contraseña para
+      // todas: fijársela desde aquí sería entrar a esas empresas.
+      if (user.has_system_access && await identity.hasOtherAccounts(user)) {
+        return res.status(403).json({
+          success: false,
+          code: 'SHARED_IDENTITY',
+          message: 'Esta persona también trabaja en otras empresas: solo ella puede cambiar su contraseña (Mi Perfil o ¿Olvidaste tu contraseña?).',
         });
       }
       updateData.password_hash = await bcrypt.hash(password, 12);
@@ -868,6 +1013,8 @@ const getLimitsStatus = async (req, res) => {
 };
 
 module.exports = {
+  getEmailStatus,
+  linkUser,
   getAllUsers,
   getUserById,
   getProfile,

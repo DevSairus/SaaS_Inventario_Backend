@@ -116,6 +116,14 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ success: false, error: 'La contraseña debe tener al menos 8 caracteres' });
   }
   try {
+    // El correo ya no es único en la BD (ver services/auth/identity.service.js):
+    // un usuario de plataforma no puede compartirlo con nadie.
+    try {
+      await require('../../services/auth/identity.service').assertEmailAvailable(email);
+    } catch (e) {
+      if (e.status) return res.status(409).json({ success: false, error: 'El email ya está registrado' });
+      throw e;
+    }
     const access = normalizeAccess({ role: 'super_admin', ...req.body });
     const user = await sequelize.transaction(async (transaction) => {
       const created = await User.create({

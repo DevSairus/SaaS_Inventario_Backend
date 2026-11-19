@@ -31,6 +31,12 @@ router.put('/change-password', authLimiter, userController.changePassword);
 // Obtener todos los usuarios (admin, manager, seller, super_admin)
 router.get('/', checkRole('admin', 'manager', 'seller', 'super_admin'), userController.getAllUsers);
 
+// Personas en varias empresas (services/auth/identity.service.js): antes de
+// crear, ¿el correo ya es de alguien? y vincular a quien ya tiene cuenta.
+// Van antes de '/:id' para que Express no las tome como un id.
+router.get('/email-status', checkRole('admin', 'super_admin'), userController.getEmailStatus);
+router.post('/link', checkRole('admin', 'super_admin'), checkLimits('users'), userController.linkUser);
+
 // Obtener usuario por ID (admin, manager, seller, super_admin)
 router.get('/:id', checkRole('admin', 'manager', 'seller', 'super_admin'), userController.getUserById);
 
