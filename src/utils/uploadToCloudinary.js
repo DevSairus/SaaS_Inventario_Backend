@@ -1,4 +1,5 @@
 const logger = require('../config/logger');
+const { backendBaseUrl } = require('./publicBaseUrl');
 
 /**
  * Sube un archivo buffer a Cloudinary y devuelve { url, public_id, resource_type }.
@@ -80,8 +81,7 @@ const uploadToCloudinary = async (fileBuffer, originalName, folder, options = {}
   const filename = `${Date.now()}-${safeName}`;
   fs.writeFileSync(path.join(dir, filename), fileBuffer);
 
-  const port = process.env.PORT || 5001;
-  const base = (process.env.BACKEND_URL || `http://localhost:${port}`).replace(/\/$/, '').replace(/\/api$/, '');
+  const base = backendBaseUrl();
   return {
     url: `${base}/uploads/${safeFolder}/${filename}`,
     public_id: filename,

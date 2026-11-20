@@ -78,6 +78,12 @@ const CashSession = sequelize.define('CashSession', {
     type: DataTypes.DATE,
     allowNull: true,
   },
+  // Faltante al cerrar: 'loss' (gasto 519599) o 'employee' (CxC al cajero 136595).
+  shortage_treatment: { type: DataTypes.STRING(12), allowNull: true },
+  shortage_user_id: { type: DataTypes.UUID, allowNull: true },
+  // Correcciones posteriores del faltante: [{ id, date, type: 'found'|'repaid',
+  // amount, notes, user_id, journal_entry_id }]
+  adjustments: { type: DataTypes.JSONB, defaultValue: [] },
 }, {
   tableName: 'cash_sessions',
   underscored: true,

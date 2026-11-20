@@ -26,6 +26,7 @@ const PUC_COLOMBIA_STANDARD = [
   { code: '1305', name: 'Clientes', type: 'activo', parent_code: '13', accepts_entries: false },
   { code: '130505', name: 'Clientes Nacionales', type: 'activo', parent_code: '1305', accepts_entries: true },
   { code: '133015', name: 'Anticipos a Trabajadores', type: 'activo', parent_code: '13', accepts_entries: true },
+  { code: '136595', name: 'Cuentas por Cobrar a Trabajadores (faltantes de caja)', type: 'activo', parent_code: '13', accepts_entries: true },
   { code: '1355', name: 'Anticipo de Impuestos y Contribuciones', type: 'activo', parent_code: '13', accepts_entries: false },
   { code: '135515', name: 'IVA Descontable', type: 'activo', parent_code: '1355', accepts_entries: true },
   { code: '135520', name: 'Retención en la Fuente (a favor)', type: 'activo', parent_code: '1355', accepts_entries: true },
@@ -56,6 +57,7 @@ const PUC_COLOMBIA_STANDARD = [
 
   { code: '23', name: 'Cuentas por Pagar', type: 'pasivo', parent_code: '2', accepts_entries: false },
   { code: '233505', name: 'Costos y Gastos por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
+  { code: '233595', name: 'Mercancía Recibida por Facturar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236505', name: 'Retención en la Fuente por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236710', name: 'IVA Retenido por Pagar', type: 'pasivo', parent_code: '23', accepts_entries: true },
   { code: '236805', name: 'Retención de ICA', type: 'pasivo', parent_code: '23', accepts_entries: true },
@@ -214,6 +216,8 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   purchase_reteica_payable: '236805',    // Retención de ICA por Pagar
 
   expense_payable: '233505',            // gasto no pagado -> costos y gastos por pagar
+  // Orden de compra recibida sin factura del proveedor: transitoria hasta registrar la factura.
+  purchase_goods_received_not_invoiced: '233595',
   expense_cash_account: '110505',
   expense_bank_account: '111005',
   // Mismo caso que en compras, aplicado a gastos (Expense también calcula
@@ -232,6 +236,8 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
 
   cash_session_surplus: '429505',
   cash_session_shortage: '519599',
+  // Faltante cargado al cajero (cuenta por cobrar al trabajador) en vez de pérdida.
+  cash_session_shortage_employee: '136595',
 
   // Ajustes de inventario confirmados (manuales o de toma física) y consumo
   // interno: mismo criterio de "diferencia no explicada" que cash_session_*

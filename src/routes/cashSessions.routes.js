@@ -9,6 +9,8 @@ router.post('/open',          checkRole('admin', 'manager', 'accountant', 'selle
 router.get('/:id/summary',    checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getSessionSummary);
 router.get('/:id/payments',   checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getSessionPayments);
 router.post('/:id/close',     checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.closeSession);
+// Corregir un faltante después del cierre (dinero encontrado / empleado repone).
+router.post('/:id/adjustments', checkRole('admin', 'manager', 'accountant'), ctrl.addAdjustment);
 router.get('/:id',            checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.getSessionById);
 router.get('/',                checkRole('admin', 'manager', 'accountant', 'seller'), ctrl.listSessions);
 

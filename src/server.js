@@ -374,6 +374,8 @@ app.use('/api/customer-advances',              authMiddleware, tenantMiddleware,
 app.use('/api/customer-advance-alerts',        authMiddleware, tenantMiddleware, branchMiddleware, requireModule('receivables'), customerAdvanceAlertsRoutes);
 app.use('/api/tenant',                         authMiddleware, tenantMiddleware, tenantRoutes);
 app.use('/api/inventory/reports',              authMiddleware, tenantMiddleware, branchMiddleware, reportsRoutes);
+// Informes fiscales sin contabilidad (renta): no dependen del módulo contable.
+app.use('/api/fiscal-reports',                 authMiddleware, tenantMiddleware, require('./routes/fiscalReports.routes'));
 app.use('/api/invoice-import',                 authMiddleware, tenantMiddleware, branchMiddleware, invoiceImportRoutes);
 app.use('/api/users',                          authMiddleware, tenantMiddleware, userRoutes);
 

@@ -36,6 +36,14 @@ async function isIvaDeductible(tenantId, t) {
   return require('../../utils/fiscalResponsibilities').isIvaResponsibleForAccounting(tenant?.dian_config);
 }
 
+// ¿El IVA de ESTA compra va al costo? Sí cuando la empresa no es responsable
+// de IVA, o cuando la compra se registró con IVA no discriminado
+// (purchase.iva_to_cost, fijado al crearla por features.purchase_iva_to_cost).
+async function purchaseIvaToCost(purchase, tenantId, t) {
+  if (purchase?.iva_to_cost === true) return true;
+  return !(await isIvaDeductible(tenantId, t));
+}
+
 // Asignación directa (art. 490 E.T.): el IVA pagado en la compra de bienes
 // que el negocio vende como EXCLUIDOS no es descontable y va al costo.
 // Devuelve la fracción del IVA de la compra que corresponde a esas líneas
@@ -538,7 +546,7 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
       let inventory = Number(amounts.inventory || 0);
       let tax = Number(amounts.tax || 0);
       // No responsable de IVA: el IVA pagado va al costo del inventario.
-      if (tax > 0 && !(await isIvaDeductible(tenantId, t))) {
+      if (tax > 0 && (await purchaseIvaToCost(purchase, tenantId, t))) {
         inventory += tax;
         tax = 0;
       }
@@ -560,7 +568,7 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
       const netPayable = inventory + tax - totalRetentions;
 
       const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', t);
-      const lines = [{ account_id: inventoryAccount, debit: inventory, credit: 0, description: 'Ingreso de mercancía a inventario' }];
+      let lines = [{ account_id: inventoryAccount, debit: inventory, credit: 0, description: 'Ingreso de mercancía a inventario' }];
 
       if (tax > 0) {
         const ivaAccount = await getMappedAccountId(tenantId, 'purchase_iva_descontable', t);
@@ -623,16 +631,37 @@ async function generatePurchaseEntry(purchase, tenantId, userId, options = {}) {
         }
       }
 
+      // Orden de compra (sin factura del proveedor):
+      //  - receipt_only: al recibir, inventario contra la transitoria
+      //    "mercancía recibida por facturar" (sin IVA ni retenciones: aún no
+      //    hay factura que los soporte).
+      //  - invoice_only: al registrar la factura, la transitoria se cruza
+      //    contra proveedores, con su IVA descontable y sus retenciones.
+      // Las dos partes juntas suman exactamente el asiento normal.
+      if (options.mode === 'receipt_only' || options.mode === 'invoice_only') {
+        const transitAccount = await getMappedAccountId(tenantId, 'purchase_goods_received_not_invoiced', t);
+        if (options.mode === 'receipt_only') {
+          lines = [
+            lines[0],
+            { account_id: transitAccount, debit: 0, credit: inventory, description: 'Mercancía recibida pendiente de factura del proveedor', third_party_id: purchase.supplier_id || null },
+          ];
+        } else {
+          lines[0] = { account_id: transitAccount, debit: inventory, credit: 0, description: 'Cruce de mercancía recibida por facturar', third_party_id: purchase.supplier_id || null };
+        }
+      }
+
       const label = options.portion?.label ? ` — ${options.portion.label}` : '';
+      const modeLabel = options.mode === 'receipt_only' ? ' — recibida sin factura'
+        : options.mode === 'invoice_only' ? ` — factura proveedor ${purchase.invoice_number || ''}`.trimEnd() : '';
       const entry = await createDraftEntry(
         tenantId,
         {
           branchId: purchase.branch_id,
-          entryDate: options.portion?.entry_date || purchase.purchase_date || purchase.createdAt || new Date(),
+          entryDate: options.entry_date || options.portion?.entry_date || purchase.purchase_date || purchase.createdAt || new Date(),
           sourceType: 'purchase',
           sourceId: purchase.id,
           projectId: purchase.project_id || null,
-          description: `Compra ${purchase.purchase_number || purchase.id}${label}`,
+          description: `Compra ${purchase.purchase_number || purchase.id}${label}${modeLabel}`,
           lines,
           createdBy: userId,
         },
@@ -743,7 +772,11 @@ async function generateExpenseEntry(expense, tenantId, userId, options = {}) {
       const totalRetentions = retefuente + reteiva + reteica;
       const netPayable = total - totalRetentions;
 
-      const expenseAccount = await getMappedAccountId(tenantId, `expense_category:${expense.category}`, t);
+      // Flete de una compra cobrado por la transportadora: es costo del
+      // inventario (se repartió en el costo de los productos), no gasto.
+      const expenseAccount = expense.purchase_id
+        ? await getMappedAccountId(tenantId, 'purchase_inventory', t)
+        : await getMappedAccountId(tenantId, `expense_category:${expense.category}`, t);
       // Responsable de IVA: el IVA del gasto es descontable (antes todo el
       // total iba al gasto y ese IVA se perdía). No responsable: queda en el gasto.
       const expenseTax = Number(expense.tax_amount || 0);
@@ -869,10 +902,12 @@ async function generateCashSessionEntry(session, tenantId, userId, options = {})
           lines.push({ account_id: baseAccount, debit: diff, credit: 0, description: `Sobrante en caja — ${bucket}` });
           lines.push({ account_id: surplusAccount, debit: 0, credit: diff, description: `Sobrante en caja — ${bucket}` });
         } else {
-          // Faltante: contado < esperado
-          const shortageAccount = await getMappedAccountId(tenantId, 'cash_session_shortage', t);
+          // Faltante: contado < esperado. A cargo del cajero = cuenta por
+          // cobrar al trabajador; si no, pérdida (gasto diverso).
+          const toEmployee = session.shortage_treatment === 'employee';
+          const shortageAccount = await getMappedAccountId(tenantId, toEmployee ? 'cash_session_shortage_employee' : 'cash_session_shortage', t);
           const amount = Math.abs(diff);
-          lines.push({ account_id: shortageAccount, debit: amount, credit: 0, description: `Faltante en caja — ${bucket}` });
+          lines.push({ account_id: shortageAccount, debit: amount, credit: 0, description: `Faltante en caja — ${bucket}${toEmployee ? ' (a cargo del cajero)' : ''}` });
           lines.push({ account_id: baseAccount, debit: 0, credit: amount, description: `Faltante en caja — ${bucket}` });
         }
       }
@@ -898,6 +933,44 @@ async function generateCashSessionEntry(session, tenantId, userId, options = {})
       throw error;
     }
   }, `cierre de caja ${session.id}`, options);
+}
+
+/**
+ * Corrección de un faltante de caja ya cerrada: el dinero vuelve a caja (o
+ * bancos) contra la cuenta donde se cargó el faltante — la CxC del cajero
+ * o el gasto diverso.
+ */
+async function generateCashShortageAdjustmentEntry(session, adjustment, tenantId, userId, options = {}) {
+  return safeAutoGenerate(async () => {
+    const t = await sequelize.transaction();
+    try {
+      const amount = Number(adjustment.amount || 0);
+      const cashAccount = await getMappedAccountId(tenantId, adjustment.method === 'transferencia' ? 'sale_bank_account' : 'sale_cash_account', t);
+      const counterAccount = await getMappedAccountId(tenantId, session.shortage_treatment === 'employee' ? 'cash_session_shortage_employee' : 'cash_session_shortage', t);
+      const what = adjustment.type === 'repaid' ? 'Reposición del cajero' : 'Dinero encontrado';
+      const entry = await createDraftEntry(
+        tenantId,
+        {
+          branchId: session.branch_id,
+          entryDate: adjustment.date || new Date(),
+          sourceType: 'cash_session',
+          sourceId: session.id,
+          description: `${what} — faltante del cierre de caja ${session.session_date}`,
+          lines: [
+            { account_id: cashAccount, debit: amount, credit: 0, description: what },
+            { account_id: counterAccount, debit: 0, credit: amount, description: `${what} (corrige faltante)` },
+          ],
+          createdBy: userId,
+        },
+        t
+      );
+      await t.commit();
+      return entry;
+    } catch (error) {
+      await t.rollback();
+      throw error;
+    }
+  }, `corrección de caja ${session.id}`, options);
 }
 
 /**
@@ -1255,7 +1328,7 @@ async function generateSupplierReturnEntry(supplierReturn, items, purchase, tena
       let taxReturned = Number(supplierReturn.tax || 0);
       let inventoryReturned = totalReturned - taxReturned; // mismo criterio que generatePurchaseEntry: todo lo no-IVA es inventario
       // No responsable de IVA: el IVA estaba en el costo, sale con el inventario.
-      if (taxReturned > 0 && !(await isIvaDeductible(tenantId, t))) {
+      if (taxReturned > 0 && (await purchaseIvaToCost(purchase, tenantId, t))) {
         inventoryReturned += taxReturned;
         taxReturned = 0;
       }
@@ -2157,6 +2230,7 @@ async function generateBulkInventoryEntry({ description, totalValue }, tenantId,
 
 module.exports = {
   isIvaDeductible,
+  purchaseIvaToCost,
   generateSaleEntry,
   salePaymentsForEntry,
   generatePaymentEntry,
@@ -2168,6 +2242,7 @@ module.exports = {
   generateExpensePaymentEntry,
   purchaseExcludedIvaShare,
   generateCashSessionEntry,
+  generateCashShortageAdjustmentEntry,
   generateCustomerReturnEntry,
   generateCreditNoteEntry,
   generateDebitNoteEntry,

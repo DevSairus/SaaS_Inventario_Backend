@@ -44,6 +44,11 @@ const Expense = sequelize.define('Expense', {
     references: { model: 'suppliers', key: 'id' },
     comment: 'Proveedor asociado, si aplica (ej arriendo con un tercero registrado)'
   },
+  purchase_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
+    comment: 'Flete de una compra cobrado por otra empresa: se capitaliza al inventario (no va al gasto)'
+  },
   expense_date: {
     type: DataTypes.DATEONLY,
     allowNull: false,

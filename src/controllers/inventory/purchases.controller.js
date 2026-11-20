@@ -46,6 +46,17 @@ async function lineMarginsError(tenant_id, items = []) {
 
 // Pago de contado marcado al crear la compra (plazo 0). Se reemplaza si al
 // confirmar se indica otro pago, y se recalcula si se editan los ítems.
+const badRequest = (message) => Object.assign(new Error(message), { statusCode: 400 });
+
+// Transportadora que cobra el flete aparte. null = el flete viene en la
+// factura del mismo proveedor (comportamiento de siempre).
+async function resolveFreightSupplier(tenant_id, freightSupplierId, supplierId, transaction) {
+  if (!freightSupplierId || freightSupplierId === supplierId) return null;
+  const freightSupplier = await Supplier.findOne({ where: { id: freightSupplierId, tenant_id }, attributes: ['id', 'name'], transaction });
+  if (!freightSupplier) throw badRequest('Transportadora (proveedor del flete) no encontrada');
+  return freightSupplier;
+}
+
 const CREATION_CASH_SOURCE = 'creation_cash';
 const creationCashPayment = (amount, method, date, user_id) => ({
   ...newPaymentRecord({ date, amount, method, user_id, notes: 'Compra de contado' }),
@@ -67,7 +78,8 @@ const getPurchases = async (req, res) => {
       sort_by = 'purchase_date',
       sort_order = 'DESC',
       page = 1,
-      limit = 10
+      limit = 10,
+      kind,
     } = req.query;
 
     const tenant_id = req.user.tenant_id;
@@ -96,6 +108,11 @@ const getPurchases = async (req, res) => {
 
     if (status) {
       where.status = status;
+    }
+
+    // Pestañas de Compras: órdenes (sin factura del proveedor) / facturas.
+    if (kind === 'order' || kind === 'invoice') {
+      where.purchase_kind = kind;
     }
 
     if (start_date) {
@@ -215,12 +232,16 @@ const createPurchase = async (req, res) => {
       requires_support_document,
       applied_retentions,
       project_id,
+      purchase_kind,
+      freight_supplier_id,
+      invoice_date,
     } = req.body;
 
     // Validaciones
     if (!supplier_id || !items || items.length === 0) {
-      throw new Error('Proveedor y al menos un producto son requeridos');
+      throw badRequest('Proveedor y al menos un producto son requeridos');
     }
+    const freightSupplier = await resolveFreightSupplier(tenant_id, freight_supplier_id, supplier_id, t);
     const marginError = await lineMarginsError(tenant_id, items);
     if (marginError) {
       await t.rollback();
@@ -344,13 +365,16 @@ const createPurchase = async (req, res) => {
       });
     }
 
-    const total_amount = subtotal + tax_amount + inc_total - parseFloat(discount_amount) + parseFloat(shipping_cost);
+    // Flete de una transportadora: no se le debe al proveedor de la compra
+    // (es un gasto aparte), aunque sí se reparte en el costo de los productos.
+    const total_amount = subtotal + tax_amount + inc_total - parseFloat(discount_amount)
+      + (freightSupplier ? 0 : parseFloat(shipping_cost));
 
     // Calcular retenciones (Fase C) — el tenant, como comprador, puede
     // retener a este proveedor en ReteFuente/ReteIVA/ReteICA. No se aplica
     // si el proveedor está exento, o si el proveedor mismo es autorretenedor
     // (así el tenant no lo sea) — ver taxService.calculateRetentions.
-    const tenantForRetentions = await Tenant.findByPk(tenant_id, { attributes: ['tax_config'], transaction: t });
+    const tenantForRetentions = await Tenant.findByPk(tenant_id, { attributes: ['tax_config', 'features'], transaction: t });
     // Motor de retenciones: perfil del tenant + del proveedor + concepto de
     // cada ítem (ver services/retentionEngine.service.js).
     const retentions = await computePurchaseRetentions({
@@ -404,6 +428,12 @@ const createPurchase = async (req, res) => {
       ...taxService.purchaseRetentionFields(retentions),
       tax_breakdown,
       requires_support_document: effectiveRequiresSupportDocument,
+      // Orden de compra = sin factura del proveedor todavía; con número de
+      // factura ya es una compra facturada.
+      purchase_kind: purchase_kind === 'order' && !invoice_number ? 'order' : 'invoice',
+      invoice_date: invoice_number ? (invoice_date || null) : null,
+      iva_to_cost: tenantForRetentions?.features?.purchase_iva_to_cost === true ? true : null,
+      freight_supplier_id: freightSupplier?.id || null,
     }, { transaction: t });
 
     // Crear los items en un solo INSERT, con las mismas validaciones que
@@ -455,9 +485,12 @@ const createPurchase = async (req, res) => {
     }
     
     console.error('Error en createPurchase:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: process.env.NODE_ENV === 'development' ? (error.message || 'Error al crear compra') : 'Error al crear compra'
+    // Validaciones (producto/proveedor no encontrado, datos faltantes): el
+    // mensaje dice qué falta; solo un error inesperado queda genérico.
+    const status = error.statusCode || (/no encontrad|requerid/i.test(error.message || '') ? 400 : 500);
+    res.status(status).json({
+      success: false,
+      message: status < 500 || process.env.NODE_ENV === 'development' ? (error.message || 'Error al crear compra') : 'Error al crear compra'
     });
   }
 };
@@ -522,6 +555,9 @@ const updatePurchase = async (req, res) => {
       requires_support_document,
       applied_retentions,
       project_id,
+      purchase_kind,
+      freight_supplier_id,
+      invoice_date,
     } = req.body;
 
     const marginError = await lineMarginsError(tenant_id, items || []);
@@ -538,6 +574,22 @@ const updatePurchase = async (req, res) => {
       return res.status(e.statusCode || 400).json({ success: false, message: e.message });
     }
     const projectFields = project === undefined ? {} : { project_id: project?.id || null };
+
+    let freightSupplier;
+    try {
+      freightSupplier = freight_supplier_id === undefined
+        ? (purchase.freight_supplier_id ? { id: purchase.freight_supplier_id } : null)
+        : await resolveFreightSupplier(tenant_id, freight_supplier_id, supplier_id || purchase.supplier_id, t);
+    } catch (e) {
+      await t.rollback();
+      return res.status(e.statusCode || 400).json({ success: false, message: e.message });
+    }
+    const effectiveInvoice = invoice_number !== undefined ? (invoice_number || null) : purchase.invoice_number;
+    const kindFields = {
+      freight_supplier_id: freightSupplier?.id || null,
+      purchase_kind: (purchase_kind ?? purchase.purchase_kind) === 'order' && !effectiveInvoice ? 'order' : 'invoice',
+      invoice_date: effectiveInvoice ? (invoice_date !== undefined ? (invoice_date || null) : purchase.invoice_date) : null,
+    };
     // Editar una compra pendiente o aprobada anula la aprobación: el monto,
     // el proveedor o el proyecto pueden haber cambiado.
     if (purchase.approval_status) {
@@ -617,7 +669,7 @@ const updatePurchase = async (req, res) => {
 
       const total_amount = subtotal + tax_amount + inc_total -
         parseFloat(discount_amount || 0) +
-        parseFloat(shipping_cost || 0);
+        (freightSupplier ? 0 : parseFloat(shipping_cost || 0));
 
       // Retenciones (Fase C) — recalcular con el proveedor efectivo (puede
       // venir cambiado en el mismo request) y su retention_config vigente.
@@ -673,6 +725,7 @@ const updatePurchase = async (req, res) => {
         // Retenciones (Fase C) — agregadas por tipo + detalle por concepto
         ...taxService.purchaseRetentionFields(retentions),
         tax_breakdown,
+        ...kindFields,
         // Borrador de contado: el pago marcado al crear sigue al nuevo neto.
         ...cashDraftPaymentRefresh(purchase, round2(total_amount - retentions.total)),
       }, { transaction: t });
@@ -724,6 +777,12 @@ const updatePurchase = async (req, res) => {
         ...projectFields,
         requires_support_document: requires_support_document !== undefined ? !!requires_support_document : purchase.requires_support_document,
         ...retentionFields,
+        ...kindFields,
+        // Flete o descuento cambiados sin reenviar ítems: el total se recalcula.
+        total_amount: round2(Number(purchase.subtotal || 0) + Number(purchase.tax_amount || 0)
+          + (purchase.items || []).reduce((acc, it) => acc + Number(it.inc_amount || 0), 0)
+          - (discount_amount !== undefined ? parseFloat(discount_amount) || 0 : Number(purchase.discount_amount || 0))
+          + (freightSupplier ? 0 : (shipping_cost !== undefined ? parseFloat(shipping_cost) || 0 : Number(purchase.shipping_cost || 0)))),
       }, { transaction: t });
     }
 
@@ -755,9 +814,10 @@ const updatePurchase = async (req, res) => {
       data: updatedPurchase
     });
   } catch (error) {
-    await t.rollback();
+    if (!t.finished) await t.rollback();
     console.error('Error en updatePurchase:', error);
-    res.status(500).json({ success: false, message: 'Error al actualizar compra'});
+    const status = error.statusCode || (/no encontrad|requerid/i.test(error.message || '') ? 400 : 500);
+    res.status(status).json({ success: false, message: status < 500 ? error.message : 'Error al actualizar compra' });
   }
 };
 
@@ -1017,7 +1077,7 @@ const receivePurchase = async (req, res) => {
       ? String(receipt_date).slice(0, 10)
       : (purchase.purchase_date ? new Date(purchase.purchase_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
     const receiptItems = [];
-    const ivaDeductible = await require('../../services/accounting/autoEntries.service').isIvaDeductible(tenant_id);
+    const ivaDeductible = !(await require('../../services/accounting/autoEntries.service').purchaseIvaToCost(purchase, tenant_id));
 
     // Todo en bloque (antes ~14 consultas por línea, en serie: una compra de
     // 150 líneas pasaba de 2.000 consultas y superaba el límite de 30 s del
@@ -1144,21 +1204,64 @@ const receivePurchase = async (req, res) => {
         ? { inventory: portion.inventory, tax: portion.tax, retefuente: portion.retefuente, reteiva: portion.reteiva, reteica: portion.reteica, retention_lines: portion.retention_lines }
         : null,
       journal_entry_id: null,
+      // Orden de compra sin factura: el asiento de esta recepción va contra la
+      // transitoria; al registrar la factura se cruza (invoice_entry_id).
+      pending_invoice: purchase.purchase_kind === 'order' && !purchase.invoice_number,
     };
+
+    // Flete de una transportadora: con la primera recepción se causa como
+    // gasto aparte (cuenta por pagar a la transportadora) que se capitaliza
+    // al inventario -- el costo ya lo incluye vía resolveLandedPurchaseUnitCost.
+    let freightExpense = null;
+    if (purchase.freight_supplier_id && Number(purchase.shipping_cost || 0) > 0 && !purchase.freight_expense_id) {
+      const { Expense } = require('../../models');
+      const { generateExpenseNumber } = require('../finance/expenses.controller');
+      const freight = round2(purchase.shipping_cost);
+      freightExpense = await Expense.create({
+        tenant_id,
+        branch_id: purchase.branch_id || req.branch_id || null,
+        expense_number: await generateExpenseNumber(tenant_id, t),
+        category: 'transporte',
+        description: `Flete de la compra ${purchase.purchase_number}`,
+        supplier_id: purchase.freight_supplier_id,
+        purchase_id: purchase.id,
+        expense_date: movementDate,
+        total_amount: freight,
+        subtotal: freight,
+        tax_rate: 0,
+        tax_amount: 0,
+        iva_status: 'excluido',
+        payment_status: 'pending',
+        paid_amount: 0,
+        payment_history: [],
+        notes: 'Flete capitalizado al costo de los productos de la compra',
+        project_id: purchase.project_id || null,
+        created_by: req.user.id,
+      }, { transaction: t });
+    }
 
     await purchase.update({
       status: finalReceipt ? 'received' : 'partially_received',
       received_date: finalReceipt ? new Date() : purchase.received_date,
       receipts: [...previousReceipts, receipt],
+      ...(freightExpense ? { freight_expense_id: freightExpense.id } : {}),
     }, { transaction: t });
 
     await t.commit();
+
+    if (freightExpense) {
+      require('../../services/accounting/autoEntries.service').generateExpenseEntry(freightExpense, tenant_id, req.user.id)
+        .catch((err) => require('../../config/logger').warn(`[accounting] Error generando asiento del flete ${freightExpense.id}: ${err.message}`));
+    }
 
     // Asiento de esta recepción y de pagos pendientes (no bloqueante: si
     // falla, se loguea y queda para "Salud contable").
     try {
       const { generatePurchaseEntry } = require('../../services/accounting/autoEntries.service');
-      const entry = await generatePurchaseEntry(purchase, tenant_id, req.user.id, portion ? { portion } : {});
+      const entry = await generatePurchaseEntry(purchase, tenant_id, req.user.id, {
+        ...(portion ? { portion } : {}),
+        ...(receipt.pending_invoice ? { mode: 'receipt_only' } : {}),
+      });
       if (entry?.id) {
         const fresh = await Purchase.findByPk(purchase.id);
         await fresh.update({
@@ -1362,11 +1465,46 @@ const registerSupplierInvoice = async (req, res) => {
       return res.status(409).json({ success: false, message: `Esa factura ya está registrada en la compra ${duplicate.purchase_number}` });
     }
 
-    const updates = { invoice_number };
+    const invoiceDate = req.body?.invoice_date ? String(req.body.invoice_date).slice(0, 10) : null;
+    const wasOrder = purchase.purchase_kind === 'order';
+    const updates = { invoice_number, purchase_kind: 'invoice' };
+    if (invoiceDate) updates.invoice_date = invoiceDate;
     if (due_date) updates.due_date = String(due_date).slice(0, 10);
     await purchase.update(updates);
+
+    // Orden de compra → factura: lo recibido sin factura se cruza de la
+    // transitoria a proveedores (con IVA y retenciones), un asiento por
+    // recepción pendiente. No bloquea: si falla queda en Salud contable.
+    let crossed = 0;
+    if (wasOrder) {
+      const { generatePurchaseEntry } = require('../../services/accounting/autoEntries.service');
+      const receipts = Array.isArray(purchase.receipts) ? purchase.receipts : [];
+      const pending = receipts.filter((r) => r.pending_invoice && !r.invoice_entry_id);
+      const done = {};
+      for (const r of pending) {
+        try {
+          const entry = await generatePurchaseEntry(purchase, tenant_id, req.user.id, {
+            mode: 'invoice_only',
+            entry_date: invoiceDate || new Date(),
+            ...(r.amounts ? { portion: { ...r.amounts, label: `Recepción ${r.number}` } } : {}),
+          });
+          if (entry?.id) { done[r.id] = entry.id; crossed += 1; }
+        } catch (err) {
+          require('../../config/logger').warn(`[accounting] Error cruzando la recepción ${r.number} de la compra ${purchase.id}: ${err.message}`);
+        }
+      }
+      if (Object.keys(done).length) {
+        await purchase.update({ receipts: receipts.map((r) => (done[r.id] ? { ...r, invoice_entry_id: done[r.id] } : r)) });
+      }
+    }
+
     markPurchaseForAlertCheck(res, purchase.id, tenant_id);
-    res.json({ success: true, message: 'Factura del proveedor registrada', data: purchase });
+    res.json({
+      success: true,
+      message: wasOrder ? 'Orden convertida en factura del proveedor' : 'Factura del proveedor registrada',
+      data: purchase,
+      crossed_receipts: crossed,
+    });
   } catch (error) {
     console.error('Error en registerSupplierInvoice:', error);
     res.status(500).json({ success: false, message: 'Error registrando la factura del proveedor' });
@@ -1591,6 +1729,11 @@ const getPurchaseStats = async (req, res) => {
       where: { tenant_id, status: 'cancelled' }
     });
 
+    // Órdenes de compra abiertas (sin factura del proveedor, no canceladas).
+    const openOrders = await Purchase.count({
+      where: { tenant_id, purchase_kind: 'order', status: { [Op.ne]: 'cancelled' } }
+    });
+
     // Total gastado este mes
     const startOfMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     const totalThisMonth = await Purchase.sum('total_amount', {
@@ -1610,6 +1753,7 @@ const getPurchaseStats = async (req, res) => {
         received: receivedPurchases,
         partially_received: partiallyReceivedPurchases,
         cancelled: cancelledPurchases,
+        open_orders: openOrders,
         total_this_month: parseFloat(totalThisMonth)
       }
     });

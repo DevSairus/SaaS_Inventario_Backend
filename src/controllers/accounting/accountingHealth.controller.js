@@ -66,7 +66,9 @@ async function generateEntryForSource(sourceType, sourceId, tenantId, userId, op
     case 'purchase': {
       const purchase = await Purchase.findOne({ where: { id: sourceId, tenant_id: tenantId } });
       if (!purchase) throw Object.assign(new Error('Compra no encontrada'), { statusCode: 404 });
-      return generatePurchaseEntry(purchase, tenantId, userId, options);
+      // Orden de compra aún sin factura: solo la parte de inventario contra la transitoria.
+      const orderMode = purchase.purchase_kind === 'order' && !purchase.invoice_number ? { mode: 'receipt_only' } : {};
+      return generatePurchaseEntry(purchase, tenantId, userId, { ...options, ...orderMode });
     }
     case 'expense': {
       const expense = await Expense.findOne({ where: { id: sourceId, tenant_id: tenantId } });

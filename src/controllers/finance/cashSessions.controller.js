@@ -159,7 +159,7 @@ const closeSession = async (req, res) => {
     const tenant_id = req.user.tenant_id;
     const user_id = req.user.id;
     const { id } = req.params;
-    const { counted_amounts, notes } = req.body;
+    const { counted_amounts, notes, shortage_treatment, shortage_user_id } = req.body;
 
     const session = await CashSession.findOne({ where: { id, tenant_id } });
     if (!session) return res.status(404).json({ success: false, message: 'Caja no encontrada' });
@@ -183,6 +183,20 @@ const closeSession = async (req, res) => {
       differences[k] = Math.round((counted[k] - expected[k]) * 100) / 100;
     });
 
+    // Faltante: pérdida del negocio (gasto) o cuenta por cobrar al cajero
+    // responsable (por defecto quien abrió la caja).
+    const shortage = totalShortage(differences);
+    let shortageFields = {};
+    if (shortage > 0) {
+      const treatment = shortage_treatment === 'employee' ? 'employee' : 'loss';
+      let responsible = null;
+      if (treatment === 'employee') {
+        responsible = await User.findOne({ where: { id: shortage_user_id || session.opened_by, tenant_id }, attributes: ['id'] });
+        if (!responsible) return res.status(400).json({ success: false, message: 'Selecciona el empleado responsable del faltante' });
+      }
+      shortageFields = { shortage_treatment: treatment, shortage_user_id: responsible?.id || null };
+    }
+
     await session.update({
       status: 'closed',
       expected_amounts: expected,
@@ -191,6 +205,7 @@ const closeSession = async (req, res) => {
       closing_notes: notes || null,
       closed_by: user_id,
       closed_at: new Date(),
+      ...shortageFields,
     });
 
     // Asiento contable en borrador si hubo sobrante/faltante (no bloqueante:
@@ -293,4 +308,78 @@ const getSessionPayments = async (req, res) => {
   }
 };
 
-module.exports = { getCurrentSession, openSession, getSessionSummary, closeSession, listSessions, getSessionById, getSessionPayments, calculateExpected, normalizeMethod };
+const round2 = (n) => Math.round(Number(n || 0) * 100) / 100;
+// Faltante total del cierre (suma de las diferencias negativas, en positivo).
+function totalShortage(differences = {}) {
+  return round2(Object.values(differences || {}).reduce((acc, v) => acc + (Number(v) < 0 ? -Number(v) : 0), 0));
+}
+// Lo que queda del faltante después de las correcciones registradas.
+function outstandingShortage(session) {
+  const adjusted = (session.adjustments || []).reduce((acc, a) => acc + Number(a.amount || 0), 0);
+  return round2(Math.max(totalShortage(session.differences) - adjusted, 0));
+}
+
+// POST /api/cash-sessions/:id/adjustments  { type: 'found' | 'repaid', amount, notes, method }
+//
+// Corrige el faltante de una caja YA cerrada, sin reabrirla: "found" = el
+// dinero apareció (conteo errado); "repaid" = el empleado lo repuso. Queda
+// el rastro (quién, cuándo, cuánto) y un asiento que devuelve el valor a
+// caja contra la misma cuenta donde se cargó el faltante.
+const addAdjustment = async (req, res) => {
+  try {
+    const tenant_id = req.user.tenant_id;
+    const { type, notes } = req.body || {};
+    const amount = round2(req.body?.amount);
+    const method = req.body?.method === 'transferencia' ? 'transferencia' : 'efectivo';
+    if (!['found', 'repaid'].includes(type)) return res.status(400).json({ success: false, message: 'Tipo de corrección inválido' });
+    if (!(amount > 0)) return res.status(400).json({ success: false, message: 'Indica el valor de la corrección' });
+
+    const session = await CashSession.findOne({ where: { id: req.params.id, tenant_id } });
+    if (!session) return res.status(404).json({ success: false, message: 'Caja no encontrada' });
+    if (session.status !== 'closed') return res.status(400).json({ success: false, message: 'La caja sigue abierta: corrige el conteo al cerrarla' });
+    const outstanding = outstandingShortage(session);
+    if (outstanding <= 0) return res.status(400).json({ success: false, message: 'Esta caja no tiene faltante pendiente' });
+    if (amount > outstanding + 0.009) {
+      return res.status(400).json({ success: false, message: `El valor supera el faltante pendiente ($${outstanding.toLocaleString('es-CO')})` });
+    }
+    if (type === 'repaid' && session.shortage_treatment !== 'employee') {
+      return res.status(400).json({ success: false, message: 'El faltante se registró como pérdida, no a cargo de un empleado: usa "Dinero encontrado"' });
+    }
+
+    const adjustment = {
+      id: require('crypto').randomUUID(),
+      date: new Date().toISOString(),
+      type,
+      amount,
+      method,
+      notes: notes ? String(notes).slice(0, 500) : null,
+      user_id: req.user.id,
+      journal_entry_id: null,
+    };
+    await session.update({ adjustments: [...(session.adjustments || []), adjustment] });
+
+    try {
+      const { generateCashShortageAdjustmentEntry } = require('../../services/accounting/autoEntries.service');
+      const entry = await generateCashShortageAdjustmentEntry(session, adjustment, tenant_id, req.user.id);
+      if (entry?.id) {
+        await session.update({
+          adjustments: (session.adjustments || []).map((a) => (a.id === adjustment.id ? { ...a, journal_entry_id: entry.id } : a)),
+        });
+      }
+    } catch (err) {
+      require('../../config/logger').warn(`[accounting] Error generando asiento de corrección de caja ${session.id}: ${err.message}`);
+    }
+
+    res.json({
+      success: true,
+      message: type === 'found' ? 'Dinero encontrado registrado' : 'Reposición del empleado registrada',
+      data: session,
+      outstanding_shortage: outstandingShortage(session),
+    });
+  } catch (error) {
+    console.error('Error registrando corrección de caja:', error);
+    res.status(500).json({ success: false, message: 'Error registrando la corrección' });
+  }
+};
+
+module.exports = { getCurrentSession, openSession, getSessionSummary, closeSession, listSessions, getSessionById, getSessionPayments, calculateExpected, normalizeMethod, addAdjustment, outstandingShortage, totalShortage };

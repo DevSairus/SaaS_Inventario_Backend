@@ -166,6 +166,18 @@ const Purchase = sequelize.define('Purchase', {
     allowNull: true,
     comment: 'Número de factura del proveedor'
   },
+  invoice_date: { type: DataTypes.DATEONLY, allowNull: true, comment: 'Fecha de la factura del proveedor' },
+  // 'invoice' = compra con factura (de siempre); 'order' = orden de compra:
+  // entra al inventario sin factura contra la transitoria 233595 y pasa a
+  // factura (2205) al registrar el número (ver registerSupplierInvoice).
+  purchase_kind: { type: DataTypes.STRING(10), allowNull: false, defaultValue: 'invoice', validate: { isIn: [['invoice', 'order']] } },
+  // IVA no discriminado: va al costo del inventario. Se fija al crear la
+  // compra con features.purchase_iva_to_cost; null = regla del tenant.
+  iva_to_cost: { type: DataTypes.BOOLEAN, allowNull: true },
+  // Flete cobrado por una transportadora: gasto aparte (freight_expense_id)
+  // que se capitaliza al inventario; shipping_cost no suma al total.
+  freight_supplier_id: { type: DataTypes.UUID, allowNull: true },
+  freight_expense_id: { type: DataTypes.UUID, allowNull: true },
   order_number: {
     type: DataTypes.STRING(100),
     allowNull: true

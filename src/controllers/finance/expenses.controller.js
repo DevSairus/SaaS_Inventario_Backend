@@ -387,6 +387,10 @@ const deleteExpense = async (req, res) => {
     if (parseFloat(expense.paid_amount || 0) > 0) {
       return res.status(400).json({ success: false, message: 'No se puede eliminar un gasto con pagos registrados' });
     }
+    // El flete ya está dentro del costo de los productos recibidos.
+    if (expense.purchase_id) {
+      return res.status(400).json({ success: false, message: 'Este gasto es el flete de una compra ya recibida y está incluido en el costo de sus productos: no se puede eliminar.' });
+    }
     // Documento Soporte ya enviado o aceptado: la DIAN lo tiene, borrar el
     // gasto lo dejaría huérfano. Uno rechazado no tiene validez y no bloquea.
     const { SupportDocument } = require('../../models');

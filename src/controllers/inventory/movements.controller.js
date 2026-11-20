@@ -162,93 +162,183 @@ const getMovements = async (req, res) => {
 };
 
 /**
- * Obtener kardex de un producto (historial completo de movimientos)
+ * Kardex de un producto: movimientos con saldo en cantidad y en valor
+ * (costo de cada movimiento tal como quedó registrado), saldo inicial del
+ * rango, y datos para decidir: último costo/compra, última venta, precio,
+ * utilidad configurada vs. realizada en el periodo.
+ *
+ * Con `warehouse_id` el saldo se acumula solo con los movimientos de esa
+ * bodega (arranca en 0); sin él, parte del stock previo del primer
+ * movimiento (previous_stock es el stock global del producto).
  */
 const getProductKardex = async (req, res) => {
   try {
     const { product_id } = req.params;
-    const { start_date, end_date } = req.query;
+    const { start_date, end_date, warehouse_id } = req.query;
     const tenant_id = req.user.tenant_id;
+    const isDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''));
+    if ((start_date && !isDate(start_date)) || (end_date && !isDate(end_date))) {
+      return res.status(400).json({ success: false, message: 'Fechas inválidas. Use YYYY-MM-DD' });
+    }
 
-    const where = {
-      tenant_id,
-      product_id
+    const product = await Product.findOne({ where: { id: product_id, tenant_id } });
+    if (!product) return res.status(404).json({ success: false, message: 'Producto no encontrado' });
+
+    // Todo el historial hasta end_date (el saldo inicial del rango sale de
+    // lo anterior a start_date).
+    const where = { tenant_id, product_id };
+    if (warehouse_id) where.warehouse_id = warehouse_id;
+    if (end_date) where.movement_date = { [Op.lte]: end_date };
+    const all = await InventoryMovement.findAll({
+      where,
+      include: [{ model: Warehouse, as: 'warehouse', attributes: ['id', 'name'], required: false }],
+      order: [['movement_date', 'ASC'], ['created_at', 'ASC']],
+    });
+
+    const r2 = (n) => Math.round(n * 100) / 100;
+    let qty = 0;
+    let value = 0;
+    if (!warehouse_id && all.length) {
+      qty = parseFloat(all[0].previous_stock) || 0;
+      value = qty * (parseFloat(all[0].unit_cost) || parseFloat(product.average_cost) || 0);
+    }
+    let opening = start_date ? null : { qty: r2(qty), value: r2(value) };
+    const inRange = [];
+    const totals = { in_qty: 0, in_value: 0, out_qty: 0, out_value: 0 };
+    for (const m of all) {
+      const date = String(m.movement_date).slice(0, 10);
+      if (start_date && opening === null && date >= start_date) opening = { qty: r2(qty), value: r2(value) };
+      const q = parseFloat(m.quantity) || 0;
+      const cost = parseFloat(m.total_cost) || q * (parseFloat(m.unit_cost) || 0);
+      const sign = m.direction === 'in' ? 1 : (m.direction === 'out' ? -1 : 0);
+      qty += sign * q;
+      value += sign * cost;
+      if (start_date && date < start_date) continue;
+      if (sign > 0) { totals.in_qty += q; totals.in_value += cost; }
+      if (sign < 0) { totals.out_qty += q; totals.out_value += cost; }
+      inRange.push({
+        ...m.toJSON(),
+        balance_qty: r2(qty),
+        balance_value: r2(value),
+        balance_avg_cost: qty > 0 ? r2(value / qty) : null,
+      });
+    }
+    if (opening === null) opening = { qty: r2(qty), value: r2(value) };
+
+    // Ventas del producto en el rango (neto de devoluciones aprobadas):
+    // unidades, ingreso, costo y utilidad realizada; y la última venta.
+    const { sequelize } = require('../../config/database');
+    const { QueryTypes } = require('sequelize');
+    const { remisionSqlCondition } = require('../../utils/remisionVisibility');
+    const schema = getCurrentSchema() || 'public';
+    const rangeSql = [
+      start_date ? 'AND COALESCE(s.sale_date, s.created_at)::date >= :startDate' : '',
+      end_date ? 'AND COALESCE(s.sale_date, s.created_at)::date <= :endDate' : '',
+    ].join(' ');
+    const baseSql = `
+      FROM "${schema}"."sale_items" si
+      INNER JOIN "${schema}"."sales" s ON s.id = si.sale_id
+      LEFT JOIN (
+        SELECT cri.sale_item_id, SUM(cri.quantity)::numeric AS rq, SUM(cri.subtotal)::numeric AS rs
+        FROM "${schema}"."customer_return_items" cri
+        INNER JOIN "${schema}"."customer_returns" cr ON cr.id = cri.return_id
+        WHERE cr.tenant_id = :tenantId AND cr.status = 'approved'
+        GROUP BY cri.sale_item_id
+      ) ret ON ret.sale_item_id = si.id
+      WHERE s.tenant_id = :tenantId AND si.product_id = :productId
+        AND s.status IN ('completed', 'pending')
+        AND (s.document_type IS NULL OR s.document_type::text <> 'cotizacion')
+        AND ${remisionSqlCondition(req, 's')}`;
+    const replacements = { tenantId: tenant_id, productId: product_id, startDate: start_date || null, endDate: end_date || null };
+    const [salesRow] = await sequelize.query(`
+      SELECT COUNT(DISTINCT s.id)::int AS sales_count,
+        COALESCE(SUM(si.quantity - COALESCE(ret.rq, 0)), 0)::numeric AS qty,
+        COALESCE(SUM(si.subtotal - COALESCE(ret.rs, 0)), 0)::numeric AS revenue,
+        COALESCE(SUM((si.quantity - COALESCE(ret.rq, 0)) * CASE WHEN si.unit_cost > 0 THEN si.unit_cost ELSE :avgCost END), 0)::numeric AS cost
+      ${baseSql} ${rangeSql}`, {
+      replacements: { ...replacements, avgCost: parseFloat(product.average_cost) || 0 }, type: QueryTypes.SELECT,
+    });
+    const [lastSale] = await sequelize.query(`
+      SELECT s.id, s.sale_number, COALESCE(s.sale_date, s.created_at)::date AS sale_date, s.customer_name,
+        si.quantity, si.unit_price
+      ${baseSql}
+      ORDER BY COALESCE(s.sale_date, s.created_at) DESC, s.created_at DESC LIMIT 1`, {
+      replacements, type: QueryTypes.SELECT,
+    });
+
+    const { productSalePrice, impliedMargin } = require('../../utils/salePricing');
+    const { getMarginMethod } = require('../../services/inventory/productMargin.service');
+    const method = await getMarginMethod(tenant_id);
+    const price = productSalePrice(product);
+    const avgCost = parseFloat(product.average_cost) || 0;
+    const stock = parseFloat(product.current_stock) || 0;
+    const revenue = parseFloat(salesRow?.revenue) || 0;
+    const soldCost = parseFloat(salesRow?.cost) || 0;
+    const daysSince = (d) => {
+      if (!d) return null;
+      const t = new Date(`${String(d).slice(0, 10)}T12:00:00`).getTime();
+      return Number.isFinite(t) ? Math.floor((Date.now() - t) / 86400000) : null;
     };
 
-    if (start_date) {
-      where.movement_date = {
-        ...where.movement_date,
-        [Op.gte]: start_date
-      };
-    }
-
-    if (end_date) {
-      where.movement_date = {
-        ...where.movement_date,
-        [Op.lte]: end_date
-      };
-    }
-
     const { page = 1, limit = 25 } = req.query;
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
-    const offset = (pageNum - 1) * limitNum;
-
-    // Totales sobre TODO el rango (sin paginar)
-    const allMovements = await InventoryMovement.findAll({
-      where,
-      attributes: ['movement_type', 'direction', 'quantity', 'total_cost', 'new_stock'],
-      order: [['movement_date', 'ASC'], ['created_at', 'ASC']],
-      raw: true
-    });
-
-    // OJO: "movement_type" NO es 'entrada'/'salida' — guarda la clasificación de
-    // negocio (sale, purchase, customer_return, etc.) porque el CHECK constraint
-    // de la tabla no permite esos literales. El campo confiable para in/out es
-    // "direction" ('in' | 'out'), que sí se setea siempre en createMovement().
-    const entradas = allMovements.filter(m => m.direction === 'in');
-    const salidas  = allMovements.filter(m => m.direction === 'out');
-    const totalEntradas      = entradas.reduce((s, m) => s + parseFloat(m.quantity), 0);
-    const totalSalidas       = salidas.reduce((s, m) => s + parseFloat(m.quantity), 0);
-    const totalCostoEntradas = entradas.reduce((s, m) => s + parseFloat(m.total_cost), 0);
-    const stockActual        = allMovements.length > 0 ? allMovements[allMovements.length - 1].new_stock : 0;
-
-    // Solo la página solicitada
-    const { count, rows: movements } = await InventoryMovement.findAndCountAll({
-      where,
-      include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku'] }],
-      order: [['movement_date', 'ASC'], ['created_at', 'ASC']],
-      limit: limitNum,
-      offset
-    });
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit) || 25));
+    const movements = inRange.slice((pageNum - 1) * limitNum, pageNum * limitNum);
 
     res.json({
       success: true,
       data: {
         movements,
-        pagination: {
-          total: allMovements.length,
-          page: pageNum,
-          limit: limitNum,
-          pages: Math.ceil(allMovements.length / limitNum)
+        pagination: { total: inRange.length, page: pageNum, limit: limitNum, pages: Math.ceil(inRange.length / limitNum) },
+        product: {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          current_stock: stock,
+          min_stock: parseFloat(product.min_stock) || 0,
+          average_cost: avgCost,
+          last_purchase_cost: parseFloat(product.last_purchase_cost) || 0,
+          last_purchase_date: product.last_purchase_date || null,
+          days_since_last_purchase: daysSince(product.last_purchase_date),
+          sale_price: price,
+          price_includes_tax: !!product.price_includes_tax,
+          configured_margin_pct: product.profit_margin_percentage !== null && product.profit_margin_percentage !== undefined
+            ? parseFloat(product.profit_margin_percentage) : null,
+          // Utilidad del precio actual sobre el costo promedio, con el método del tenant.
+          current_margin_pct: impliedMargin(avgCost, price, product, method),
+          margin_method: method,
+          inventory_value: r2(stock * avgCost),
+        },
+        sales: {
+          sales_count: salesRow?.sales_count || 0,
+          qty_sold: parseFloat(salesRow?.qty) || 0,
+          revenue: r2(revenue),
+          cost: r2(soldCost),
+          profit: r2(revenue - soldCost),
+          // Utilidad realizada sobre la venta (ingreso sin IVA).
+          realized_margin_pct: revenue > 0 ? r2(((revenue - soldCost) / revenue) * 100) : null,
+          last_sale: lastSale ? { ...lastSale, days_ago: daysSince(lastSale.sale_date) } : null,
         },
         summary: {
-          total_movements: allMovements.length,
-          total_entradas: totalEntradas,
-          total_salidas: totalSalidas,
-          stock_actual: stockActual,
-          total_costo_entradas: totalCostoEntradas,
-          costo_promedio: totalEntradas > 0 ? totalCostoEntradas / totalEntradas : 0
-        }
-      }
+          total_movements: inRange.length,
+          opening_qty: opening.qty,
+          opening_value: opening.value,
+          total_entradas: totals.in_qty,
+          total_salidas: totals.out_qty,
+          valor_entradas: r2(totals.in_value),
+          valor_salidas: r2(totals.out_value),
+          closing_qty: r2(qty),
+          closing_value: r2(value),
+          // Compatibilidad con la vista anterior.
+          stock_actual: r2(qty),
+          total_costo_entradas: r2(totals.in_value),
+          costo_promedio: totals.in_qty > 0 ? r2(totals.in_value / totals.in_qty) : 0,
+        },
+      },
     });
-
   } catch (error) {
     console.error('Error en getProductKardex:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener kardex del producto'
-    });
+    res.status(500).json({ success: false, message: 'Error al obtener kardex del producto' });
   }
 };
 

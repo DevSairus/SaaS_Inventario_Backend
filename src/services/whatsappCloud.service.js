@@ -6,6 +6,7 @@ const { encryptToken, decryptToken } = require('../utils/metaTokenCrypto');
 const { TenantMetaConfig, Tenant, Customer } = require('../models');
 const { runWithTenantSchema } = require('../config/tenantContext');
 const { windowStatus } = require('../utils/waWorkspacePrefs');
+const { backendBaseUrl } = require('../utils/publicBaseUrl');
 const { normalizeWhatsAppPhone: normalizePhone } = require('../utils/customerWhatsappPhone');
 
 function httpError(status, message, code) {
@@ -747,11 +748,7 @@ async function downloadInboundMedia({ mediaId, accessToken, tenantId, type, file
 
     let url = uploaded.url;
     if (url && url.startsWith('/')) {
-      const port = process.env.PORT || 5001;
-      const base = (process.env.BACKEND_URL || `http://localhost:${port}`)
-        .replace(/\/$/, '')
-        .replace(/\/api$/, '');
-      url = `${base}${url}`;
+      url = `${backendBaseUrl()}${url}`;
     }
     return url || null;
   } catch (err) {
@@ -975,9 +972,7 @@ async function sendMediaFromTenant({
   );
   let mediaUrl = uploaded.url;
   if (mediaUrl && mediaUrl.startsWith('/')) {
-    const port = process.env.PORT || 5001;
-    const base = (process.env.BACKEND_URL || `http://localhost:${port}`).replace(/\/$/, '').replace(/\/api$/, '');
-    mediaUrl = `${base}${mediaUrl}`;
+    mediaUrl = `${backendBaseUrl()}${mediaUrl}`;
   }
   // Nunca usar FRONTEND_URL como host de media (rompe audio/archivos)
   if (mediaUrl && process.env.FRONTEND_URL && mediaUrl.startsWith(process.env.FRONTEND_URL)) {

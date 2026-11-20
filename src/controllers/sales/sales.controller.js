@@ -1,4 +1,5 @@
 const logger = require('../../config/logger');
+const { backendBaseUrl } = require('../../utils/publicBaseUrl');
 // backend/src/controllers/sales/sales.controller.js
 const { Sale, SaleItem, Customer, Product, Vehicle, Tenant, InventoryMovement, DianResolution, CustomerReturn, User, Branch, Warehouse, SaleDiagnosisMark, DiagramTemplate, CustomerInteraction, Project } = require('../../models');
 const { resolveDocumentProject } = require('../../services/projects/projectRef.service');
@@ -15,7 +16,7 @@ const { markProductsForAlertCheck } = require('../../middleware/autoCheckAlerts.
 const dianService = require('../../services/dian/dianService');
 const taxService = require('../../services/taxService');
 const aiuService = require('../../services/sales/aiu.service');
-const { getOrCreateFinalConsumer } = require('../../services/sales/finalConsumer.service');
+const { getOrCreateFinalConsumer, FINAL_CONSUMER_TAX_ID } = require('../../services/sales/finalConsumer.service');
 const { resolvePaymentSession } = require('../../services/finance/cashSession.service');
 const { resolveBranchFilter } = require('../../utils/branchFilter');
 const { buildStockWarnings } = require('../../services/inventory/stockInProcess.service');
@@ -1327,15 +1328,25 @@ const confirm = async (req, res) => {
     // payment_method === 'credito', valor que la UI nunca envía: el crédito
     // es "lo que queda sin pagar al confirmar", con cualquier medio. Cliente
     // sin cupo (credit_limit vacío o 0) = crédito sin tope.
-    if (sale.customer_id && finalDocType !== 'cotizacion') {
+    if (finalDocType !== 'cotizacion') {
       const settledNow = (splits
         ? splits.reduce((sum, sp) => sum + sp.amount, 0)
         : (paid_amount !== undefined ? parseFloat(paid_amount) || 0 : parseFloat(sale.total_amount)))
         + (parseFloat(advance_amount) || 0);
       const unpaid = Math.round((parseFloat(sale.total_amount) - settledNow) * 100) / 100;
-      const creditCustomer = unpaid > 0.01
+      const creditCustomer = unpaid > 0.01 && sale.customer_id
         ? await Customer.findOne({ where: { id: sale.customer_id, tenant_id: tenantId } })
         : null;
+      // CONSUMIDOR FINAL (o una venta vieja sin cliente) es un tercero
+      // genérico: no hay a quién cobrarle después, así que se paga completa.
+      if (unpaid > 0.01 && (!sale.customer_id || String(creditCustomer?.tax_id || '').trim() === FINAL_CONSUMER_TAX_ID)) {
+        return res.status(400).json({
+          success: false,
+          code: 'FINAL_CONSUMER_NO_CREDIT',
+          message: `No se puede vender a crédito a CONSUMIDOR FINAL. Registra el pago completo o asigna el cliente real (saldo pendiente: $${unpaid.toLocaleString('es-CO')}).`,
+          sale_unpaid: unpaid,
+        });
+      }
       if (creditCustomer && parseFloat(creditCustomer.credit_limit || 0) > 0) {
         const pendingResult = await Sale.findOne({
           where: {
@@ -2026,7 +2037,7 @@ const registerPayment = async (req, res) => {
       const payment_id = require('crypto').randomUUID();
       const payment_history = [...(target.payment_history || [])];
       const receipt_number = await generateReceiptNumber(tenantId, transaction);
-      await Receipt.create({
+      const receiptRow = await Receipt.create({
         tenant_id: tenantId,
         branch_id: req.branch_id,
         receipt_number,
@@ -2059,7 +2070,7 @@ const registerPayment = async (req, res) => {
         { paid_amount, payment_status, payment_method: payment_method || target.payment_method, payment_history },
         { transaction }
       );
-      appliedPayments.push({ target, payment_id, effectiveAmount });
+      appliedPayments.push({ target, payment_id, effectiveAmount, receipt: receiptRow });
     }
 
     const consolidatedId = sale.is_consolidated_invoice ? sale.id : sale.invoiced_in_sale_id;
@@ -2098,6 +2109,12 @@ const registerPayment = async (req, res) => {
         : 'Pago registrado exitosamente',
       data: updatedSale,
       advance: excessAdvance,
+      // Recibos de caja generados (uno por documento abonado) para que la UI
+      // ofrezca el PDF o la tirilla apenas se registra el pago.
+      receipts: appliedPayments.map(({ target, payment_id, effectiveAmount, receipt }) => ({
+        id: receipt.id, receipt_number: receipt.receipt_number, payment_id,
+        sale_id: target.id, sale_number: target.sale_number, amount: effectiveAmount,
+      })),
     });
   } catch (error) {
     if (transaction && !transaction.finished) await transaction.rollback();
@@ -2532,7 +2549,7 @@ const generateShareLink = async (req, res) => {
 
     // BACKEND_URL puede no estar seteado en algunos entornos -- si falta,
     // se reconstruye desde el propio request en vez de dejar el link relativo.
-    const backendUrl = (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const backendUrl = backendBaseUrl(req);
     const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
     const pdfUrl = `${backendUrl}/api/public/pdf/${token}`;
     // El link que se comparte SIEMPRE debe apuntar al frontend (la SPA
@@ -2602,7 +2619,7 @@ const sendWhatsApp = async (req, res) => {
 
     // BACKEND_URL puede no estar seteado en algunos entornos -- si falta,
     // se reconstruye desde el propio request en vez de dejar el link relativo.
-    const backendUrl = (process.env.BACKEND_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
+    const backendUrl = backendBaseUrl(req);
     const frontendUrl = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
     const pdfUrl = `${backendUrl}/api/public/pdf/${token}`;
     // Igual que en generateShareLink: el link compartido por WhatsApp debe
@@ -2710,7 +2727,7 @@ async function getPublicSaleBody(saleId, res) {
   const tenant = await Tenant.findByPk(sale.tenant_id);
   if (!tenant) return res.status(404).json({ success: false, message: 'Tenant no encontrado' });
 
-  const backendUrl = (process.env.BACKEND_URL || '').replace(/\/$/, '');
+  const backendUrl = backendBaseUrl(req);
 
   // Una cotización enviada cuya vigencia ya pasó se marca vencida al
   // consultarla (no hay job que lo haga): el cliente ya no puede aprobarla.
