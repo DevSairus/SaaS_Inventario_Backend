@@ -33,6 +33,9 @@ const SALE_FILTER = `s.tenant_id = :tenantId
   AND (s.document_type IS NULL OR s.document_type::text IN ('factura', 'remision'))
   AND s.is_consolidated_invoice IS NOT TRUE`;
 
+// INC de una venta (va en las líneas): no es ingreso, es impuesto.
+const INC_OF = (alias) => `COALESCE((SELECT SUM(COALESCE(si.inc_amount, 0)) FROM "${getCurrentSchema() || 'public'}".sale_items si WHERE si.sale_id = ${alias}.id), 0)`;
+
 function q(sql, replacements) {
   return sequelize.query(sql, { replacements, type: QueryTypes.SELECT });
 }
@@ -82,7 +85,7 @@ async function incomeBlock(S, r) {
 
   const byMonth = await q(`
     SELECT to_char(COALESCE(s.sale_date, s.created_at), 'YYYY-MM') AS month,
-      COALESCE(SUM(s.total_amount - s.tax_amount), 0) AS net, COALESCE(SUM(s.tax_amount), 0) AS iva
+      COALESCE(SUM(s.total_amount - s.tax_amount - ${INC_OF('s')}), 0) AS net, COALESCE(SUM(s.tax_amount), 0) AS iva
     FROM "${S}".sales s
     WHERE ${SALE_FILTER} AND COALESCE(s.sale_date, s.created_at)::date BETWEEN :from AND :to
     GROUP BY 1 ORDER BY 1`, r);
@@ -301,8 +304,20 @@ async function dailyBook(tenantId, { from, to }) {
     ),
     sales AS (
       SELECT COALESCE(s.sale_date, s.created_at)::date AS day, COUNT(*)::int AS docs,
-        SUM(s.total_amount - s.tax_amount) AS net, SUM(s.tax_amount) AS iva, SUM(s.total_amount) AS total
+        SUM(s.total_amount - s.tax_amount - ${INC_OF('s')}) AS net, SUM(s.tax_amount) AS iva, SUM(s.total_amount) AS total
       FROM "${S}".sales s WHERE ${SALE_FILTER} AND COALESCE(s.sale_date, s.created_at)::date BETWEEN :from AND :to
+      GROUP BY 1
+    ),
+    notes AS (
+      -- Notas crédito/débito que no salen de una devolución (como en el resumen).
+      SELECT COALESCE(s.sale_date, s.created_at)::date AS day,
+        SUM(CASE WHEN s.document_type::text = 'nota_debito' THEN s.total_amount - s.tax_amount ELSE 0 END) AS debit_net,
+        SUM(CASE WHEN s.document_type::text = 'nota_credito' THEN s.total_amount - s.tax_amount ELSE 0 END) AS credit_net
+      FROM "${S}".sales s
+      WHERE s.tenant_id = :tenantId AND s.document_type::text IN ('nota_credito', 'nota_debito')
+        AND s.status NOT IN ('cancelled', 'draft')
+        AND COALESCE(s.sale_date, s.created_at)::date BETWEEN :from AND :to
+        AND NOT EXISTS (SELECT 1 FROM "${S}".customer_returns cr WHERE cr.credit_note_sale_id = s.id)
       GROUP BY 1
     ),
     rets AS (
@@ -324,20 +339,22 @@ async function dailyBook(tenantId, { from, to }) {
       GROUP BY 1
     )
     SELECT days.day, COALESCE(sales.docs, 0) AS sales_docs, COALESCE(sales.net, 0) AS sales_net, COALESCE(sales.iva, 0) AS sales_iva,
-      COALESCE(rets.net, 0) AS returns_net, COALESCE(purch.net, 0) AS purchases_net, COALESCE(purch.iva, 0) AS purchases_iva,
+      COALESCE(rets.net, 0) + COALESCE(notes.credit_net, 0) AS returns_net, COALESCE(notes.debit_net, 0) AS debit_net,
+      COALESCE(purch.net, 0) AS purchases_net, COALESCE(purch.iva, 0) AS purchases_iva,
       COALESCE(exp.net, 0) AS expenses_net
     FROM days
-    LEFT JOIN sales ON sales.day = days.day LEFT JOIN rets ON rets.day = days.day
+    LEFT JOIN sales ON sales.day = days.day LEFT JOIN rets ON rets.day = days.day LEFT JOIN notes ON notes.day = days.day
     LEFT JOIN purch ON purch.day = days.day LEFT JOIN exp ON exp.day = days.day
-    WHERE sales.day IS NOT NULL OR rets.day IS NOT NULL OR purch.day IS NOT NULL OR exp.day IS NOT NULL
+    WHERE sales.day IS NOT NULL OR rets.day IS NOT NULL OR notes.day IS NOT NULL OR purch.day IS NOT NULL OR exp.day IS NOT NULL
     ORDER BY days.day`, r);
   const out = rows.map((x) => ({
     date: String(x.day instanceof Date ? x.day.toISOString() : x.day).slice(0, 10),
     sales_docs: x.sales_docs,
-    sales_net: round2(x.sales_net),
+    // Ventas sin IVA ni INC, más notas débito; "devoluciones" incluye notas crédito sueltas.
+    sales_net: round2(num(x.sales_net) + num(x.debit_net)),
     sales_iva: round2(x.sales_iva),
     returns_net: round2(x.returns_net),
-    income_net: round2(num(x.sales_net) - num(x.returns_net)),
+    income_net: round2(num(x.sales_net) + num(x.debit_net) - num(x.returns_net)),
     purchases_net: round2(x.purchases_net),
     purchases_iva: round2(x.purchases_iva),
     expenses_net: round2(x.expenses_net),
