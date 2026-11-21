@@ -2687,7 +2687,7 @@ const getPublicSale = async (req, res) => {
     if (!resolved) {
       return res.status(404).json({ success: false, message: 'Documento no encontrado o enlace inválido' });
     }
-    return runWithTenantSchema(resolved.schemaName, () => getPublicSaleBody(resolved.saleId, res));
+    return await runWithTenantSchema(resolved.schemaName, () => getPublicSaleBody(resolved.saleId, req, res));
   } catch (error) {
     logger.error('[Cotización pública] Error:', error.message);
     res.status(500).json({ success: false, message: 'Error obteniendo la cotización' });
@@ -2717,7 +2717,7 @@ function publicQuoteItems(items) {
   }));
 }
 
-async function getPublicSaleBody(saleId, res) {
+async function getPublicSaleBody(saleId, req, res) {
   const sale = await Sale.findOne({
     where: { id: saleId },
     include: [{ model: SaleItem, as: 'items', include: [{ model: Product, as: 'product', attributes: ['id', 'name', 'sku', 'image_url'] }] }],
