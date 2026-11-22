@@ -355,6 +355,33 @@ const DEFAULT_ACCOUNT_MAPPINGS = {
   fixed_asset_impairment_expense: '519905',
   fixed_asset_impairment_accumulated: '159905',
   fixed_asset_impairment_recovery: '425050',
+  // Mediciones NIIF de cierre (services/accounting/niifMeasurements.service.js).
+  receivable_impairment_allowance: '139905',
+  receivable_impairment_expense: '519910',
+  receivable_impairment_recovery: '425055',
+  inventory_nrv_allowance: '149905',
+  inventory_nrv_expense: '519920',
+  inventory_nrv_recovery: '425060',
+  fx_gain: '421020',
+  fx_loss: '530525',
+  // Impuesto diferido (sección 29) — fiscalReconciliation.service.js.
+  deferred_tax_asset: '171076',
+  deferred_tax_liability: '272505',
+  deferred_tax_expense: '540510',
 };
+
+// Cuentas que pide la NIIF para Pymes (deterioro, impuesto diferido,
+// provisiones, adopción, ORI, diferencia en cambio, renta). Misma lista que
+// la migración 2026112101-niif-pymes-base.js siembra en empresas existentes;
+// van al final porque sus padres ya están arriba.
+{
+  const { NIIF_ACCOUNTS } = require('../database/migrations/2026112101-niif-pymes-base');
+  const known = new Set(PUC_COLOMBIA_STANDARD.map((a) => a.code));
+  for (const a of NIIF_ACCOUNTS) {
+    if (known.has(a.code)) continue;
+    PUC_COLOMBIA_STANDARD.push({ code: a.code, name: a.name, type: a.type, parent_code: a.parent, accepts_entries: a.leaf });
+    known.add(a.code);
+  }
+}
 
 module.exports = { PUC_COLOMBIA_STANDARD, DEFAULT_ACCOUNT_MAPPINGS };

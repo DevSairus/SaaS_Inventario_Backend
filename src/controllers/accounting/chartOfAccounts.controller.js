@@ -1,6 +1,19 @@
 const { ChartOfAccount, JournalEntryLine } = require('../../models');
 const logger = require('../../config/logger');
 const { sequelize } = require('../../config/database');
+const { NIIF_RUBROS, resolveRubros, isRubroValidForType, RUBRO_BY_CODE } = require('../../data/niifRubros');
+
+// niif_rubro del body: '' / null = quitar (vuelve a heredado/regla).
+// Devuelve { value } o { error }.
+function parseNiifRubro(raw, accountType) {
+  if (raw === undefined) return { skip: true };
+  if (raw === null || raw === '') return { value: null };
+  if (!RUBRO_BY_CODE[raw]) return { error: `Rubro NIIF desconocido: ${raw}` };
+  if (!isRubroValidForType(raw, accountType)) {
+    return { error: `El rubro "${RUBRO_BY_CODE[raw].label}" no aplica a una cuenta de tipo ${accountType}` };
+  }
+  return { value: raw };
+}
 
 // GET /api/accounting/chart-of-accounts
 exports.list = async (req, res) => {
@@ -9,7 +22,13 @@ exports.list = async (req, res) => {
       where: { tenant_id: req.tenant_id },
       order: [['code', 'ASC']],
     });
-    res.json({ success: true, data: accounts });
+    // Rubro NIIF efectivo de cada cuenta (propio, heredado o por regla PUC).
+    const rubros = resolveRubros(accounts.map((a) => a.get({ plain: true })));
+    const data = accounts.map((a) => {
+      const r = rubros.get(a.id);
+      return { ...a.get({ plain: true }), niif_rubro_effective: r.rubro, niif_rubro_source: r.source };
+    });
+    res.json({ success: true, data });
   } catch (error) {
     logger.error('Error en chartOfAccounts.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al listar plan de cuentas', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
@@ -23,6 +42,8 @@ exports.create = async (req, res) => {
     if (!code || !name || !account_type) {
       return res.status(400).json({ success: false, message: 'code, name y account_type son obligatorios' });
     }
+    const rubro = parseNiifRubro(req.body.niif_rubro, account_type);
+    if (rubro.error) return res.status(400).json({ success: false, message: rubro.error });
 
     let level = 1;
     if (parent_id) {
@@ -39,6 +60,7 @@ exports.create = async (req, res) => {
       parent_id: parent_id || null,
       level,
       accepts_entries: accepts_entries !== undefined ? accepts_entries : true,
+      niif_rubro: rubro.skip ? null : rubro.value,
     });
 
     res.status(201).json({ success: true, data: account });
@@ -63,6 +85,9 @@ exports.update = async (req, res) => {
       is_active: is_active !== undefined ? is_active : account.is_active,
       accepts_entries: accepts_entries !== undefined ? accepts_entries : account.accepts_entries,
     };
+    const rubro = parseNiifRubro(req.body.niif_rubro, account.account_type);
+    if (rubro.error) return res.status(400).json({ success: false, message: rubro.error });
+    if (!rubro.skip) updates.niif_rubro = rubro.value;
 
     // Cambiar la cuenta padre (p. ej. una 415595 creada colgando de 41 en vez
     // de 4155). El nivel de la cuenta y de toda su descendencia se recalcula.
@@ -139,4 +164,14 @@ exports.remove = async (req, res) => {
     logger.error('Error en chartOfAccounts.controller.js:', error);
     res.status(500).json({ success: false, message: 'Error al eliminar cuenta', error: process.env.NODE_ENV === 'production' ? undefined : error.message });
   }
+};
+
+// GET /api/accounting/chart-of-accounts/niif-rubros
+// Catálogo de rubros NIIF para Pymes (para el selector del plan de cuentas).
+exports.niifRubros = async (req, res) => {
+  const types = ['activo', 'pasivo', 'patrimonio', 'ingreso', 'gasto', 'costo'];
+  res.json({
+    success: true,
+    data: NIIF_RUBROS.map((r) => ({ ...r, account_types: types.filter((t) => isRubroValidForType(r.code, t)) })),
+  });
 };

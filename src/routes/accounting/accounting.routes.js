@@ -45,6 +45,7 @@ const uploadStatement = multer({
 
 // Plan de cuentas
 router.get('/chart-of-accounts', chartOfAccountsCtrl.list);
+router.get('/chart-of-accounts/niif-rubros', chartOfAccountsCtrl.niifRubros);
 router.post('/chart-of-accounts', chartOfAccountsCtrl.create);
 router.put('/chart-of-accounts/:id', chartOfAccountsCtrl.update);
 router.delete('/chart-of-accounts/:id', chartOfAccountsCtrl.remove);
@@ -185,6 +186,34 @@ router.get('/reports/retenciones-practicadas/export', withholdingPracticedCtrl.w
 // Estado de Flujo de Efectivo — método indirecto, derivado de los asientos.
 router.get('/reports/cashflow-indirecto', cashFlowIndirectCtrl.cashFlowIndirect);
 router.get('/reports/cashflow-indirecto/export', cashFlowIndirectCtrl.cashFlowIndirectExport);
+
+// Estados financieros NIIF para Pymes: financial-position | comprehensive-income | equity-changes
+const niifStatementsCtrl = require('../../controllers/accounting/niifStatements.controller');
+router.get('/reports/niif-package/pdf', niifStatementsCtrl.packagePdf);
+router.put('/reports/niif-notes/:year/:key', accountingStaff, niifStatementsCtrl.saveNoteText);
+router.put('/reports/niif-signatures/:year', accountingStaff, niifStatementsCtrl.saveSignatures);
+router.get('/reports/niif/:report', niifStatementsCtrl.report);
+router.get('/reports/niif/:report/export', niifStatementsCtrl.export);
+
+// Mediciones NIIF de cierre: receivable_impairment | inventory_nrv | fx_remeasurement
+const niifMeasurementsCtrl = require('../../controllers/accounting/niifMeasurements.controller');
+router.get('/niif-measurements', niifMeasurementsCtrl.history);
+router.get('/niif-measurements/trm', niifMeasurementsCtrl.trm);
+router.post('/niif-measurements/:kind/preview', niifMeasurementsCtrl.preview);
+router.post('/niif-measurements/:kind/apply', accountingStaff, niifMeasurementsCtrl.apply);
+router.post('/niif-measurements/:id/reverse', accountingStaff, niifMeasurementsCtrl.reverse);
+
+// Conciliación fiscal (soporte del formato 2516) e insumos del impuesto diferido
+const fiscalReconCtrl = require('../../controllers/accounting/fiscalReconciliation.controller');
+router.get('/fiscal-reconciliation/:year/esf', fiscalReconCtrl.esf);
+router.get('/fiscal-reconciliation/:year/eri', fiscalReconCtrl.eri);
+router.get('/fiscal-reconciliation/:year/export', fiscalReconCtrl.export);
+router.get('/fiscal-reconciliation/:year/settings', fiscalReconCtrl.getSettings);
+router.put('/fiscal-reconciliation/:year/settings', accountingStaff, fiscalReconCtrl.saveSettings);
+router.get('/fiscal-reconciliation/:year/adjustments', fiscalReconCtrl.listAdjustments);
+router.post('/fiscal-reconciliation/:year/adjustments', accountingStaff, fiscalReconCtrl.createAdjustment);
+router.post('/fiscal-reconciliation/:year/adjustments/copy-previous', accountingStaff, fiscalReconCtrl.copyPrevious);
+router.delete('/fiscal-reconciliation/adjustments/:id', accountingStaff, fiscalReconCtrl.deleteAdjustment);
 
 // Saldos iniciales (cartera/CxP/cuentas/inventario al arrancar con Pitbox)
 router.get('/opening-balances', openingBalancesCtrl.list);

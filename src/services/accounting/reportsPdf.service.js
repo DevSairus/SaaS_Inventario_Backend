@@ -1038,4 +1038,8 @@ module.exports = {
   generateWithholdingPDF,
   generateWithholdingPracticedPDF,
   generateCashFlowIndirectPDF,
+  // Piezas comunes para otros PDF contables (niifPdf.service.js).
+  startReportDoc,
+  finishReportDoc,
+  ensureSpace,
 };

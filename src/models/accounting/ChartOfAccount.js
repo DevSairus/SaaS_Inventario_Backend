@@ -17,6 +17,8 @@ const ChartOfAccount = sequelize.define(
     level: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
     accepts_entries: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     is_active: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    // Rubro NIIF de presentación fijado a mano (null = heredado/regla). Ver data/niifRubros.js.
+    niif_rubro: { type: DataTypes.STRING(40), allowNull: true },
   },
   {
     tableName: 'chart_of_accounts',

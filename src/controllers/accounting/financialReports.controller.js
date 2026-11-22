@@ -192,6 +192,9 @@ async function fetchIncomeStatementForRange(tenantId, { from, to, branchId } = {
          AND e.entry_date BETWEEN :from AND :to
          AND (:branchId::uuid IS NULL OR e.branch_id = :branchId::uuid)
          AND a.account_type IN ('ingreso', 'gasto', 'costo')
+         -- El cierre anual (31-dic) salda ingresos/gastos contra 3605: si
+         -- entrara, el P&G de un año cerrado saldría en cero.
+         AND e.source_type <> 'year_end_close'
        GROUP BY a.id, a.code, a.name, a.account_type
        ORDER BY a.code ASC`,
       { replacements: { tenantId, from, to, branchId: branchId || null }, type: QueryTypes.SELECT }

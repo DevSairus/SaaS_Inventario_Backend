@@ -9,24 +9,24 @@
 //
 // Método: utilidad neta del período (ya calculada por
 // fetchIncomeStatement) + variación de las cuentas de balance que no son
-// caja, clasificadas por prefijo de código PUC:
-//   - 11 (Disponible)                         -> es la caja misma, se excluye del cálculo y se usa como cifra de control
-//   - 15 (Propiedades, Planta y Equipo)        -> inversión
-//   - 21 (Obligaciones Financieras) y
-//     31 (Capital Social)                      -> financiación
-//   - todo lo demás de activo/pasivo (13,14,22,23,24,25...) -> operación
-//   - patrimonio 36/37 (resultados) se excluye: ya está representado por
-//     la utilidad neta del período; incluirlo de nuevo sería doble conteo.
+// caja, clasificadas por su rubro NIIF (data/niifRubros.js, ver classify):
+//   - efectivo                                  -> es la caja misma, cifra de control
+//   - PPE, intangibles, inversiones, activos no
+//     corrientes                                -> inversión
+//   - depreciación/deterioro acumulados (1592,
+//     1599...)                                  -> operación (no son caja)
+//   - obligaciones financieras, capital, prima  -> financiación
+//   - todo lo demás de activo/pasivo            -> operación
+//   - el resto del patrimonio (resultados, ORI) se excluye: el resultado ya
+//     está en la utilidad neta; incluirlo de nuevo sería doble conteo.
 //
-// Es una clasificación razonable para el subconjunto de cuentas que trae
-// el PUC sembrado de Pitbox, no una implementación NIIF completa (eso
-// requeriría notas de revelación y juicio profesional caso por caso).
 // Se documenta la metodología también en el JSON de respuesta.
 
 const { sequelize } = require('../../config/database');
 const { QueryTypes } = require('sequelize');
 const { getCurrentSchema } = require('../../config/tenantContext');
 const { fetchIncomeStatementForRange } = require('./financialReports.controller');
+const { loadAccounts } = require('../../services/accounting/niifStatements.service');
 const { generateCashFlowIndirectExcel } = require('../../services/accounting/reportsExcel.service');
 const { generateCashFlowIndirectPDF } = require('../../services/accounting/reportsPdf.service');
 
@@ -34,11 +34,22 @@ function generatedByName(req) {
   return [req.user?.first_name, req.user?.last_name].filter(Boolean).join(' ') || req.user?.email || '';
 }
 
-function classify(code, accountType) {
-  if (code.startsWith('11')) return 'cash';
-  if (accountType === 'patrimonio') return code.startsWith('31') ? 'financing' : 'excluded';
-  if (code.startsWith('15')) return 'investing';
-  if (code.startsWith('21')) return 'financing';
+// Clasificación por rubro NIIF (data/niifRubros.js), no por prefijo: así
+// una cuenta que el contador marcó como obligación financiera no corriente
+// o inversión cae donde debe aunque su código no sea el estándar.
+const INVESTING_RUBROS = new Set(['ppe', 'intangibles', 'propiedades_inversion', 'inversiones_no_corrientes', 'deudores_no_corrientes', 'otros_activos_no_corrientes']);
+const FINANCING_RUBROS = new Set(['obligaciones_financieras_corrientes', 'obligaciones_financieras_no_corrientes', 'capital', 'prima_superavit']);
+// Depreciación, amortización y deterioro acumulados de PPE/intangibles: son
+// gastos que no mueven caja; su variación se suma en operación (sección 7.18).
+const NON_CASH_CONTRA = /^(1592|1597|1598|1599|1698|1699)/;
+
+function classify(account) {
+  const { rubro, account_type: accountType, code } = account;
+  if (rubro === 'efectivo') return 'cash';
+  if (accountType === 'patrimonio') return FINANCING_RUBROS.has(rubro) ? 'financing' : 'excluded';
+  if ((rubro === 'ppe' || rubro === 'intangibles') && NON_CASH_CONTRA.test(String(code))) return 'operating';
+  if (INVESTING_RUBROS.has(rubro)) return 'investing';
+  if (FINANCING_RUBROS.has(rubro)) return 'financing';
   if (accountType === 'activo' || accountType === 'pasivo') return 'operating';
   return 'excluded';
 }
@@ -86,7 +97,8 @@ async function fetchCashFlowIndirect(req) {
   openingAsOf.setUTCDate(openingAsOf.getUTCDate() - 1);
   const openingDate = openingAsOf.toISOString().slice(0, 10);
 
-  const [opening, closing, incomeStatement] = await Promise.all([
+  const [accounts, opening, closing, incomeStatement] = await Promise.all([
+    loadAccounts(req.tenant_id),
     accountBalancesAsOf(req.tenant_id, openingDate, branch_id),
     accountBalancesAsOf(req.tenant_id, to, branch_id),
     fetchIncomeStatementForRange(req.tenant_id, { from, to, branchId: branch_id }),
@@ -103,7 +115,7 @@ async function fetchCashFlowIndirect(req) {
     const o = opening.get(id);
     const c = closing.get(id);
     const ref = c || o;
-    const bucket = classify(ref.code, ref.account_type);
+    const bucket = classify({ ...ref, rubro: accounts.get(id)?.rubro });
     const openingBalance = o ? o.balance : 0;
     const closingBalance = c ? c.balance : 0;
     const delta = closingBalance - openingBalance;
@@ -115,9 +127,12 @@ async function fetchCashFlowIndirect(req) {
     }
     if (bucket === 'excluded' || Math.abs(delta) < 0.01) continue;
 
-    // Activo: un aumento (delta > 0) es USO de caja -> impacto negativo.
-    // Pasivo/patrimonio: un aumento es FUENTE de caja -> impacto positivo.
-    const cashImpact = ref.account_type === 'activo' ? -delta : delta;
+    // delta es la variación del saldo CRUDO (débito - crédito) para toda
+    // cuenta. Un saldo más deudor es uso de caja (más activo o menos pasivo)
+    // y uno más acreedor es fuente (más pasivo/patrimonio o menos activo):
+    // el impacto es siempre -delta. Antes los pasivos usaban +delta y un
+    // aumento de proveedores o anticipos restaba caja: el flujo no cuadraba.
+    const cashImpact = -delta;
     const row = { id, code: ref.code, name: ref.name, opening_balance: openingBalance, closing_balance: closingBalance, variation: delta, cash_impact: cashImpact };
 
     if (bucket === 'operating') operating.push(row);
@@ -153,7 +168,7 @@ async function fetchCashFlowIndirect(req) {
       matches: Math.abs(netCashFlow - cashVariationReal) < 1,
       difference: netCashFlow - cashVariationReal,
     },
-    methodology_note: 'Método indirecto: utilidad neta del período + variación de cuentas de balance distintas a caja/bancos, clasificadas como operación (13,14,22-25...), inversión (15 - Propiedades, Planta y Equipo) y financiación (21 - Obligaciones Financieras, 31 - Capital Social).',
+    methodology_note: 'Método indirecto (NIIF para Pymes, sección 7): resultado del período + variación de las cuentas de balance distintas al efectivo, clasificadas por su rubro NIIF: inversión (propiedades, planta y equipo, intangibles, inversiones y activos no corrientes), financiación (obligaciones financieras y aportes de capital) y operación (lo demás, incluida la depreciación y el deterioro acumulados, que no son caja).',
   };
 }
 
@@ -197,3 +212,4 @@ exports.cashFlowIndirectExport = async (req, res) => {
     }
   }
 };
+exports.fetchCashFlowIndirect = fetchCashFlowIndirect;

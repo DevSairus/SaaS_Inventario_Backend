@@ -223,3 +223,5 @@ exports.agingExport = async (req, res) => {
     }
   }
 };
+
+exports.fetchAging = fetchAging;
