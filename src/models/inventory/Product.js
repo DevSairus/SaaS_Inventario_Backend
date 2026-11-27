@@ -58,6 +58,19 @@ const Product = sequelize.define('Product', {
     allowNull: false,
     defaultValue: false
   },
+  // Tempario (solo servicios de mano de obra): horas estándar de la
+  // operación y cómo se fija el precio. 'hourly' = base_price = horas × valor
+  // hora de la empresa (business_config.labor_hour_rate), lo mantiene
+  // services/workshop/laborTimes.service.js; 'fixed'/NULL = precio propio.
+  standard_hours: {
+    type: DataTypes.DECIMAL(8, 2),
+    allowNull: true
+  },
+  labor_pricing_mode: {
+    type: DataTypes.STRING(10),
+    allowNull: true,
+    validate: { isIn: [['fixed', 'hourly']] }
+  },
   sku: {
     type: DataTypes.STRING(50),
     allowNull: false,
@@ -220,7 +233,15 @@ const Product = sequelize.define('Product', {
   timestamps: true,
   underscored: true,
   createdAt: 'created_at',
-  updatedAt: 'updated_at'
+  updatedAt: 'updated_at',
+  hooks: {
+    // Tempario: un servicio "por hora" toma su precio de horas × valor hora
+    // de la empresa al crearlo o al cambiarle horas/modo desde la ficha.
+    beforeSave: async (product, options) => {
+      const { applyHourlyPrice } = require('../../services/workshop/laborTimes.service');
+      await applyHourlyPrice(product, options?.transaction);
+    },
+  },
 });
 
 const Supplier = require('./Supplier');

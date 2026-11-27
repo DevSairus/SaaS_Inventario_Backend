@@ -47,7 +47,10 @@ const getProductStats = async (req, res) => {
          COUNT(*) FILTER (WHERE track_inventory AND is_active
                           AND current_stock <= 0)                             AS out_of_stock,
          COALESCE(SUM(CASE WHEN is_active
-                      THEN current_stock * average_cost ELSE 0 END), 0)      AS inventory_value
+                      THEN current_stock * average_cost ELSE 0 END), 0)      AS inventory_value,
+         COUNT(*) FILTER (WHERE is_active AND product_type <> 'service')      AS kind_products,
+         COUNT(*) FILTER (WHERE is_active AND product_type = 'service' AND is_labor) AS kind_labor,
+         COUNT(*) FILTER (WHERE is_active AND product_type = 'service' AND NOT is_labor) AS kind_services
        FROM "${schema}"."products"
        WHERE 1=1 ${tenantFilter}`,
       {
@@ -63,7 +66,9 @@ const getProductStats = async (req, res) => {
     const outOfStockProducts  = parseInt(agg.out_of_stock);
     const totalInventoryValue = parseFloat(agg.inventory_value);
 
-    res.json({ success: true, data: { total: totalProducts, total_products: totalProducts, active: activeProducts, active_products: activeProducts, inactive: inactiveProducts, inactive_products: inactiveProducts, lowStock: lowStockProducts, low_stock_products: lowStockProducts, outOfStock: outOfStockProducts, out_of_stock_products: outOfStockProducts, totalInventoryValue, total_inventory_value: totalInventoryValue } });
+    res.json({ success: true, data: { total: totalProducts, total_products: totalProducts, active: activeProducts, active_products: activeProducts, inactive: inactiveProducts, inactive_products: inactiveProducts, lowStock: lowStockProducts, low_stock_products: lowStockProducts, outOfStock: outOfStockProducts, out_of_stock_products: outOfStockProducts, totalInventoryValue, total_inventory_value: totalInventoryValue,
+      // Activos por pestaña (productos / mano de obra / servicios).
+      by_kind: { products: parseInt(agg.kind_products), labor: parseInt(agg.kind_labor), services: parseInt(agg.kind_services) } } });
   } catch (error) {
     console.error('Error en getProductStats:', error);
     res.status(500).json({ success: false, message: 'Error al obtener estadísticas' });
@@ -77,7 +82,7 @@ const getAllProducts = async (req, res) => {
       sort_by = 'name', sort_order = 'ASC',
       applies_to_vehicle_id, applies_to_brand, applies_to_line, applies_to_year,
       exclude_sale_id, exclude_work_order_id,
-      location_id, no_location,
+      location_id, no_location, kind,
     } = req.query;
 
     // ── Seguridad: whitelist ORDER BY — Sequelize NO parametriza ORDER BY ────
@@ -148,6 +153,12 @@ const getAllProducts = async (req, res) => {
     }
     if (category_id) whereClause.category_id = category_id;
     if (is_active !== '') whereClause.is_active = is_active === 'true';
+    // Pestañas de la página de Productos: productos (todo lo que no es
+    // servicio), mano de obra (tempario) y otros servicios. Sin `kind`, como
+    // siempre: todo junto (buscadores de ventas, OT, compras…).
+    if (kind === 'products') whereClause.product_type = { [Op.ne]: 'service' };
+    else if (kind === 'labor') Object.assign(whereClause, { product_type: 'service', is_labor: true });
+    else if (kind === 'services') Object.assign(whereClause, { product_type: 'service', is_labor: false });
     // Ubicación física (req. 2.2): una ubicación concreta, o los que no tienen.
     if (location_id) whereClause.location_id = location_id;
     else if (no_location === 'true') whereClause.location_id = null;
@@ -384,7 +395,8 @@ const createProduct = async (req, res) => {
       track_inventory = true, is_active = true, is_for_sale = true,
       is_for_purchase = true, has_tax = true, tax_percentage = 19, price_includes_tax = false,
       tax_config, is_labor = false, vehicle, retention_concept, allow_negative_stock = false,
-      margin_inherited = false, unspsc_code, revenue_account_id, deferred_months, deferred_account_id
+      margin_inherited = false, unspsc_code, revenue_account_id, deferred_months, deferred_account_id,
+      standard_hours, labor_pricing_mode
     } = req.body;
 
     const VALID_PRODUCT_TYPES = ['simple', 'variant', 'service', 'bundle', 'raw_material', 'vehicle'];
@@ -530,6 +542,9 @@ const createProduct = async (req, res) => {
         is_active, is_for_sale, is_for_purchase, has_tax, tax_percentage, price_includes_tax,
         tax_config: finalTaxConfig,
         is_labor: safeProductType === 'service' ? !!is_labor : false,
+        // Tempario (solo mano de obra): horas estándar y modo de precio.
+        standard_hours: safeProductType === 'service' && is_labor && Number(standard_hours) > 0 ? Number(standard_hours) : null,
+        labor_pricing_mode: safeProductType === 'service' && is_labor && ['fixed', 'hourly'].includes(labor_pricing_mode) ? labor_pricing_mode : null,
         retention_concept: retention_concept || null,
       }, { transaction });
 

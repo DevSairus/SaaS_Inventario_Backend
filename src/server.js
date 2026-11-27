@@ -305,6 +305,8 @@ app.use('/api/workshop/board',                 authMiddleware, tenantMiddleware,
 app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware, commissionSettlementsRoutes);
 app.use('/api/workshop/commission-categories', authMiddleware, tenantMiddleware, commissionCategoriesRoutes);
 app.use('/api/workshop/maintenance-types',     authMiddleware, tenantMiddleware, maintenanceTypesRoutes);
+// Tempario (tiempos y tarifas de mano de obra) y productividad de técnicos
+app.use('/api/workshop/labor-times',           authMiddleware, tenantMiddleware, requireModule('workshop'), require('./routes/workshop/laborTimes.routes'));
 app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware, diagramTemplatesRoutes);
 app.use('/api/workshop/inspections',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('workshop'), inspectionsRoutes);
 

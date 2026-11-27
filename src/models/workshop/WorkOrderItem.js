@@ -128,6 +128,10 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
   combo_quantity: { type: DataTypes.DECIMAL(10, 3), allowNull: true },
   // false = en pantalla/PDF/DIAN el grupo se muestra solo como nombre + total
   combo_show_breakdown: { type: DataTypes.BOOLEAN, allowNull: true },
+  // Tempario: horas estándar POR UNIDAD copiadas del servicio al agregar la
+  // línea (horas de la línea = standard_hours × quantity). Productividad de
+  // técnicos (services/workshop/laborTimes.service.js).
+  standard_hours: { type: DataTypes.DECIMAL(8, 2), allowNull: true },
 }, {
   tableName: 'work_order_items',
   timestamps: true,
@@ -135,7 +139,18 @@ const WorkOrderItem = sequelize.define('WorkOrderItem', {
   indexes: [
     { fields: ['work_order_id'] },
     { fields: ['product_id'] }
-  ]
+  ],
+  hooks: {
+    // Todas las vías que crean líneas (agregar ítem, cotización, marcas de
+    // diagnóstico, combos) heredan las horas del tempario sin tocar cada una.
+    beforeCreate: async (item, options) => {
+      if (item.standard_hours != null || !item.product_id) return;
+      const Product = sequelize.models.Product;
+      if (!Product) return;
+      const product = await Product.findByPk(item.product_id, { attributes: ['id', 'standard_hours'], transaction: options?.transaction });
+      if (product?.standard_hours != null && Number(product.standard_hours) > 0) item.standard_hours = product.standard_hours;
+    },
+  },
 });
 
 module.exports = WorkOrderItem;
