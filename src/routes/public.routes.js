@@ -47,6 +47,13 @@ router.post('/sales/:token/respond', quoteResponseLimiter, respondPublicQuote);
 // impreso en el sticker QR -- ver getPublicVehiclePortal.
 router.get('/vehicles/:token', vehiclePortalLimiter, getPublicVehiclePortal);
 
+// GET /api/public/inspections/:token  (+ /pdf)
+// Verificación del certificado de peritaje (QR impreso en el PDF). Sin datos
+// del solicitante ni del propietario -- ver inspections.controller publicVerify.
+const inspectionsCtrl = require('../controllers/workshop/inspections.controller');
+router.get('/inspections/:token', vehiclePortalLimiter, inspectionsCtrl.publicVerify);
+router.get('/inspections/:token/pdf', vehiclePortalLimiter, inspectionsCtrl.publicPdf);
+
 // GET /api/public/workshop-display/:token
 // Pantalla de taller del TV de una sede (solo lectura, sin datos del cliente).
 // El TV la consulta cada minuto y al recibir un aviso por socket. Ver

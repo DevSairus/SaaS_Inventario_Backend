@@ -20,6 +20,8 @@ const PriceAdjustment = sequelize.define('PriceAdjustment', {
   notes: { type: DataTypes.TEXT, allowNull: true },
   items_count: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
   created_by: { type: DataTypes.UUID, allowNull: true },
+  // Con corrección de costo (migración 2026112801).
+  cost_corrected: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
 }, {
   tableName: 'price_adjustments',
   timestamps: true,

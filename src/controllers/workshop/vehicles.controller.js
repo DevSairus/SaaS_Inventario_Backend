@@ -1,7 +1,7 @@
 // backend/src/controllers/workshop/vehicles.controller.js
 const crypto = require('crypto');
 const logger = require('../../config/logger');
-const { Vehicle, Customer, WorkOrder, WorkOrderItem, User, Sale, Tenant, VehicleReminderLog } = require('../../models');
+const { Vehicle, Customer, WorkOrder, WorkOrderItem, User, Sale, Tenant, VehicleReminderLog, VehicleOwner } = require('../../models');
 const { Op } = require('sequelize');
 const { searchMatch } = require('../../utils/searchText');
 const { runWithTenantSchema } = require('../../config/tenantContext');
@@ -15,6 +15,7 @@ const { deliverWhatsApp, waResponse } = require('../../services/whatsappDelivery
 const { eventTemplate, greetingName } = require('../../services/waEventTemplates');
 const { findVehicleByPlate } = require('../../services/workshop/vehiclePlate.service');
 const { MAX_LIMIT } = require('../../utils/pagination');
+const v360 = require('../../services/workshop/vehicle360.service');
 
 const list = async (req, res) => {
   try {
@@ -92,7 +93,7 @@ const create = async (req, res) => {
       current_mileage: current_mileage ? parseInt(current_mileage) || null : null,
       customer_id: customer_id || null,
       notes
-    });
+    }, { ownerChangeBy: req.user.id });
 
     const full = await Vehicle.findByPk(vehicle.id, {
       include: [{ model: Customer, as: 'customer', attributes: ['id', 'first_name', 'last_name', 'business_name'] }]
@@ -125,7 +126,7 @@ const update = async (req, res) => {
       current_mileage: current_mileage ? parseInt(current_mileage) || null : null,
       customer_id: customer_id || null,
       notes, is_active
-    });
+    }, { ownerChangeBy: req.user.id });
 
     // Reload con customer incluido para que el frontend tenga el objeto completo
     await vehicle.reload({
@@ -363,6 +364,120 @@ const getLabel = async (req, res) => {
   }
 };
 
+// ── HOJA DE VIDA 360 ────────────────────────────────────────────────────────
+// Ver services/workshop/vehicle360.service.js.
+
+const sendSvcError = (res, error, fallback) => {
+  if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
+  logger.error(fallback, error);
+  return res.status(500).json({ success: false, message: fallback });
+};
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+// GET /workshop/vehicles/:id/360
+const get360 = async (req, res) => {
+  try {
+    res.json({ success: true, data: await v360.getVehicle360(req.user.tenant_id, req.params.id) });
+  } catch (error) {
+    sendSvcError(res, error, 'Error al obtener la hoja de vida del vehículo');
+  }
+};
+
+// GET /workshop/vehicles/:id/owners
+const getOwners = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
+    res.json({ success: true, data: await v360.listOwners(vehicle) });
+  } catch (error) {
+    sendSvcError(res, error, 'Error al obtener los propietarios');
+  }
+};
+
+// POST /workshop/vehicles/:id/owners  { customer_id, date, notes }
+// Traspaso con fecha y nota (el formulario de edición lo registra con la
+// fecha de hoy). La fecha no puede ser futura ni anterior al propietario vigente.
+const transferOwner = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
+    const { customer_id, date, notes } = req.body || {};
+    if (!customer_id) return res.status(400).json({ success: false, message: 'Selecciona el nuevo propietario' });
+    if (customer_id === vehicle.customer_id) return res.status(400).json({ success: false, message: 'Ese cliente ya es el propietario' });
+    const customer = await Customer.findOne({ where: { id: customer_id, tenant_id: req.user.tenant_id } });
+    if (!customer) return res.status(404).json({ success: false, message: 'Cliente no encontrado' });
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const day = DATE_RE.test(String(date || '')) ? date : today;
+    if (day > today) return res.status(400).json({ success: false, message: 'La fecha del traspaso no puede ser futura' });
+    const open = await VehicleOwner.findOne({ where: { vehicle_id: vehicle.id, ended_at: null }, order: [['started_at', 'DESC']] });
+    if (open && day < open.started_at) {
+      return res.status(400).json({ success: false, message: `La fecha no puede ser anterior al inicio del propietario actual (${open.started_at})` });
+    }
+    await vehicle.update({ customer_id }, {
+      ownerChangeBy: req.user.id, ownerChangeDate: day, ownerChangeNotes: String(notes || '').trim().slice(0, 500) || null,
+    });
+    res.json({ success: true, message: 'Traspaso registrado', data: await v360.listOwners(vehicle) });
+  } catch (error) {
+    sendSvcError(res, error, 'Error al registrar el traspaso');
+  }
+};
+
+// PUT /workshop/vehicles/:id/owners/:ownerId  { started_at, ended_at, notes }
+// Corregir fechas o nota de una fila del historial (permiso workshop.vehicles.owners).
+const updateOwner = async (req, res) => {
+  try {
+    const row = await VehicleOwner.findOne({ where: { id: req.params.ownerId, vehicle_id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!row) return res.status(404).json({ success: false, message: 'Registro no encontrado' });
+    const data = {};
+    if (req.body.started_at !== undefined) {
+      if (!DATE_RE.test(String(req.body.started_at || ''))) return res.status(400).json({ success: false, message: 'Fecha de inicio inválida' });
+      data.started_at = req.body.started_at;
+    }
+    if (req.body.ended_at !== undefined && row.ended_at) {
+      // Solo se corrige la fecha de fin de una fila ya cerrada (la vigente se cierra con un traspaso).
+      if (!DATE_RE.test(String(req.body.ended_at || ''))) return res.status(400).json({ success: false, message: 'Fecha de fin inválida' });
+      data.ended_at = req.body.ended_at;
+    }
+    if (req.body.notes !== undefined) data.notes = String(req.body.notes || '').trim().slice(0, 500) || null;
+    const start = data.started_at || row.started_at;
+    const end = data.ended_at || row.ended_at;
+    if (end && end < start) return res.status(400).json({ success: false, message: 'La fecha de fin no puede ser anterior a la de inicio' });
+    await row.update(data);
+    const vehicle = await Vehicle.findByPk(req.params.id);
+    res.json({ success: true, data: await v360.listOwners(vehicle) });
+  } catch (error) {
+    sendSvcError(res, error, 'Error al corregir el propietario');
+  }
+};
+
+// POST /workshop/vehicles/:id/runt-snapshots  { data } -- resultado de RuntConsultaModal
+const saveRuntSnapshot = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
+    const data = req.body?.data;
+    const norm = (p) => String(p || '').replace(/[\s-]/g, '').toUpperCase();
+    if (data?.plate && norm(data.plate) !== norm(vehicle.plate)) {
+      return res.status(400).json({ success: false, message: `La consulta RUNT es de la placa ${norm(data.plate)}, no de ${vehicle.plate}` });
+    }
+    const snap = await v360.saveRuntSnapshot(vehicle, req.user.id, data);
+    res.status(201).json({ success: true, data: snap });
+  } catch (error) {
+    sendSvcError(res, error, 'Error al guardar la consulta RUNT');
+  }
+};
+
+// GET /workshop/vehicles/:id/runt-snapshots
+const listRuntSnapshots = async (req, res) => {
+  try {
+    const vehicle = await Vehicle.findOne({ where: { id: req.params.id, tenant_id: req.user.tenant_id } });
+    if (!vehicle) return res.status(404).json({ success: false, message: 'Vehículo no encontrado' });
+    res.json({ success: true, data: await v360.listRuntSnapshots(vehicle) });
+  } catch (error) {
+    sendSvcError(res, error, 'Error al obtener las consultas RUNT');
+  }
+};
+
 // ── PÚBLICO (sin auth) ──────────────────────────────────────────────────────
 
 // El link va en un sticker pegado en el vehículo: cualquiera que lo vea
@@ -421,6 +536,14 @@ async function getPublicVehiclePortalBody(vehicleId, res) {
     const vehicleData = {};
     for (const k of VEHICLE_PUBLIC_ATTRS) vehicleData[k] = vehicle[k];
 
+    // Hoja de vida 360 pública: lecturas de kilometraje, cuántos propietarios
+    // ha tenido en el taller y los peritajes que el taller decidió publicar.
+    // Si falla no tumba el portal.
+    const extra = await v360.publicView(vehicle).catch((e) => {
+      logger.warn(`[portal] publicView falló: ${e.message}`);
+      return null;
+    });
+
     res.json({
       success: true,
       data: {
@@ -458,6 +581,9 @@ async function getPublicVehiclePortalBody(vehicleId, res) {
             .map(i => ({ item_type: i.item_type, product_name: i.product_name, quantity: parseFloat(i.quantity) })),
           maintenance: maintenance.records.filter(r => r.work_order_id === o.id).map(r => r.name),
         })),
+        odometer: extra?.odometer || null,
+        owners_count: extra?.owners_count ?? null,
+        inspections: extra?.inspections || [],
         workshop: tenant ? {
           name: tenant.company_name,
           phone: tenant.phone,
@@ -516,4 +642,5 @@ const getCatalog = async (req, res) => {
 module.exports = {
   list, getById, getByPlate, create, update, getHistory, remove, getCatalog,
   getMaintenance, getReminders, getPortalLink, sendPortalWhatsApp, getLabel, getPublicVehiclePortal,
+  get360, getOwners, transferOwner, updateOwner, saveRuntSnapshot, listRuntSnapshots,
 };

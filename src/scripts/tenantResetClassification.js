@@ -17,6 +17,8 @@ const ALWAYS_KEEP = [
   'branches', 'warehouses', 'user_branches',
   // Permisos por empresa (configuración)
   'tenant_role_permissions',
+  // Plantillas de peritaje (configuración)
+  'inspection_templates',
   // Reglas de aprobación (configuración)
   'approval_rules',
   // Formatos propios de archivo plano de pagos (configuración)
@@ -94,6 +96,8 @@ const ALWAYS_WIPE = [
   'payment_batches', 'payment_batch_items',
   'project_time_entries', 'project_labor_allocations', 'project_budget_alerts',
   'tools', 'tool_assignments', 'tool_events', 'project_material_postings', 'solar_studies', 'project_cuts', 'project_cut_items', 'solar_leads',
+  // Hoja de vida 360 + peritajes (2026112701)
+  'vehicle_owners', 'vehicle_runt_snapshots', 'vehicle_inspections', 'vehicle_inspection_items',
 ];
 
 // Casos dudosos: catálogo que puede ser real (el cliente ya lo configuró en

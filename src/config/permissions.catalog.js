@@ -60,6 +60,8 @@ const PERMISSIONS = [
   { key: 'inventory.consumptions.approve', group: 'Inventario', label: 'Aprobar consumos internos', roles: MGMT },
   { key: 'inventory.consumptions.delete', group: 'Inventario', label: 'Eliminar consumos internos', roles: [...MGMT, 'warehouse_keeper'] },
   { key: 'inventory.price_adjustments.write', group: 'Inventario', label: 'Ajustes de precios', roles: MGMT },
+  // Corregir el costo promedio desde el ajuste de precio (kárdex + asiento).
+  { key: 'inventory.cost_correction', group: 'Inventario', label: 'Corregir el costo de productos (con kárdex y asiento)', roles: ['admin'] },
   // ── Compras ──
   { key: 'purchases.write', group: 'Compras', label: 'Crear, confirmar y recibir compras', roles: ALL },
   // ── Tesorería ──
@@ -78,6 +80,11 @@ const PERMISSIONS = [
   { key: 'projects.maintenance.visit', group: 'Proyectos', label: 'Registrar visitas de mantenimiento', hint: 'Diligenciar el checklist, las observaciones y la firma del cliente al cerrar una visita.', roles: [...MGMT, 'technician'] },
   { key: 'solar.quote', group: 'Proyectos', label: 'Cotizador solar: estudios, cotizaciones y proyecto desde el estudio', roles: [...MGMT, 'seller'] },
   { key: 'solar.configure', group: 'Proyectos', label: 'Configurar precios y parámetros del cotizador solar', roles: MGMT },
+  // ── Taller: peritajes ──
+  { key: 'workshop.inspections.write', group: 'Taller', label: 'Hacer peritajes (crear, diligenciar, fotos y finalizar)', roles: [...MGMT, 'technician'] },
+  { key: 'workshop.inspections.cancel', group: 'Taller', label: 'Anular peritajes finalizados', roles: MGMT },
+  { key: 'workshop.inspections.templates', group: 'Taller', label: 'Configurar plantillas de peritaje', roles: MGMT },
+  { key: 'workshop.vehicles.owners', group: 'Taller', label: 'Corregir el historial de propietarios de un vehículo', roles: MGMT },
   // ── Herramientas ──
   { key: 'tools.manage', group: 'Herramientas', label: 'Registrar herramientas, mantenimientos, calibraciones y bajas', roles: [...MGMT, 'warehouse_keeper', 'inventory_lead'] },
   { key: 'tools.assign', group: 'Herramientas', label: 'Entregar y recibir herramientas (actas)', roles: [...MGMT, 'warehouse_keeper', 'inventory_lead'] },

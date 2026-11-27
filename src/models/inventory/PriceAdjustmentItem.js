@@ -34,6 +34,11 @@ const PriceAdjustmentItem = sequelize.define('PriceAdjustmentItem', {
   price_includes_tax: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   last_purchase_cost: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
   average_cost: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
+  // Corrección de costo (migración 2026112801): average_cost es el anterior.
+  cost_corrected: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  new_average_cost: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
+  stock_at_correction: { type: DataTypes.DECIMAL(15, 4), allowNull: true },
+  cost_correction_value: { type: DataTypes.DECIMAL(15, 2), allowNull: true },
 }, {
   tableName: 'price_adjustment_items',
   timestamps: true,

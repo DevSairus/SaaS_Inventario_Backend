@@ -183,6 +183,7 @@ const commissionCategoriesRoutes    = require('./routes/workshop/commissionCateg
 const maintenanceTypesRoutes        = require('./routes/workshop/maintenanceTypes.routes');
 const runtRoutes                    = require('./routes/workshop/runt.routes');
 const diagramTemplatesRoutes        = require('./routes/workshop/diagramTemplates.routes');
+const inspectionsRoutes             = require('./routes/workshop/inspections.routes');
 const userRoutes                    = require('./routes/user.routes');
 
 // Movimientos Avanzados
@@ -305,6 +306,7 @@ app.use('/api/workshop/commission-settlements',authMiddleware, tenantMiddleware,
 app.use('/api/workshop/commission-categories', authMiddleware, tenantMiddleware, commissionCategoriesRoutes);
 app.use('/api/workshop/maintenance-types',     authMiddleware, tenantMiddleware, maintenanceTypesRoutes);
 app.use('/api/workshop/diagram-templates',     authMiddleware, tenantMiddleware, diagramTemplatesRoutes);
+app.use('/api/workshop/inspections',           authMiddleware, tenantMiddleware, branchMiddleware, requireModule('workshop'), inspectionsRoutes);
 
 // ── Inventario ──
 app.use('/api/products',                       authMiddleware, tenantMiddleware, productsRoutes);

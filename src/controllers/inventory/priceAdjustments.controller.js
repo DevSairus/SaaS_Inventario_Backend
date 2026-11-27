@@ -2,6 +2,7 @@
 // Base: /api/inventory/price-adjustments (roles en routes/inventory/priceAdjustments.routes.js)
 const svc = require('../../services/inventory/priceAdjustment.service');
 const audit = require('../../utils/audit');
+const permissions = require('../../services/tenantPermissions.service');
 
 const tenantOf = (req) => req.user?.tenant_id || null;
 
@@ -41,19 +42,25 @@ const productsInfo = withTenant('Error al cargar los productos', async (req, res
   res.json({ success: true, data: await svc.getProductsInfo(tenantId, req.body?.product_ids) });
 });
 
-// POST / { reason, notes, items: [{ product_id, new_price, reference_cost, margin_pct }] }
+// POST / { reason, notes, update_cost?, items: [{ product_id, new_price, reference_cost, margin_pct }] }
+// update_cost exige el permiso inventory.cost_correction (por defecto solo admin).
 const create = withTenant('Error al guardar el ajuste de precio', async (req, res, tenantId) => {
-  const result = await svc.createPriceAdjustment(tenantId, req.user.id, req.body || {});
+  const canCorrectCost = await permissions.can(tenantId, req.user.role, 'inventory.cost_correction');
+  const result = await svc.createPriceAdjustment(tenantId, req.user.id, req.body || {}, { canCorrectCost });
   setImmediate(() => audit({
     tenant_id: tenantId, user_id: req.user.id, action: 'PRICE_ADJUSTMENT_CREATED',
     entity: 'price_adjustment', entity_id: result.adjustment.id,
-    changes: { number: result.adjustment.adjustment_number, items: result.items_count, reason: result.adjustment.reason },
+    changes: {
+      number: result.adjustment.adjustment_number, items: result.items_count, reason: result.adjustment.reason,
+      ...(result.costs_changed ? { costs_corrected: result.costs_changed, journal_entry: result.journal_entry_number } : {}),
+    },
     req,
   }));
   res.status(201).json({
     success: true,
     message: `Ajuste ${result.adjustment.adjustment_number} guardado: ${result.prices_changed} precio(s)`
-      + (result.margins_changed ? ` y ${result.margins_changed} margen(es)` : '') + ' actualizado(s)',
+      + (result.margins_changed ? ` y ${result.margins_changed} margen(es)` : '') + ' actualizado(s)'
+      + (result.costs_changed ? `; ${result.costs_changed} costo(s) corregido(s)` + (result.journal_entry_number ? ` (asiento ${result.journal_entry_number})` : '') : ''),
     data: result,
   });
 });

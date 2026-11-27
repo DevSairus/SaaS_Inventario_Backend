@@ -28,7 +28,7 @@ const JournalEntry = sequelize.define(
         // Amortización mensual de ingresos diferidos (deferredRevenue.service.js)
         'deferred_revenue',
         'niif_receivable_impairment', 'niif_inventory_nrv', 'niif_fx_remeasurement', 'niif_deferred_tax',
-        'opening_balance', 'year_end_close', 'internal_consumption', 'inventory_adjustment', 'product_initial_stock', 'product_bulk_import',
+        'opening_balance', 'year_end_close', 'internal_consumption', 'inventory_adjustment', 'product_cost_correction', 'product_initial_stock', 'product_bulk_import',
         'payroll', 'payroll_provisions', 'payroll_payment', 'payroll_cesantias_year_end', 'payroll_provision_adjustment',
         // Módulo Proyectos: consumo de materiales en la obra y reclasificación de nómina
         'project_material', 'project_labor', 'project_retention',

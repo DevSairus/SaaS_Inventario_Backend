@@ -2055,6 +2055,49 @@ async function generateAdjustmentEntry(adjustment, items, tenantId, userId, opti
 }
 
 /**
+ * Asiento de la corrección de costo hecha desde un ajuste de precio (AJP-con
+ * "Corregir también el costo", priceAdjustment.service.js). Por cada producto
+ * con existencias, el inventario sube o baja en existencias × (costo nuevo −
+ * costo anterior): la subida va contra el sobrante de inventario y la bajada
+ * contra el faltante (mismos mapeos que los ajustes de inventario). Corre en
+ * la transacción del ajuste: si no se puede contabilizar (período cerrado,
+ * mapeo faltante), no cambia ni el costo ni el kárdex.
+ *
+ * @param {Array<{ sku, cost_correction_value }>} rows - valor firmado por producto
+ */
+async function generateCostCorrectionEntry(adjustment, rows, tenantId, userId, transaction) {
+  const up = rows.filter((r) => r.cost_correction_value > 0);
+  const down = rows.filter((r) => r.cost_correction_value < 0);
+  const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  const sumUp = r2(up.reduce((s, r) => s + r.cost_correction_value, 0));
+  const sumDown = r2(down.reduce((s, r) => s - r.cost_correction_value, 0));
+  if (sumUp <= 0 && sumDown <= 0) return null;
+
+  const inventoryAccount = await getMappedAccountId(tenantId, 'purchase_inventory', transaction);
+  const skus = (list) => list.map((r) => r.sku).filter(Boolean).slice(0, 8).join(', ') + (list.length > 8 ? '…' : '');
+  const lines = [];
+  if (sumUp > 0) {
+    const desc = `Mayor costo de inventario (${skus(up)})`;
+    lines.push({ account_id: inventoryAccount, debit: sumUp, credit: 0, description: desc });
+    lines.push({ account_id: await getMappedAccountId(tenantId, 'inventory_adjustment_surplus', transaction), debit: 0, credit: sumUp, description: desc });
+  }
+  if (sumDown > 0) {
+    const desc = `Menor costo de inventario (${skus(down)})`;
+    lines.push({ account_id: await getMappedAccountId(tenantId, 'inventory_adjustment_shortage', transaction), debit: sumDown, credit: 0, description: desc });
+    lines.push({ account_id: inventoryAccount, debit: 0, credit: sumDown, description: desc });
+  }
+  return createDraftEntry(tenantId, {
+    branchId: null,
+    entryDate: new Date(),
+    sourceType: 'product_cost_correction',
+    sourceId: adjustment.id,
+    description: `Corrección de costo ${adjustment.adjustment_number} (${adjustment.reason})`.slice(0, 500),
+    lines,
+    createdBy: userId,
+  }, transaction);
+}
+
+/**
  * Genera el asiento en borrador de un consumo interno APROBADO (repuestos o
  * insumos que la propia empresa consume, no un cliente -- ej. aceite para el
  * vehículo de la empresa). Antes, approveInternalConsumption sacaba stock vía
@@ -2258,6 +2301,7 @@ module.exports = {
   generateImpairmentReversalEntry,
   generateLoanPaymentEntry,
   generateAdjustmentEntry,
+  generateCostCorrectionEntry,
   generateInternalConsumptionEntry,
   generateInitialStockEntry,
   generateBulkInventoryEntry,

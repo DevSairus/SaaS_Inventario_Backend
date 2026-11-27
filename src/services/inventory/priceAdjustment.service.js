@@ -14,6 +14,15 @@
 // queda como margen propio (deja de heredar el de la categoría) y lo usan las
 // próximas compras; la línea guarda el margen anterior (margin_changed). Las alertas de "precio retenido" activas de esos productos
 // se resuelven, porque el precio ya se revisó a mano.
+//
+// Corrección de costo (opcional, `update_cost`, permiso
+// inventory.cost_correction -- por defecto solo el administrador): el costo
+// promedio de cada producto pasa al costo de referencia. Con existencias se
+// registra en el kárdex una salida de todas las unidades al costo anterior y
+// una entrada al costo nuevo (así el promedio queda exacto) y un asiento por
+// la diferencia (autoEntries.generateCostCorrectionEntry); sin existencias
+// solo cambia el costo. Todo en la misma transacción. El último costo de
+// compra no se toca: es un dato de las compras.
 
 const { Op } = require('sequelize');
 const { sequelize } = require('../../config/database');
@@ -21,6 +30,9 @@ const { getCurrentSchema } = require('../../config/tenantContext');
 const { Product, CostAlert, PriceAdjustment, PriceAdjustmentItem, User } = require('../../models');
 const { suggestedSalePrice, isValidMargin, marginRangeMessage } = require('../../utils/salePricing');
 const { getMarginMethod } = require('./productMargin.service');
+const { createMovementsBatch } = require('../../controllers/inventory/movements.controller');
+const { assertPeriodOpen } = require('../accounting/journalEntry.service');
+const { generateCostCorrectionEntry } = require('../accounting/autoEntries.service');
 
 const MAX_ITEMS = 500;
 const EPS = 0.005;
@@ -28,7 +40,7 @@ const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 const PRODUCT_ATTRS = [
   'id', 'sku', 'name', 'is_active', 'base_price', 'sale_price', 'average_cost', 'last_purchase_cost',
-  'last_purchase_date', 'profit_margin_percentage', 'margin_inherited', 'price_includes_tax', 'has_tax', 'tax_percentage', 'tax_config',
+  'last_purchase_date', 'current_stock', 'profit_margin_percentage', 'margin_inherited', 'price_includes_tax', 'has_tax', 'tax_percentage', 'tax_config',
 ];
 
 class PriceAdjustmentError extends Error {
@@ -53,6 +65,7 @@ function productInfo(p, method) {
     last_purchase_cost: parseFloat(p.last_purchase_cost) || 0,
     last_purchase_date: p.last_purchase_date || null,
     average_cost: parseFloat(p.average_cost) || 0,
+    current_stock: parseFloat(p.current_stock) || 0,
     margin_pct: margin, margin_inherited: !!p.margin_inherited,
     price_includes_tax: !!p.price_includes_tax, has_tax: p.has_tax, tax_percentage: p.tax_percentage, tax_config: p.tax_config,
     default_cost: cost, default_cost_source: source,
@@ -115,12 +128,16 @@ function parseLines(items) {
  * Crea el ajuste y cambia el precio de venta de cada producto.
  * @param {{ reason: string, notes?: string, items: Array<{ product_id, new_price, reference_cost? }> }} data
  */
-async function createPriceAdjustment(tenant_id, user_id, data = {}) {
+async function createPriceAdjustment(tenant_id, user_id, data = {}, { canCorrectCost = false } = {}) {
   const reason = String(data.reason || '').trim();
   if (!reason) throw new PriceAdjustmentError('Escribe el motivo del ajuste');
   if (reason.length > 255) throw new PriceAdjustmentError('El motivo es muy largo (máximo 255 caracteres)');
   const notes = String(data.notes || '').trim() || null;
   const lines = parseLines(data.items);
+  const updateCost = data.update_cost === true;
+  if (updateCost && !canCorrectCost) {
+    throw new PriceAdjustmentError('No tienes permiso para corregir el costo de los productos (solo el administrador, o quien tenga el permiso en Roles y permisos)', 403);
+  }
   const method = await getMarginMethod(tenant_id);
 
   const transaction = await sequelize.transaction();
@@ -145,7 +162,10 @@ async function createPriceAdjustment(tenant_id, user_id, data = {}) {
       }
       const marginChanged = line.margin_pct !== null && (prevMargin === null || Math.abs(line.margin_pct - prevMargin) >= EPS);
       const priceChanged = Math.abs(line.new_price - previous) >= EPS;
-      if (!priceChanged && !marginChanged) { unchanged.push(p.sku); continue; }
+      const prevAvg = parseFloat(p.average_cost) || 0;
+      const costChanged = updateCost && line.reference_cost !== null && line.reference_cost > 0
+        && Math.abs(line.reference_cost - prevAvg) >= EPS;
+      if (!priceChanged && !marginChanged && !costChanged) { unchanged.push(p.sku); continue; }
 
       const def = defaultCost(p);
       const last = parseFloat(p.last_purchase_cost) || 0;
@@ -167,13 +187,32 @@ async function createPriceAdjustment(tenant_id, user_id, data = {}) {
         suggested_price: refCost && margin ? suggestedSalePrice(refCost, margin, p, method) : null,
         price_includes_tax: !!p.price_includes_tax,
         last_purchase_cost: last, average_cost: avg,
+        ...(costChanged ? (() => {
+          const stock = parseFloat(p.current_stock) || 0;
+          return {
+            cost_corrected: true,
+            new_average_cost: line.reference_cost,
+            stock_at_correction: stock,
+            // Solo las existencias positivas tienen valor en el inventario.
+            cost_correction_value: stock > 0 ? round2(round2(stock * line.reference_cost) - round2(stock * avg)) : 0,
+          };
+        })() : {}),
       });
     }
-    if (!rows.length) throw new PriceAdjustmentError('Ningún precio ni margen cambia: son iguales a los actuales');
+    if (!rows.length) {
+      throw new PriceAdjustmentError(updateCost
+        ? 'Nada cambia: los precios, márgenes y costos son iguales a los actuales'
+        : 'Ningún precio ni margen cambia: son iguales a los actuales');
+    }
+    const corrected = rows.filter((r) => r.cost_corrected);
+    if (corrected.length) {
+      try { await assertPeriodOpen(tenant_id, new Date(), transaction); } catch (e) { throw new PriceAdjustmentError(e.message); }
+    }
 
     const adjustment_number = await nextNumber(tenant_id, transaction);
     const adjustment = await PriceAdjustment.create({
       tenant_id, adjustment_number, reason, notes, items_count: rows.length, created_by: user_id,
+      cost_corrected: corrected.length > 0,
     }, { transaction });
     await PriceAdjustmentItem.bulkCreate(rows.map((r) => ({ ...r, adjustment_id: adjustment.id })), { transaction });
 
@@ -200,6 +239,39 @@ async function createPriceAdjustment(tenant_id, user_id, data = {}) {
       `, { replacements: { tenant_id }, transaction });
     }
 
+    // Corrección de costo: kárdex (salida + entrada por las existencias) y
+    // costo promedio; luego el asiento por la diferencia.
+    let journalEntry = null;
+    if (corrected.length) {
+      const note = `Corrección de costo ${adjustment_number}: ${reason}`.slice(0, 500);
+      const movementLines = [];
+      for (const r of corrected) {
+        const qty = Number(r.stock_at_correction);
+        if (!(qty > 0)) continue;
+        const base = {
+          tenant_id, reference_type: 'price_adjustment', reference_id: adjustment.id,
+          product_id: r.product_id, quantity: qty, user_id, notes: note,
+        };
+        movementLines.push({ ...base, movement_type: 'salida', movement_reason: 'adjustment_out', unit_cost: r.average_cost });
+        movementLines.push({ ...base, movement_type: 'entrada', movement_reason: 'adjustment_in', unit_cost: r.new_average_cost });
+      }
+      if (movementLines.length) await createMovementsBatch(movementLines, transaction);
+      // El promedio queda exactamente en el costo nuevo (también sin existencias,
+      // donde no hay movimiento que lo recalcule).
+      const values = corrected.map((r) => `('${r.product_id}', ${Number(r.new_average_cost)})`).join(',');
+      await sequelize.query(`
+        UPDATE "${schema}"."products" AS p
+        SET average_cost = v.cost, updated_at = NOW()
+        FROM (VALUES ${values}) AS v(id, cost)
+        WHERE p.id = v.id::uuid AND p.tenant_id = :tenant_id
+      `, { replacements: { tenant_id }, transaction });
+      try {
+        journalEntry = await generateCostCorrectionEntry(adjustment, corrected, tenant_id, user_id, transaction);
+      } catch (e) {
+        throw new PriceAdjustmentError(`No se pudo contabilizar la corrección de costo: ${e.message}. No se cambió nada.`);
+      }
+    }
+
     // El precio ya se revisó a mano: las alertas de precio retenido de estos
     // productos dejan de estar pendientes.
     const [alertsResolved] = await CostAlert.update({
@@ -213,6 +285,7 @@ async function createPriceAdjustment(tenant_id, user_id, data = {}) {
     await transaction.commit();
     return {
       adjustment, items_count: rows.length, prices_changed: priced.length, margins_changed: remargined.length,
+      costs_changed: corrected.length, journal_entry_number: journalEntry?.entry_number || null,
       unchanged, alerts_resolved: alertsResolved,
     };
   } catch (err) {

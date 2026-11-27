@@ -125,6 +125,12 @@ const DiagramSystemCommissionMap = require('./workshop/DiagramSystemCommissionMa
 const MaintenanceType = require('./workshop/MaintenanceType');
 const VehicleMaintenanceRecord = require('./workshop/VehicleMaintenanceRecord');
 const VehicleReminderLog = require('./workshop/VehicleReminderLog');
+// Hoja de vida 360 + peritajes (migración 2026112701)
+const VehicleOwner = require('./workshop/VehicleOwner');
+const VehicleRuntSnapshot = require('./workshop/VehicleRuntSnapshot');
+const InspectionTemplate = require('./workshop/InspectionTemplate');
+const VehicleInspection = require('./workshop/VehicleInspection');
+const VehicleInspectionItem = require('./workshop/VehicleInspectionItem');
 
 // ✅ NUEVO - CRM (Fase 1)
 const CustomerInteraction = require('./crm/CustomerInteraction');
@@ -910,6 +916,46 @@ VehicleMaintenanceRecord.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as:
 Vehicle.hasMany(VehicleReminderLog, { foreignKey: 'vehicle_id', as: 'reminder_logs' });
 VehicleReminderLog.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
 
+// Hoja de vida 360 + peritajes
+Vehicle.hasMany(VehicleOwner, { foreignKey: 'vehicle_id', as: 'owners' });
+VehicleOwner.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+VehicleOwner.belongsTo(Customer, { foreignKey: 'customer_id', as: 'customer' });
+VehicleOwner.belongsTo(User, { foreignKey: 'created_by', as: 'creator' });
+Vehicle.hasMany(VehicleRuntSnapshot, { foreignKey: 'vehicle_id', as: 'runt_snapshots' });
+VehicleRuntSnapshot.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+VehicleRuntSnapshot.belongsTo(User, { foreignKey: 'consulted_by', as: 'consultant' });
+Vehicle.hasMany(VehicleInspection, { foreignKey: 'vehicle_id', as: 'inspections' });
+VehicleInspection.belongsTo(Vehicle, { foreignKey: 'vehicle_id', as: 'vehicle' });
+VehicleInspection.belongsTo(Customer, { foreignKey: 'owner_customer_id', as: 'owner' });
+VehicleInspection.belongsTo(Customer, { foreignKey: 'requester_customer_id', as: 'requester' });
+VehicleInspection.belongsTo(User, { foreignKey: 'inspector_id', as: 'inspector' });
+VehicleInspection.belongsTo(InspectionTemplate, { foreignKey: 'template_id', as: 'template' });
+VehicleInspection.belongsTo(VehicleRuntSnapshot, { foreignKey: 'runt_snapshot_id', as: 'runt_snapshot' });
+VehicleInspection.belongsTo(WorkOrder, { foreignKey: 'work_order_id', as: 'work_order' });
+VehicleInspection.belongsTo(Sale, { foreignKey: 'sale_id', as: 'sale' });
+VehicleInspection.hasMany(VehicleInspectionItem, { foreignKey: 'inspection_id', as: 'items' });
+VehicleInspectionItem.belongsTo(VehicleInspection, { foreignKey: 'inspection_id', as: 'inspection' });
+// Historial de propietarios: cualquier camino que cree el vehículo o le
+// cambie customer_id (ficha, OT, OT rápida, citas, ventas) deja la fila en
+// vehicle_owners. Vehicle.update estático (sin individualHooks) no pasa por
+// aquí, pero ninguno de esos cambia el propietario. ownerChangeBy / ownerChangeDate /
+// ownerChangeNotes son opciones propias que puede pasar quien llama.
+Vehicle.addHook('afterCreate', 'vehicleOwnerHistory', async (vehicle, options) => {
+  if (!vehicle.customer_id) return;
+  await VehicleOwner.create({
+    tenant_id: vehicle.tenant_id, vehicle_id: vehicle.id, customer_id: vehicle.customer_id,
+    started_at: new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' }),
+    source: 'inicial', created_by: options.ownerChangeBy || null,
+  }, { transaction: options.transaction });
+});
+Vehicle.addHook('afterUpdate', 'vehicleOwnerHistory', async (vehicle, options) => {
+  if (!vehicle.changed('customer_id')) return;
+  const { recordOwnerChange } = require('../services/workshop/vehicle360.service');
+  await recordOwnerChange(vehicle, vehicle.previous('customer_id'), vehicle.customer_id, options.ownerChangeBy || null, {
+    transaction: options.transaction, date: options.ownerChangeDate, notes: options.ownerChangeNotes,
+  });
+});
+
 // ── Cruce con nómina (categoría DIAN "Comisiones") ───────────────────────
 CommissionSettlement.belongsTo(Employee, { foreignKey: 'employee_id', as: 'employee' });
 CommissionSettlement.belongsTo(PayrollNovedad, { foreignKey: 'payroll_novedad_id', as: 'payroll_novedad' });
@@ -1165,6 +1211,11 @@ registerTenantSchemaHooks(sequelize);
 
 module.exports = {
   sequelize,
+  VehicleOwner,
+  VehicleRuntSnapshot,
+  InspectionTemplate,
+  VehicleInspection,
+  VehicleInspectionItem,
   SolarLead,
   ProjectCut,
   ProjectCutItem,

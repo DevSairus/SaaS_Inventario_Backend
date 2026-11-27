@@ -1338,6 +1338,8 @@ const generateTechSheetBuffer = async (order, tenant) => {
 };
 
 module.exports = {
+  // Reutilizado por el certificado de peritaje (inspectionPdf.service.js)
+  downloadImage,
   generatePaymentReceipt,
   generateIntakeForm,
   generateWorkOrderPDF,

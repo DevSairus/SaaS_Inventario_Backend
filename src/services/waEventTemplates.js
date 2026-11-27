@@ -42,6 +42,12 @@ const EVENTS = Object.freeze({
     bodyVars: ['nombre del cliente', 'placa'],
     path: '/portal/vehiculo/',
   },
+  inspection_certificate: {
+    group: 'Taller',
+    label: 'Certificado de peritaje',
+    bodyVars: ['nombre del solicitante', 'número del peritaje', 'placa'],
+    path: '/peritaje/',
+  },
   sale_quote: {
     group: 'Ventas',
     label: 'Cotización de venta',
