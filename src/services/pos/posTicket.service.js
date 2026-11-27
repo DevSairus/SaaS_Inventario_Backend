@@ -296,12 +296,14 @@ async function buildReceiptTicket(receipt, tenant) {
 
 // ── Cierre de caja ────────────────────────────────────────────────────────────
 const BUCKETS = [['efectivo', 'Efectivo'], ['tarjeta', 'Tarjeta'], ['transferencia', 'Transferencia'], ['otro', 'Otros']];
+// Medios del resumen de documentos: los de la caja + los que no son dinero.
+const DOC_METHODS = [...BUCKETS, ['anticipo', 'Anticipo aplicado'], ['retenciones', 'Retenciones'], ['saldo_a_favor', 'Saldo a favor']];
 const SOURCES = {
   sale: 'Ventas', work_order: 'Órdenes de trabajo', customer_advance: 'Anticipos de clientes',
   customer_advance_refund: 'Devolución de anticipos', opening_receivable: 'Saldos iniciales por cobrar',
   opening_payable: 'Saldos iniciales por pagar', customer_return_refund: 'Devoluciones a clientes',
   customer_return_reversal: 'Reversión de devoluciones', supplier_return_refund: 'Devoluciones de proveedores',
-  purchase: 'Compras', expense: 'Gastos',
+  supplier_return_reversal: 'Reversión de devoluciones a proveedor', purchase: 'Compras', expense: 'Gastos',
 };
 
 async function buildCashSessionTicket(session, tenant) {
@@ -321,47 +323,98 @@ async function buildCashSessionTicket(session, tenant) {
   else blocks.push(kv('Impreso', dateTime(new Date()), { size: 'sm' }));
   blocks.push(kv('Base de apertura', COP(session.opening_amount)));
 
-  // Movimientos agrupados por origen
-  const bySource = new Map();
-  let totalIn = 0;
-  let totalOut = 0;
-  (transactions || []).forEach((t) => {
-    const amount = n(t.amount);
-    const key = `${t.direction}:${t.source}`;
-    const row = bySource.get(key) || { direction: t.direction, source: t.source, count: 0, amount: 0 };
-    row.count += 1;
-    row.amount += amount;
-    bySource.set(key, row);
-    if (t.direction === 'in') totalIn += amount; else totalOut += amount;
-  });
-  blocks.push(SEP);
-  blocks.push(text(`MOVIMIENTOS (${(transactions || []).length})`, { bold: true }));
-  const rows = [...bySource.values()].sort((a, b) => (a.direction === b.direction ? b.amount - a.amount : a.direction === 'in' ? -1 : 1));
-  rows.forEach((r) => blocks.push(kv(`${SOURCES[r.source] || r.source} (${r.count})`, `${r.direction === 'out' ? '-' : ''}${COP(r.amount)}`, { size: 'sm' })));
-  blocks.push(kv('Total entradas', COP(totalIn), { bold: true }));
-  if (totalOut > 0) blocks.push(kv('Total salidas', `-${COP(totalOut)}`, { bold: true }));
+  // Movimientos: entradas y salidas por separado, agrupadas por origen.
+  const list = transactions || [];
+  const ins = list.filter((t) => t.direction === 'in');
+  const outs = list.filter((t) => t.direction !== 'in');
+  const sum = (rows) => rows.reduce((acc, t) => acc + n(t.amount), 0);
+  const groupBySource = (rows) => {
+    const map = new Map();
+    rows.forEach((t) => {
+      const row = map.get(t.source) || { source: t.source, count: 0, amount: 0 };
+      row.count += 1;
+      row.amount += n(t.amount);
+      map.set(t.source, row);
+    });
+    return [...map.values()].sort((a, b) => b.amount - a.amount);
+  };
+  const totalIn = sum(ins);
+  const totalOut = sum(outs);
 
-  // Cuadre por medio de pago
+  // Ventas y compras del turno por medio de pago y a crédito.
+  const { buildSessionReport } = require('../finance/cashSessionReport.service');
+  const report = await buildSessionReport(session);
+  const methodLines = (byMethod, { sign = '' } = {}) => DOC_METHODS.forEach(([key, label]) => {
+    if (Math.abs(n(byMethod[key])) >= 0.5) blocks.push(kv(`  ${label}`, `${sign}${COP(byMethod[key])}`, { size: 'sm' }));
+  });
+  const docSection = (title, b, { creditLabel, payments = false } = {}) => {
+    if (!b.count) return;
+    blocks.push(SEP);
+    blocks.push(text(`${title} (${b.count})`, { bold: true }));
+    if (!payments) blocks.push(kv(title.startsWith('VENTAS') ? 'Total vendido' : 'Total documentos', COP(b.total), { bold: true }));
+    if (n(b.retentions) >= 0.5) blocks.push(kv('  Retenciones practicadas', COP(b.retentions), { size: 'sm' }));
+    if (!payments) blocks.push(text(title.startsWith('VENTAS') ? 'Recibido en esta caja' : 'Pagado en esta caja', { size: 'sm' }));
+    methodLines(b.by_method);
+    if (payments) blocks.push(kv('Total', COP(b.total), { bold: true }));
+    if (creditLabel && n(b.credit) >= 0.5) blocks.push(kv(creditLabel, COP(b.credit), { bold: true }));
+  };
+  docSection('VENTAS DEL TURNO', report.sales, { creditLabel: 'A crédito / saldo' });
+  docSection('ABONOS DE CARTERA', report.collections, { payments: true });
+  docSection('COMPRAS DEL TURNO', report.purchases, { creditLabel: 'Por pagar al proveedor' });
+  docSection('PAGOS DE COMPRAS ANTERIORES', report.supplier_payments, { payments: true });
+  docSection('GASTOS DEL TURNO', report.expenses, { creditLabel: 'Gastos por pagar' });
+  docSection('PAGOS DE GASTOS ANTERIORES', report.expense_payments, { payments: true });
+
+  blocks.push(SEP);
+  blocks.push(text(`ENTRADAS (${ins.length})`, { bold: true }));
+  if (!ins.length) blocks.push(text('Sin entradas', { size: 'sm' }));
+  groupBySource(ins).forEach((r) => blocks.push(kv(`${SOURCES[r.source] || r.source} (${r.count})`, COP(r.amount), { size: 'sm' })));
+  blocks.push(kv('Total entradas', COP(totalIn), { bold: true }));
+
+  // Salidas: total por origen y, debajo, cada pago (a quién y cuánto), para
+  // que quien recibe la caja vea en qué se fue el dinero.
+  blocks.push(SEP);
+  blocks.push(text(`SALIDAS (${outs.length})`, { bold: true }));
+  if (!outs.length) blocks.push(text('Sin salidas', { size: 'sm' }));
+  groupBySource(outs).forEach((r) => blocks.push(kv(`${SOURCES[r.source] || r.source} (${r.count})`, `-${COP(r.amount)}`, { size: 'sm' })));
+  if (outs.length) {
+    blocks.push(kv('Total salidas', `-${COP(totalOut)}`, { bold: true }));
+    blocks.push(text('Detalle de salidas', { bold: true, size: 'sm' }));
+    [...outs].sort((a, b) => n(b.amount) - n(a.amount)).forEach((t) => {
+      const who = [t.reference, t.detail].filter(Boolean).join(' · ') || (SOURCES[t.source] || t.source);
+      blocks.push(kv(`  ${who}`, `-${COP(t.amount)}`, { size: 'sm' }));
+      blocks.push(text(`    ${SOURCES[t.source] || t.source} · ${methodLabel(t.method)}`, { size: 'sm' }));
+    });
+  }
+  blocks.push(kv('Neto del día', `${totalIn - totalOut < 0 ? '-' : ''}${COP(Math.abs(totalIn - totalOut))}`, { bold: true }));
+
+  // Cuadre por medio: base + entradas − salidas = esperado, contra lo contado.
+  const { methodMatrix } = require('../finance/cashSessionReport.service');
+  const matrix = methodMatrix(list, session.opening_amount);
   blocks.push(SEP);
   blocks.push(text(isClosed ? 'CUADRE POR MEDIO DE PAGO' : 'ESPERADO POR MEDIO DE PAGO', { bold: true }));
   let totalExpected = 0;
   let totalCounted = 0;
   BUCKETS.forEach(([key, label]) => {
-    const exp = n(expected[key]);
-    if (!isClosed) {
-      if (exp !== 0) blocks.push(kv(label, COP(exp)));
-      totalExpected += exp;
-      return;
-    }
+    const m = matrix[key];
+    const exp = isClosed ? n(expected[key]) : m.expected;
     const counted = n(session.counted_amounts?.[key]);
-    const diff = n(session.differences?.[key]);
-    if (exp === 0 && counted === 0) return;
+    const opening = key === 'efectivo' ? n(session.opening_amount) : 0;
+    if (!opening && !m.in && !m.out && !exp && !(isClosed && counted)) return;
     totalExpected += exp;
     totalCounted += counted;
     blocks.push(text(label, { bold: true, size: 'sm' }));
-    blocks.push(kv('  Esperado', COP(exp), { size: 'sm' }));
-    blocks.push(kv('  Contado', COP(counted), { size: 'sm' }));
-    if (Math.abs(diff) >= 0.5) blocks.push(kv(diff > 0 ? '  Sobrante' : '  Faltante', COP(Math.abs(diff)), { size: 'sm', bold: true }));
+    if (opening) blocks.push(kv('  Base', COP(opening), { size: 'sm' }));
+    blocks.push(kv('  + Entradas', COP(m.in), { size: 'sm' }));
+    if (key === 'efectivo') blocks.push(kv('  - Salidas', `-${COP(m.out)}`, { size: 'sm' }));
+    blocks.push(kv('  = Esperado', COP(exp), { size: 'sm', bold: true }));
+    // Pagos por otros medios: se informan, no restan del cuadre.
+    if (key !== 'efectivo' && m.out >= 0.5) blocks.push(kv('  Pagos (no restan)', COP(m.out), { size: 'sm' }));
+    if (isClosed) {
+      const diff = n(session.differences?.[key]);
+      blocks.push(kv('  Contado', COP(counted), { size: 'sm' }));
+      if (Math.abs(diff) >= 0.5) blocks.push(kv(diff > 0 ? '  Sobrante' : '  Faltante', COP(Math.abs(diff)), { size: 'sm', bold: true }));
+    }
   });
   blocks.push(kv('Total esperado', COP(totalExpected), { bold: true }));
   if (isClosed) {

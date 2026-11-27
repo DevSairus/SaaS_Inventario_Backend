@@ -97,3 +97,36 @@ test('un pago de la noche entra en el día local, no en el siguiente', async () 
   expect(nextDay.allTransactions.find((t) => t.reference === 'FV-9')).toBeUndefined();
   rows.Sale = [];
 });
+
+// Salidas ligadas a la caja (pago con cash_session_id): entran al cuadre de
+// esa caja aunque su fecha no sea la de apertura y aunque el documento no
+// tenga sede; sin vínculo siguen el criterio de fecha + sede.
+test('compras y gastos ligados a la caja entran como salida aunque tengan otra fecha', async () => {
+  rows.Purchase = [
+    // Compra de contado con fecha de factura anterior, documento sin sede.
+    { purchase_number: 'COMP-9', branch_id: null, supplier: { name: 'Prov' }, payment_history: [
+      { date: '2026-10-05', amount: 7000, method: 'Efectivo', branch_id: 'b1', cash_session_id: 'cs1' },
+    ] },
+  ];
+  rows.Expense = [
+    // Gasto pagado al día siguiente de abrir la caja (caja abierta dos días).
+    { expense_number: 'GAS-1', description: 'Almuerzo', branch_id: null, payment_history: [
+      { date: '2026-10-10T15:00:00Z', amount: 4000, method: 'Efectivo', branch_id: 'b1', cash_session_id: 'cs1' },
+    ] },
+    // Gasto de otra caja: no entra.
+    { expense_number: 'GAS-2', description: 'Otro', branch_id: 'b1', payment_history: [
+      { date: `${DAY}T15:00:00Z`, amount: 9000, method: 'Efectivo', branch_id: 'b1', cash_session_id: 'cs2' },
+    ] },
+  ];
+  const flow = await buildCashFlow('t1', { from_date: DAY, branch_id: 'b1', cash_session_id: 'cs1' });
+  const byRef = Object.fromEntries(flow.allTransactions.map((t) => [t.reference, t]));
+  expect(byRef['COMP-9']).toMatchObject({ direction: 'out', source: 'purchase', amount: 7000, cash_session_id: 'cs1', branch_id: 'b1' });
+  expect(byRef['GAS-1']).toMatchObject({ direction: 'out', source: 'expense', amount: 4000, cash_session_id: 'cs1' });
+  // GAS-2 pasa el filtro de fecha/sede; lo descarta filterBySession del cuadre.
+  expect(byRef['GAS-2']).toMatchObject({ cash_session_id: 'cs2' });
+
+  // Sin cash_session_id (Flujo de Caja general) la compra fechada antes no entra.
+  const general = await buildCashFlow('t1', { from_date: DAY, branch_id: 'b1' });
+  expect(general.allTransactions.find((t) => t.reference === 'COMP-9')).toBeUndefined();
+  rows.Expense = [];
+});

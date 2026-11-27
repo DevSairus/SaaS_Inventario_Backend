@@ -215,11 +215,15 @@ const createExpense = async (req, res) => {
       ? expenseNetPayable({ total_amount: resolvedTotal, total_retentions: resolvedRetefuenteAmount + resolvedReteivaAmount + resolvedReteicaAmount })
       : 0;
     const initialStatus = paid_now ? 'paid' : 'pending';
+    // Ligado a la caja abierta de la sede: el cierre de caja lo muestra como salida.
+    const sessionLink = paid_now
+      ? await require('../../services/finance/cashSession.service').outflowSessionLink(tenant_id, branch_id || req.branch_id || null, transaction)
+      : {};
     const initialHistory = paid_now
       // Lleva su propio asiento de pago (journal_entry_id), igual que un pago
       // registrado después con "Pagar": el gasto va contra cuentas por pagar y
       // el pago las cancela contra caja o bancos.
-      ? [{ id: require('crypto').randomUUID(), date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto', journal_entry_id: null }]
+      ? [{ id: require('crypto').randomUUID(), date: expense_date || new Date(), amount: initialPaidAmount, method: payment_method || 'Efectivo', bank_account_id: selectedBankAccountId, user_id: req.user.id, notes: 'Pago al momento de registrar el gasto', journal_entry_id: null, ...sessionLink }]
       : [];
 
     const expense = await Expense.create({
@@ -444,6 +448,7 @@ const registerPayment = async (req, res) => {
       const { registerExpensePayment } = require('../../services/payments/documentPayments.service');
       registered = await registerExpensePayment({
         tenantId: tenant_id, userId, expenseId: id, amount, method: payment_method, date: payment_date, notes, bankAccountId: bank_account_id,
+        branchId: req.branch_id || null, linkCashSession: true,
       }, transaction);
     } catch (e) {
       if (!transaction.finished) await transaction.rollback();

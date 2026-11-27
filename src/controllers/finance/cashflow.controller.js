@@ -86,16 +86,25 @@ const historyInRangeSql = (alias, column, range) => `EXISTS (
 const columnInRangeSql = (alias, column, range) =>
   dateInRangeSql(`to_char("${alias}"."${column}" AT TIME ZONE 'UTC', 'YYYY-MM-DD') COLLATE "C"`, range);
 
-const historyInRange = (alias, column, range) =>
-  (range.from_date || range.to_date ? [sequelize.literal(historyInRangeSql(alias, column, range))] : []);
+// Con `cash_session_id` (cuadre de una caja) también entran las filas con
+// algún pago ligado a esa caja aunque su fecha caiga fuera del rango (compra
+// de contado con fecha de factura anterior, caja abierta varios días).
+const historyInRange = (alias, column, range) => {
+  if (!(range.from_date || range.to_date)) return [];
+  const inRange = historyInRangeSql(alias, column, range);
+  if (!range.cash_session_id) return [sequelize.literal(inRange)];
+  const linked = `"${alias}"."${column}" @> ${sequelize.escape(JSON.stringify([{ cash_session_id: range.cash_session_id }]))}::jsonb`;
+  return [sequelize.literal(`((${inRange}) OR (jsonb_typeof("${alias}"."${column}") = 'array' AND ${linked}))`)];
+};
 
 // Arma el objeto { summary, by_day, transactions } a partir de Ventas,
 // Compras y Gastos. Usado tanto por el JSON de la pantalla como por el PDF,
 // para que ambos siempre muestren exactamente los mismos números.
-const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) => {
+const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id, cash_session_id } = {}) => {
   const range = {
     from_date: from_date ? shiftDate(String(from_date), -1) : null,
     to_date: to_date ? shiftDate(String(to_date), 1) : null,
+    cash_session_id: cash_session_id || null,
   };
   const filtered = Boolean(from_date || to_date);
   const [tenant, sales, purchases, expenses, pendingWorkOrders, advances, openingBalances, returnRefunds, supplierRefunds] = await Promise.all([
@@ -351,7 +360,9 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
         reference: p.purchase_number,
         detail: p.supplier?.name || 'Proveedor',
         method: pay.method || null,
-        branch_id: p.branch_id
+        // Sede del pago (la de la caja donde se registró) si el documento no tiene.
+        branch_id: p.branch_id || pay.branch_id || null,
+        cash_session_id: pay.cash_session_id || null,
       });
     });
   });
@@ -367,14 +378,17 @@ const buildCashFlow = async (tenant_id, { from_date, to_date, branch_id } = {}) 
         detail: e.description,
         category: e.category,
         method: pay.method || null,
-        branch_id: e.branch_id
+        branch_id: e.branch_id || pay.branch_id || null,
+        cash_session_id: pay.cash_session_id || null,
       });
     });
   });
 
   // Filtros de fecha / sede sobre los movimientos ya aplanados
-  if (from_date) transactions = transactions.filter(t => t.date && t.date >= from_date);
-  if (to_date) transactions = transactions.filter(t => t.date && t.date <= to_date);
+  // Lo ligado a la caja pedida entra sin importar su fecha (ver historyInRange).
+  const linkedToSession = (t) => Boolean(cash_session_id && t.cash_session_id === cash_session_id);
+  if (from_date) transactions = transactions.filter(t => linkedToSession(t) || (t.date && t.date >= from_date));
+  if (to_date) transactions = transactions.filter(t => linkedToSession(t) || (t.date && t.date <= to_date));
   if (branch_id) transactions = transactions.filter(t => t.branch_id === branch_id);
 
   let totalIn = 0, totalOut = 0;

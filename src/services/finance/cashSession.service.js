@@ -66,4 +66,23 @@ async function assertCashAvailable(session, amount, method) {
   }
 }
 
-module.exports = { getOpenSession, isTreasuryEnabled, isOpenCashSessionRequired, resolvePaymentSession, assertCashAvailable };
+/**
+ * Para una SALIDA de dinero (pago a proveedor, gasto): campos que ligan el
+ * pago a la caja abierta de la sede, para que el cierre de caja lo muestre
+ * como salida aunque la fecha del pago no sea la de apertura de la caja (caja
+ * que quedó abierta varios días, compra con fecha de factura anterior). Nunca
+ * bloquea: sin Tesorería, sin sede o sin caja abierta devuelve {} y el pago
+ * sigue entrando al cuadre por fecha y sede como antes.
+ */
+async function outflowSessionLink(tenantId, branchId, transaction) {
+  if (!branchId) return {};
+  try {
+    if (!(await isTreasuryEnabled(tenantId))) return {};
+    const session = await getOpenSession(tenantId, branchId, transaction);
+    return session ? { cash_session_id: session.id, branch_id: branchId } : {};
+  } catch {
+    return {};
+  }
+}
+
+module.exports = { getOpenSession, isTreasuryEnabled, isOpenCashSessionRequired, resolvePaymentSession, assertCashAvailable, outflowSessionLink };

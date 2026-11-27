@@ -429,6 +429,7 @@ const registerPayment = async (req, res) => {
       const { registerPurchasePayment } = require('../../services/payments/documentPayments.service');
       registered = await registerPurchasePayment({
         tenantId, userId, purchaseId: id, amount, method: payment_method, date: payment_date, notes, bankAccountId: bank_account_id,
+        branchId: req.branch_id || null, linkCashSession: true,
       }, transaction);
     } catch (e) {
       await transaction.rollback();

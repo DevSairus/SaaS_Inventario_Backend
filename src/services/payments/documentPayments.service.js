@@ -14,13 +14,17 @@ const { Purchase, Expense } = require('../../models');
 const { purchaseBalance, purchasePaymentStatus, round2 } = require('../../utils/purchaseAmounts');
 const { expenseBalance, expensePaymentStatus } = require('../../utils/expenseAmounts');
 const { resolveSelectedBankAccountId } = require('../accounting/bankAccountSelection');
+const { outflowSessionLink } = require('../finance/cashSession.service');
 
 const httpError = (statusCode, message) => Object.assign(new Error(message), { statusCode });
 
 /**
  * @returns {{ document, payment, amount, afterCommit: () => Promise<void> }}
  */
-async function registerPurchasePayment({ tenantId, userId, purchaseId, amount, method, date, notes, bankAccountId, extra = {} }, transaction) {
+// `linkCashSession` (pago manual desde la pantalla, no los lotes bancarios):
+// liga el pago a la caja abierta de la sede del documento (o de `branchId`,
+// la sede del usuario) para que el cierre de caja lo muestre como salida.
+async function registerPurchasePayment({ tenantId, userId, purchaseId, amount, method, date, notes, bankAccountId, branchId, linkCashSession = false, extra = {} }, transaction) {
   if (!amount || parseFloat(amount) <= 0) throw httpError(400, 'El monto debe ser mayor a 0');
   // SELECT FOR UPDATE: evita que dos pagos concurrentes lean el mismo paid_amount
   const purchase = await Purchase.findOne({ where: { id: purchaseId, tenant_id: tenantId }, lock: transaction.LOCK.UPDATE, transaction });
@@ -36,6 +40,7 @@ async function registerPurchasePayment({ tenantId, userId, purchaseId, amount, m
 
   const effectiveAmount = round2(Math.min(parseFloat(amount), remaining));
   const paid_amount = round2(parseFloat(purchase.paid_amount || 0) + effectiveAmount);
+  const sessionLink = linkCashSession ? await outflowSessionLink(tenantId, purchase.branch_id || branchId, transaction) : {};
   const payment = {
     id: require('crypto').randomUUID(),
     date: date || new Date(),
@@ -45,6 +50,7 @@ async function registerPurchasePayment({ tenantId, userId, purchaseId, amount, m
     user_id: userId,
     notes: notes || null,
     journal_entry_id: null,
+    ...sessionLink,
     ...extra,
   };
   await purchase.update({
@@ -70,7 +76,7 @@ async function registerPurchasePayment({ tenantId, userId, purchaseId, amount, m
   };
 }
 
-async function registerExpensePayment({ tenantId, userId, expenseId, amount, method, date, notes, bankAccountId, extra = {} }, transaction) {
+async function registerExpensePayment({ tenantId, userId, expenseId, amount, method, date, notes, bankAccountId, branchId, linkCashSession = false, extra = {} }, transaction) {
   if (!amount || parseFloat(amount) <= 0) throw httpError(400, 'El monto debe ser mayor a 0');
   const expense = await Expense.findOne({ where: { id: expenseId, tenant_id: tenantId }, lock: transaction.LOCK.UPDATE, transaction });
   if (!expense) throw httpError(404, 'Gasto no encontrado');
@@ -86,6 +92,7 @@ async function registerExpensePayment({ tenantId, userId, expenseId, amount, met
   const paid_amount = Math.round((parseFloat(expense.paid_amount || 0) + effectiveAmount) * 100) / 100;
   const effectiveMethod = method || expense.payment_method || 'Efectivo';
   const selectedBankAccountId = await resolveSelectedBankAccountId(tenantId, bankAccountId, effectiveMethod, transaction);
+  const sessionLink = linkCashSession ? await outflowSessionLink(tenantId, expense.branch_id || branchId, transaction) : {};
   const payment = {
     id: require('crypto').randomUUID(),
     date: date || new Date(),
@@ -95,6 +102,7 @@ async function registerExpensePayment({ tenantId, userId, expenseId, amount, met
     user_id: userId,
     notes: notes || null,
     journal_entry_id: null,
+    ...sessionLink,
     ...extra,
   };
   await expense.update({

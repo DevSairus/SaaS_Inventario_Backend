@@ -58,10 +58,13 @@ async function resolveFreightSupplier(tenant_id, freightSupplierId, supplierId, 
 }
 
 const CREATION_CASH_SOURCE = 'creation_cash';
-const creationCashPayment = (amount, method, date, user_id) => ({
+const creationCashPayment = (amount, method, date, user_id, sessionLink = {}) => ({
   ...newPaymentRecord({ date, amount, method, user_id, notes: 'Compra de contado' }),
   source: CREATION_CASH_SOURCE,
+  ...sessionLink,
 });
+// Liga el pago a la caja abierta de la sede (ver cashSession.service#outflowSessionLink).
+const { outflowSessionLink } = require('../../services/finance/cashSession.service');
 
 
 /**
@@ -416,7 +419,8 @@ const createPurchase = async (req, res) => {
       // Contado: se paga el neto (total - retenciones), no el total.
       paid_amount: isCash ? round2(total_amount - retentions.total) : 0,
       payment_history: isCash
-        ? [creationCashPayment(round2(total_amount - retentions.total), payment_method || 'Efectivo', purchase_date || new Date(), user_id)]
+        ? [creationCashPayment(round2(total_amount - retentions.total), payment_method || 'Efectivo', purchase_date || new Date(), user_id,
+          await outflowSessionLink(tenant_id, req.branch_id || null, t))]
         : [],
       invoice_number,
       reference,
@@ -868,6 +872,7 @@ const confirmPurchase = async (req, res) => {
       // El pago indicado al confirmar reemplaza el de contado marcado al
       // crear la compra (si lo había) — si no, se contaría dos veces.
       const priorPayments = (purchase.payment_history || []).filter((p) => p.source !== CREATION_CASH_SOURCE);
+      const sessionLink = await outflowSessionLink(tenant_id, purchase.branch_id || req.branch_id || null);
       const priorPaid = priorPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
       const totalPaid = round2(Math.min(priorPaid + effectiveAmount, net));
 
@@ -875,14 +880,14 @@ const confirmPurchase = async (req, res) => {
       updates.paid_amount = totalPaid;
       updates.payment_status = purchasePaymentStatus(purchase, totalPaid);
       updates.payment_history = effectiveAmount > 0
-        ? [...priorPayments, newPaymentRecord({
+        ? [...priorPayments, { ...newPaymentRecord({
           date: new Date(),
           amount: effectiveAmount,
           method: payment_method || purchase.payment_method || 'Efectivo',
           bank_account_id,
           user_id: req.user.id,
           notes: 'Pago registrado al confirmar la compra',
-        })]
+        }), ...sessionLink }]
         : priorPayments;
 
       // Vencimiento: plazo contado desde la fecha de la compra (factura), no

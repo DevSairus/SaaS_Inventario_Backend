@@ -43,6 +43,7 @@ const sessionCashFlow = (session) => buildCashFlow(session.tenant_id, {
   from_date: session.session_date, // 'YYYY-MM-DD' (DATEONLY)
   to_date: session.closed_at ? shiftDate(new Date(session.closed_at).toISOString().slice(0, 10), 1) : undefined,
   branch_id: session.branch_id,
+  cash_session_id: session.id,
 });
 
 const calculateExpected = async (session) => {
@@ -53,8 +54,15 @@ const calculateExpected = async (session) => {
   const expected = { ...ZERO_BUCKET, efectivo: parseFloat(session.opening_amount) || 0 };
   relevant.forEach(t => {
     const bucket = normalizeMethod(t.method);
-    const signedAmount = t.direction === 'in' ? t.amount : -t.amount;
-    expected[bucket] += signedAmount;
+    if (t.direction === 'in') {
+      expected[bucket] += t.amount;
+    } else if (bucket === 'efectivo') {
+      // Solo las salidas en efectivo salen del cajón. Los pagos por tarjeta o
+      // transferencia (a proveedores, devoluciones…) quedan registrados e
+      // informados en el cierre, pero no restan del esperado: el cajero
+      // cuenta lo que recibió por esos medios, no un neto.
+      expected[bucket] -= t.amount;
+    }
   });
 
   Object.keys(expected).forEach(k => { expected[k] = Math.round(expected[k] * 100) / 100; });
@@ -301,7 +309,15 @@ const getSessionPayments = async (req, res) => {
     const transactions = filterBySession(cashFlow.allTransactions, session)
       .map(t => ({ ...t, bucket: normalizeMethod(t.method) }));
 
-    res.json({ success: true, data: { session_id: session.id, transactions } });
+    // Cuadre por medio (entradas/salidas/esperado) y resumen de documentos:
+    // ventas y compras del turno por medio de pago y a crédito.
+    const { buildSessionReport, methodMatrix } = require('../../services/finance/cashSessionReport.service');
+    const report = await buildSessionReport(session);
+
+    res.json({
+      success: true,
+      data: { session_id: session.id, transactions, by_method: methodMatrix(transactions, session.opening_amount), report },
+    });
   } catch (error) {
     console.error('Error obteniendo pagos de la caja:', error);
     res.status(500).json({ success: false, message: 'Error obteniendo pagos de la caja' });
